@@ -7,8 +7,10 @@ import { createInterface } from "node:readline";
 import type { AttemptRecord, NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
 import type { StateStore } from "../state/store.js";
 import { buildWorkerPrompt } from "../core/task.js";
+import { providerEnvironment, resolveProvider } from "../core/providers.js";
 import { readProviderKey } from "../core/secrets.js";
 import { ClaudeEventNormalizer } from "../events/normalize.js";
+import { cloneDefaults, type ExecutionSettings, type ProviderDefaultSettings } from "../core/settings.js";
 
 export interface WorkerExecutionResult {
   status: "succeeded" | "failed" | "interrupted";
@@ -23,6 +25,7 @@ export interface WorkerRunHooks {
   onSpawn?: (child: ChildProcess) => void;
   onEvent?: (event: NormalizedWorkerEvent) => void;
   wasInterrupted?: () => boolean;
+  feedback?: string;
 }
 
 export interface WorkerLaunch {
@@ -36,22 +39,20 @@ export function allowedToolArguments(task: TaskRecord): {
   allowed: string;
   denied: string;
 } {
-  const tools = ["Read", "Glob", "Grep"];
-  if (task.spec.worker.allowEdits) tools.push("Edit", "Write");
-  const allowed = [...tools];
+  const allowed = ["Read", "Glob", "Grep"];
+  if (task.spec.worker.allowEdits) allowed.push("Edit", "Write");
   const denied = [
     "Bash",
     "WebFetch",
     "WebSearch",
+    "Task",
   ];
-  return { tools: tools.join(","), allowed: allowed.join(" "), denied: denied.join(" ") };
+  return { tools: allowed.join(","), allowed: allowed.join(","), denied: denied.join(",") };
 }
 
-function claudeArguments(task: TaskRecord, resuming: boolean): string[] {
+function claudeArguments(task: TaskRecord, resuming: boolean, prompt: string): string[] {
   const permission = allowedToolArguments(task);
   const args = [
-    "--bare",
-    "--safe-mode",
     "--no-chrome",
     "--disable-slash-commands",
     "--strict-mcp-config",
@@ -83,22 +84,20 @@ function claudeArguments(task: TaskRecord, resuming: boolean): string[] {
   } else {
     args.push("--session-id", task.sessionId);
   }
-  args.push(buildWorkerPrompt(task.spec, resuming));
+  args.push(prompt);
   return args;
 }
 
-function childEnvironment(task: TaskRecord, apiKey: string): NodeJS.ProcessEnv {
-  return {
+function childEnvironment(
+  task: TaskRecord,
+  apiKey: string,
+  providerDefaults?: ProviderDefaultSettings,
+): NodeJS.ProcessEnv {
+  const provider = resolveProvider(task.spec.provider.name, task.spec.provider, providerDefaults);
+  return providerEnvironment(provider, apiKey, {
     ...process.env,
     CLAUDE_CONFIG_DIR: task.paths.claudeConfig,
-    ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic",
-    ANTHROPIC_AUTH_TOKEN: apiKey,
-    ANTHROPIC_API_KEY: apiKey,
-    ANTHROPIC_MODEL: task.spec.provider.model,
-    ANTHROPIC_DEFAULT_OPUS_MODEL: task.spec.provider.model,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: task.spec.provider.model,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-flash",
-  };
+  });
 }
 
 function sandboxLiteral(value: string): string {
@@ -163,6 +162,8 @@ export async function runClaudeWorker(
   attempt: AttemptRecord,
   resuming: boolean,
   hooks: WorkerRunHooks = {},
+  executionSettings?: ExecutionSettings,
+  providerDefaults?: ProviderDefaultSettings,
 ): Promise<WorkerExecutionResult> {
   await mkdir(task.paths.logs, { recursive: true, mode: 0o700 });
   await mkdir(task.paths.claudeConfig, { recursive: true, mode: 0o700 });
@@ -173,18 +174,68 @@ export async function runClaudeWorker(
   const stderrChunks: string[] = [];
   let terminal: NormalizedWorkerEvent["terminal"];
 
-  const launch = workerLaunch(task, claudeArguments(task, resuming));
+  // --- no-progress watchdog ---
+  const exec = executionSettings ?? cloneDefaults().execution;
+  let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+  let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+  let watchdogFired = false;
+  let watchdogTerminal = false;
+
+  const clearWatchdog = (): void => {
+    if (watchdogTimer !== undefined) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = undefined;
+    }
+    if (escalationTimer !== undefined) {
+      clearTimeout(escalationTimer);
+      escalationTimer = undefined;
+    }
+  };
+
+  const scheduleWatchdog = (): void => {
+    if (watchdogTerminal || watchdogFired) return;
+    if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
+    const timeout = setTimeout(() => {
+      watchdogFired = true;
+      const pid = child?.pid;
+      if (pid !== undefined && child?.exitCode === null && child?.signalCode === null) {
+        child.kill("SIGINT");
+        const escalation = setTimeout(() => {
+          if (child?.exitCode === null && child?.signalCode === null) {
+            child.kill("SIGTERM");
+          }
+          escalationTimer = undefined;
+        }, exec.workerStopGraceMs);
+        escalation.unref();
+        escalationTimer = escalation;
+      }
+    }, exec.noProgressTimeoutMs);
+    timeout.unref();
+    watchdogTimer = timeout;
+  };
+
+  const prompt = buildWorkerPrompt(task.spec, resuming, hooks.feedback);
+  await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {
+    mode: 0o600,
+  });
+  const launch = workerLaunch(task, claudeArguments(task, resuming, prompt));
   store.addEvent(
     task.id,
     attempt.id,
     resuming ? "worker.resumed" : "worker.started",
     resuming ? "Claude Code Worker resumed" : "Claude Code Worker started",
-    { model: task.spec.provider.model, runtime: task.spec.runtime.name, isolation: launch.isolation },
+    {
+      model: task.spec.provider.model,
+      provider: task.spec.provider.name,
+      runtime: task.spec.runtime.name,
+      isolation: launch.isolation,
+      correctionFeedbackIncluded: Boolean(hooks.feedback),
+    },
   );
 
   const child = spawn(launch.command, launch.args, {
     cwd: task.paths.workspace,
-    env: childEnvironment(task, apiKey),
+    env: childEnvironment(task, apiKey, providerDefaults),
     stdio: ["ignore", "pipe", "pipe"],
   });
   hooks.onSpawn?.(child);
@@ -192,6 +243,9 @@ export async function runClaudeWorker(
     store.updateAttempt(attempt.id, { pid: child.pid });
     store.updateTask(task.id, { workerPid: child.pid });
   }
+
+  // Start watchdog AFTER spawn so pre-spawn delay is not counted.
+  scheduleWatchdog();
 
   child.stdout.pipe(rawLog);
   child.stderr.on("data", (chunk: Buffer) => {
@@ -201,7 +255,18 @@ export async function runClaudeWorker(
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   lines.on("line", (line) => {
     for (const event of normalizer.parseLine(line)) {
-      if (event.terminal) terminal = event.terminal;
+      if (event.terminal) {
+        terminal = event.terminal;
+        watchdogTerminal = true;
+        if (!watchdogFired && watchdogTimer !== undefined) {
+          clearTimeout(watchdogTimer);
+          watchdogTimer = undefined;
+        }
+      }
+      // Only normalized tool lifecycle resets the watchdog, never narration.
+      if (event.type === "worker.tool.started" || event.type === "worker.tool.completed") {
+        scheduleWatchdog();
+      }
       if (event.terminal && hooks.wasInterrupted?.() === true) continue;
       store.addEvent(task.id, attempt.id, event.type, event.summary, event.payload);
       hooks.onEvent?.(event);
@@ -215,12 +280,26 @@ export async function runClaudeWorker(
         spawnError = error;
       });
       child.once("close", (code, signal) => {
+        clearWatchdog();
         resolve({ code: code ?? (signal ? 128 : 1), signal, ...(spawnError ? { spawnError } : {}) });
       });
     },
   );
   await new Promise<void>((resolve) => rawLog.end(resolve));
   await writeFile(stderrPath, stderrChunks.join(""), { mode: 0o600 });
+
+  // Watchdog timeout must be classified before user interruption —
+  // the watchdog itself sends SIGINT so signal-based detection is ambiguous.
+  if (watchdogFired) {
+    return {
+      status: "failed",
+      exitCode: interruptedExitCode(outcome.code),
+      ...(terminal?.resultText === undefined ? {} : { resultText: terminal.resultText }),
+      ...(terminal?.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
+      ...(terminal?.turns === undefined ? {} : { turns: terminal.turns }),
+      error: "No effective implementation progress detected within the configured interval; worker was terminated by the progress watchdog",
+    };
+  }
 
   const interrupted = hooks.wasInterrupted?.() === true
     || outcome.signal === "SIGINT"

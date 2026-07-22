@@ -10,16 +10,22 @@ import {
 test("P2 Worker never receives Bash or web tools", () => {
   const task = {
     spec: {
-      worker: { allowEdits: true, allowedCommands: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
       acceptance: { commands: ["node --test"] },
     },
   } as unknown as TaskRecord;
   const permission = allowedToolArguments(task);
-  assert.doesNotMatch(permission.tools, /Bash|Web/);
+  assert.doesNotMatch(permission.tools, /Bash|Web|Task/);
+  assert.match(permission.tools, /Glob/);
+  assert.match(permission.tools, /Write/);
   assert.match(permission.denied, /Bash/);
   assert.match(permission.denied, /WebFetch/);
+  assert.match(permission.denied, /Task/);
   assert.match(permission.allowed, /Read/);
+  assert.match(permission.allowed, /Glob/);
+  assert.match(permission.allowed, /Grep/);
   assert.match(permission.allowed, /Edit/);
+  assert.match(permission.allowed, /Write/);
 });
 
 test("an interrupted Worker never records a successful exit code", () => {

@@ -1,5 +1,7 @@
 export type TaskStatus =
   | "queued"
+  | "waiting"
+  | "blocked"
   | "preparing"
   | "running"
   | "verifying"
@@ -11,6 +13,9 @@ export type AttemptStatus = "running" | "succeeded" | "failed" | "interrupted";
 
 export type EventType =
   | "task.created"
+  | "task.waiting"
+  | "task.blocked"
+  | "task.ready"
   | "workspace.prepared"
   | "worker.started"
   | "worker.resumed"
@@ -22,36 +27,106 @@ export type EventType =
   | "worker.interrupted"
   | "verification.started"
   | "verification.command.completed"
-  | "verification.completed";
+  | "verification.completed"
+  | "integration.preflight.completed"
+  | "integration.apply.started"
+  | "integration.apply.completed"
+  | "integration.rollback.completed";
 
-export interface TaskSpec {
-  version: 1;
+export interface ProviderSpec {
+  name: "deepseek" | "qwen" | "minimax" | "glm";
+  model: string;
+  endpoint?: string;
+  keychainService: string;
+  keychainAccount?: string;
+}
+
+export interface RuntimeSpec {
+  name: "claude-code";
+  executable: string;
+  effort: "low" | "medium" | "high" | "xhigh" | "max";
+  maxBudgetUsd: number;
+}
+
+export interface TaskModuleContract {
+  name: string;
+  responsibility: string;
+  consumes: string[];
+  produces: string[];
+  boundaries: string[];
+}
+
+export interface TaskScenarioContract {
+  name: string;
+  given: string;
+  when: string;
+  then: string;
+}
+
+export interface TaskContract {
+  outcome: string;
+  context: string[];
+  inScope: string[];
+  outOfScope: string[];
+  executionSteps: string[];
+  deliverables: string[];
+  modules: TaskModuleContract[];
+  callChain: string[];
+  scenarios: TaskScenarioContract[];
+  risks: string[];
+  changeBudget: {
+    maxFiles: number;
+    maxDiffLines: number;
+  };
+}
+
+interface SharedTaskSpec {
   name: string;
   project: string;
-  goal: string;
-  constraints: string[];
-  provider: {
-    name: "deepseek";
-    model: string;
-    keychainService: string;
-    keychainAccount?: string;
-  };
-  runtime: {
-    name: "claude-code";
-    executable: string;
-    effort: "low" | "medium" | "high" | "xhigh" | "max";
-    maxBudgetUsd: number;
-  };
+  provider: ProviderSpec;
+  runtime: RuntimeSpec;
   workspace: {
     exclude: string[];
   };
   worker: {
     allowEdits: boolean;
     allowedCommands: string[];
+    focusPaths: string[];
   };
+}
+
+export interface LegacyTaskSpec extends SharedTaskSpec {
+  version: 1;
+  goal: string;
+  constraints: string[];
   acceptance: {
     commands: string[];
   };
+}
+
+export interface ContractTaskSpec extends SharedTaskSpec {
+  version: 2;
+  contract: TaskContract;
+  acceptance: {
+    criteria: string[];
+    commands: string[];
+  };
+}
+
+export type TaskSpec = LegacyTaskSpec | ContractTaskSpec;
+
+export interface QualityCheck {
+  id: string;
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface QualityReport {
+  passed: boolean;
+  score: number;
+  checks: QualityCheck[];
+  issues: string[];
 }
 
 export interface TaskPaths {
@@ -98,6 +173,19 @@ export interface AttemptRecord {
   error?: string;
 }
 
+export interface StagedTaskRegistration {
+  task: TaskRecord;
+  creationEvent: {
+    summary: string;
+    payload?: unknown;
+  };
+  extraEvents?: Array<{
+    type: EventType;
+    summary: string;
+    payload?: unknown;
+  }>;
+}
+
 export interface EventRecord {
   id: number;
   taskId: string;
@@ -115,6 +203,7 @@ export interface VerificationCommandResult {
   stdout: string;
   stderr: string;
   durationMs: number;
+  timedOut: boolean;
 }
 
 export interface VerificationResult {
@@ -122,6 +211,13 @@ export interface VerificationResult {
   commands: VerificationCommandResult[];
   diffPath: string;
   sourceUnchanged: boolean;
+  changeBudget?: {
+    filesChanged: number;
+    changedLines: number;
+    maxFiles: number;
+    maxDiffLines: number;
+    withinBudget: boolean;
+  };
 }
 
 export interface NormalizedWorkerEvent {
@@ -135,4 +231,151 @@ export interface NormalizedWorkerEvent {
     costUsd?: number;
     turns?: number;
   };
+}
+
+export interface PlanRecord {
+  id: string;
+  name: string;
+  objective: string;
+  planFile: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlanItemRecord {
+  id: string;
+  planId: string;
+  taskId?: string;
+  itemIndex: number;
+  taskFile: string;
+}
+
+export interface DependencyRecord {
+  planId: string;
+  itemId: string;
+  dependsOnItemId: string;
+}
+
+export interface PlanItemStatus {
+  itemId: string;
+  taskId?: string;
+  taskStatus?: TaskStatus;
+}
+
+export type CompetitionStatus = "pending" | "running" | "completed";
+export type RankingFactor = "verification" | "diffFocus" | "retries" | "cost" | "duration";
+
+export interface RankingPolicy {
+  weights: Record<RankingFactor, number>;
+  tieThreshold: number;
+}
+
+export interface CompetitionRecord {
+  id: string;
+  name: string;
+  contractTaskId: string;
+  status: CompetitionStatus;
+  rankingPolicy: RankingPolicy;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  latestEvaluationId?: string;
+  error?: string;
+}
+
+export interface CompetitionCandidateRecord {
+  id: string;
+  competitionId: string;
+  taskId: string;
+  ordinal: number;
+  providerName: string;
+  modelName: string;
+}
+
+export interface CompetitionFactorScore {
+  factor: RankingFactor;
+  weight: number;
+  available: boolean;
+  rawValue?: number;
+  normalizedValue: number;
+  weightedScore: number;
+  evidence: string;
+}
+
+export interface CompetitionCandidateScore {
+  candidateId: string;
+  taskId: string;
+  providerName: string;
+  modelName: string;
+  eligible: boolean;
+  disqualificationReason?: string;
+  factors: CompetitionFactorScore[];
+  totalScore: number;
+}
+
+export interface CompetitionRecommendation {
+  candidateId: string;
+  confidence: number;
+  reasoning: string;
+}
+
+export interface CompetitionEvaluationRecord {
+  id: string;
+  competitionId: string;
+  policy: RankingPolicy;
+  candidates: CompetitionCandidateScore[];
+  recommendation?: CompetitionRecommendation;
+  createdAt: string;
+}
+
+export interface IntegrationReceiptRecord {
+  id: string;
+  taskId: string;
+  patchDigest: string;
+  affectedFiles: string[];
+  rejectionReasons: string[];
+  sourceEvidence: Record<string, string>;
+  createdAt: string;
+  expiresAt: string;
+  consumed: boolean;
+}
+
+export interface IntegrationResultRecord {
+  id: string;
+  receiptId: string;
+  taskId: string;
+  status: "applied" | "rejected" | "retained-failure" | "rolled-back";
+  backupDir?: string;
+  verificationCommands?: VerificationCommandResult[];
+  postApplyDigests?: Record<string, string>;
+  rollbackFailures?: string[];
+  error?: string;
+  appliedAt?: string;
+  createdAt: string;
+}
+
+// --- Provider probe ---
+
+export type ProbeResultStatus = "verified" | "failed";
+
+export type ProbeFailureCategory = "authentication" | "timeout" | "connectivity" | "unknown";
+
+export type ProviderHealthStatus = "unverified" | "verified" | "failed" | "stale";
+
+export interface ProbeEvidence {
+  provider: string;
+  model: string;
+  endpointOrigin: string;
+  status: ProbeResultStatus;
+  latencyMs: number;
+  timestamp: string;
+  failureCategory?: ProbeFailureCategory;
+}
+
+export interface ProviderStatus {
+  provider: string;
+  model: string;
+  keychainExists: boolean;
+  status: ProviderHealthStatus;
+  evidence?: ProbeEvidence;
 }

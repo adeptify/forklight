@@ -2,20 +2,37 @@
   "name": "forklight",
   "version": "0.2.0",
   "private": true,
+  "license": "UNLICENSED",
   "description": "Local-first orchestration and observability for accountable coding workers.",
+  "os": [
+    "darwin"
+  ],
   "type": "module",
   "bin": {
-    "forklight": "dist/src/cli.js"
+    "forklight": "dist/src/cli.js",
+    "forklight-mcp": "dist/src/mcp/main.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-console-assets.mjs && node scripts/copy-setup-assets.mjs",
     "dev": "node --disable-warning=ExperimentalWarning --import tsx src/cli.ts",
     "test": "node --disable-warning=ExperimentalWarning --test --import tsx tests/*.test.ts",
-    "check": "npm run build && npm test"
+    "check": "npm run build && npm test",
+    "smoke": "node --disable-warning=ExperimentalWarning --test --import tsx tests/smoke.test.ts",
+    "prepare": "npm run build",
+    "prepack": "npm run check"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=24.0.0"
   },
+  "files": [
+    "dist/src/",
+    "docs/",
+    "plugins/forklight/",
+    ".agents/plugins/",
+    "README.md",
+    "AGENTS.md",
+    "examples/"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "yaml": "^2.8.1",

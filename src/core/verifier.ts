@@ -3,6 +3,18 @@ import type { StateStore } from "../state/store.js";
 import { runCaptured } from "./process.js";
 import { sourceIsUnchanged, writeWorkspaceDiff } from "../workspace/copy.js";
 
+function measureDiff(diff: string): { filesChanged: number; changedLines: number } {
+  const lines = diff.split("\n");
+  return {
+    filesChanged: lines.filter((line) => line.startsWith("diff --git ")).length,
+    changedLines: lines.filter(
+      (line) =>
+        (line.startsWith("+") && !line.startsWith("+++")) ||
+        (line.startsWith("-") && !line.startsWith("---")),
+    ).length,
+  };
+}
+
 export async function verifyTask(
   store: StateStore,
   task: TaskRecord,
@@ -23,6 +35,7 @@ export async function verifyTask(
       stdout: result.stdout,
       stderr: result.stderr,
       durationMs: result.durationMs,
+      timedOut: result.timedOut,
     };
     commands.push(commandResult);
     store.addEvent(
@@ -35,16 +48,30 @@ export async function verifyTask(
     if (result.exitCode !== 0) break;
   }
 
-  await writeWorkspaceDiff(task.paths);
+  const diff = await writeWorkspaceDiff(task.paths, task.spec.workspace.exclude);
   const sourceUnchanged = await sourceIsUnchanged(task.spec, task.paths);
+  const changeBudget = task.spec.version === 2
+    ? {
+        ...measureDiff(diff),
+        ...task.spec.contract.changeBudget,
+        withinBudget: false,
+      }
+    : undefined;
+  if (changeBudget) {
+    changeBudget.withinBudget =
+      changeBudget.filesChanged <= changeBudget.maxFiles &&
+      changeBudget.changedLines <= changeBudget.maxDiffLines;
+  }
   const passed = commands.length === task.spec.acceptance.commands.length
     && commands.every((command) => command.exitCode === 0)
-    && sourceUnchanged;
+    && sourceUnchanged
+    && (changeBudget?.withinBudget ?? true);
   const verification: VerificationResult = {
     passed,
     commands,
     diffPath: task.paths.diff,
     sourceUnchanged,
+    ...(changeBudget === undefined ? {} : { changeBudget }),
   };
   store.addEvent(
     task.id,

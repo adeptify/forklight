@@ -1,0 +1,23 @@
+{
+  "name": "forklight",
+  "version": "0.2.0",
+  "description": "Delegate persistent coding tasks to external Workers while Codex remains the accountable orchestrator.",
+  "author": {
+    "name": "Adeptify"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ForkLight",
+    "shortDescription": "Supervise persistent external coding Workers.",
+    "longDescription": "ForkLight lets Codex submit bounded coding jobs to persistent external-model Workers, observe progress, inspect diffs and tests, and resume interrupted work without giving up final review responsibility.",
+    "developerName": "Adeptify",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Delegate this bounded coding task with ForkLight.",
+      "Review the latest ForkLight result before integration.",
+      "Compare multiple models on this implementation task."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

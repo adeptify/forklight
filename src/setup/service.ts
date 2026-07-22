@@ -1,0 +1,242 @@
+import { execFileSync } from "node:child_process";
+import { userInfo } from "node:os";
+import {
+  isProviderName,
+  providerDefinition,
+  providerLabel,
+  providerNames,
+  providerVariantLabel,
+  providerVariants,
+  resolveProvider as resolveRuntimeProvider,
+  type ResolvedProviderConfig,
+} from "../core/providers.js";
+import type { SettingsService } from "../core/settings.js";
+import type {
+  ResolvedSetupProvider,
+  SetupBootstrap,
+  SetupKeychainStore,
+  SetupPrerequisite,
+  SetupProviderCommit,
+  SetupProviderOption,
+  SetupProviderSelection,
+  SetupSystemInspector,
+} from "./types.js";
+
+type SetupSettings = Pick<SettingsService, "get" | "update">;
+
+const MODEL_PATTERN = /^[A-Za-z0-9._+:/\[\]-]{1,128}$/;
+
+export function createSystemInspector(): SetupSystemInspector {
+  return {
+    platform: () => process.platform,
+    nodeVersion: () => process.version,
+    account: () => userInfo().username,
+    commandExists(command) {
+      try {
+        execFileSync("which", [command], { stdio: "ignore" });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+export class SetupService {
+  constructor(
+    private readonly settings: SetupSettings,
+    private readonly keychain: SetupKeychainStore,
+    private readonly system: SetupSystemInspector,
+  ) {}
+
+  inspectPrerequisites(): SetupPrerequisite[] {
+    const platform = this.system.platform();
+    const nodeVersion = this.system.nodeVersion();
+    const major = Number(/^v?(\d+)/.exec(nodeVersion)?.[1] ?? 0);
+    const checks: SetupPrerequisite[] = [
+      {
+        id: "platform",
+        label: "macOS",
+        ready: platform === "darwin",
+        blocker: platform !== "darwin",
+        message: platform === "darwin" ? "Supported" : `Detected ${platform}`,
+        ...(platform === "darwin" ? {} : { fix: "ForkLight setup currently stores keys in macOS Keychain." }),
+      },
+      {
+        id: "node",
+        label: "Node.js 24+",
+        ready: major >= 24,
+        blocker: major < 24,
+        message: `Detected ${nodeVersion}`,
+        ...(major >= 24 ? {} : { fix: "Install Node.js 24 or newer, then run setup again." }),
+      },
+      this.commandCheck("claude", "Claude Code", "Install Claude Code so provider Workers can run."),
+      this.commandCheck("codex", "Codex CLI", "Install Codex CLI to use ForkLight as a Codex sub-agent."),
+      this.commandCheck("security", "macOS Keychain", "The macOS security command must be available to store API keys."),
+    ];
+    return checks;
+  }
+
+  describeProviders(): SetupProviderOption[] {
+    const effective = this.settings.get();
+    const account = this.system.account();
+    return providerNames().map((name) => {
+      const definition = providerDefinition(name, effective.providerDefaults);
+      return {
+        name,
+        label: providerLabel(name),
+        variantLabel: providerVariantLabel(name),
+        configured: this.keychain.has(definition.defaultKeychainService, account),
+        defaultModel: definition.defaultModel,
+        defaultEndpoint: definition.defaultEndpoint,
+        variants: providerVariants(name, effective.providerDefaults),
+      };
+    });
+  }
+
+  currentProvider(): ResolvedSetupProvider | null {
+    const effective = this.settings.get();
+    const account = this.system.account();
+    const ordered = [
+      effective.execution.defaultProvider,
+      ...providerNames().filter((name) => name !== effective.execution.defaultProvider),
+    ];
+    for (const name of ordered) {
+      const definition = providerDefinition(name, effective.providerDefaults);
+      if (!this.keychain.has(definition.defaultKeychainService, account)) continue;
+      const variant = providerVariants(name, effective.providerDefaults)
+        .find((candidate) => candidate.endpoint === definition.defaultEndpoint);
+      return {
+        provider: name,
+        providerLabel: providerLabel(name),
+        variant: variant?.id ?? "custom",
+        variantLabel: variant?.label ?? "Custom endpoint",
+        model: definition.defaultModel,
+        endpoint: definition.defaultEndpoint,
+        keychainService: definition.defaultKeychainService,
+      };
+    }
+    return null;
+  }
+
+  bootstrap(): SetupBootstrap {
+    return {
+      prerequisites: this.inspectPrerequisites(),
+      providers: this.describeProviders(),
+      current: this.currentProvider(),
+    };
+  }
+
+  resolveProvider(selection: SetupProviderSelection): ResolvedSetupProvider {
+    if (!isProviderName(selection.provider)) throw new Error("Unsupported provider");
+    const effective = this.settings.get();
+    const definition = providerDefinition(selection.provider, effective.providerDefaults);
+    const variant = providerVariants(selection.provider, effective.providerDefaults)
+      .find((candidate) => candidate.id === selection.variant);
+    if (!variant) throw new Error("Choose a valid provider plan or account region");
+
+    const model = (selection.model?.trim() || variant.models[0] || definition.defaultModel);
+    if (!MODEL_PATTERN.test(model)) throw new Error("Model name contains unsupported characters");
+    const endpoint = this.validatedEndpoint(selection.endpoint?.trim() || variant.endpoint);
+    return {
+      provider: selection.provider,
+      providerLabel: providerLabel(selection.provider),
+      variant: variant.id,
+      variantLabel: variant.label,
+      model,
+      endpoint,
+      keychainService: definition.defaultKeychainService,
+    };
+  }
+
+  resolveRuntimeProvider(selection: SetupProviderSelection): ResolvedProviderConfig {
+    const resolved = this.resolveProvider(selection);
+    const effective = this.settings.get();
+    return resolveRuntimeProvider(
+      resolved.provider,
+      {
+        model: resolved.model,
+        endpoint: resolved.endpoint,
+        keychainService: resolved.keychainService,
+      },
+      effective.providerDefaults[resolved.provider],
+    );
+  }
+
+  commitProvider(selection: SetupProviderSelection, apiKey: string): SetupProviderCommit {
+    const resolved = this.resolveProvider(selection);
+    this.assertCanStoreCredential(apiKey);
+    const account = this.system.account();
+    const hadPrevious = this.keychain.has(resolved.keychainService, account);
+    const previous = hadPrevious
+      ? this.keychain.read(resolved.keychainService, account)
+      : undefined;
+    if (hadPrevious && previous === undefined) {
+      throw new Error("The existing Keychain entry could not be backed up. No changes were made.");
+    }
+
+    try {
+      this.keychain.write(resolved.keychainService, account, apiKey);
+    } catch {
+      throw new Error("ForkLight could not store the API key in macOS Keychain. Settings were not changed.");
+    }
+
+    try {
+      this.settings.update({
+        execution: { defaultProvider: resolved.provider },
+        providerDefaults: {
+          [resolved.provider]: {
+            defaultModel: resolved.model,
+            defaultEndpoint: resolved.endpoint,
+            defaultKeychainService: resolved.keychainService,
+          },
+        },
+      });
+    } catch {
+      try {
+        if (previous === undefined) this.keychain.delete(resolved.keychainService, account);
+        else this.keychain.write(resolved.keychainService, account, previous);
+      } catch {
+        throw new Error("Settings could not be saved and the Keychain rollback did not complete. Retry setup before running a Worker.");
+      }
+      throw new Error("Settings could not be saved. The previous Keychain state was restored.");
+    }
+
+    return { ...resolved, stored: true, settingsUpdated: true };
+  }
+
+  private commandCheck(command: string, label: string, fix: string): SetupPrerequisite {
+    const ready = this.system.commandExists(command);
+    return {
+      id: command === "security" ? "keychain" : command as "claude" | "codex",
+      label,
+      ready,
+      blocker: !ready,
+      message: ready ? "Available" : "Not found",
+      ...(ready ? {} : { fix }),
+    };
+  }
+
+  private validatedEndpoint(value: string): string {
+    if (value.length > 512) throw new Error("Endpoint is too long");
+    let endpoint: URL;
+    try {
+      endpoint = new URL(value);
+    } catch {
+      throw new Error("Endpoint must be a valid HTTPS URL");
+    }
+    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password) {
+      throw new Error("Endpoint must be an HTTPS URL without embedded credentials");
+    }
+    return endpoint.href.replace(/\/$/, "");
+  }
+
+  private assertCanStoreCredential(apiKey: string): void {
+    if (this.system.platform() !== "darwin" || !this.system.commandExists("security")) {
+      throw new Error("macOS Keychain is not available. No credential was stored.");
+    }
+    if (apiKey.length < 8 || apiKey.length > 4096 || /[\0\r\n]/.test(apiKey)) {
+      throw new Error("API key format is invalid");
+    }
+  }
+}

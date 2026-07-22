@@ -1,0 +1,20 @@
+{
+  "name": "adeptify",
+  "interface": {
+    "displayName": "Adeptify"
+  },
+  "plugins": [
+    {
+      "name": "forklight",
+      "source": {
+        "source": "local",
+        "path": "./plugins/forklight"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>ForkLight Console</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="fl-header">
+  <div id="fl-status-bar"></div>
+  <nav id="fl-tabs">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="plans">Plans</button>
+    <button data-tab="tasks">Tasks</button>
+    <button data-tab="competitions">Competitions</button>
+    <button data-tab="stats">Stats</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+</header>
+<main>
+  <section id="fl-view"></section>
+  <section id="fl-detail" hidden></section>
+</main>
+<footer id="fl-footer"></footer>
+<script src="app.js"></script>
+</body>
+</html>

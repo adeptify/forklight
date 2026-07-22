@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>ForkLight setup</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to main content</a>
+<header id="fl-setup-header">
+  <div id="fl-header-row">
+    <h1 id="fl-setup-title">ForkLight setup</h1>
+    <span id="fl-conn" class="dim">pending</span>
+  </div>
+  <ol id="fl-steps" aria-label="Setup progress">
+    <li data-step="system" aria-current="step"><span class="num" aria-hidden="true">1</span><span class="label">System check</span></li>
+    <li data-step="model"><span class="num" aria-hidden="true">2</span><span class="label">Choose provider</span></li>
+    <li data-step="connect"><span class="num" aria-hidden="true">3</span><span class="label">Connect provider</span></li>
+    <li data-step="ready"><span class="num" aria-hidden="true">4</span><span class="label">Ready</span></li>
+  </ol>
+</header>
+<main id="main" tabindex="-1">
+  <p id="fl-bootstrap-status" class="state-msg loading" aria-live="polite">Loading setup state</p>
+
+  <section id="fl-stage-system" hidden aria-labelledby="fl-stage-system-h">
+    <h2 id="fl-stage-system-h">System check</h2>
+    <p class="dim">ForkLight inspects local prerequisites before continuing.</p>
+    <ul id="fl-prereqs" class="card-list" aria-label="Prerequisites"></ul>
+    <div class="actions">
+      <button id="fl-btn-system-retry" type="button">Re-check</button>
+      <button id="fl-btn-system-next" type="button" class="primary" hidden>Continue</button>
+    </div>
+  </section>
+
+  <section id="fl-stage-model" hidden aria-labelledby="fl-stage-model-h">
+    <h2 id="fl-stage-model-h">Choose provider and model</h2>
+    <p class="dim">ForkLight uses this as the default Worker. You can override it on individual tasks later.</p>
+    <form id="fl-model-form" novalidate>
+      <fieldset>
+        <legend>Provider</legend>
+        <div id="fl-provider-list" class="radio-list" role="radiogroup" aria-label="Provider"></div>
+      </fieldset>
+      <fieldset id="fl-variant-fs" hidden>
+        <legend id="fl-variant-legend">Plan or region</legend>
+        <p class="dim fs11" id="fl-variant-help">Choose the option that matches where the API key was created.</p>
+        <div id="fl-variant-list" class="radio-list" role="radiogroup" aria-labelledby="fl-variant-legend"></div>
+      </fieldset>
+      <label>Model
+        <input id="fl-model-input" name="model" type="text" list="fl-model-options" autocomplete="off" spellcheck="false" maxlength="128">
+        <datalist id="fl-model-options"></datalist>
+      </label>
+      <details id="fl-advanced">
+        <summary>Advanced endpoint override</summary>
+        <label>Endpoint override
+          <input id="fl-endpoint-input" name="endpoint" type="url" autocomplete="off" spellcheck="false" inputmode="url" maxlength="512" placeholder="Use the selected plan endpoint">
+        </label>
+      </details>
+      <div class="actions">
+        <button type="button" id="fl-btn-model-back">Back</button>
+        <button type="submit" class="primary">Continue</button>
+      </div>
+    </form>
+  </section>
+
+  <section id="fl-stage-connect" hidden aria-labelledby="fl-stage-connect-h">
+    <h2 id="fl-stage-connect-h">Connect provider</h2>
+    <p class="dim">Verify the API key with one small provider request. It is stored only after the check succeeds.</p>
+    <div id="fl-provider-summary" class="summary" aria-live="polite"></div>
+    <form id="fl-connect-form" novalidate>
+      <label id="fl-key-label">Provider API key
+        <input id="fl-key-input" name="key" type="password" autocomplete="off" required minlength="8" maxlength="4096" aria-describedby="fl-key-help">
+      </label>
+      <p class="dim fs11" id="fl-key-help">Sent only to the selected provider for verification, then stored in macOS Keychain. Cleared from this page immediately.</p>
+      <div id="fl-cost-banner" class="danger-banner" role="note">
+        Running the probe sends a real request to the provider and may incur charges. You will be asked to confirm before it starts.
+      </div>
+      <div class="actions">
+        <button type="button" id="fl-btn-connect-back">Back</button>
+        <button type="button" id="fl-btn-probe">Run billable probe</button>
+      </div>
+      <div id="fl-probe-result" class="card" hidden aria-live="polite"></div>
+    </form>
+  </section>
+
+  <section id="fl-stage-ready" hidden aria-labelledby="fl-stage-ready-h">
+    <h2 id="fl-stage-ready-h">Ready</h2>
+    <p class="dim">Install the Codex integration, then finish. The console is read-only.</p>
+    <ul id="fl-finish-list" class="card-list" aria-label="Completion checks"></ul>
+    <div class="actions">
+      <button type="button" id="fl-btn-plugin">Install Codex plugin</button>
+      <button type="button" id="fl-btn-finish" class="primary" disabled>Finish setup</button>
+    </div>
+    <div id="fl-finish-result" class="card" hidden aria-live="polite"></div>
+  </section>
+
+  <section id="fl-error" class="error-box" hidden role="alert" aria-live="assertive"></section>
+</main>
+<footer id="fl-footer" class="dim">Setup runs on this Mac. Keys are stored in Keychain and sent only to the provider you choose.</footer>
+<script src="app.js"></script>
+</body>
+</html>

@@ -2,11 +2,89 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { forklightHome } from "../core/config.js";
+import type { ProviderModelSummary } from "../core/statistics.js";
 import type { TaskRecord } from "../core/types.js";
+import { assessTaskQuality, parseTaskSpec } from "../core/task.js";
+import { type ProviderName } from "../core/providers.js";
 import { daemonRequest, ensureDaemon } from "../daemon/client.js";
+import type { ForkLightSettings, TaskPolicy } from "../core/settings.js";
 
 const SERVER_INSTRUCTIONS =
-  "ForkLight runs bounded external coding Workers. Use submit only after the main Codex agent has aligned the solution, supplied explicit acceptance commands, and decided delegation is useful. Submit returns immediately: poll status, then inspect the diff and verification result. The main Codex agent remains accountable for review and user approvals. Never call ForkLight a native Codex subagent, and never use it to commit or push.";
+  "ForkLight runs bounded external coding Workers through DeepSeek, Qwen, MiniMax, or GLM. Before submit, the main Codex agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, module inputs and outputs, call chain, scenarios, risks, and independent acceptance. Validate the contract first. Submit returns immediately: poll status, then inspect the diff and verification result. The main Codex agent remains accountable for review and user approvals. Never call ForkLight a native Codex subagent, and never use it to commit or push.";
+
+const moduleContractSchema = z.object({
+  name: z.string().min(1),
+  responsibility: z.string().min(8),
+  consumes: z.array(z.string().min(1)).min(1),
+  produces: z.array(z.string().min(1)).min(1),
+  boundaries: z.array(z.string().min(1)).min(1),
+});
+
+const scenarioContractSchema = z.object({
+  name: z.string().min(1),
+  given: z.string().min(1),
+  when: z.string().min(1),
+  then: z.string().min(1),
+});
+
+const taskInputSchema = z.object({
+  project: z.string().min(1).describe("Absolute path to the source project"),
+  name: z.string().min(1).max(120),
+  contract: z.object({
+    outcome: z.string().min(12),
+    context: z.array(z.string().min(1)).min(1),
+    inScope: z.array(z.string().min(1)).min(1),
+    outOfScope: z.array(z.string().min(1)).min(1),
+    executionSteps: z.array(z.string().min(1)).min(1),
+    deliverables: z.array(z.string().min(1)).min(1),
+    modules: z.array(moduleContractSchema).min(1),
+    callChain: z.array(z.string().min(1)).min(2),
+    scenarios: z.array(scenarioContractSchema).min(2),
+    risks: z.array(z.string().min(1)).min(1),
+    changeBudget: z.object({
+      maxFiles: z.number().int().positive(),
+      maxDiffLines: z.number().int().positive(),
+    }),
+  }),
+  acceptance: z.object({
+    criteria: z.array(z.string().min(1)).min(1),
+    commands: z.array(z.string().min(1)).min(1),
+  }),
+  provider: z.enum(["deepseek", "qwen", "minimax", "glm"]).optional(),
+  model: z.string().min(1).optional(),
+  endpoint: z.string().url().optional(),
+  effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+  maxBudgetUsd: z.number().positive().optional(),
+  allowEdits: z.boolean().default(true),
+  focusPaths: z.array(z.string().min(1)).min(1),
+});
+
+type TaskInput = z.infer<typeof taskInputSchema>;
+
+function inlineTask(input: TaskInput, settings: ForkLightSettings): Record<string, unknown> {
+  const providerName = (input.provider ?? settings.execution.defaultProvider) as ProviderName;
+  const providerDef = settings.providerDefaults[providerName];
+  return {
+    version: 2,
+    name: input.name,
+    project: input.project,
+    contract: input.contract,
+    provider: {
+      name: providerName,
+      model: input.model ?? providerDef.defaultModel,
+      keychainService: providerDef.defaultKeychainService,
+      ...(input.endpoint === undefined ? {} : { endpoint: input.endpoint }),
+    },
+    runtime: {
+      name: "claude-code",
+      executable: "claude",
+      effort: input.effort ?? settings.execution.defaultEffort,
+      maxBudgetUsd: input.maxBudgetUsd ?? settings.execution.defaultMaxBudgetUsd,
+    },
+    worker: { allowEdits: input.allowEdits, allowedCommands: [], focusPaths: input.focusPaths },
+    acceptance: input.acceptance,
+  };
+}
 
 function textAndData(data: unknown, summary?: string): {
   content: Array<{ type: "text"; text: string }>;
@@ -26,6 +104,7 @@ function taskSummary(task: TaskRecord): Record<string, unknown> {
     taskId: task.id,
     name: task.name,
     status: task.status,
+    provider: task.spec.provider.name,
     model: task.spec.provider.model,
     runtime: task.spec.runtime.name,
     sourcePath: task.sourcePath,
@@ -47,7 +126,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     "forklight_health",
     {
       title: "Check ForkLight",
-      description: "Check whether the local ForkLight daemon, Claude Code, and DeepSeek credential are ready.",
+      description: "Check whether the local ForkLight daemon, Claude Code, and provider credentials are ready.",
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -58,57 +137,115 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
   );
 
   server.registerTool(
+    "forklight_validate",
+    {
+      title: "Validate coding task contract",
+      description:
+        "Validate that a bounded coding task has clear scope, module behavior, call chain, scenarios, risks, and independent acceptance before starting a Worker.",
+      inputSchema: taskInputSchema,
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async (input) => {
+      await ensureDaemon(home);
+      const settings = await daemonRequest<ForkLightSettings>("settings_get", {}, home);
+      const policy: TaskPolicy = {
+        contractQuality: settings.contractQuality,
+        execution: settings.execution,
+        providerDefaults: settings.providerDefaults,
+      };
+      const spec = parseTaskSpec(
+        inlineTask(input, settings),
+        input.project,
+        policy,
+      );
+      const report = assessTaskQuality(spec, settings.contractQuality);
+      return textAndData(report);
+    },
+  );
+
+  server.registerTool(
+    "forklight_plan_submit",
+    {
+      title: "Submit a Work Plan",
+      description:
+        "Submit a local Work Plan file for coordinated multi-task execution and return its item-to-task mapping.",
+      inputSchema: z.object({
+        planFile: z.string().min(1).describe("Absolute path to the Work Plan YAML or JSON file"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    },
+    async ({ planFile }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "plan_submit_file",
+        { planFile },
+        home,
+      );
+      return textAndData(result);
+    },
+  );
+
+  server.registerTool(
+    "forklight_plan_inspect",
+    {
+      title: "Inspect a Work Plan board",
+      description: "Read one plan's progress, columns, task states, and dependency evidence.",
+      inputSchema: z.object({ planId: z.string().min(1) }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ planId }) => {
+      await ensureDaemon(home);
+      const board = await daemonRequest<Record<string, unknown>>("plan_board", { planId }, home);
+      return textAndData(board);
+    },
+  );
+
+  server.registerTool(
+    "forklight_plan_board",
+    {
+      title: "List Work Plan boards",
+      description: "List bounded read-only progress summaries for known Work Plans.",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(100).default(50) }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ limit }) => {
+      await ensureDaemon(home);
+      const plans = await daemonRequest<Record<string, unknown>[]>(
+        "plan_board_overview",
+        { limit },
+        home,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(plans, null, 2) }],
+        structuredContent: { plans },
+      };
+    },
+  );
+
+  server.registerTool(
     "forklight_submit",
     {
       title: "Delegate coding task",
       description:
-        "Submit a bounded coding task to an isolated external Worker. Returns a task ID immediately. Use only after defining the goal, constraints, and independent acceptance commands.",
-      inputSchema: z.object({
-        project: z.string().min(1).describe("Absolute path to the source project"),
-        name: z.string().min(1).max(120),
-        goal: z.string().min(1),
-        constraints: z.array(z.string().min(1)).default([]),
-        acceptanceCommands: z.array(z.string().min(1)).min(1),
-        model: z.string().min(1).default("deepseek-v4-flash"),
-        effort: z.enum(["low", "medium", "high", "xhigh", "max"]).default("high"),
-        maxBudgetUsd: z.number().positive().max(20).default(0.5),
-        allowEdits: z.boolean().default(true),
-      }),
+        "Submit a validated Task Contract to an isolated external Worker. Returns a task ID immediately.",
+      inputSchema: taskInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async (input) => {
       await ensureDaemon(home);
+      const settings = await daemonRequest<ForkLightSettings>("settings_get", {}, home);
       const task = await daemonRequest<TaskRecord>(
         "submit",
         {
           baseDirectory: input.project,
-          task: {
-            version: 1,
-            name: input.name,
-            project: input.project,
-            goal: input.goal,
-            constraints: input.constraints,
-            provider: {
-              name: "deepseek",
-              model: input.model,
-              keychainService: "forklight.deepseek.api-key",
-            },
-            runtime: {
-              name: "claude-code",
-              executable: "claude",
-              effort: input.effort,
-              maxBudgetUsd: input.maxBudgetUsd,
-            },
-            worker: { allowEdits: input.allowEdits, allowedCommands: [] },
-            acceptance: { commands: input.acceptanceCommands },
-          },
+          task: inlineTask(input, settings),
         },
         home,
       );
       const summary = taskSummary(task);
       return textAndData(
         summary,
-        `ForkLight task ${task.id} was queued for ${input.model}. Poll forklight_status with this task ID.`,
+        `ForkLight task ${task.id} was queued for ${task.spec.provider.name}/${task.spec.provider.model}. Poll forklight_status with this task ID.`,
       );
     },
   );
@@ -153,12 +290,19 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Resume interrupted Worker",
       description: "Queue an interrupted or failed ForkLight task for another attempt using its existing session.",
-      inputSchema: z.object({ taskId: z.string().uuid() }),
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        feedback: z.string().min(1).optional(),
+      }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    async ({ taskId }) => {
+    async ({ taskId, feedback }) => {
       await ensureDaemon(home);
-      const task = await daemonRequest<TaskRecord>("resume", { taskId }, home);
+      const task = await daemonRequest<TaskRecord>(
+        "resume",
+        { taskId, ...(feedback === undefined ? {} : { feedback }) },
+        home,
+      );
       return textAndData(
         taskSummary(task),
         `ForkLight task ${taskId} was queued for resume. Poll forklight_status.`,
@@ -191,6 +335,292 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         content: [{ type: "text", text: JSON.stringify(summaries, null, 2) }],
         structuredContent: { tasks: summaries },
       };
+    },
+  );
+
+  server.registerTool(
+    "forklight_statistics",
+    {
+      title: "Query ForkLight statistics",
+      description:
+        "Query local provider/model outcomes, failures, costs, and separate timing evidence. Duration is reported but is not a default quality ranking signal.",
+      inputSchema: z.object({
+        provider: z.string().min(1).optional(),
+        model: z.string().min(1).optional(),
+        since: z.string().datetime({ offset: true }).optional(),
+        until: z.string().datetime({ offset: true }).optional(),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ provider, model, since, until }) => {
+      await ensureDaemon(home);
+      const summaries = await daemonRequest<ProviderModelSummary[]>(
+        "statistics",
+        {
+          ...(provider === undefined ? {} : { providerName: provider }),
+          ...(model === undefined ? {} : { modelName: model }),
+          ...(since === undefined ? {} : { since }),
+          ...(until === undefined ? {} : { until }),
+        },
+        home,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(summaries, null, 2) }],
+        structuredContent: { summaries },
+      };
+    },
+  );
+
+  server.registerTool(
+    "forklight_settings_get",
+    {
+      title: "Read effective ForkLight settings",
+      description:
+        "Return the complete effective settings document (defaults merged with persisted overrides). Credential values and fixed safety invariants are never exposed.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      await ensureDaemon(home);
+      const settings = await daemonRequest<ForkLightSettings>("settings_get", {}, home);
+      return textAndData(settings);
+    },
+  );
+
+  server.registerTool(
+    "forklight_settings_update",
+    {
+      title: "Update ForkLight settings",
+      description:
+        "Apply a partial settings patch. Every key must be a known section; unknown or credential-like fields are rejected atomically. Returns the new effective settings on success.",
+      inputSchema: z.object({
+        patch: z.record(z.string(), z.unknown()).describe(
+          "Partial settings object. Top-level keys must be known sections (contractQuality, execution, competition, integration, console, providerDefaults, probe). Nested fields are merged with current values.",
+        ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ patch }) => {
+      await ensureDaemon(home);
+      const settings = await daemonRequest<ForkLightSettings>("settings_update", { patch }, home);
+      return textAndData(settings);
+    },
+  );
+
+  server.registerTool(
+    "forklight_settings_reset",
+    {
+      title: "Reset ForkLight settings to built-in defaults",
+      description:
+        "Remove all persisted overrides. Returns the restored default settings document. Tasks, plans, and execution history are not affected.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async () => {
+      await ensureDaemon(home);
+      const settings = await daemonRequest<ForkLightSettings>("settings_reset", {}, home);
+      return textAndData(settings);
+    },
+  );
+
+  server.registerTool(
+    "forklight_integration_preflight",
+    {
+      title: "Preflight integration review",
+      description:
+        "Perform a dry-run safety review of a task's patch against its source. Returns affected files, rejection reasons, and source evidence. Persists an audit receipt but never mutates the source project.",
+      inputSchema: z.object({ taskId: z.string().uuid() }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId }) => {
+      await ensureDaemon(home);
+      const receipt = await daemonRequest<Record<string, unknown>>(
+        "integration_preflight",
+        { taskId },
+        home,
+      );
+      return textAndData(receipt);
+    },
+  );
+
+  server.registerTool(
+    "forklight_integration_apply",
+    {
+      title: "Apply reviewed integration to source",
+      description:
+        "EXPLICITLY apply a reviewed and approved integration to source. REQUIRES a prior passing preflight receipt. This MUTATES source files — never call this without explicit Main Codex approval. The confirm parameter must be true.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        receiptId: z.string().uuid(),
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that source mutation is approved. Must be true.",
+        ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    },
+    async ({ taskId, receiptId }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "integration_apply",
+        { taskId, receiptId, confirm: true },
+        home,
+      );
+      return textAndData(result);
+    },
+  );
+
+  server.registerTool(
+    "forklight_integration_history",
+    {
+      title: "Read integration history",
+      description:
+        "Return integration receipts and results for a task. Read-only, never mutates source or state.",
+      inputSchema: z.object({ taskId: z.string().uuid() }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ taskId }) => {
+      await ensureDaemon(home);
+      const history = await daemonRequest<Record<string, unknown>>(
+        "integration_history",
+        { taskId },
+        home,
+      );
+      return textAndData(history);
+    },
+  );
+
+  server.registerTool(
+    "forklight_compete_submit",
+    {
+      title: "Start a model competition",
+      description:
+        "Submit a Task Contract with multiple candidate models. Runs each candidate in an isolated workspace from a single canonical snapshot. Returns the competition ID immediately; poll forklight_competition_status for progress.",
+      inputSchema: taskInputSchema.extend({
+        candidates: z.array(z.object({
+          providerName: z.enum(["deepseek", "qwen", "minimax", "glm"]),
+          modelName: z.string().min(1),
+          maxBudgetUsd: z.number().positive().optional(),
+        })).min(1),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    },
+    async (input) => {
+      await ensureDaemon(home);
+      const settings = await daemonRequest<ForkLightSettings>("settings_get", {}, home);
+      const taskDef = inlineTask(input, settings);
+      const competition = await daemonRequest<Record<string, unknown>>(
+        "competition_submit",
+        { task: taskDef, baseDirectory: input.project, candidates: input.candidates },
+        home,
+      );
+      return textAndData(
+        competition,
+        `Competition ${competition.id} started with ${input.candidates.length} candidates. Poll forklight_competition_status for progress.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_competition_status",
+    {
+      title: "Read competition status",
+      description:
+        "Read one competition's progress, candidate task statuses, and completed evaluation. No winner is declared while any candidate is still active.",
+      inputSchema: z.object({ competitionId: z.string().min(1) }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ competitionId }) => {
+      await ensureDaemon(home);
+      return textAndData(await daemonRequest<Record<string, unknown>>("competition_status", { competitionId }, home));
+    },
+  );
+
+  const rankingWeightsSchema = z.object({
+    verification: z.number().min(0).optional(),
+    diffFocus: z.number().min(0).optional(),
+    retries: z.number().min(0).optional(),
+    cost: z.number().min(0).optional(),
+    duration: z.number().min(0).optional(),
+  }).optional();
+
+  server.registerTool(
+    "forklight_competition_compare",
+    {
+      title: "Compare competition candidates",
+      description:
+        "Return per-factor scores, missing evidence, disqualifications, confidence, and advisory recommendation. Override ranking weights for ephemeral what-if scoring; default comparison returns stored evaluation.",
+      inputSchema: z.object({ competitionId: z.string().min(1), rankingWeights: rankingWeightsSchema }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ competitionId, rankingWeights }) => {
+      await ensureDaemon(home);
+      const params: Record<string, unknown> = { competitionId };
+      if (rankingWeights !== undefined) params.rankingWeights = rankingWeights;
+      return textAndData(await daemonRequest<Record<string, unknown>>("competition_compare", params, home));
+    },
+  );
+
+  server.registerTool(
+    "forklight_competition_list",
+    {
+      title: "List competitions",
+      description: "List all known competitions with status and candidate progress.",
+      inputSchema: z.object({ status: z.enum(["pending", "running", "completed"]).optional() }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ status }) => {
+      await ensureDaemon(home);
+      const params: Record<string, unknown> = {};
+      if (status !== undefined) params.status = status;
+      const list = await daemonRequest<Record<string, unknown>[]>("competition_list", params, home);
+      return { content: [{ type: "text", text: JSON.stringify(list, null, 2) }], structuredContent: { competitions: list } };
+    },
+  );
+
+  server.registerTool(
+    "forklight_provider_status",
+    {
+      title: "Read provider verification status",
+      description:
+        "Return cached provider verification status (verified, failed, stale, or unverified). This is a safe, read-only operation — it never triggers a probe, incurs no cost, and reveals no secrets.",
+      inputSchema: z.object({
+        provider: z.enum(["deepseek", "qwen", "minimax", "glm"]).optional().describe(
+          "Optional provider name. Omit to return status for all configured providers.",
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ provider }) => {
+      await ensureDaemon(home);
+      const params: Record<string, unknown> = {};
+      if (provider !== undefined) params.provider = provider;
+      const result = await daemonRequest<Record<string, unknown>>("provider_status", params, home);
+      return textAndData(result, `Provider verification status${provider ? ` for ${provider}` : ""} (cached, read-only).`);
+    },
+  );
+
+  server.registerTool(
+    "forklight_provider_probe",
+    {
+      title: "Probe provider connectivity",
+      description:
+        "Run an EXPLICIT live probe against one or all configured providers. This is a MUTATING, potentially billable operation: every request uses the current configured budget, timeout, cache lifetime, and concurrency limits, then persists only safe evidence.",
+      inputSchema: z.object({
+        provider: z.enum(["deepseek", "qwen", "minimax", "glm"]).optional().describe(
+          "Optional provider name. Omit to probe all configured providers with bounded concurrency.",
+        ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    },
+    async ({ provider }) => {
+      await ensureDaemon(home);
+      const params: Record<string, unknown> = {};
+      if (provider !== undefined) params.provider = provider;
+      const result = await daemonRequest<Record<string, unknown>>("provider_probe", params, home);
+      return textAndData(
+        result,
+        `Provider probe completed for ${provider ?? "all providers"}. Results are cached; use forklight_provider_status to re-read without cost.`,
+      );
     },
   );
 

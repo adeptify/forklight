@@ -1,14 +1,47 @@
-version: 1
+version: 2
 name: Analyze and fix checkout with boundary review
 project: ../fixtures/checkout
-goal: >-
-  Analyze at least twenty boundary scenarios for calculate_total, then fix the
-  loyalty-credit tax-order bug with the smallest coherent change. Carefully
-  inspect the implementation and tests before editing.
-constraints:
-  - Keep the public function signature unchanged.
-  - Do not add new files.
-  - Explain the five highest-risk boundary scenarios in the final summary.
+contract:
+  outcome: Checkout tax order is corrected after a documented review of at least twenty boundary scenarios.
+  context:
+    - This task exercises persistent execution and resume behavior with a deliberately deeper review.
+  inScope:
+    - Analyze at least twenty calculate_total boundary scenarios before editing.
+    - Fix the loyalty-credit tax-order bug with the smallest coherent change.
+  outOfScope:
+    - Do not add files or change the public calculate_total signature.
+    - Do not modify unrelated fixtures, project settings, or Git state.
+  executionSteps:
+    - Inspect implementation and tests, then enumerate at least twenty boundary scenarios.
+    - Identify the highest-risk cases, implement the calculation fix, and review the final diff.
+  deliverables:
+    - Corrected checkout implementation and a final summary of the five highest-risk scenarios.
+  modules:
+    - name: checkout calculation
+      responsibility: Validate checkout inputs and calculate a non-negative, correctly taxed total.
+      consumes:
+        - Subtotal, tax rate, loyalty credit, and existing test expectations.
+      produces:
+        - Correct checkout totals and a boundary-risk assessment in the Worker summary.
+      boundaries:
+        - Preserve validation, rounding behavior, file layout, and public API shape.
+  callChain:
+    - Existing tests and callers send checkout values to calculate_total.
+    - calculate_total validates, discounts, taxes, floors the result, and returns it to callers.
+  scenarios:
+    - name: broad boundary review
+      given: At least twenty combinations around zero, invalid values, and credit thresholds.
+      when: The Worker reviews behavior before editing.
+      then: The implementation decision accounts for the highest-risk boundary cases.
+    - name: interrupted execution
+      given: The Worker process may be interrupted after starting its review.
+      when: ForkLight resumes the same task session.
+      then: Work continues under the same contract without losing the agreed boundaries.
+  risks:
+    - A long analysis could consume budget without making the required minimal code change.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 300
 provider:
   name: deepseek
   model: deepseek-v4-flash
@@ -21,6 +54,11 @@ runtime:
 worker:
   allowEdits: true
   allowedCommands: []
+  focusPaths:
+    - README.md
 acceptance:
+  criteria:
+    - All existing checkout tests pass after the tax-order fix.
+    - The Worker summary identifies five high-risk boundary scenarios.
   commands:
     - python3 -m unittest discover -s tests -v

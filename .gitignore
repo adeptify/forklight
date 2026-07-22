@@ -3,3 +3,4 @@ dist/
 .forklight-*/
 .DS_Store
 *.log
+plans/

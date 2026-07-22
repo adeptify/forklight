@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "forklight": {
+      "command": "forklight-mcp"
+    }
+  }
+}

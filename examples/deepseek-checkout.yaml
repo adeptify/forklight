@@ -1,12 +1,47 @@
-version: 1
+version: 2
 name: Fix checkout loyalty tax order
 project: ../fixtures/checkout
-goal: >-
-  Fix calculate_total so loyalty credit reduces the taxable amount before tax,
-  while preserving validation and preventing a negative total.
-constraints:
-  - Keep the public function signature unchanged.
-  - Make the smallest coherent code change needed for the tests.
+contract:
+  outcome: Loyalty credit reduces the taxable subtotal before tax without allowing a negative total.
+  context:
+    - calculate_total currently applies loyalty credit after tax, producing an incorrect total.
+  inScope:
+    - Correct the order of loyalty-credit and tax calculations in calculate_total.
+    - Preserve existing input validation and the zero-total floor.
+  outOfScope:
+    - Do not change the public function signature or introduce new checkout features.
+    - Do not modify deployment, packaging, or unrelated fixture files.
+  executionSteps:
+    - Inspect calculate_total and its existing tests to confirm the current calculation order.
+    - Make the smallest coherent implementation change and review all affected branches.
+  deliverables:
+    - Updated checkout calculation behavior with all fixture tests passing.
+  modules:
+    - name: checkout calculation
+      responsibility: Calculate the final payable total from subtotal, tax rate, and loyalty credit.
+      consumes:
+        - Validated subtotal, tax rate, and loyalty-credit values.
+      produces:
+        - A non-negative final checkout total with tax applied to the discounted subtotal.
+      boundaries:
+        - Keep validation and the public calculate_total signature unchanged.
+  callChain:
+    - Tests and callers provide subtotal, tax rate, and loyalty credit to calculate_total.
+    - calculate_total validates inputs, applies credit, calculates tax, and returns the total.
+  scenarios:
+    - name: standard loyalty credit
+      given: A positive subtotal, tax rate, and loyalty credit smaller than the subtotal.
+      when: calculate_total computes the checkout total.
+      then: Tax is applied after loyalty credit reduces the taxable subtotal.
+    - name: credit exceeds subtotal
+      given: Loyalty credit is greater than the original subtotal.
+      when: calculate_total computes the checkout total.
+      then: The final total is zero and never becomes negative.
+  risks:
+    - Reordering arithmetic could accidentally bypass existing validation or change rounding behavior.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 300
 provider:
   name: deepseek
   model: deepseek-v4-flash
@@ -19,6 +54,11 @@ runtime:
 worker:
   allowEdits: true
   allowedCommands: []
+  focusPaths:
+    - README.md
 acceptance:
+  criteria:
+    - Loyalty credit reduces the taxable amount before tax and totals remain non-negative.
+    - Existing validation behavior and the public function signature remain unchanged.
   commands:
     - python3 -m unittest discover -s tests -v

@@ -5,6 +5,9 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
+  rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { lstatSync } from "node:fs";
@@ -23,12 +26,19 @@ interface Manifest {
   skippedSymlinks: string[];
 }
 
+interface WorkspaceManifest extends Manifest {
+  linkedDependencies: string[];
+}
+
+const SHARED_DEPENDENCY_DIRECTORIES = ["node_modules"];
+const WORKSPACE_CONTEXT_PATH = path.join(".forklight", "workspace-context.md");
+
 function excluded(relativePath: string, excludes: Set<string>): boolean {
   if (!relativePath || relativePath === ".") return false;
   return relativePath.split(path.sep).some((part) => excludes.has(part));
 }
 
-async function buildManifest(root: string, excludes: Set<string>): Promise<Manifest> {
+export async function buildManifest(root: string, excludes: Set<string>): Promise<Manifest> {
   const files: ManifestEntry[] = [];
   const skippedSymlinks: string[] = [];
 
@@ -58,34 +68,100 @@ async function buildManifest(root: string, excludes: Set<string>): Promise<Manif
   return { files, skippedSymlinks };
 }
 
-export async function prepareWorkspace(spec: TaskSpec, paths: TaskPaths): Promise<Manifest> {
+async function linkSharedDependencies(
+  spec: TaskSpec,
+  paths: TaskPaths,
+  excludes: Set<string>,
+): Promise<string[]> {
+  const linked: string[] = [];
+  for (const name of SHARED_DEPENDENCY_DIRECTORIES) {
+    if (!excludes.has(name)) continue;
+    const source = path.join(spec.project, name);
+    let dependencySource = source;
+    try {
+      const metadata = await lstat(source);
+      if (metadata.isSymbolicLink()) dependencySource = await realpath(source);
+      const resolvedMetadata = await lstat(dependencySource);
+      if (!resolvedMetadata.isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    for (const root of [paths.baseline, paths.workspace]) {
+      const target = path.join(root, name);
+      try {
+        await lstat(target);
+      } catch {
+        await symlink(dependencySource, target, "dir");
+      }
+    }
+    linked.push(name);
+  }
+  return linked;
+}
+
+async function writeWorkspaceContext(
+  paths: TaskPaths,
+  sourceManifest: Manifest,
+  linkedDependencies: string[],
+): Promise<void> {
+  const content = [
+    "# ForkLight Workspace Context",
+    "",
+    "This index is generated from the isolated snapshot. Use it instead of guessing directory contents.",
+    "Use Read for files, Grep for symbols, Glob for further discovery, Write for new files, and Edit for existing files.",
+    "Shell and web tools are intentionally unavailable.",
+    "",
+    "## Visible files",
+    ...sourceManifest.files.map((file) => `- ${file.path}`),
+    "",
+    "## Verifier-only dependency links",
+    ...(linkedDependencies.length > 0
+      ? linkedDependencies.map((dependency) => `- ${dependency}`)
+      : ["- None"]),
+    "",
+  ].join("\n");
+  for (const root of [paths.baseline, paths.workspace]) {
+    const contextPath = path.join(root, WORKSPACE_CONTEXT_PATH);
+    await mkdir(path.dirname(contextPath), { recursive: true, mode: 0o700 });
+    await writeFile(contextPath, content, { mode: 0o600 });
+  }
+}
+
+export async function prepareWorkspace(
+  spec: TaskSpec,
+  paths: TaskPaths,
+  sourceDir?: string,
+): Promise<WorkspaceManifest> {
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   await mkdir(paths.logs, { recursive: true, mode: 0o700 });
   await mkdir(paths.claudeConfig, { recursive: true, mode: 0o700 });
+  const copySource = sourceDir ?? spec.project;
   const excludes = new Set(spec.workspace.exclude);
-  const sourceManifest = await buildManifest(spec.project, excludes);
+  const sourceManifest = await buildManifest(copySource, excludes);
   const filter = (source: string): boolean => {
-    const relative = path.relative(spec.project, source);
+    const relative = path.relative(copySource, source);
     if (excluded(relative, excludes)) return false;
     return !lstatSync(source).isSymbolicLink();
   };
 
-  await cp(spec.project, paths.baseline, {
+  await cp(copySource, paths.baseline, {
     recursive: true,
     preserveTimestamps: true,
     filter,
   });
-  await cp(spec.project, paths.workspace, {
+  await cp(copySource, paths.workspace, {
     recursive: true,
     preserveTimestamps: true,
     filter,
   });
+  const linkedDependencies = await linkSharedDependencies(spec, paths, excludes);
+  await writeWorkspaceContext(paths, sourceManifest, linkedDependencies);
   await writeFile(
     path.join(paths.root, "source-manifest.json"),
     `${JSON.stringify(sourceManifest, null, 2)}\n`,
     { mode: 0o600 },
   );
-  return sourceManifest;
+  return { ...sourceManifest, linkedDependencies };
 }
 
 export async function sourceIsUnchanged(spec: TaskSpec, paths: TaskPaths): Promise<boolean> {
@@ -95,7 +171,23 @@ export async function sourceIsUnchanged(spec: TaskSpec, paths: TaskPaths): Promi
   return JSON.stringify(before) === JSON.stringify(after);
 }
 
-export async function writeWorkspaceDiff(paths: TaskPaths): Promise<string> {
+async function removeGeneratedExcludes(paths: TaskPaths, excludes: string[]): Promise<void> {
+  for (const excludedName of excludes) {
+    if (!excludedName || excludedName.includes(path.sep)) continue;
+    for (const root of [paths.baseline, paths.workspace]) {
+      const target = path.join(root, excludedName);
+      try {
+        const metadata = await lstat(target);
+        if (!metadata.isSymbolicLink()) await rm(target, { recursive: true, force: true });
+      } catch {
+        // The excluded path was never created.
+      }
+    }
+  }
+}
+
+export async function writeWorkspaceDiff(paths: TaskPaths, excludes: string[] = []): Promise<string> {
+  await removeGeneratedExcludes(paths, excludes);
   const result = await runCaptured(
     "git",
     ["diff", "--no-index", "--no-ext-diff", "--binary", "--", "baseline", "workspace"],

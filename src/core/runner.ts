@@ -9,6 +9,7 @@ import type {
 } from "./types.js";
 import { taskPaths } from "./config.js";
 import { loadTaskSpec } from "./task.js";
+import { cloneDefaults, type ExecutionSettings, type ProviderDefaultsSettings, type TaskPolicy } from "./settings.js";
 import { StateStore } from "../state/store.js";
 import { assertWorkspaceExists, prepareWorkspace } from "../workspace/copy.js";
 import { runClaudeWorker } from "../workers/claude.js";
@@ -22,8 +23,52 @@ export interface RunResult {
 
 export type ProgressListener = (event: NormalizedWorkerEvent) => void;
 
+function latestVerificationFeedback(store: StateStore, taskId: string): string | undefined {
+  const event = store
+    .listEvents(taskId)
+    .filter((candidate) => candidate.type === "verification.command.completed")
+    .at(-1);
+  if (!event || event.payload === null || typeof event.payload !== "object") return undefined;
+  const payload = event.payload as { command?: unknown; exitCode?: unknown; stdout?: unknown; stderr?: unknown };
+  const stdout = typeof payload.stdout === "string" ? payload.stdout.slice(-12_000) : "";
+  const stderr = typeof payload.stderr === "string" ? payload.stderr.slice(-6_000) : "";
+  return [
+    `Independent command: ${String(payload.command ?? "verification command")}`,
+    `Exit code: ${String(payload.exitCode ?? "not recorded")}`,
+    stdout ? `stdout:\n${stdout}` : "",
+    stderr ? `stderr:\n${stderr}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function timestamp(): string {
   return new Date().toISOString();
+}
+
+interface TaskRecordInput {
+  spec: TaskRecord["spec"];
+  taskFile: string;
+  home: string;
+  id: string;
+  sessionId: string;
+  createdAt: string;
+}
+
+export function buildTaskRecord(input: TaskRecordInput): TaskRecord {
+  const { spec, taskFile, home, id, sessionId, createdAt } = input;
+  return {
+    id,
+    name: spec.name,
+    status: "queued",
+    sourcePath: spec.project,
+    taskFile,
+    spec,
+    paths: taskPaths(home, id),
+    sessionId,
+    createdAt,
+    updatedAt: createdAt,
+  };
 }
 
 export function registerTaskFromSpec(
@@ -33,18 +78,14 @@ export function registerTaskFromSpec(
 ): TaskRecord {
   const id = randomUUID();
   const createdAt = timestamp();
-  const record: TaskRecord = {
-    id,
-    name: spec.name,
-    status: "queued",
-    sourcePath: spec.project,
-    taskFile,
+  const record = buildTaskRecord({
     spec,
-    paths: taskPaths(path.dirname(store.databasePath), id),
+    taskFile,
+    home: path.dirname(store.databasePath),
+    id,
     sessionId: randomUUID(),
     createdAt,
-    updatedAt: createdAt,
-  };
+  });
   store.createTask(record);
   store.addEvent(id, undefined, "task.created", `Task created: ${spec.name}`, {
     provider: spec.provider.name,
@@ -64,6 +105,7 @@ export async function prepareTaskWorkspace(store: StateStore, task: TaskRecord):
       baseline: task.paths.baseline,
       copiedFiles: manifest.files.length,
       skippedSymlinks: manifest.skippedSymlinks,
+      linkedDependencies: manifest.linkedDependencies,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -85,8 +127,12 @@ export async function createTaskFromSpec(
   return prepareTaskWorkspace(store, task);
 }
 
-export async function createTask(store: StateStore, taskFileInput: string): Promise<TaskRecord> {
-  const { taskFile, spec } = await loadTaskSpec(taskFileInput);
+export async function createTask(
+  store: StateStore,
+  taskFileInput: string,
+  policy?: TaskPolicy,
+): Promise<TaskRecord> {
+  const { taskFile, spec } = await loadTaskSpec(taskFileInput, policy);
   return createTaskFromSpec(store, spec, taskFile);
 }
 
@@ -121,9 +167,18 @@ export async function executeAttempt(
   task: TaskRecord,
   resuming: boolean,
   onProgress?: ProgressListener,
+  feedback?: string,
+  execution?: ExecutionSettings,
+  providerDefaults?: ProviderDefaultsSettings,
 ): Promise<RunResult> {
   await assertWorkspaceExists(task.paths);
+  const exec = execution ?? cloneDefaults().execution;
   const ordinal = store.nextAttemptOrdinal(task.id);
+  if (ordinal > exec.maxAttempts) {
+    throw new Error(
+      `Task ${task.id} has reached maximum attempts (${exec.maxAttempts}); cannot start attempt ${ordinal}`,
+    );
+  }
   const attemptId = randomUUID();
   const attempt: AttemptRecord = {
     id: attemptId,
@@ -146,11 +201,13 @@ export async function executeAttempt(
   let worker;
   try {
     try {
+      const pd = providerDefaults?.[task.spec.provider.name];
       worker = await runClaudeWorker(store, store.getTask(task.id), attempt, resuming, {
         onSpawn: forwarding.setChild,
         ...(onProgress === undefined ? {} : { onEvent: onProgress }),
         wasInterrupted: forwarding.wasInterrupted,
-      });
+        ...(feedback === undefined ? {} : { feedback }),
+      }, exec, pd);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const failedAt = timestamp();
@@ -241,22 +298,48 @@ export async function runNewTask(
   taskFile: string,
   onProgress?: ProgressListener,
   onCreated?: (task: TaskRecord) => void,
+  policy?: TaskPolicy,
 ): Promise<RunResult> {
-  const task = await createTask(store, taskFile);
+  const task = await createTask(store, taskFile, policy);
   onCreated?.(task);
-  return executeAttempt(store, task, false, onProgress);
+  return executeAttempt(
+    store,
+    task,
+    false,
+    onProgress,
+    undefined,
+    policy?.execution,
+    policy?.providerDefaults,
+  );
 }
 
 export async function resumeTask(
   store: StateStore,
   taskId: string,
   onProgress?: ProgressListener,
+  feedback?: string,
+  execution?: ExecutionSettings,
+  providerDefaults?: ProviderDefaultsSettings,
 ): Promise<RunResult> {
   const task = store.getTask(taskId);
   if (task.status !== "interrupted" && task.status !== "failed") {
     throw new Error(`Task ${taskId} cannot resume from status ${task.status}`);
   }
-  return executeAttempt(store, task, true, onProgress);
+  const exec = execution ?? cloneDefaults().execution;
+  const attemptCount = store.listAttempts(taskId).length;
+  if (attemptCount >= exec.maxAttempts) {
+    throw new Error(`Task ${taskId} has reached maximum attempts (${exec.maxAttempts})`);
+  }
+  const verifierFeedback = latestVerificationFeedback(store, taskId);
+  const combinedFeedback = [
+    verifierFeedback,
+    feedback === undefined ? undefined : `Additional main Codex review:\n${feedback}`,
+  ]
+    .filter((item): item is string => item !== undefined)
+    .join("\n\n");
+  return executeAttempt(
+    store, task, true, onProgress, combinedFeedback || undefined, exec, providerDefaults,
+  );
 }
 
 export function reconcileTask(store: StateStore, taskId: string): TaskRecord {

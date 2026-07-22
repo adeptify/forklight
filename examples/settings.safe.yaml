@@ -1,0 +1,23 @@
+execution:
+  maxConcurrency: 2
+  noProgressTimeoutMs: 1800000
+  defaultMaxBudgetUsd: 0.5
+
+competition:
+  tieThreshold: 1.0e-9
+  rankingWeights:
+    verification: 1
+    diffFocus: 0.3
+    retries: 0.2
+    cost: 0
+    duration: 0
+
+console:
+  loopbackPort: 0
+  refreshIntervalMs: 1000
+
+probe:
+  probeTimeoutMs: 30000
+  maxBudgetUsd: 0.05
+  cacheLifetimeMs: 300000
+  maxProbeConcurrency: 2
