@@ -1,0 +1,26 @@
+version: 1
+name: Analyze and fix checkout with boundary review
+project: ../fixtures/checkout
+goal: >-
+  Analyze at least twenty boundary scenarios for calculate_total, then fix the
+  loyalty-credit tax-order bug with the smallest coherent change. Carefully
+  inspect the implementation and tests before editing.
+constraints:
+  - Keep the public function signature unchanged.
+  - Do not add new files.
+  - Explain the five highest-risk boundary scenarios in the final summary.
+provider:
+  name: deepseek
+  model: deepseek-v4-flash
+  keychainService: forklight.deepseek.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: max
+  maxBudgetUsd: 0.35
+worker:
+  allowEdits: true
+  allowedCommands: []
+acceptance:
+  commands:
+    - python3 -m unittest discover -s tests -v

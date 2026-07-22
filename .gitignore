@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.forklight-*/
+.DS_Store
+*.log

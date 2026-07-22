@@ -1,0 +1,24 @@
+version: 1
+name: Fix checkout loyalty tax order
+project: ../fixtures/checkout
+goal: >-
+  Fix calculate_total so loyalty credit reduces the taxable amount before tax,
+  while preserving validation and preventing a negative total.
+constraints:
+  - Keep the public function signature unchanged.
+  - Make the smallest coherent code change needed for the tests.
+provider:
+  name: deepseek
+  model: deepseek-v4-flash
+  keychainService: forklight.deepseek.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: 0.25
+worker:
+  allowEdits: true
+  allowedCommands: []
+acceptance:
+  commands:
+    - python3 -m unittest discover -s tests -v
