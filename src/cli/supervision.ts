@@ -1,20 +1,44 @@
 import type {
-  AttemptRecord, EventRecord, TaskRecord, TaskStatus,
+  AttemptRecord, EventRecord, EventType, TaskRecord, TaskStatus,
 } from "../core/types.js";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["succeeded", "failed", "interrupted"]);
 
 export type WaitUntil = "change" | "terminal";
 export type WaitOutcome = "changed" | "terminal" | "timeout";
+export type ProgressActivity = "active" | "quiet" | "terminal";
 
 export interface WaitPolicy {
   timeoutMs: number;
   pollMs: number;
   until: WaitUntil;
+  /** When last event is older than this many ms, activity becomes quiet. Default 30s. */
+  quietAfterMs?: number;
+}
+
+/** Progress cursor used by wait --until change (FL-D97 / FL-D111). */
+export interface ProgressCursor {
+  status: TaskStatus;
+  latestEventSequence: number;
+  currentAttemptId: string | null;
+  updatedAt: string;
+}
+
+export interface LatestEventMeta {
+  sequence: number;
+  timestamp: string;
+  type: EventType | string;
+  summary: string;
+}
+
+export interface TaskProgressSnapshot {
+  task: TaskRecord;
+  cursor: ProgressCursor;
+  latestEvent?: LatestEventMeta;
 }
 
 export interface WaitDependencies {
-  readTask: () => TaskRecord | Promise<TaskRecord>;
+  readProgress: () => TaskProgressSnapshot | Promise<TaskProgressSnapshot>;
   sleep: (milliseconds: number) => void | Promise<void>;
   now: () => number;
 }
@@ -29,11 +53,21 @@ export interface CompactTaskSummary {
   finishedAt?: string;
 }
 
+export interface WaitProgressSummary {
+  latestEventSequence: number;
+  lastEventAt: string | null;
+  lastEventType: string | null;
+  lastEventSummary: string | null;
+  activity: ProgressActivity;
+  currentAttemptId: string | null;
+}
+
 export interface WaitResult {
   outcome: WaitOutcome;
   elapsedMs: number;
   pollCount: number;
   task: CompactTaskSummary;
+  progress: WaitProgressSummary;
 }
 
 export interface ParsedWaitOptions extends WaitPolicy {
@@ -66,10 +100,21 @@ export interface CompactEventEvidence {
   summary: string;
 }
 
+export interface CompactVerificationHint {
+  present: boolean;
+  passed: boolean | null;
+  summary: string | null;
+  behaviorHint: string | null;
+  policyHint: string | null;
+  sourceHint: string | null;
+}
+
 export interface CompactInspection {
   task: CompactTaskSummary;
+  progress: WaitProgressSummary;
   attempts: CompactAttemptEvidence[];
   events: CompactEventEvidence[];
+  verification: CompactVerificationHint;
   diff: { generated: boolean; utf8Bytes: number; lineCount: number };
 }
 
@@ -168,14 +213,73 @@ export function compactTaskSummary(task: TaskRecord): CompactTaskSummary {
   };
 }
 
+export function buildProgressCursor(
+  task: TaskRecord,
+  latestEvent?: LatestEventMeta,
+): ProgressCursor {
+  return {
+    status: task.status,
+    latestEventSequence: latestEvent?.sequence ?? 0,
+    currentAttemptId: task.currentAttemptId ?? null,
+    updatedAt: task.updatedAt,
+  };
+}
+
+export function progressCursorKey(cursor: ProgressCursor): string {
+  return [
+    cursor.status,
+    String(cursor.latestEventSequence),
+    cursor.currentAttemptId ?? "",
+    cursor.updatedAt,
+  ].join("\u0001");
+}
+
+export function classifyActivity(
+  task: TaskRecord,
+  latestEvent: LatestEventMeta | undefined,
+  nowMs: number,
+  quietAfterMs: number,
+): ProgressActivity {
+  if (TERMINAL_STATUSES.has(task.status)) return "terminal";
+  if (latestEvent === undefined) return "quiet";
+  const eventMs = Date.parse(latestEvent.timestamp);
+  if (!Number.isFinite(eventMs)) return "quiet";
+  return nowMs - eventMs <= quietAfterMs ? "active" : "quiet";
+}
+
+export function buildWaitProgressSummary(
+  snapshot: TaskProgressSnapshot,
+  nowMs: number,
+  quietAfterMs: number,
+): WaitProgressSummary {
+  const activity = classifyActivity(
+    snapshot.task, snapshot.latestEvent, nowMs, quietAfterMs,
+  );
+  return {
+    latestEventSequence: snapshot.cursor.latestEventSequence,
+    lastEventAt: snapshot.latestEvent?.timestamp ?? null,
+    lastEventType: snapshot.latestEvent?.type ?? null,
+    lastEventSummary: snapshot.latestEvent?.summary ?? null,
+    activity,
+    currentAttemptId: snapshot.cursor.currentAttemptId,
+  };
+}
+
 function waitResult(
-  outcome: WaitOutcome, startedAt: number, pollCount: number, task: TaskRecord, now: () => number,
+  outcome: WaitOutcome,
+  startedAt: number,
+  pollCount: number,
+  snapshot: TaskProgressSnapshot,
+  now: () => number,
+  quietAfterMs: number,
 ): WaitResult {
+  const nowMs = now();
   return {
     outcome,
-    elapsedMs: Math.max(0, now() - startedAt),
+    elapsedMs: Math.max(0, nowMs - startedAt),
     pollCount,
-    task: compactTaskSummary(task),
+    task: compactTaskSummary(snapshot.task),
+    progress: buildWaitProgressSummary(snapshot, nowMs, quietAfterMs),
   };
 }
 
@@ -184,31 +288,34 @@ export async function waitForTask(
 ): Promise<WaitResult> {
   assertInteger(policy.timeoutMs, "timeoutMs", false);
   assertInteger(policy.pollMs, "pollMs", false);
+  const quietAfterMs = policy.quietAfterMs ?? 30_000;
+  assertInteger(quietAfterMs, "quietAfterMs", false);
   const startedAt = dependencies.now();
-  const initial = await dependencies.readTask();
+  const initial = await dependencies.readProgress();
   let latest = initial;
   let pollCount = 0;
+  const initialKey = progressCursorKey(initial.cursor);
 
-  if (TERMINAL_STATUSES.has(initial.status)) {
-    return waitResult("terminal", startedAt, pollCount, initial, dependencies.now);
+  if (TERMINAL_STATUSES.has(initial.task.status)) {
+    return waitResult("terminal", startedAt, pollCount, initial, dependencies.now, quietAfterMs);
   }
 
   while (true) {
     const elapsedMs = Math.max(0, dependencies.now() - startedAt);
     if (elapsedMs >= policy.timeoutMs) {
-      return waitResult("timeout", startedAt, pollCount, latest, dependencies.now);
+      return waitResult("timeout", startedAt, pollCount, latest, dependencies.now, quietAfterMs);
     }
     await dependencies.sleep(Math.min(policy.pollMs, policy.timeoutMs - elapsedMs));
-    latest = await dependencies.readTask();
+    latest = await dependencies.readProgress();
     pollCount += 1;
-    if (TERMINAL_STATUSES.has(latest.status)) {
-      return waitResult("terminal", startedAt, pollCount, latest, dependencies.now);
+    if (TERMINAL_STATUSES.has(latest.task.status)) {
+      return waitResult("terminal", startedAt, pollCount, latest, dependencies.now, quietAfterMs);
     }
-    if (policy.until === "change" && latest.status !== initial.status) {
-      return waitResult("changed", startedAt, pollCount, latest, dependencies.now);
+    if (policy.until === "change" && progressCursorKey(latest.cursor) !== initialKey) {
+      return waitResult("changed", startedAt, pollCount, latest, dependencies.now, quietAfterMs);
     }
     if (dependencies.now() - startedAt >= policy.timeoutMs) {
-      return waitResult("timeout", startedAt, pollCount, latest, dependencies.now);
+      return waitResult("timeout", startedAt, pollCount, latest, dependencies.now, quietAfterMs);
     }
   }
 }
@@ -230,20 +337,126 @@ function compactOfficialCost(attempt: AttemptRecord): CompactAttemptEvidence["of
   };
 }
 
+function extractVerificationHint(events: EventRecord[]): CompactVerificationHint {
+  const completed = [...events]
+    .filter((event) => event.type === "verification.completed")
+    .sort((left, right) => left.sequence - right.sequence)
+    .at(-1);
+  if (completed === undefined) {
+    return {
+      present: false, passed: null, summary: null,
+      behaviorHint: null, policyHint: null, sourceHint: null,
+    };
+  }
+  const payload = completed.payload;
+  if (payload === null || typeof payload !== "object") {
+    return {
+      present: true,
+      passed: null,
+      summary: completed.summary,
+      behaviorHint: null,
+      policyHint: null,
+      sourceHint: null,
+    };
+  }
+  const body = payload as {
+    passed?: unknown;
+    behaviorPassed?: unknown;
+    policyPassed?: unknown;
+    sourceCompatible?: unknown;
+    sourceUnchanged?: unknown;
+    sourceCompatibility?: {
+      conflictingPaths?: unknown;
+      unrelatedDriftPaths?: unknown;
+    };
+    commands?: Array<{ command?: unknown; exitCode?: unknown }>;
+    changeBudget?: { withinBudget?: unknown; filesChanged?: unknown; changedLines?: unknown;
+      maxFiles?: unknown; maxDiffLines?: unknown };
+  };
+  const passed = typeof body.passed === "boolean" ? body.passed : null;
+  const cmdFail = Array.isArray(body.commands)
+    ? body.commands.find((command) => command.exitCode !== 0 && command.exitCode !== undefined)
+    : undefined;
+  let behaviorHint: string | null = null;
+  if (typeof body.behaviorPassed === "boolean") {
+    behaviorHint = body.behaviorPassed ? "behavior_passed" : "behavior_failed";
+  }
+  if (cmdFail) {
+    behaviorHint = `command_failed exit=${String(cmdFail.exitCode)} cmd=${String(cmdFail.command ?? "")}`;
+  } else if (behaviorHint === null && Array.isArray(body.commands) && body.commands.length > 0) {
+    behaviorHint = "commands_passed";
+  }
+  const budget = body.changeBudget;
+  let policyHint: string | null = null;
+  if (typeof body.policyPassed === "boolean") {
+    policyHint = body.policyPassed ? "policy_passed" : "policy_failed";
+  }
+  if (budget && budget.withinBudget === false) {
+    policyHint = `change_budget_exceeded files=${String(budget.filesChanged)}/${String(budget.maxFiles)} lines=${String(budget.changedLines)}/${String(budget.maxDiffLines)}`;
+  } else if (budget && budget.withinBudget === true && policyHint === null) {
+    policyHint = "change_budget_ok";
+  }
+  let sourceHint: string | null = null;
+  if (typeof body.sourceCompatible === "boolean") {
+    if (body.sourceCompatible) {
+      const drift = Array.isArray(body.sourceCompatibility?.unrelatedDriftPaths)
+        ? body.sourceCompatibility.unrelatedDriftPaths.length
+        : 0;
+      sourceHint = drift > 0 ? `source_compatible unrelated_drift=${drift}` : "source_compatible";
+    } else {
+      const n = Array.isArray(body.sourceCompatibility?.conflictingPaths)
+        ? body.sourceCompatibility.conflictingPaths.length
+        : 0;
+      sourceHint = `source_conflict affected=${n}`;
+    }
+  } else if (body.sourceUnchanged === false) {
+    sourceHint = "source_changed";
+  } else if (body.sourceUnchanged === true) {
+    sourceHint = "source_unchanged";
+  }
+  return {
+    present: true,
+    passed,
+    summary: completed.summary,
+    behaviorHint,
+    policyHint,
+    sourceHint,
+  };
+}
+
 export function buildCompactInspection(input: {
   task: TaskRecord;
   attempts: AttemptRecord[];
   events: EventRecord[];
   diff: string | undefined;
   eventLimit: number;
+  nowMs?: number;
+  quietAfterMs?: number;
 }): CompactInspection {
   assertInteger(input.eventLimit, "eventLimit", true);
   const latestEvents = input.eventLimit === 0
     ? []
     : [...input.events].sort((left, right) => left.sequence - right.sequence).slice(-input.eventLimit);
   const diff = input.diff;
+  const lastEvent = [...input.events].sort((a, b) => a.sequence - b.sequence).at(-1);
+  const latestMeta: LatestEventMeta | undefined = lastEvent === undefined
+    ? undefined
+    : {
+      sequence: lastEvent.sequence,
+      timestamp: lastEvent.timestamp,
+      type: lastEvent.type,
+      summary: lastEvent.summary,
+    };
+  const snapshot: TaskProgressSnapshot = {
+    task: input.task,
+    cursor: buildProgressCursor(input.task, latestMeta),
+    ...(latestMeta === undefined ? {} : { latestEvent: latestMeta }),
+  };
+  const nowMs = input.nowMs ?? Date.now();
+  const quietAfterMs = input.quietAfterMs ?? 30_000;
   return {
     task: compactTaskSummary(input.task),
+    progress: buildWaitProgressSummary(snapshot, nowMs, quietAfterMs),
     attempts: input.attempts.map((attempt) => ({
       ordinal: attempt.ordinal,
       status: attempt.status,
@@ -262,6 +475,7 @@ export function buildCompactInspection(input: {
       type: event.type,
       summary: event.summary,
     })),
+    verification: extractVerificationHint(input.events),
     diff: {
       generated: diff !== undefined,
       utf8Bytes: diff === undefined ? 0 : new TextEncoder().encode(diff).byteLength,
@@ -281,7 +495,13 @@ export function humanWaitLines(result: WaitResult): string {
     `name: ${result.task.name}`,
     `status: ${result.task.status}`,
     `updatedAt: ${result.task.updatedAt}`,
+    `activity: ${result.progress.activity}`,
+    `latestEventSequence: ${result.progress.latestEventSequence}`,
   ];
+  if (result.progress.lastEventAt) lines.push(`lastEventAt: ${result.progress.lastEventAt}`);
+  if (result.progress.lastEventType) {
+    lines.push(`lastEvent: ${result.progress.lastEventType} — ${result.progress.lastEventSummary ?? ""}`);
+  }
   if (result.task.finishedAt !== undefined) lines.push(`finishedAt: ${result.task.finishedAt}`);
   return `${lines.join("\n")}\n`;
 }
@@ -298,6 +518,8 @@ export function humanCompactInspectionLines(inspection: CompactInspection): stri
     `name: ${inspection.task.name}`,
     `status: ${inspection.task.status}`,
     `updatedAt: ${inspection.task.updatedAt}`,
+    `activity: ${inspection.progress.activity}`,
+    `latestEventSequence: ${inspection.progress.latestEventSequence}`,
     `attempts: ${inspection.attempts.length}`,
   ];
   for (const attempt of inspection.attempts) {
@@ -307,6 +529,16 @@ export function humanCompactInspectionLines(inspection: CompactInspection): stri
       + ` runtimeEstimateUsd=${attempt.runtimeEstimate.valueUsd ?? "-"}`
       + ` officialCost=${officialCostLine(attempt.officialCost)}`,
     );
+  }
+  if (inspection.verification.present) {
+    lines.push(
+      `verification: passed=${inspection.verification.passed ?? "unknown"}`
+      + ` behavior=${inspection.verification.behaviorHint ?? "-"}`
+      + ` policy=${inspection.verification.policyHint ?? "-"}`
+      + ` source=${inspection.verification.sourceHint ?? "-"}`,
+    );
+  } else {
+    lines.push("verification: not-recorded");
   }
   lines.push(`events: ${inspection.events.length}`);
   for (const event of inspection.events) {

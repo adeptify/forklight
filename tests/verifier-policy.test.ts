@@ -115,6 +115,36 @@ acceptance:
   };
 }
 
+test("unrelated source drift does not fail verification when affected paths are intact", async () => {
+  const { store, task, cleanup } = await fixture("hard", true, true);
+  try {
+    // Concurrent edit outside the Worker patch surface.
+    await writeFile(path.join(task.spec.project, "README.md"), "# Concurrent note\n");
+
+    const attemptId = "attempt-drift";
+    store.createAttempt({
+      id: attemptId,
+      taskId: task.id,
+      ordinal: 1,
+      status: "running",
+      sessionId: task.sessionId,
+      rawLogPath: "/tmp/log",
+      startedAt: new Date().toISOString(),
+    });
+    const { verifyTask } = await import("../src/core/verifier.js");
+    const result = await verifyTask(store, task, attemptId);
+
+    assert.equal(result.passed, true);
+    assert.equal(result.behaviorPassed, true);
+    assert.equal(result.policyPassed, true);
+    assert.equal(result.sourceCompatible, true);
+    assert.equal(result.sourceUnchanged, false);
+    assert.ok((result.sourceCompatibility?.unrelatedDriftPaths.length ?? 0) > 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test("default hard mode fails editable zero-change task even when acceptance commands pass", async () => {
   const { store, task, cleanup } = await fixture("hard", true, false);
   try {

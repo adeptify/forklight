@@ -171,6 +171,80 @@ export async function sourceIsUnchanged(spec: TaskSpec, paths: TaskPaths): Promi
   return JSON.stringify(before) === JSON.stringify(after);
 }
 
+/** Paths touched by `git diff --no-index baseline workspace` output. */
+export function parseAffectedPathsFromWorkspaceDiff(diff: string): string[] {
+  const files = new Set<string>();
+  const strip = (raw: string): string | undefined => {
+    if (raw === "/dev/null") return undefined;
+    if (raw.startsWith("baseline/")) return raw.slice("baseline/".length);
+    if (raw.startsWith("workspace/")) return raw.slice("workspace/".length);
+    return undefined;
+  };
+  for (const line of diff.split("\n")) {
+    if (!line.startsWith("diff --git ")) continue;
+    if (line.includes('"')) continue;
+    const rest = line.slice("diff --git ".length).trim();
+    const match = rest.match(/^a\/(\S+)\s+b\/(\S+)$/);
+    if (!match) continue;
+    for (const part of [match[1]!, match[2]!]) {
+      const relative = strip(part);
+      if (relative && !relative.includes("\0") && !path.isAbsolute(relative)) {
+        if (!relative.split("/").some((segment) => segment === ".." || segment === "." || !segment)) {
+          files.add(relative);
+        }
+      }
+    }
+  }
+  return [...files].sort();
+}
+
+export interface SourceCompatibilityAssessment {
+  globalUnchanged: boolean;
+  compatible: boolean;
+  affectedPaths: string[];
+  conflictingPaths: string[];
+  unrelatedDriftPaths: string[];
+}
+
+/**
+ * Hard gate for concurrent source edits: only paths in the Worker patch
+ * (baseline→workspace) must still match the prepare-time source snapshot.
+ * Unrelated project drift is reported but does not fail compatibility.
+ */
+export async function assessSourceCompatibility(
+  spec: TaskSpec,
+  paths: TaskPaths,
+  affectedPaths: readonly string[],
+): Promise<SourceCompatibilityAssessment> {
+  const beforeText = await readFile(path.join(paths.root, "source-manifest.json"), "utf8");
+  const before = JSON.parse(beforeText) as Manifest;
+  const after = await buildManifest(spec.project, new Set(spec.workspace.exclude));
+  const beforeMap = new Map(before.files.map((file) => [file.path, file.sha256]));
+  const afterMap = new Map(after.files.map((file) => [file.path, file.sha256]));
+
+  const allPaths = new Set<string>([...beforeMap.keys(), ...afterMap.keys()]);
+  const drifted: string[] = [];
+  for (const filePath of allPaths) {
+    if (beforeMap.get(filePath) !== afterMap.get(filePath)) drifted.push(filePath);
+  }
+  drifted.sort();
+
+  const affected = [...new Set(affectedPaths)].sort();
+  const affectedSet = new Set(affected);
+  const conflictingPaths = affected.filter(
+    (filePath) => beforeMap.get(filePath) !== afterMap.get(filePath),
+  );
+  const unrelatedDriftPaths = drifted.filter((filePath) => !affectedSet.has(filePath));
+
+  return {
+    globalUnchanged: drifted.length === 0,
+    compatible: conflictingPaths.length === 0,
+    affectedPaths: affected,
+    conflictingPaths,
+    unrelatedDriftPaths,
+  };
+}
+
 async function removeGeneratedExcludes(paths: TaskPaths, excludes: string[]): Promise<void> {
   for (const excludedName of excludes) {
     if (!excludedName || excludedName.includes(path.sep)) continue;

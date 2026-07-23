@@ -104,7 +104,16 @@ function compAttempt(store: StateStore, taskId: string, ordinal = 1, costUsd = 0
   return attempt;
 }
 
-const verificationEvidence = { passed: true, commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }], diffPath: "/d", sourceUnchanged: true, changeBudget: { filesChanged: 1, changedLines: 10, maxFiles: 10, maxDiffLines: 200, withinBudget: true } };
+const verificationEvidence = {
+  passed: true,
+  behaviorPassed: true,
+  policyPassed: true,
+  sourceCompatible: true,
+  commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+  diffPath: "/d",
+  sourceUnchanged: true,
+  changeBudget: { filesChanged: 1, changedLines: 10, maxFiles: 10, maxDiffLines: 200, withinBudget: true },
+};
 
 function seedRunningCompetition(store: StateStore, compId: string): void {
   const now = new Date().toISOString();

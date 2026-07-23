@@ -1,7 +1,17 @@
-import type { TaskRecord, VerificationCommandResult, VerificationResult, CompletionPolicyCheck, PolicyMode } from "./types.js";
+import type {
+  TaskRecord,
+  VerificationCommandResult,
+  VerificationResult,
+  CompletionPolicyCheck,
+  PolicyMode,
+} from "./types.js";
 import type { StateStore } from "../state/store.js";
 import { runCaptured } from "./process.js";
-import { sourceIsUnchanged, writeWorkspaceDiff } from "../workspace/copy.js";
+import {
+  assessSourceCompatibility,
+  parseAffectedPathsFromWorkspaceDiff,
+  writeWorkspaceDiff,
+} from "../workspace/copy.js";
 
 function measureDiff(diff: string): { filesChanged: number; changedLines: number } {
   const lines = diff.split("\n");
@@ -43,7 +53,6 @@ function evaluateCompletionPolicy(
     };
   }
 
-  // No changes detected in an editable Task
   switch (noChangeMode) {
     case "hard":
       return {
@@ -106,8 +115,10 @@ export async function verifyTask(
   }
 
   const diff = await writeWorkspaceDiff(task.paths, task.spec.workspace.exclude);
-  const sourceUnchanged = await sourceIsUnchanged(task.spec, task.paths);
   const diffMeasure = measureDiff(diff);
+  const affectedPaths = parseAffectedPathsFromWorkspaceDiff(diff);
+  const sourceAssessment = await assessSourceCompatibility(task.spec, task.paths, affectedPaths);
+
   const changeBudget = task.spec.version === 2
     ? {
         ...diffMeasure,
@@ -121,28 +132,50 @@ export async function verifyTask(
       changeBudget.changedLines <= changeBudget.maxDiffLines;
   }
 
-  // Evaluate the snapped completion policy against the measured diff.
   const completionPolicyCheck = evaluateCompletionPolicy(task.spec, diffMeasure);
 
-  const passed = commands.length === task.spec.acceptance.commands.length
-    && commands.every((command) => command.exitCode === 0)
-    && sourceUnchanged
-    && (changeBudget?.withinBudget ?? true)
+  const behaviorPassed = commands.length === task.spec.acceptance.commands.length
+    && commands.every((command) => command.exitCode === 0);
+  const policyPassed = (changeBudget?.withinBudget ?? true)
     && completionPolicyCheck.check !== "hard-fail";
+  const sourceCompatible = sourceAssessment.compatible;
+  const passed = behaviorPassed && policyPassed && sourceCompatible;
+
   const verification: VerificationResult = {
     passed,
+    behaviorPassed,
+    policyPassed,
+    sourceCompatible,
     commands,
     diffPath: task.paths.diff,
-    sourceUnchanged,
+    sourceUnchanged: sourceAssessment.globalUnchanged,
+    sourceCompatibility: {
+      compatible: sourceAssessment.compatible,
+      affectedPaths: sourceAssessment.affectedPaths,
+      conflictingPaths: sourceAssessment.conflictingPaths,
+      unrelatedDriftPaths: sourceAssessment.unrelatedDriftPaths,
+    },
     ...(changeBudget === undefined ? {} : { changeBudget }),
     completionPolicy: completionPolicyCheck,
   };
-  store.addEvent(
-    task.id,
-    attemptId,
-    "verification.completed",
-    passed ? "Independent verification passed" : "Independent verification failed",
-    verification,
-  );
+
+  let summary: string;
+  if (passed) {
+    summary = sourceAssessment.unrelatedDriftPaths.length > 0
+      ? "Independent verification passed (unrelated source drift recorded)"
+      : "Independent verification passed";
+  } else if (!behaviorPassed) {
+    summary = "Independent verification failed: acceptance commands";
+  } else if (!policyPassed) {
+    summary = completionPolicyCheck.check === "hard-fail"
+      ? "Independent verification failed: completion policy"
+      : "Independent verification failed: change budget";
+  } else if (!sourceCompatible) {
+    summary = "Independent verification failed: affected source paths changed";
+  } else {
+    summary = "Independent verification failed";
+  }
+
+  store.addEvent(task.id, attemptId, "verification.completed", summary, verification);
   return verification;
 }

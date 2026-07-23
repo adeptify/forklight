@@ -5,7 +5,13 @@ import path from "node:path";
 import test from "node:test";
 import { taskPaths } from "../src/core/config.js";
 import type { TaskSpec } from "../src/core/types.js";
-import { prepareWorkspace, sourceIsUnchanged, writeWorkspaceDiff } from "../src/workspace/copy.js";
+import {
+  assessSourceCompatibility,
+  parseAffectedPathsFromWorkspaceDiff,
+  prepareWorkspace,
+  sourceIsUnchanged,
+  writeWorkspaceDiff,
+} from "../src/workspace/copy.js";
 
 function spec(project: string): TaskSpec {
   return {
@@ -61,6 +67,64 @@ test("isolates Worker changes and produces a diff", async () => {
   assert.match(diff, /\+after/);
   assert.doesNotMatch(diff, /node_modules/);
   assert.doesNotMatch(diff, /generated\.js/);
+});
+
+test("parseAffectedPathsFromWorkspaceDiff extracts baseline/workspace relative paths", () => {
+  const diff = [
+    "diff --git a/baseline/src/a.ts b/workspace/src/a.ts",
+    "--- a/baseline/src/a.ts",
+    "+++ b/workspace/src/a.ts",
+    "diff --git a/workspace/src/new.ts b/workspace/src/new.ts",
+    "--- /dev/null",
+    "+++ b/workspace/src/new.ts",
+  ].join("\n");
+  assert.deepEqual(parseAffectedPathsFromWorkspaceDiff(diff), ["src/a.ts", "src/new.ts"]);
+});
+
+test("source compatibility ignores unrelated project drift (FL-D33/D110)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-src-compat-"));
+  const source = path.join(root, "source");
+  await mkdir(source);
+  await writeFile(path.join(source, "value.txt"), "before\n");
+  await writeFile(path.join(source, "NOTES.md"), "notes\n");
+  const paths = taskPaths(path.join(root, "state"), "compat-1");
+  const taskSpec = spec(source);
+  await prepareWorkspace(taskSpec, paths);
+  await writeFile(path.join(paths.workspace, "value.txt"), "after\n");
+
+  // Concurrent dogfood: unrelated doc changes in the real source tree.
+  await writeFile(path.join(source, "NOTES.md"), "notes updated by another agent\n");
+  await writeFile(path.join(source, "forklight-dogfood-log.md"), "new log\n");
+
+  assert.equal(await sourceIsUnchanged(taskSpec, paths), false);
+  const diff = await writeWorkspaceDiff(paths);
+  const affected = parseAffectedPathsFromWorkspaceDiff(diff);
+  assert.deepEqual(affected, ["value.txt"]);
+  const assessment = await assessSourceCompatibility(taskSpec, paths, affected);
+  assert.equal(assessment.globalUnchanged, false);
+  assert.equal(assessment.compatible, true);
+  assert.deepEqual(assessment.conflictingPaths, []);
+  assert.ok(assessment.unrelatedDriftPaths.includes("NOTES.md"));
+  assert.ok(assessment.unrelatedDriftPaths.includes("forklight-dogfood-log.md"));
+});
+
+test("source compatibility hard-fails when an affected path changes in source", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-src-conflict-"));
+  const source = path.join(root, "source");
+  await mkdir(source);
+  await writeFile(path.join(source, "value.txt"), "before\n");
+  const paths = taskPaths(path.join(root, "state"), "compat-2");
+  const taskSpec = spec(source);
+  await prepareWorkspace(taskSpec, paths);
+  await writeFile(path.join(paths.workspace, "value.txt"), "worker-edit\n");
+  // Someone else edited the same path in the real project.
+  await writeFile(path.join(source, "value.txt"), "concurrent-edit\n");
+
+  const diff = await writeWorkspaceDiff(paths);
+  const affected = parseAffectedPathsFromWorkspaceDiff(diff);
+  const assessment = await assessSourceCompatibility(taskSpec, paths, affected);
+  assert.equal(assessment.compatible, false);
+  assert.deepEqual(assessment.conflictingPaths, ["value.txt"]);
 });
 
 test("reuses a dependency directory that is already linked by a parent workspace", async () => {

@@ -4,15 +4,16 @@ import { z } from "zod";
 import { forklightHome } from "../core/config.js";
 import type { ProviderModelSummary } from "../core/statistics.js";
 import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
-import type { TaskRecord } from "../core/types.js";
+import type { AttemptRecord, EventRecord, TaskRecord } from "../core/types.js";
 import { assessTaskQuality, parseTaskSpec } from "../core/task.js";
 import { type ProviderName } from "../core/providers.js";
 import { daemonRequest, ensureDaemon } from "../daemon/client.js";
 import type { ForkLightSettings, TaskPolicy } from "../core/settings.js";
+import { buildCompactInspection } from "../cli/supervision.js";
 import { withMcpExchangeReceipt } from "./exchange-receipts.js";
 
 const SERVER_INSTRUCTIONS =
-  "ForkLight runs bounded external coding Workers through DeepSeek, Qwen, MiniMax, or GLM. Before submit, the main Codex agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, module inputs and outputs, call chain, scenarios, risks, and independent acceptance. Validate the contract first. Submit returns immediately: poll status, then inspect the diff and verification result. The main Codex agent remains accountable for review and user approvals. Never call ForkLight a native Codex subagent, and never use it to commit or push.";
+  "ForkLight runs bounded external coding Workers through DeepSeek, Qwen, MiniMax, or GLM. Before submit, the main Codex agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, module inputs and outputs, call chain, scenarios, risks, and independent acceptance. Validate the contract first. Submit returns immediately. Prefer status sparingly; for supervision use compact inspect (summary=true, default) after the task is terminal rather than tight-loop full inspect. CLI wait observes event-sequence progress, not only status. The main Codex agent remains accountable for review and user approvals. Never call ForkLight a native Codex subagent, and never use it to commit or push.";
 
 const moduleContractSchema = z.object({
   name: z.string().min(1),
@@ -291,19 +292,40 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Inspect Worker result",
       description:
-        "Inspect attempts, normalized events, verification output, and diff for a ForkLight task. The main Codex agent must review this before accepting the work.",
-      inputSchema: z.object({ taskId: z.string().uuid() }),
+        "Inspect a ForkLight task. Prefer summary=true (default) for main-thread supervision: compact attempts, bounded events, verification hints, and diff metrics without full diff text. Set summary=false only for deep audit (full events/diff, truncated at 120k).",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        summary: z.boolean().default(true),
+        eventLimit: z.number().int().min(0).max(200).default(20),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ taskId }) => {
+    async ({ taskId, summary, eventLimit }) => {
       return withMcpExchangeReceipt({
         operation: "forklight_inspect",
         home,
-        args: { taskId },
+        args: { taskId, summary, eventLimit },
         taskId,
         invoke: async () => {
           await ensureDaemon(home);
           const result = await daemonRequest<Record<string, unknown>>("inspect", { taskId }, home);
+          if (summary) {
+            const task = result.task as TaskRecord;
+            const attempts = result.attempts as AttemptRecord[];
+            const events = result.events as EventRecord[];
+            const diff = typeof result.diff === "string" ? result.diff : undefined;
+            const compact = buildCompactInspection({
+              task,
+              attempts,
+              events,
+              diff,
+              eventLimit,
+            });
+            return textAndData(
+              compact,
+              `Compact inspect for ${taskId}. Use summary=false only if full events/diff are required.`,
+            );
+          }
           const diff = typeof result.diff === "string" && result.diff.length > 120_000
             ? `${result.diff.slice(0, 120_000)}\n[diff truncated by ForkLight MCP]`
             : result.diff;

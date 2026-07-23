@@ -276,11 +276,30 @@ export interface VerificationCommandResult {
   timedOut: boolean;
 }
 
+export interface SourceCompatibilityResult {
+  /** True when every patch-affected path still matches the prepare-time source snapshot. */
+  compatible: boolean;
+  /** Relative paths touched by baseline→workspace diff. */
+  affectedPaths: string[];
+  /** Affected paths whose live source bytes differ from the prepare-time snapshot. */
+  conflictingPaths: string[];
+  /** Source paths that drifted but are outside the patch affected set (audit only). */
+  unrelatedDriftPaths: string[];
+}
+
 export interface VerificationResult {
   passed: boolean;
+  /** Acceptance commands all exited 0. */
+  behaviorPassed: boolean;
+  /** Change budget (and related policy size gates) satisfied when present. */
+  policyPassed: boolean;
+  /** Affected-path source compatibility hard gate. */
+  sourceCompatible: boolean;
   commands: VerificationCommandResult[];
   diffPath: string;
+  /** Full-tree source fingerprint equality (audit). Not a hard gate by itself. */
   sourceUnchanged: boolean;
+  sourceCompatibility?: SourceCompatibilityResult;
   changeBudget?: {
     filesChanged: number;
     changedLines: number;

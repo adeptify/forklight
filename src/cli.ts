@@ -32,11 +32,14 @@ import { StateStore } from "./state/store.js";
 import { withCliExchangeReceipt, humanTokenReportLines } from "./cli/exchange-receipts.js";
 import {
   buildCompactInspection,
+  buildProgressCursor,
   humanCompactInspectionLines,
   humanWaitLines,
   parseInspectSummaryOptions,
   parseWaitOptions,
   waitForTask,
+  type LatestEventMeta,
+  type TaskProgressSnapshot,
 } from "./cli/supervision.js";
 import { getTaskTokenReport } from "./core/token-report.js";
 
@@ -53,9 +56,11 @@ Usage:
   forklight board [--json]
   forklight status <task-id> [--json]
   forklight wait <task-id> --timeout-ms <positive integer> [--poll-ms <positive integer>] [--until change|terminal] [--json]
+      # change = status/attempt/event-sequence/updatedAt cursor (not status-only)
   forklight resume <task-id>
   forklight revise <task-id> --feedback <text>
   forklight inspect <task-id> [--summary] [--events <nonnegative integer>] [--json]
+      # prefer --summary for main-thread supervision; full inspect is for deep audit
   forklight list [--json]
   forklight stats [--json] [--provider <name>] [--model <name>] [--since <ISO>] [--until <ISO>]
   forklight daemon <start|status|stop>
@@ -1250,6 +1255,23 @@ async function main(): Promise<void> {
       const taskId = required(positional, "task id");
       const settings = new SettingsService(store).get();
       const waitOptions = parseWaitOptions(rest, settings.console.refreshIntervalMs);
+      const readProgress = (): TaskProgressSnapshot => {
+        const task = reconcileTask(store, taskId);
+        const meta = store.latestEventMeta(taskId);
+        const latestEvent: LatestEventMeta | undefined = meta === undefined
+          ? undefined
+          : {
+            sequence: meta.sequence,
+            timestamp: meta.timestamp,
+            type: meta.type,
+            summary: meta.summary,
+          };
+        return {
+          task,
+          cursor: buildProgressCursor(task, latestEvent),
+          ...(latestEvent === undefined ? {} : { latestEvent }),
+        };
+      };
       const { output } = await withCliExchangeReceipt({
         operation: "forklight_wait",
         home: forklightHome(),
@@ -1262,7 +1284,7 @@ async function main(): Promise<void> {
         },
         taskId,
         invoke: async () => waitForTask(waitOptions, {
-          readTask: () => reconcileTask(store, taskId),
+          readProgress,
           sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
           now: () => Date.now(),
         }),

@@ -423,6 +423,25 @@ export class StateStore {
     }));
   }
 
+  /** Latest event for progress cursors. O(1) by max sequence; omits payload. */
+  latestEventMeta(taskId: string): Pick<EventRecord, "sequence" | "timestamp" | "type" | "summary"> | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT sequence, timestamp, type, summary
+         FROM events WHERE task_id = ? ORDER BY sequence DESC LIMIT 1`,
+      )
+      .get(taskId) as
+      | { sequence: number; timestamp: string; type: EventType; summary: string }
+      | undefined;
+    if (row === undefined) return undefined;
+    return {
+      sequence: Number(row.sequence),
+      timestamp: row.timestamp,
+      type: row.type,
+      summary: row.summary,
+    };
+  }
+
   private validatePlanGraph(
     plan: PlanRecord,
     items: PlanItemRecord[],

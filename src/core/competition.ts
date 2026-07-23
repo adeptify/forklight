@@ -105,7 +105,13 @@ function verificationFailure(verification: VerificationResult): string {
   }
   const command = verification.commands.find((candidate) => candidate.exitCode !== 0);
   if (command) return `Verification failed: ${command.command} (exit ${command.exitCode})`;
-  if (!verification.sourceUnchanged) return "Verification failed: source changed outside isolation";
+  if (verification.sourceCompatible === false
+    || (verification.sourceCompatible === undefined && !verification.sourceUnchanged)) {
+    const conflicts = verification.sourceCompatibility?.conflictingPaths?.length
+      ? ` (${verification.sourceCompatibility.conflictingPaths.length} affected path(s))`
+      : "";
+    return `Verification failed: affected source paths changed outside isolation${conflicts}`;
+  }
   return "Independent verification failed";
 }
 

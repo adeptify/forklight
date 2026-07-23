@@ -15,6 +15,9 @@ import { StateStore } from "../src/state/store.js";
 
 const failedVerification: VerificationResult = {
   passed: false,
+  behaviorPassed: false,
+  policyPassed: true,
+  sourceCompatible: true,
   commands: [
     { command: "npm test", exitCode: 1, stdout: "", stderr: "failed", durationMs: 10, timedOut: false },
   ],
@@ -142,6 +145,9 @@ function toolEvent(taskId: string, attemptId: string, minutes: number): EventRec
 
 const passedVerification: VerificationResult = {
   passed: true,
+  behaviorPassed: true,
+  policyPassed: true,
+  sourceCompatible: true,
   commands: [{ command: "npm test", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
   diffPath: "/diff",
   sourceUnchanged: true,

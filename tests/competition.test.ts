@@ -72,6 +72,9 @@ function verification(
 ): VerificationResult {
   return {
     passed,
+    behaviorPassed: passed,
+    policyPassed: passed,
+    sourceCompatible: true,
     commands: [
       { command: "npm test", exitCode: passed ? 0 : 1, stdout: "", stderr: "", durationMs: 1, timedOut: false },
     ],
@@ -506,6 +509,9 @@ function verificationWithPolicy(
 ): VerificationResult {
   return {
     passed,
+    behaviorPassed: passed,
+    policyPassed: passed,
+    sourceCompatible: true,
     commands: [
       { command: "npm test", exitCode: passed ? 0 : 1, stdout: "", stderr: "", durationMs: 1, timedOut: false },
     ],
@@ -532,6 +538,9 @@ test("legacy zero-diff editable candidate is ineligible and cannot be recommende
     // Legacy verification: passed=true, but zero changes and no completionPolicy
     {
       passed: true,
+      behaviorPassed: true,
+      policyPassed: true,
+      sourceCompatible: true,
       commands: [{ command: "npm test", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
       diffPath: "/diff",
       sourceUnchanged: true,

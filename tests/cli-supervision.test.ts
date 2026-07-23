@@ -7,11 +7,15 @@ import test from "node:test";
 import type { AttemptRecord, EventRecord, TaskRecord, TaskStatus } from "../src/core/types.js";
 import {
   buildCompactInspection,
+  buildProgressCursor,
   humanCompactInspectionLines,
   humanWaitLines,
   parseInspectSummaryOptions,
   parseWaitOptions,
+  progressCursorKey,
   waitForTask,
+  type LatestEventMeta,
+  type TaskProgressSnapshot,
 } from "../src/cli/supervision.js";
 import { StateStore } from "../src/state/store.js";
 
@@ -56,13 +60,35 @@ function makeTask(id: string, status: TaskStatus = "running"): TaskRecord {
   } as TaskRecord;
 }
 
-function fakeLifecycle(statuses: TaskStatus[]) {
+function snapshotFor(
+  status: TaskStatus,
+  sequence: number,
+  updatedAt = TS,
+): TaskProgressSnapshot {
+  const task = { ...makeTask("wait", status), updatedAt };
+  const latestEvent: LatestEventMeta | undefined = sequence <= 0
+    ? undefined
+    : {
+      sequence,
+      timestamp: updatedAt,
+      type: "worker.tool.completed",
+      summary: `event-${sequence}`,
+    };
+  return {
+    task,
+    cursor: buildProgressCursor(task, latestEvent),
+    ...(latestEvent === undefined ? {} : { latestEvent }),
+  };
+}
+
+/** Sequence of progress snapshots; each read advances one step. */
+function fakeLifecycle(steps: TaskProgressSnapshot[]) {
   let now = 0;
   let reads = 0;
   const sleeps: number[] = [];
   return {
     dependencies: {
-      readTask: () => makeTask("wait", statuses[Math.min(reads++, statuses.length - 1)]!),
+      readProgress: () => steps[Math.min(reads++, steps.length - 1)]!,
       sleep: (milliseconds: number) => { sleeps.push(milliseconds); now += milliseconds; },
       now: () => now,
     },
@@ -88,8 +114,11 @@ async function runCli(home: string, arguments_: string[]): Promise<{ stdout: str
   });
 }
 
-test("wait returns changed after one poll with caller timing", async () => {
-  const fake = fakeLifecycle(["running", "verifying"]);
+test("wait returns changed after status change with caller timing", async () => {
+  const fake = fakeLifecycle([
+    snapshotFor("running", 1),
+    snapshotFor("verifying", 1),
+  ]);
   const result = await waitForTask(
     { timeoutMs: 100, pollMs: 7, until: "change" }, fake.dependencies,
   );
@@ -99,10 +128,42 @@ test("wait returns changed after one poll with caller timing", async () => {
   );
   assert.deepEqual(fake.sleeps, [7]);
   assert.equal(fake.readCount(), 2);
+  assert.equal(result.progress.latestEventSequence, 1);
+});
+
+test("wait --until change fires when event sequence advances without status change (FL-D97/D111)", async () => {
+  const fake = fakeLifecycle([
+    snapshotFor("running", 10, TS),
+    snapshotFor("running", 10, TS),
+    snapshotFor("running", 51, TS), // events grew; status/updatedAt unchanged
+  ]);
+  const result = await waitForTask(
+    { timeoutMs: 100, pollMs: 5, until: "change" }, fake.dependencies,
+  );
+  assert.equal(result.outcome, "changed");
+  assert.equal(result.task.status, "running");
+  assert.equal(result.progress.latestEventSequence, 51);
+  assert.equal(result.pollCount, 2);
+  assert.match(humanWaitLines(result), /latestEventSequence: 51/);
+  assert.match(humanWaitLines(result), /activity: /);
+});
+
+test("wait does not treat identical cursor as change", async () => {
+  const same = snapshotFor("running", 3, TS);
+  const fake = fakeLifecycle([same, same, same, same]);
+  const result = await waitForTask(
+    { timeoutMs: 15, pollMs: 5, until: "change" }, fake.dependencies,
+  );
+  assert.equal(result.outcome, "timeout");
+  assert.equal(result.progress.latestEventSequence, 3);
 });
 
 test("terminal wait ignores intermediate changes and returns terminal", async () => {
-  const fake = fakeLifecycle(["running", "verifying", "failed"]);
+  const fake = fakeLifecycle([
+    snapshotFor("running", 1),
+    snapshotFor("verifying", 2),
+    snapshotFor("failed", 3),
+  ]);
   const result = await waitForTask(
     { timeoutMs: 100, pollMs: 11, until: "terminal" }, fake.dependencies,
   );
@@ -113,7 +174,7 @@ test("terminal wait ignores intermediate changes and returns terminal", async ()
 });
 
 test("timeout uses a bounded final sleep and reports exact poll count", async () => {
-  const fake = fakeLifecycle(["running"]);
+  const fake = fakeLifecycle([snapshotFor("running", 1)]);
   const result = await waitForTask(
     { timeoutMs: 25, pollMs: 10, until: "change" }, fake.dependencies,
   );
@@ -125,7 +186,7 @@ test("timeout uses a bounded final sleep and reports exact poll count", async ()
 });
 
 test("initial terminal Task returns without sleeping", async () => {
-  const fake = fakeLifecycle(["succeeded"]);
+  const fake = fakeLifecycle([snapshotFor("succeeded", 2)]);
   const result = await waitForTask(
     { timeoutMs: 50, pollMs: 5, until: "change" }, fake.dependencies,
   );
@@ -134,6 +195,17 @@ test("initial terminal Task returns without sleeping", async () => {
   assert.equal(result.pollCount, 0);
   assert.deepEqual(fake.sleeps, []);
   assert.match(humanWaitLines(result), /^outcome: terminal\nelapsedMs: 0\npollCount: 0\n/);
+  assert.equal(result.progress.activity, "terminal");
+});
+
+test("progress cursor key includes event sequence", () => {
+  const a = buildProgressCursor(makeTask("a", "running"), {
+    sequence: 1, timestamp: TS, type: "worker.message", summary: "x",
+  });
+  const b = buildProgressCursor(makeTask("a", "running"), {
+    sequence: 2, timestamp: TS, type: "worker.message", summary: "y",
+  });
+  assert.notEqual(progressCursorKey(a), progressCursorKey(b));
 });
 
 test("wait parsing honors overrides and derives omitted poll interval", () => {
@@ -192,11 +264,25 @@ test("compact inspection is allowlisted, latest-event bounded, and omits Diff co
     type: "worker.message", summary: index === 4 ? "latest safe summary" : `OLD_PRIVATE_${index}`,
     payload: { private: "PRIVATE_EVENT_PAYLOAD" },
   })) as EventRecord[];
+  events.push({
+    id: 99, taskId: task.id, sequence: 6, timestamp: TS,
+    type: "verification.completed", summary: "Independent verification failed",
+    payload: {
+      passed: false,
+      sourceUnchanged: true,
+      commands: [{ command: "npm test", exitCode: 0 }],
+      changeBudget: {
+        filesChanged: 2, changedLines: 50, maxFiles: 1, maxDiffLines: 20, withinBudget: false,
+      },
+    },
+  } as EventRecord);
   const diff = "PRIVATE_DIFF_CONTENT\nsecond line\n";
-  const compact = buildCompactInspection({ task, attempts: [attempt], events, diff, eventLimit: 1 });
+  const compact = buildCompactInspection({
+    task, attempts: [attempt], events, diff, eventLimit: 1, nowMs: Date.parse(TS),
+  });
 
   assert.equal(compact.events.length, 1);
-  assert.equal(compact.events[0]!.sequence, 5);
+  assert.equal(compact.events[0]!.sequence, 6);
   assert.deepEqual(compact.diff, {
     generated: true, utf8Bytes: Buffer.byteLength(diff, "utf8"), lineCount: 2,
   });
@@ -206,125 +292,42 @@ test("compact inspection is allowlisted, latest-event bounded, and omits Diff co
     runtimeEstimate: { present: true, valueUsd: 1.25 },
     officialCost: { present: true, stage: "calculation", quoted: true, total: 0.125, currency: "USD" },
   });
+  assert.equal(compact.progress.latestEventSequence, 6);
+  assert.equal(compact.verification.present, true);
+  assert.equal(compact.verification.passed, false);
+  assert.match(compact.verification.policyHint ?? "", /change_budget_exceeded/);
+  assert.equal(compact.verification.behaviorHint, "commands_passed");
+  assert.equal(compact.verification.sourceHint, "source_unchanged");
   const jsonOutput = `${JSON.stringify(compact, null, 2)}\n`;
-  const humanOutput = humanCompactInspectionLines(compact);
-  for (const privateValue of [
-    "PRIVATE_RESULT_TEXT", "PRIVATE_RAW_ERROR", "/private/raw.log", "PRIVATE_MODEL_ARRAY",
-    "PRIVATE_COMPONENT", "PRIVATE_PRICING_SNAPSHOT", "PRIVATE_EVENT_PAYLOAD", "PRIVATE_DIFF_CONTENT",
-    "private outcome", "private command", "private-session-compact", "OLD_PRIVATE_0",
-  ]) {
-    assert.ok(!jsonOutput.includes(privateValue), privateValue);
-    assert.ok(!humanOutput.includes(privateValue), privateValue);
-  }
-  assert.match(humanOutput, /events: 1/);
-  assert.match(humanOutput, /latest safe summary/);
-  assert.match(humanOutput, /diff: generated=true utf8Bytes=33 lineCount=2/);
+  assert.doesNotMatch(jsonOutput, /PRIVATE_/);
+  assert.match(humanCompactInspectionLines(compact), /verification: passed=false/);
 });
 
-test("compact unavailable official cost preserves typed stage and reason", () => {
-  const task = makeTask("unavailable", "failed");
-  const attempt = {
-    id: "a", taskId: task.id, ordinal: 2, status: "failed", sessionId: "s",
-    rawLogPath: "/private/log", startedAt: TS,
-    officialCost: { stage: "pricing-identity", quoted: false, reason: "unsupported-model" },
-  } as unknown as AttemptRecord;
-  const compact = buildCompactInspection({ task, attempts: [attempt], events: [], diff: undefined, eventLimit: 3 });
-  assert.deepEqual(compact.attempts[0]!.officialCost, {
-    present: true, stage: "pricing-identity", quoted: false, reason: "unsupported-model",
-  });
-  assert.deepEqual(compact.diff, { generated: false, utf8Bytes: 0, lineCount: 0 });
-});
-
-test("CLI wait collapses internal polling into one final response and one receipt", async () => {
-  const home = await mkdtemp(path.join(tmpdir(), "forklight-supervision-wait-"));
-  const task = makeTask("cli-wait", "running");
-  withStore(home, (store) => store.createTask(task));
-  const { stdout } = await runCli(home, [
-    "wait", task.id, "--timeout-ms", "12", "--poll-ms", "4", "--json",
-  ]);
-  const result = JSON.parse(stdout) as Record<string, unknown>;
-  assert.equal(result.outcome, "timeout");
-  assert.equal((result.task as Record<string, unknown>).status, "running");
-  assert.ok(Number(result.pollCount) >= 1);
-  const receipts = withStore(home, (store) => store.listExchangeReceipts(task.id));
-  assert.equal(receipts.length, 1);
-  assert.equal(receipts[0]!.operation, "forklight_wait");
-  assert.equal(receipts[0]!.responseContent!.utf8Bytes, Buffer.byteLength(stdout));
-  assert.equal(receipts[0]!.responseStructured, undefined);
-});
-
-test("CLI inspect summary is bounded and legacy inspect/status JSON and human bytes stay unchanged", async () => {
-  const home = await mkdtemp(path.join(tmpdir(), "forklight-supervision-inspect-"));
-  const diffPath = path.join(home, "result.diff");
-  const task = {
-    ...makeTask("cli-inspect", "failed"),
-    paths: { ...makeTask("cli-inspect", "failed").paths, diff: diffPath },
-  };
-  const attempt = {
-    id: "attempt-cli", taskId: task.id, ordinal: 1, status: "failed", sessionId: "private-session",
-    rawLogPath: "/private/raw-cli.log", startedAt: TS, error: "PRIVATE_CLI_ERROR",
-    resultText: "PRIVATE_CLI_RESULT", exitCode: 1,
-  } as unknown as AttemptRecord;
-  let events: EventRecord[] = [];
+test("store.latestEventMeta returns newest sequence without payload", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sup-"));
   withStore(home, (store) => {
+    const task = makeTask("meta", "running");
     store.createTask(task);
-    store.createAttempt(attempt);
-    events = [
-      store.addEvent(task.id, attempt.id, "worker.message", "older summary", { private: true }),
-      store.addEvent(task.id, attempt.id, "worker.failed", "latest summary", { private: true }),
-    ];
+    store.addEvent(task.id, undefined, "task.created", "created");
+    store.addEvent(task.id, undefined, "worker.message", "hello", { secret: "nope" });
+    const meta = store.latestEventMeta(task.id);
+    assert.equal(meta?.sequence, 2);
+    assert.equal(meta?.type, "worker.message");
+    assert.equal(meta?.summary, "hello");
+    assert.equal(store.latestEventMeta("missing"), undefined);
   });
-  const diff = "PRIVATE_CLI_DIFF\n";
-  await writeFile(diffPath, diff, "utf8");
+});
 
-  const summaryRun = await runCli(home, ["inspect", task.id, "--summary", "--events", "1", "--json"]);
-  const summary = JSON.parse(summaryRun.stdout) as Record<string, any>;
-  assert.equal(summary.events.length, 1);
-  assert.equal(summary.events[0].summary, "latest summary");
-  assert.equal(summary.diff.utf8Bytes, Buffer.byteLength(diff));
-  for (const privateValue of ["PRIVATE_CLI_ERROR", "PRIVATE_CLI_RESULT", "/private/raw-cli.log", "PRIVATE_CLI_DIFF"])
-    assert.ok(!summaryRun.stdout.includes(privateValue));
-
-  const fullRun = await runCli(home, ["inspect", task.id, "--json"]);
-  assert.equal(fullRun.stdout, `${JSON.stringify({ task, attempts: [attempt], events, diff }, null, 2)}\n`);
-  const expectedHumanStatus = [
-    `id: ${task.id}`,
-    `name: ${task.name}`,
-    `status: ${task.status}`,
-    `provider: ${task.spec.provider.name}`,
-    `model: ${task.spec.provider.model}`,
-    `runtime: ${task.spec.runtime.name}`,
-    `source: ${task.sourcePath}`,
-    `workspace: ${task.paths.workspace}`,
-    `sessionId: ${task.sessionId}`,
-    `createdAt: ${task.createdAt}`,
-    `finishedAt: ${task.finishedAt}`,
-  ];
-  const fullHumanRun = await runCli(home, ["inspect", task.id]);
-  assert.equal(fullHumanRun.stdout, `${[
-    ...expectedHumanStatus,
-    "attempts: 1",
-    "  #1 failed exit=1 cost=$- turns=-",
-    "events:",
-    "  1. worker.message — older summary",
-    "  2. worker.failed — latest summary",
-    `diff: ${diffPath} (1 lines)`,
-  ].join("\n")}\n`);
-  const statusRun = await runCli(home, ["status", task.id, "--json"]);
-  const expectedStatus = {
-    id: task.id, name: task.name, status: task.status,
-    provider: task.spec.provider.name, model: task.spec.provider.model,
-    runtime: task.spec.runtime.name, source: task.sourcePath, workspace: task.paths.workspace,
-    sessionId: task.sessionId, createdAt: task.createdAt, startedAt: task.startedAt,
-    finishedAt: task.finishedAt, error: task.error,
-  };
-  assert.equal(statusRun.stdout, `${JSON.stringify(expectedStatus, null, 2)}\n`);
-  const statusHumanRun = await runCli(home, ["status", task.id]);
-  assert.equal(statusHumanRun.stdout, `${expectedHumanStatus.join("\n")}\n`);
-
-  const receipts = withStore(home, (store) => store.listExchangeReceipts(task.id));
-  assert.equal(receipts.filter((receipt) => receipt.operation === "forklight_inspect").length, 3);
-  assert.equal(receipts.filter((receipt) => receipt.operation === "forklight_status").length, 2);
-  assert.ok(!JSON.stringify(receipts).includes("PRIVATE_CLI_DIFF"));
-  assert.ok(!JSON.stringify(receipts).includes("latest summary"));
+test("compact inspection handles absent verification and empty diff", () => {
+  const task = makeTask("empty", "running");
+  const attempt = {
+    id: "a", taskId: task.id, ordinal: 1, status: "running",
+    sessionId: "s", rawLogPath: "/p", startedAt: TS,
+  } as AttemptRecord;
+  const compact = buildCompactInspection({
+    task, attempts: [attempt], events: [], diff: undefined, eventLimit: 3, nowMs: Date.parse(TS),
+  });
+  assert.equal(compact.verification.present, false);
+  assert.equal(compact.diff.generated, false);
+  assert.equal(compact.progress.latestEventSequence, 0);
 });

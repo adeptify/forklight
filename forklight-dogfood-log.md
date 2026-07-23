@@ -942,3 +942,385 @@
 - 成功率被未分类失败污染：FL-D115  
 - 合同/预算估算导致假失败或近失：FL-D109 等  
 
+
+## 2026-07-23 Dogfood 全量归类与综合优化计划
+
+用途：在**通读 FL-D01–FL-D115 + 自举交付表 + 本地账本审计**之后，做全量问题地图与综合施工计划。  
+原则：先总结再排期，不把「主线程相关」误当成「dogfood 的全部」；状态为基于 log 文案的**观察对账**（非逐条跑回归后的正式 QA 报告）。
+
+### 0. 文档范围
+
+| 来源 | 内容 |
+|------|------|
+| FL-D01–FL-D07 | 2026-07-22 初始观察 |
+| FL-D08–FL-D115 | 用户反馈 + 自举 dogfood 摩擦与修复线索 |
+| 2026-07-23 自举第一轮表 | 任务级交付与模型观察 |
+| 主线程/总成本账本审计 | 本机 SQLite 量化（94 tasks / 176 attempts） |
+
+**条目数**：115 条编号观察 + 若干横截面结论。  
+**状态标签**（本节统一）：
+
+- **OPEN**：产品仍缺，log 标明未修或再次复现  
+- **PARTIAL**：核心/部分路径已合入，消费者、策略或 UX 未闭环  
+- **FIXED-ish**：log 写明已修/已合入（可能仍有旁支）  
+- **PRODUCT**：产品方向/规格，未必是当前缺陷  
+- **RECURRING**：同一根因多编号重复（以最新编号为主跟踪）
+
+---
+
+### 1. 横切结论（读完 115 条后）
+
+1. **ForkLight 的价值命题成立但未锁死**：能把实现卸载到隔离 Worker，主线程可更轻；但失败多轮、假失败、轮询 inspect、硬门误杀会把「便宜模型」变成「总账不省」。  
+2. **最大结构性问题是「单一终态 / 单一失败率」**：几乎所有主题最后都要求把结果拆成  
+   `behavior | policy | source-compat | provider/runtime | fixture | main-review | cancel | environment`  
+   否则模型路由、Console Stats、费用解读全部失真（FL-D52/53/96/106/115 等）。  
+3. **第二结构性问题是「门的语义混用」**：安全不变量、机器验收、Diff 预算、Integration 上限被同一套 hard fail 表达；估错范围会诱导压缩正确设计（FL-D43/44/54/58/90）。需要 `hard | warn | score | off` + profile。  
+4. **第三结构性问题是「控制面与运行面不同步」**：source / dist / daemon / MCP / CLI 可四分叉；Integration 绿 ≠ 激活（FL-D34/35/50/61/69/79/100）；前台超时 ≠ 后台失败（FL-D99/113）。  
+5. **第四结构性问题是「进展不可见」**：`running` + 不更新的 `updatedAt` + 只看 status 的 wait → 主线程 inspect 税（FL-D15/51/57/68/83/97/111）。  
+6. **第五结构性问题是「Worker 信息闭塞」**：无 shell、无实时机器 Diff、无阶段预算 → 盲目读与压缩行数（FL-D26–29/55/62/78/82）。  
+7. **费用语义已部分修好、展示仍危险**：runtime estimate ≠ official；MiniMax 常 per-request unavailable；不得用 0 填缺失（FL-D38/47/49/59/73/91）。  
+8. **主审是必需角色但通道不完整**：succeeded 后无法 resume；有窄 `revise`；缺 awaiting-main-review / main-correction receipt / lineage integration（FL-D45/88/94/98）。  
+9. **并发与 source fingerprint 互相打架**：`maxConcurrency=4` + 全局 `sourceUnchanged` hard = 并行必误杀（FL-D33/56/87/110）。  
+10. **合同税真实存在**：version2 全字段 + 占位符启发式 + 估错 scope 会抬高主线程与 Worker 双方成本（FL-D09/12/70/109/112）。
+
+账本数字（支撑横切，不是替代定性）：任务成功率约 38%、首轮约 17%；runtime 估约 $307 中失败任务约占六成；inspect 占 exchange 收据一半以上；direct-Codex 校准几乎只有 1 个 class。
+
+---
+
+### 2. 按主题的全量地图
+
+下列每个主题列出主要 FL-D；**OPEN/PARTIAL/FIXED** 以 log 自身「状态」句为准，重复项合并到 RECURRING。
+
+#### A. 安装 / 发现 / 入口一致性
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D01 | Skill/MCP 未暴露，只能 CLI | OPEN/PRODUCT |
+| FL-D35 / FL-D69 | MCP 常驻与 daemon/CLI 版本分叉；未知字段静默丢弃 | OPEN / RECURRING |
+| FL-D93 | dev CLI 能 stop 不能从源码 start daemon | OPEN |
+
+#### B. 配置 / Setup / Provider 就绪
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D03 / D17 | ready 与模型/凭据不一致；Probe 与 Key 形态 | PARTIAL（probe 隔离已交付） |
+| FL-D08 / D11 / D13 | 配置可视化、三层条件、决策流而非表单 | PRODUCT |
+| FL-D18 | DeepSeek 模型列表不全 | OPEN |
+| FL-D19 | Health 与 effective settings 不一致 | FIXED-ish（自举交付写已修） |
+| FL-D20 / D21 / D22 | Probe 证据、退出码、区域预检、全局 Claude 覆盖 | PARTIAL/FIXED-ish（隔离 Probe 已交付） |
+| FL-D59 / D73 / D91 | pricing route / MiniMax 分层 / 精确报价条件 | PARTIAL |
+
+#### C. 合同 / Validate / 策略档位
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D02 / D70 / D112 | `unknown` 等词误判占位符 | OPEN / RECURRING |
+| FL-D04 / D39 / D43 / D44 / D54 / D58 / D90 | Diff hard gate 与估错、压缩诱导 | OPEN/PRODUCT |
+| FL-D07 | 100/100 ≠ 可执行 | OPEN/PRODUCT |
+| FL-D09 / D12 | 任务档位与合同 Token 税 | PRODUCT |
+| FL-D10 / D46 / D84 | Task budget vs Integration limit 死路 | OPEN |
+| FL-D14 | validate/submit 相对路径 | FIXED-ish（规范化已交付） |
+| FL-D26 | 调查次数只是文案不是运行时 | OPEN |
+| FL-D77 / D86 / D109 | 合同漏消费者 / 范围估错 | OPEN/PRODUCT |
+| FL-D92 | MCP 无法表达 null 无限预算 | OPEN |
+
+#### D. Worker 运行时与成本控制
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D06 / D23 | 单次 vs 累计预算；超支后错误文案 | OPEN |
+| FL-D24 / D29 / D36 | 阶段预算 / 首次编辑门 / null≠无限循环 | OPEN |
+| FL-D27 / D28 | 全索引税；focus 非 allowlist | OPEN |
+| FL-D30 | resume 不能新预算授权 | OPEN |
+| FL-D42 / D63 | 无 cancel/pause；中止丢 usage | OPEN |
+| FL-D55 / D62 / D78 | 无实时 Diff；无进展≠有事件；无受控 verify checkpoint | OPEN |
+| FL-D107 | stop_reason error 被当成功 | FIXED-ish |
+
+#### E. 进展可见性与主线程监督（**账本 P0 相关**）
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D15 | running 藏 401 重试 | OPEN |
+| FL-D25 | 失败缺阶段摘要 | OPEN |
+| FL-D51 / D57 / D83 | heartbeat / stage；updatedAt 不跟活动 | OPEN |
+| FL-D66 | CLI 收据是 pipe 前体积 | PARTIAL |
+| FL-D68 / D97 / D111 | wait change 不看 event stream | OPEN / RECURRING |
+| 账本 | inspect 轮询占主线程 exchange 大头 | OPEN |
+
+#### F. Verifier / 源兼容 / 策略输出
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D31 / D37 | Worker claim vs independent verify | OPEN/PRODUCT |
+| FL-D33 / D56 / D87 / D110 | 全局 sourceUnchanged 误杀 | OPEN / RECURRING |
+| FL-D41 / D108 | hard/warn/score/off；零 Diff 交付 | PARTIAL（competition no-change 已有） |
+| FL-D103 | resume 反馈缺全维 remediation packet | OPEN |
+
+#### G. 主审 / 纠正 / 状态机
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D45 / D88 | succeeded 后无法 resume；窄 revise 已有 | PARTIAL |
+| FL-D52 / D53 / D67 | attempt 配额与纠正/取消混算 | OPEN |
+| FL-D89 | 主审反馈也可能错 | PRODUCT |
+| FL-D94 / D105 | lineage integration；hopChurn vs 最终 diff | OPEN |
+| FL-D98 | maxAttempts 后 main-correction receipt | OPEN |
+
+#### H. Integration / 激活
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D34 / D50 / D61 / D79 / D100 | apply 绿但 dist/daemon 未激活 | OPEN / RECURRING |
+| FL-D99 / D113 | 前台超时 vs 后台 applied | OPEN / RECURRING |
+
+#### I. Token / 费用 / 校准
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D32 / D40 / D47 / D60 / D64 / D65 | efficiency 核心、usage、official、report | PARTIAL（核心多已合入，展示/统计未齐） |
+| FL-D38 / D48 / D49 | runtime≠官方；语义完整性；请求级 usage | PARTIAL |
+| FL-D71 / D75 | economics 读路径；Stats 文案已改 | PARTIAL |
+| FL-D76 / D81 / D95 / D101 | 校准隐私/profile/daemon 工作流/首个 exact pair | PARTIAL |
+| FL-D101 | 主线程 savings 有 1 样本 low confidence | PARTIAL |
+
+#### J. Console / Competition / 统计
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D74 | 浏览器验收四连坑（假 0.00 等） | FIXED-ish |
+| FL-D114 | competition 历史评价 vs 当前预览 | OPEN |
+| FL-D115 | 成功率未 taxonomy | OPEN |
+
+#### K. 其他
+
+| ID | 要点 | 状态 |
+|----|------|------|
+| FL-D05 | Plan 不继承 patch stack | PRODUCT |
+| FL-D16 | failed 事件 subtype success | 可能 PARTIAL/FIXED（与 D107 同类） |
+| FL-D102 | 沙箱 capability-denied | OPEN |
+
+---
+
+### 3. 根因簇（合并重复 ID 后的「真正要修的东西」）
+
+用根因簇而不是 115 个独立 bug 排期：
+
+| 簇 | 代表 ID | 用户可感知后果 |
+|----|---------|----------------|
+| **R1 进展模型** | D51/57/68/83/97/111 | wait 误超时、狂 inspect、主线程贵 |
+| **R2 结果多维语义** | D41/52–54/90/103/108/115 | 假失败率、错路由、错归因 |
+| **R3 源兼容门** | D33/56/87/110 | 并发假失败、白烧、污染统计 |
+| **R4 预算/策略门** | D04/10/43/46/54/84/90 | 测过仍 fail、压缩正确代码、合入死路 |
+| **R5 运行时阶段控制** | D23–30/36/55/62/78 | 只调查不交付、无限读、无 result |
+| **R6 激活与版本身份** | D34/35/50/61/69/79/93/100 | 「合入了但没生效」 |
+| **R7 Integration 控制面** | D99/113 | 超时当失败、重复 apply |
+| **R8 主审闭环** | D45/88/94/98/105 | 机器成功后无法正式纠正/合入 |
+| **R9 合同与 MCP 表达** | D02/70/92/109/112 | 合同税、null 预算、估错范围 |
+| **R10 费用可信展示** | D38/47/59/73/75/91 | 错误成本决策 |
+| **R11 Provider/Probe 信任** | D03/17–22 | 假 ready、白调任务 |
+| **R12 校准可信** | D32/60/64/81/101 | 不能乱说「省了多少」 |
+
+---
+
+### 4. 综合优化计划（在全量地图之后）
+
+目标优先级（产品原则，来自账本 + 横切）：
+
+1. **主线程最便宜且可信**（R1 + 监督协议 + 紧凑证据）  
+2. **终态与统计不说谎**（R2）——否则一切路由/优化会建在错误数据上  
+3. **少假失败、少白烧**（R3 + R4 + R5 关键子集）  
+4. **合入=可运行**（R6 + R7）  
+5. **主审与合同表达**（R8 + R9）  
+6. **费用与校准可信**（R10 + R12）  
+7. **配置/档位/Console 产品化**（B/C 的 PRODUCT 项，可并行规格）
+
+#### Wave 0 — 基线与度量（短，不宣称已优化）
+
+- 冻结账本快照方法：任务成功率、首轮成功率、失败 taxonomy 粗分、inspect/wait 次数、official vs runtime。  
+- 每波结束后用同一脚本复测（防「感觉好了」）。  
+- 在 dogfood 中维护根因簇 ↔ FL-D 对照（本节），新 FL-D 必须挂簇。
+
+#### Wave 1 — 主线程监督可信（对应 R1；服务「主线程最便宜」）
+
+**做：**
+
+1. Progress cursor：`status + latestEventSequence + attempt/stage (+ lastEventAt)`  
+2. `wait --until change` 观察 cursor / effective progress，不只 `updatedAt`/status  
+3. 紧凑 status/wait 返回：`active|quiet|stalled`、最近有效动作、距今时间  
+4. inspect 默认/推荐 summary；MCP 支持 eventLimit/summary，抑制 full 轮询  
+5. 编排 skill/文档：`submit → wait → inspect(summary) → …`  
+
+**验收：** D97/D111 场景单测：event 增而 status 不变 → changed 非 timeout；inspect 体积可测下降。  
+**刻意不做：** 完整 Console timeline 重做（可随后）。
+
+#### Wave 2 — 结果语义与源兼容（R2 + R3；服务「总成本 + 统计诚实」）
+
+**做：**
+
+1. Verifier 输出分栏：`behaviorPassed`、`policyPassed`、`sourceCompatible`（及原因列表）  
+2. 全局 `sourceUnchanged` 降为审计；hard 门改为 affected paths（+ 可选依赖闭包）相交  
+3. 失败 error / Console 至少能区分 policy vs behavior vs source-drift  
+4. Resume/revise 反馈用 remediation packet 多维同时列出（R2∩D103）  
+
+**验收：** 并行改 dogfood.md 不再误杀无关任务；「命令绿+行数红」在 API 上可区分。
+
+#### Wave 3 — 策略门与预算诚实（R4 + R5 子集）
+
+**做：**
+
+1. changeBudget / 质量行数：profile 级 `hard|warn|score|off`（安全与 behavior 默认 hard）  
+2. Validate/Submit：Task budget vs Integration limit 冲突预检（D10/D46/D84）  
+3. 预算终态传播 `error_max_budget_usd`（D23）；resume 允许一次性 attempt 预算授权（D30/D67）  
+4. 机器 Diff 回传 Worker（additions/deletions/changedLines）（D55/D58）  
+5. 可选：受控 verification checkpoint（白名单命令，非任意 shell）（D78）  
+
+**验收：** 行为全绿仅超 N 行不再只能记普通 failed；提交前可见「能跑不能合」。
+
+#### Wave 4 — 激活、Integration 控制面、版本身份（R6 + R7）
+
+**做：**
+
+1. Integration 阶段：`sourceApplied / sourceVerified / artifactBuilt / runtimeActivated`  
+2. apply 异步 operation id + wait；超时 = outcome-unknown（D99/D113）  
+3. daemon/CLI/MCP 暴露 build/protocol identity；握手不一致明确 refresh（D35/D69）  
+4. dev daemon start 修入口（D93）  
+
+**验收：** 自托管改 ForkLight 后「绿 apply」不再静默跑旧 dist。
+
+#### Wave 5 — 主审生命周期与 lineage（R8）
+
+**做：**
+
+1. `awaiting-main-review` / accept / revise 扩展到 plan/competition 需求边界内  
+2. `main-correction` receipt（maxAttempts 后最小补丁 + 重验收）（D98）  
+3. correction lineage + combinedDeliveryDiff vs hopChurn（D94/D105）  
+
+**验收：** 机器 succeeded 后主审可正式纠正；失败历史不伪造成功。
+
+#### Wave 6 — 合同表达、MCP 预算、占位符（R9）
+
+**做：**
+
+1. 占位符 hard 仅 sentinel/空字段；自然语言 warning（D70/D112）  
+2. MCP `maxBudgetUsd: number | null` + 继承语义（D92）  
+3. 任务档位（small-fix 等）最小合同（PRODUCT，可与 Wave 3 profile 合并）  
+4. impact forecast / 消费者面预警（D109/D77）——可先静态启发式  
+
+#### Wave 7 — 费用展示、统计 taxonomy、校准扩样（R10 + R12 + D115）
+
+**做：**
+
+1. Stats/Competition 全面分栏 official vs runtime；不可用原因  
+2. Provider 成功率 taxonomy（D115）  
+3. 多 taskClass direct-Codex 校准；禁止无基线宣称节省  
+4. MiniMax 请求级 usage 路线图（精确报价前置）  
+
+#### Wave 8 — 产品层配置中心（B/C PRODUCT）
+
+- 三层 Safety / Quality Profile / Preferences  
+- 提交决策流：档位 → 冲突 → 费用暴露 → 合同  
+- 不阻塞前几波工程修复  
+
+---
+
+### 5. 与「先前想当然计划」的差异
+
+| 先前草稿 | 全量总结后 |
+|----------|------------|
+| 几乎只做 wait + inspect + source | 仍把 R1 放 Wave 1，但 **R2 与 R3 紧随**，否则省主线程也省不稳总账 |
+| 把 budget 近失当小补丁 | 上升为 **R4 策略语义**，不是单点 if |
+| 忽略激活/MCP 版本 | 单列为 Wave 4，log 复现极多次 |
+| 忽略主审闭环 | Wave 5，否则 dogfood「主 Codex 手工合入」会永远绕过产品 |
+| 未系统挂 FL-D | 每簇绑定代表 ID，新观察必须入簇 |
+
+---
+
+### 6. 建议的立即执行顺序（仍不开始写代码，除非另行批准）
+
+1. **确认本全量地图与 Wave 划分**（本文）  
+2. **Wave 0 度量脚本**（可复用账本 node 汇总）  
+3. **Wave 1 实现**（progress-aware wait + compact inspect）  
+4. **Wave 2 实现**（verifier 分栏 + affected-path source gate）  
+5. 每波：测试 → dogfood 追加「已处理簇/剩余」→ 再 commit  
+
+**本轮明确不宣称：** 做完 Wave 1–2 就「总成本一定省」；只宣称监督可信 + 假失败下降 + 主线程轮询下降（可用账本复测）。
+
+### 7. 覆盖声明
+
+- **已覆盖：** FL-D01–FL-D115 的主题归类与根因簇；自举交付与账本审计的横切含义。  
+- **未做：** 逐条对当前 `main` 源码的自动化 open/closed 验证（需 Wave 0 之后用测试/代码检索二次对账）。  
+- **若某条状态与代码不符：** 以代码 + 复现为准，回写本节状态标签。
+
+
+## 2026-07-23 Wave 0+1 交付记录
+
+状态：已在源码实现，待 commit / 激活 dist+daemon。
+
+### Wave 0
+
+- 新增 `scripts/economics-snapshot.mjs` 与 npm script `economics-snapshot`。
+- 只读汇总 tasks/attempts、成功率、official vs runtime、worker gross tokens、exchange op 分布与 inspect 占比。
+- 用法：`npm run economics-snapshot` 或 `FORKLIGHT_HOME=... npm run economics-snapshot -- --json`。
+
+### Wave 1（R1 主线程监督）
+
+**Progress-aware wait（FL-D97 / FL-D111 / FL-D68）**
+
+- `wait --until change` 的 cursor = `status + latestEventSequence + currentAttemptId + updatedAt`。
+- Worker 仅产生 events、status/`updatedAt` 不变时，也会返回 `changed`，不再误 timeout。
+- Wait 结果增加 `progress.activity`（active|quiet|terminal）、`latestEventSequence`、最近 event 摘要。
+- Store 新增 `latestEventMeta`（按 max sequence，不读 payload）。
+
+**Compact inspect**
+
+- summary 增加 verification 分栏提示：behavior / policy(changeBudget) / source。
+- 增加 progress 字段。
+- MCP `forklight_inspect` 默认 `summary=true`、`eventLimit=20`；`summary=false` 仍为 deep audit（diff 120k 截断）。
+- MCP 指令文案改为：禁止 tight-loop full inspect，优先 summary。
+
+**测试**
+
+- `tests/cli-supervision.test.ts` 覆盖 event-sequence change、identical cursor timeout、verification hints、latestEventMeta。
+
+### 明确未做（后续 Wave）
+
+- Wave 2：affected-path sourceUnchanged、完整 behavior/policy 终态字段落库。
+- MCP `forklight_wait` 工具（当前 wait 仍为 CLI）。
+- Console 共用 progress 读模型。
+
+
+## 2026-07-23 Wave 2 交付记录
+
+状态：已在源码实现并通过相关单测；待 build / 重启 daemon 后生效。
+
+### 做了什么（R2 结果分栏 + R3 源兼容）
+
+1. **Verifier 分栏字段**（写入 `verification.completed` payload）  
+   - `behaviorPassed`：验收命令是否全过  
+   - `policyPassed`：changeBudget + completionPolicy hard 是否通过  
+   - `sourceCompatible`：补丁涉及路径在源项目上是否仍与 prepare 快照一致  
+   - `sourceUnchanged`：保留为**全树审计**，不再单独构成 hard fail  
+
+2. **Affected-path 源兼容门**（FL-D33 / D56 / D87 / D110）  
+   - 从 baseline→workspace diff 解析 affected paths  
+   - 仅这些路径与 `source-manifest.json` 不一致时 hard fail  
+   - 无关路径漂移记入 `sourceCompatibility.unrelatedDriftPaths`，summary 可注明 “unrelated source drift recorded”  
+   - 同路径并发改动仍 hard fail（`conflictingPaths`）  
+
+3. **消费方**  
+   - competition 失败文案改用 sourceCompatible  
+   - statistics 读取 legacy payload 时回填分栏字段  
+   - inspect summary 的 source hint 优先展示 compatible / conflict / unrelated_drift  
+
+### 测试
+
+- `workspace.test.ts`：无关漂移兼容、同路径冲突、diff path 解析  
+- `verifier-policy.test.ts`：交付 + 改 README 仍 `passed=true` 且 `sourceUnchanged=false`  
+- competition / statistics / supervision 相关套件全绿  
+
+### 明确未做
+
+- 依赖闭包（只做了 patch 路径，未做 import 图）  
+- changeBudget soft/warn 分档（Wave 3）  
+- Integration preflight 与 verifier 完全共用同一 API 面（语义已对齐方向）  
+

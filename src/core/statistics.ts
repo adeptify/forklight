@@ -339,9 +339,28 @@ export function verificationFrom(events: EventRecord[]): VerificationResult | un
     .find((candidate) => candidate.type === "verification.completed");
   if (!event || typeof event.payload !== "object" || event.payload === null) return undefined;
   const payload = event.payload as Partial<VerificationResult>;
-  return typeof payload.passed === "boolean" && Array.isArray(payload.commands)
-    ? payload as VerificationResult
-    : undefined;
+  if (typeof payload.passed !== "boolean" || !Array.isArray(payload.commands)) return undefined;
+  // Legacy payloads only had `passed` + `sourceUnchanged`; fill dimensional fields.
+  const sourceCompatible = typeof payload.sourceCompatible === "boolean"
+    ? payload.sourceCompatible
+    : (typeof payload.sourceUnchanged === "boolean" ? payload.sourceUnchanged : true);
+  const behaviorPassed = typeof payload.behaviorPassed === "boolean"
+    ? payload.behaviorPassed
+    : payload.commands.length > 0 && payload.commands.every((c) => c.exitCode === 0);
+  const policyPassed = typeof payload.policyPassed === "boolean"
+    ? payload.policyPassed
+    : (payload.changeBudget?.withinBudget ?? true)
+      && payload.completionPolicy?.check !== "hard-fail";
+  return {
+    ...payload,
+    passed: payload.passed,
+    behaviorPassed,
+    policyPassed,
+    sourceCompatible,
+    commands: payload.commands,
+    diffPath: typeof payload.diffPath === "string" ? payload.diffPath : "",
+    sourceUnchanged: typeof payload.sourceUnchanged === "boolean" ? payload.sourceUnchanged : true,
+  } as VerificationResult;
 }
 
 export class StatisticsService {
