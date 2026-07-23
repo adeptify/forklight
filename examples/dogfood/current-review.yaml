@@ -1,0 +1,95 @@
+version: 2
+name: Keep Main review bound to its verified Attempt
+project: ../..
+contract:
+  outcome: A Main Codex decision may govern only the exact independent verification event it reviewed, never a newer correction Attempt.
+  context:
+    - The real three-Attempt Dogfood left a prior revise decision visible after the newer Attempt passed independent verification.
+    - The canonical TaskDecisionView therefore told users to resume again instead of requesting a fresh Main Codex review.
+    - A deterministic regression test is present and failing before this Task starts.
+  inScope:
+    - Bind the projected Main Codex review to the latest independent verification event sequence.
+    - Omit an older review from current authority when a newer verification exists.
+    - Preserve review decisions that match the current verification.
+  outOfScope:
+    - Do not change how reviews are recorded, persisted, or authorized.
+    - Do not alter Integration, activation, Console rendering, or daemon protocol.
+    - Do not add an entity, table, dependency, commit, or push.
+  executionSteps:
+    - Run the contract-only TaskDecisionView checkpoint and observe the seeded stale-review failure.
+    - Inspect the latest verification and review selection in buildTaskDecisionView.
+    - Make the smallest typed projection correction and keep historical Events untouched.
+    - Run all three approved checkpoint commands and inspect the actual Diff.
+  deliverables:
+    - A current-authority projection that ignores reviews bound to older verification sequences.
+    - Passing regression, authority matrix, TypeScript, and whitespace checks.
+  modules:
+    - name: TaskDecisionView review authority
+      responsibility: Select only the Main Codex review attached to the latest independent verification event.
+      consumes:
+        - Ordered verification and main-review Events already stored for the Task.
+      produces:
+        - A non-persisted current review decision or an explicit awaiting-review state.
+      boundaries:
+        - Historical review Events remain available in the audit timeline and are never rewritten.
+  callChain:
+    - A correction Attempt writes a newer verification.completed Event.
+    - buildTaskDecisionView reads the latest verification and latest review Event.
+    - The projection includes the review only when verificationEventSequence matches the latest verification sequence.
+    - CLI, MCP, and Console show the resulting current stage and next action.
+  scenarios:
+    - name: stale revise after correction
+      given: Attempt one was reviewed as revise and Attempt two has a newer passing verification.
+      when: TaskDecisionView projects current authority.
+      then: The old revise is omitted and the Task awaits a fresh Main Codex review.
+    - name: current accept
+      given: The latest passing verification has a matching accept review.
+      when: TaskDecisionView projects current authority.
+      then: The Task is ready for Integration.
+    - name: historical audit remains
+      given: Multiple review Events exist in Task history.
+      when: The current decision projection omits a stale review.
+      then: The stored Events and delivery lineage remain unchanged for deep audit.
+  risks:
+    - Comparing review recency alone would repeat the bug; sequence identity must match.
+    - Removing stale review Events would destroy audit history and is forbidden.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 80
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1m]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-decision-view.ts
+    - tests/task-decision-view.test.ts
+delivery:
+  buildCommands:
+    - npm run build
+  activationCommands:
+    - node dist/src/cli.js daemon stop; for i in {1..100}; do node dist/src/cli.js daemon status >/dev/null 2>&1 || break; sleep 0.05; done; node dist/src/cli.js daemon start
+  activationCheckCommands:
+    - node dist/src/cli.js daemon status | grep -q '"buildIdentity"'
+acceptance:
+  criteria:
+    - An older review never governs a newer verification.
+    - A review matching the latest verification still drives the expected decision stage.
+    - The focused test, TypeScript compilation, and patch whitespace checks pass.
+  commands:
+    - node --import tsx --test tests/task-decision-view.test.ts
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

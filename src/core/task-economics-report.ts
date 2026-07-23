@@ -38,6 +38,14 @@ export interface RuntimeBudgetSection {
   readonly label: "capped" | "uncapped";
 }
 
+export interface AttemptRuntimeBudgetSection {
+  readonly attemptId: string;
+  readonly ordinal: number;
+  readonly source: "attempt-snapshot" | "legacy-inherited-unknown";
+  readonly maxBudgetUsd?: number | null;
+  readonly label: "capped" | "uncapped" | "inherited/unknown";
+}
+
 export interface RuntimeEstimateSection {
   /** Sum of all present runtimeCostEstimateUsd values across Attempts.
    *  Legacy costUsd is never added — missing and unavailable estimates
@@ -94,6 +102,8 @@ export interface OfficialCostSection {
 export interface TaskEconomicsReport {
   readonly taskId: string;
   readonly runtimeBudget: RuntimeBudgetSection;
+  /** Per-Attempt launch-time budget evidence. Legacy records stay unknown. */
+  readonly attemptRuntimeBudgets: readonly AttemptRuntimeBudgetSection[];
   readonly runtimeEstimate: RuntimeEstimateSection;
   readonly officialCost: OfficialCostSection;
   /** Canonical Task Token evidence — embedded unchanged.  Worker volume is
@@ -145,6 +155,23 @@ export function getTaskEconomicsReport(
     capped: maxBudgetUsd !== null,
     label: maxBudgetUsd !== null ? "capped" : "uncapped",
   };
+  const attemptRuntimeBudgets: AttemptRuntimeBudgetSection[] = attempts.map((attempt) => {
+    if (attempt.runtimeBudgetUsd === undefined) {
+      return {
+        attemptId: attempt.id,
+        ordinal: attempt.ordinal,
+        source: "legacy-inherited-unknown",
+        label: "inherited/unknown",
+      };
+    }
+    return {
+      attemptId: attempt.id,
+      ordinal: attempt.ordinal,
+      source: "attempt-snapshot",
+      maxBudgetUsd: attempt.runtimeBudgetUsd,
+      label: attempt.runtimeBudgetUsd === null ? "uncapped" : "capped",
+    };
+  });
 
   // --- 2. Runtime estimate aggregation (runtimeCostEstimateUsd only) ---
   let observedTotalUsd = 0;
@@ -242,6 +269,7 @@ export function getTaskEconomicsReport(
   const report: TaskEconomicsReport = {
     taskId,
     runtimeBudget,
+    attemptRuntimeBudgets,
     runtimeEstimate,
     officialCost: {
       totals,

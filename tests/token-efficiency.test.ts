@@ -15,7 +15,6 @@ import type {
   DirectCodexCalibration,
   DirectCodexUnavailableReason,
   OrchestrationExchangeReceipt,
-  PercentageSavings,
   RedactedExchangeMeasurement,
 } from "../src/core/token-efficiency.js";
 

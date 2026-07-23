@@ -6,14 +6,12 @@ import {
   readFile,
   readdir,
   realpath,
-  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { lstatSync } from "node:fs";
 import path from "node:path";
 import type { TaskPaths, TaskSpec } from "../core/types.js";
-import { runCaptured } from "../core/process.js";
 
 interface ManifestEntry {
   path: string;
@@ -32,6 +30,7 @@ interface WorkspaceManifest extends Manifest {
 
 const SHARED_DEPENDENCY_DIRECTORIES = ["node_modules"];
 const WORKSPACE_CONTEXT_PATH = path.join(".forklight", "workspace-context.md");
+const WORKSPACE_CONTEXT_MAX_FILES = 200;
 
 function excluded(relativePath: string, excludes: Set<string>): boolean {
   if (!relativePath || relativePath === ".") return false;
@@ -100,10 +99,29 @@ async function linkSharedDependencies(
 }
 
 async function writeWorkspaceContext(
+  spec: TaskSpec,
   paths: TaskPaths,
   sourceManifest: Manifest,
   linkedDependencies: string[],
 ): Promise<void> {
+  const normalizedFocusPaths = spec.worker.focusPaths.map((focusPath) =>
+    focusPath.split(path.sep).join("/").replace(/\/+$/, "")
+  );
+  const isFocused = (filePath: string): boolean => normalizedFocusPaths.some(
+    (focusPath) => filePath === focusPath || filePath.startsWith(`${focusPath}/`),
+  );
+  const files = sourceManifest.files.map((file) => file.path.split(path.sep).join("/"));
+  const focused = files.filter(isFocused);
+  const rootFiles = files.filter((filePath) => !filePath.includes("/") && !isFocused(filePath));
+  const remaining = files.filter(
+    (filePath) => !isFocused(filePath) && filePath.includes("/"),
+  );
+  const shownFiles = [...focused, ...rootFiles, ...remaining].slice(0, WORKSPACE_CONTEXT_MAX_FILES);
+  const topLevelCounts = new Map<string, number>();
+  for (const filePath of files) {
+    const topLevel = filePath.includes("/") ? filePath.split("/", 1)[0]! : "[root]";
+    topLevelCounts.set(topLevel, (topLevelCounts.get(topLevel) ?? 0) + 1);
+  }
   const content = [
     "# ForkLight Workspace Context",
     "",
@@ -111,8 +129,28 @@ async function writeWorkspaceContext(
     "Use Read for files, Grep for symbols, Glob for further discovery, Write for new files, and Edit for existing files.",
     "Shell and web tools are intentionally unavailable.",
     "",
-    "## Visible files",
-    ...sourceManifest.files.map((file) => `- ${file.path}`),
+    `## Visible files: ${files.length}`,
+    `Showing at most ${WORKSPACE_CONTEXT_MAX_FILES} paths. Declared focus paths are prioritized.`,
+    ...(shownFiles.length < files.length
+      ? [`${files.length - shownFiles.length} additional visible path(s) are omitted from this index.`]
+      : []),
+    "",
+    "## Top-level counts",
+    ...[...topLevelCounts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, count]) => `- ${name}: ${count}`),
+    "",
+    "## Declared focus paths",
+    ...(normalizedFocusPaths.length > 0
+      ? normalizedFocusPaths.map((focusPath) =>
+          `- ${focusPath} (${focused.filter(
+            (filePath) => filePath === focusPath || filePath.startsWith(`${focusPath}/`),
+          ).length} matching file(s))`
+        )
+      : ["- None"]),
+    "",
+    "## Prioritized file index",
+    ...shownFiles.map((filePath) => `- ${filePath}`),
     "",
     "## Verifier-only dependency links",
     ...(linkedDependencies.length > 0
@@ -155,47 +193,13 @@ export async function prepareWorkspace(
     filter,
   });
   const linkedDependencies = await linkSharedDependencies(spec, paths, excludes);
-  await writeWorkspaceContext(paths, sourceManifest, linkedDependencies);
+  await writeWorkspaceContext(spec, paths, sourceManifest, linkedDependencies);
   await writeFile(
     path.join(paths.root, "source-manifest.json"),
     `${JSON.stringify(sourceManifest, null, 2)}\n`,
     { mode: 0o600 },
   );
   return { ...sourceManifest, linkedDependencies };
-}
-
-export async function sourceIsUnchanged(spec: TaskSpec, paths: TaskPaths): Promise<boolean> {
-  const beforeText = await readFile(path.join(paths.root, "source-manifest.json"), "utf8");
-  const before = JSON.parse(beforeText) as Manifest;
-  const after = await buildManifest(spec.project, new Set(spec.workspace.exclude));
-  return JSON.stringify(before) === JSON.stringify(after);
-}
-
-/** Paths touched by `git diff --no-index baseline workspace` output. */
-export function parseAffectedPathsFromWorkspaceDiff(diff: string): string[] {
-  const files = new Set<string>();
-  const strip = (raw: string): string | undefined => {
-    if (raw === "/dev/null") return undefined;
-    if (raw.startsWith("baseline/")) return raw.slice("baseline/".length);
-    if (raw.startsWith("workspace/")) return raw.slice("workspace/".length);
-    return undefined;
-  };
-  for (const line of diff.split("\n")) {
-    if (!line.startsWith("diff --git ")) continue;
-    if (line.includes('"')) continue;
-    const rest = line.slice("diff --git ".length).trim();
-    const match = rest.match(/^a\/(\S+)\s+b\/(\S+)$/);
-    if (!match) continue;
-    for (const part of [match[1]!, match[2]!]) {
-      const relative = strip(part);
-      if (relative && !relative.includes("\0") && !path.isAbsolute(relative)) {
-        if (!relative.split("/").some((segment) => segment === ".." || segment === "." || !segment)) {
-          files.add(relative);
-        }
-      }
-    }
-  }
-  return [...files].sort();
 }
 
 export interface SourceCompatibilityAssessment {
@@ -243,36 +247,6 @@ export async function assessSourceCompatibility(
     conflictingPaths,
     unrelatedDriftPaths,
   };
-}
-
-async function removeGeneratedExcludes(paths: TaskPaths, excludes: string[]): Promise<void> {
-  for (const excludedName of excludes) {
-    if (!excludedName || excludedName.includes(path.sep)) continue;
-    for (const root of [paths.baseline, paths.workspace]) {
-      const target = path.join(root, excludedName);
-      try {
-        const metadata = await lstat(target);
-        if (!metadata.isSymbolicLink()) await rm(target, { recursive: true, force: true });
-      } catch {
-        // The excluded path was never created.
-      }
-    }
-  }
-}
-
-export async function writeWorkspaceDiff(paths: TaskPaths, excludes: string[] = []): Promise<string> {
-  await removeGeneratedExcludes(paths, excludes);
-  const result = await runCaptured(
-    "git",
-    ["diff", "--no-index", "--no-ext-diff", "--binary", "--", "baseline", "workspace"],
-    { cwd: paths.root },
-  );
-  if (result.exitCode !== 0 && result.exitCode !== 1) {
-    throw new Error(`Unable to generate workspace diff: ${result.stderr.trim()}`);
-  }
-  const diff = result.stdout;
-  await writeFile(paths.diff, diff, { mode: 0o600 });
-  return diff;
 }
 
 export async function assertWorkspaceExists(paths: TaskPaths): Promise<void> {

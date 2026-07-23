@@ -23,6 +23,16 @@ export function taskPaths(home: string, taskId: string): TaskPaths {
   };
 }
 
+export function verifierGitPaths(paths: TaskPaths): {
+  gitDir: string;
+  indexFile: string;
+} {
+  return {
+    gitDir: path.join(paths.root, "verifier-git"),
+    indexFile: path.join(paths.root, "verifier-git.index"),
+  };
+}
+
 export function daemonSocketPath(home = forklightHome()): string {
   return path.join(home, "forklight.sock");
 }

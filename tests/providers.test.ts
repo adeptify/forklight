@@ -172,7 +172,7 @@ const providerDefaultTable: Array<{
     provider: "deepseek",
     field: "defaultHaikuModel",
     configured: "deepseek-haiku-custom",
-    verify: (c, e) => { assert.equal(e.ANTHROPIC_DEFAULT_HAIKU_MODEL, "deepseek-haiku-custom"); },
+    verify: (_, e) => { assert.equal(e.ANTHROPIC_DEFAULT_HAIKU_MODEL, "deepseek-haiku-custom"); },
   },
   {
     provider: "glm",

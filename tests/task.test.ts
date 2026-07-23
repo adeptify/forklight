@@ -5,8 +5,15 @@ import path from "node:path";
 import test from "node:test";
 import { buildTaskRecord, registerTaskFromSpec } from "../src/core/runner.js";
 import { assessTaskQuality, buildWorkerPrompt, loadTaskSpec, parseTaskSpec } from "../src/core/task.js";
-import { budgetArguments } from "../src/workers/claude.js";
+import { attemptRuntimeBudget, budgetArguments } from "../src/workers/claude.js";
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "../src/core/settings.js";
+import type {
+  AttemptRecord,
+  EventRecord,
+  TaskRecord,
+  VerificationCommandResult,
+  VerificationResult,
+} from "../src/core/types.js";
 import { StateStore } from "../src/state/store.js";
 
 test("loads a legacy task and resolves a relative project", async () => {
@@ -48,6 +55,113 @@ test("includes independent verification feedback in a resumed Worker prompt", as
   );
   assert.match(prompt, /Correction feedback from independent verification/);
   assert.match(prompt, /boundary assertion was incorrect/);
+});
+
+test("requires the Worker to run the bounded checkpoint before reporting completion", async () => {
+  const loaded = await loadTaskSpec(path.resolve("examples/deepseek-checkout.yaml"));
+  const prompt = buildWorkerPrompt(loaded.spec, false);
+
+  assert.match(prompt, /mcp__forklight_checkpoint__run/);
+  assert.match(prompt, /acceptance-1/);
+  assert.match(prompt, /non-authoritative/);
+  assert.match(prompt, /must call/i);
+});
+
+test("builds complete remediation from the latest independent verification", async () => {
+  const failedOne: VerificationCommandResult = {
+    command: "npm test",
+    exitCode: 1,
+    stdout: "",
+    stderr: "first failure",
+    durationMs: 10,
+    timedOut: false,
+  };
+  const passedOne: VerificationCommandResult = {
+    command: "npm run typecheck",
+    exitCode: 0,
+    stdout: "types pass",
+    stderr: "",
+    durationMs: 20,
+    timedOut: false,
+  };
+  const failedTwo: VerificationCommandResult = {
+    command: "npm run lint",
+    exitCode: 2,
+    stdout: "lint output",
+    stderr: "second failure",
+    durationMs: 30,
+    timedOut: false,
+  };
+  const verification: VerificationResult = {
+    passed: false,
+    behaviorPassed: false,
+    policyPassed: false,
+    sourceCompatible: false,
+    commands: [failedOne, passedOne, failedTwo],
+    diffPath: "/tmp/diff.patch",
+    sourceUnchanged: false,
+    sourceCompatibility: {
+      compatible: false,
+      affectedPaths: ["src/a.ts"],
+      conflictingPaths: ["src/a.ts"],
+      unrelatedDriftPaths: ["README.md"],
+    },
+    changeBudget: {
+      filesChanged: 5,
+      changedLines: 410,
+      maxFiles: 4,
+      maxDiffLines: 300,
+      withinBudget: false,
+      mode: "hard",
+      effect: "hard-fail",
+    },
+    completionPolicy: {
+      check: "satisfied",
+      noChangeMode: "hard",
+      message: "Worker delivered changes",
+    },
+  };
+  const events: EventRecord[] = [
+    {
+      id: 1,
+      taskId: "task",
+      attemptId: "attempt-1",
+      sequence: 1,
+      timestamp: "2026-07-23T00:00:00.000Z",
+      type: "verification.completed",
+      summary: "Older verification",
+      payload: { ...verification, commands: [failedOne] },
+    },
+    {
+      id: 2,
+      taskId: "task",
+      attemptId: "attempt-2",
+      sequence: 2,
+      timestamp: "2026-07-23T00:01:00.000Z",
+      type: "verification.completed",
+      summary: "Latest verification",
+      payload: verification,
+    },
+  ];
+
+  const { buildRemediationPacket, formatRemediationPacket } = await import(
+    "../src/core/remediation.js"
+  );
+  const packet = buildRemediationPacket(events);
+
+  assert.ok(packet);
+  assert.equal(packet.verificationEventSequence, 2);
+  assert.deepEqual(packet.failedCommands, [failedOne, failedTwo]);
+  assert.ok(packet.passedChecks.includes("Command passed: npm run typecheck"));
+  assert.ok(packet.policyFindings.some((finding) => finding.includes("5/4 files")));
+  assert.deepEqual(packet.sourceConflicts, ["src/a.ts"]);
+  assert.doesNotMatch(JSON.stringify(packet), /README\.md/);
+
+  const feedback = formatRemediationPacket(packet);
+  assert.match(feedback, /npm test/);
+  assert.match(feedback, /npm run lint/);
+  assert.match(feedback, /first failure/);
+  assert.match(feedback, /second failure/);
 });
 
 test("rejects an underspecified version 2 Task Contract before execution", async () => {
@@ -591,6 +705,60 @@ function policyWithBudget(defaultMaxBudgetUsd: number | null): TaskPolicy {
   };
 }
 
+test("generated path patterns are snapped and unsafe patterns are rejected", () => {
+  const parsed = parseTaskSpec(
+    contractSpec({ workspace: { generatedPaths: ["**/.custom-cache/**"] } }),
+    process.cwd(),
+  );
+  assert.deepEqual(parsed.workspace.generatedPaths, ["**/.custom-cache/**"]);
+
+  for (const generatedPath of [
+    " **/.cache/**",
+    "/tmp/cache/**",
+    "../cache/**",
+    "pkg\\cache\\**",
+    `cache\0/**`,
+  ]) {
+    assert.throws(
+      () => parseTaskSpec(
+        contractSpec({ workspace: { generatedPaths: [generatedPath] } }),
+        process.cwd(),
+      ),
+      /task\.workspace\.generatedPaths/,
+    );
+  }
+});
+
+test("delivery commands preserve order and reject unsafe shapes", () => {
+  const parsed = parseTaskSpec(
+    contractSpec({
+      delivery: {
+        buildCommands: ["npm run build", "npm run package"],
+        activationCommands: ["forklight daemon restart"],
+        activationCheckCommands: ["forklight health --json"],
+      },
+    }),
+    process.cwd(),
+  );
+  assert.deepEqual(parsed.delivery, {
+    buildCommands: ["npm run build", "npm run package"],
+    activationCommands: ["forklight daemon restart"],
+    activationCheckCommands: ["forklight health --json"],
+  });
+
+  for (const delivery of [
+    { buildCommands: "npm run build" },
+    { buildCommands: [" "] },
+    { buildCommands: Array.from({ length: 17 }, () => "true") },
+    { buildCommands: [], unknown: [] },
+  ]) {
+    assert.throws(
+      () => parseTaskSpec(contractSpec({ delivery }), process.cwd()),
+      /task\.delivery/,
+    );
+  }
+});
+
 test("null default propagates to runtime spec when task omits budget", () => {
   const spec = parseTaskSpec(contractSpec(), process.cwd(), policyWithBudget(null));
   assert.equal(spec.runtime.maxBudgetUsd, null);
@@ -625,6 +793,20 @@ test("budgetArguments emits flag and value for finite number", () => {
 
 test("budgetArguments round-trips zero without special-casing", () => {
   assert.deepEqual(budgetArguments(0), ["--max-budget-usd", "0"]);
+});
+
+test("Attempt budget snapshot preserves explicit null instead of falling back to Task budget", () => {
+  const task = {
+    spec: { runtime: { maxBudgetUsd: 1.5 } },
+  } as TaskRecord;
+  assert.equal(
+    attemptRuntimeBudget(task, { runtimeBudgetUsd: null } as AttemptRecord),
+    null,
+  );
+  assert.equal(
+    attemptRuntimeBudget(task, {} as AttemptRecord),
+    1.5,
+  );
 });
 
 test("creation-time budget snapshot survives later policy changes", async () => {

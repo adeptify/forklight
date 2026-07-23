@@ -1,0 +1,326 @@
+import { buildDeliveryLineage } from "./delivery-lineage.js";
+import { latestMainReview } from "./main-review.js";
+import type {
+  AttemptRecord,
+  CheckpointReport,
+  EventRecord,
+  IntegrationOperationView,
+  IntegrationResultRecord,
+  TaskDecisionView,
+  TaskRecord,
+  VerificationResult,
+  WorkerClaim,
+} from "./types.js";
+
+const WORKER_CLAIM_PREVIEW_MAX_CHARS = 360;
+const WORKER_CLAIM_TRUNCATION_MARKER =
+  "\n\n[Truncated; use deep inspect for the full Worker output.]";
+
+function workerClaimPreview(text: string): string {
+  const normalized = text.trim();
+  if (normalized.length <= WORKER_CLAIM_PREVIEW_MAX_CHARS) return normalized;
+  return normalized.slice(
+    0,
+    WORKER_CLAIM_PREVIEW_MAX_CHARS - WORKER_CLAIM_TRUNCATION_MARKER.length,
+  ) + WORKER_CLAIM_TRUNCATION_MARKER;
+}
+
+function latestEvent(
+  events: readonly EventRecord[],
+  type: EventRecord["type"],
+): EventRecord | undefined {
+  return events
+    .filter((event) => event.type === type)
+    .reduce<EventRecord | undefined>(
+      (latest, event) =>
+        latest === undefined || event.sequence > latest.sequence ? event : latest,
+      undefined,
+    );
+}
+
+function objectPayload(event: EventRecord | undefined): Record<string, unknown> | undefined {
+  return event?.payload !== null && typeof event?.payload === "object"
+    ? event.payload as Record<string, unknown>
+    : undefined;
+}
+
+function workerClaim(
+  task: TaskRecord,
+  events: readonly EventRecord[],
+): TaskDecisionView["workerClaim"] {
+  const payload = objectPayload(latestEvent(events, "worker.completed"));
+  const structured = payload?.claim;
+  let claim: WorkerClaim | undefined;
+  if (
+    structured !== null
+    && typeof structured === "object"
+    && (structured as { label?: unknown }).label === "unverified-claim"
+    && typeof (structured as { text?: unknown }).text === "string"
+  ) {
+    claim = structured as WorkerClaim;
+  } else if (typeof payload?.result === "string") {
+    claim = { label: "unverified-claim", text: payload.result };
+  }
+  return claim === undefined
+    ? undefined
+    : {
+        ...claim,
+        text: workerClaimPreview(claim.text),
+        provider: task.spec.provider.name,
+        model: task.spec.provider.model,
+      };
+}
+
+function checkpoint(events: readonly EventRecord[]): CheckpointReport | undefined {
+  const payload = objectPayload(latestEvent(events, "checkpoint.completed"));
+  return payload?.authority === "non-authoritative-checkpoint"
+    && typeof payload.attemptId === "string"
+    && Array.isArray(payload.commands)
+    && payload.patches !== null
+    && typeof payload.patches === "object"
+    ? payload as unknown as CheckpointReport
+    : undefined;
+}
+
+function verification(events: readonly EventRecord[]): VerificationResult | undefined {
+  const payload = objectPayload(latestEvent(events, "verification.completed"));
+  if (
+    typeof payload?.passed === "boolean"
+    && typeof payload.behaviorPassed === "boolean"
+    && typeof payload.policyPassed === "boolean"
+    && typeof payload.sourceCompatible === "boolean"
+    && Array.isArray(payload.commands)
+    && typeof payload.diffPath === "string"
+    && typeof payload.sourceUnchanged === "boolean"
+  ) {
+    const commands = payload.commands.flatMap((value) => {
+      if (value === null || typeof value !== "object") return [];
+      const command = value as Record<string, unknown>;
+      if (
+        typeof command.command !== "string"
+        || !Number.isSafeInteger(command.exitCode)
+        || typeof command.stdout !== "string"
+        || typeof command.stderr !== "string"
+        || typeof command.durationMs !== "number"
+        || typeof command.timedOut !== "boolean"
+      ) {
+        return [];
+      }
+      return [{
+        command: command.command,
+        exitCode: command.exitCode as number,
+        stdout: command.stdout,
+        stderr: command.stderr,
+        durationMs: command.durationMs,
+        timedOut: command.timedOut,
+      }];
+    });
+    if (commands.length !== payload.commands.length) return undefined;
+    return {
+      passed: payload.passed,
+      behaviorPassed: payload.behaviorPassed,
+      policyPassed: payload.policyPassed,
+      sourceCompatible: payload.sourceCompatible,
+      commands,
+      diffPath: payload.diffPath,
+      sourceUnchanged: payload.sourceUnchanged,
+    };
+  }
+  return undefined;
+}
+
+function integrationView(
+  taskId: string,
+  events: readonly EventRecord[],
+  results: readonly IntegrationResultRecord[],
+): IntegrationOperationView | undefined {
+  const started = latestEvent(events, "integration.operation.started");
+  const startPayload = objectPayload(started);
+  const latestResult = [...results]
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .at(-1);
+  const operationId =
+    typeof startPayload?.operationId === "string"
+      ? startPayload.operationId
+      : latestResult?.id;
+  const receiptId =
+    typeof startPayload?.receiptId === "string"
+      ? startPayload.receiptId
+      : results.find((candidate) => candidate.id === operationId)?.receiptId;
+  if (operationId === undefined || receiptId === undefined) return undefined;
+  const result = results.find((candidate) => candidate.id === operationId);
+  const stages = result?.stages ?? events
+    .filter((event) => event.type === "integration.stage.completed")
+    .flatMap((event) => {
+      const payload = objectPayload(event);
+      if (payload?.operationId !== operationId) return [];
+      const evidence = payload.evidence;
+      return evidence !== null && typeof evidence === "object"
+        ? [evidence as IntegrationOperationView["stages"][number]]
+        : [];
+    });
+  const recovered = events.some((event) => {
+    const payload = objectPayload(event);
+    return event.type === "integration.operation.recovered"
+      && payload?.operationId === operationId;
+  });
+  return {
+    operationId,
+    taskId,
+    receiptId,
+    status: result !== undefined ? "completed" : recovered ? "outcome-unknown" : "running",
+    stages,
+    ...(result === undefined ? {} : { result }),
+  };
+}
+
+function stageAndAction(input: {
+  task: TaskRecord;
+  verification?: VerificationResult;
+  review?: ReturnType<typeof latestMainReview>;
+  integration?: IntegrationOperationView;
+}): Pick<TaskDecisionView, "stage" | "nextAction"> {
+  const integration = input.integration;
+  if (integration !== undefined) {
+    if (integration.result === undefined) {
+      return {
+        stage: "integrating",
+        nextAction: integration.status === "outcome-unknown"
+          ? "Query this Integration operation again; its outcome is not yet known"
+          : "Wait for Integration stages to complete",
+      };
+    }
+    if (integration.result.status !== "applied") {
+      return {
+        stage: "integration-failed",
+        nextAction: "Review Integration evidence and choose recovery or correction",
+      };
+    }
+    const runtime = integration.stages.find(
+      (stage) => stage.stage === "runtime-activated",
+    );
+    if (runtime?.status === "passed") {
+      return { stage: "activated", nextAction: "Delivery is active" };
+    }
+    return {
+      stage: "applied-not-activated",
+      nextAction: "Run or verify activation",
+    };
+  }
+
+  if (input.review?.decision === "revise") {
+    return {
+      stage: "revision-requested",
+      nextAction: "Resume with the Main Codex review reason",
+    };
+  }
+  if (input.review?.decision === "reject") {
+    return {
+      stage: "main-rejected",
+      nextAction: "Stop or revise only with a new explicit decision",
+    };
+  }
+  if (input.review?.decision === "accept") {
+    return {
+      stage: "ready-for-integration",
+      nextAction: "User may authorize Integration",
+    };
+  }
+  if (input.verification !== undefined) {
+    if (!input.verification.passed) {
+      return {
+        stage: "machine-failed",
+        nextAction: "Review remediation and decide whether to resume",
+      };
+    }
+    return {
+      stage: "awaiting-main-review",
+      nextAction: "Main Codex must review",
+    };
+  }
+  if (
+    input.task.status === "preparing"
+    || input.task.status === "running"
+    || input.task.status === "verifying"
+  ) {
+    return {
+      stage: "worker-running",
+      nextAction: "Wait for independent verification",
+    };
+  }
+  if (
+    input.task.status === "queued"
+    || input.task.status === "waiting"
+    || input.task.status === "blocked"
+  ) {
+    return {
+      stage: "queued",
+      nextAction: input.task.status === "blocked"
+        ? "Resolve the blocking prerequisite"
+        : "Wait for execution to start",
+    };
+  }
+  return {
+    stage: "unknown",
+    nextAction: "Inspect the audit timeline for missing evidence",
+  };
+}
+
+export function buildTaskDecisionView(input: {
+  task: TaskRecord;
+  attempts: readonly AttemptRecord[];
+  events: readonly EventRecord[];
+  integrationResults: readonly IntegrationResultRecord[];
+}): TaskDecisionView {
+  const orderedEvents = [...input.events].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  const latest = orderedEvents.at(-1);
+  const latestVerification = verification(orderedEvents);
+  const review = latestMainReview(orderedEvents);
+  const latestVerificationEvent = latestEvent(orderedEvents, "verification.completed");
+  const currentReview =
+    review !== undefined
+    && latestVerificationEvent !== undefined
+    && review.verificationEventSequence === latestVerificationEvent.sequence
+      ? review
+      : undefined;
+  const integration = integrationView(
+    input.task.id,
+    orderedEvents,
+    input.integrationResults,
+  );
+  const decision = stageAndAction({
+    task: input.task,
+    ...(latestVerification === undefined ? {} : { verification: latestVerification }),
+    ...(currentReview === undefined ? {} : { review: currentReview }),
+    ...(integration === undefined ? {} : { integration }),
+  });
+  const active =
+    input.task.status === "preparing"
+    || input.task.status === "running"
+    || input.task.status === "verifying";
+  const terminal =
+    input.task.status === "succeeded"
+    || input.task.status === "failed"
+    || input.task.status === "interrupted";
+  const claim = workerClaim(input.task, orderedEvents);
+  const checkpointReport = checkpoint(orderedEvents);
+  return {
+    taskId: input.task.id,
+    ...decision,
+    ...(claim === undefined ? {} : { workerClaim: claim }),
+    ...(checkpointReport === undefined ? {} : { checkpoint: checkpointReport }),
+    ...(latestVerification === undefined ? {} : { verification: latestVerification }),
+    ...(currentReview === undefined ? {} : { mainReview: currentReview }),
+    lineage: buildDeliveryLineage(input.attempts, orderedEvents),
+    ...(integration === undefined ? {} : { integration }),
+    progress: {
+      activity: active ? "active" : terminal ? "terminal" : "quiet",
+      latestEventSequence: latest?.sequence ?? 0,
+      ...(latest === undefined
+        ? {}
+        : { lastEventAt: latest.timestamp, latestAction: latest.summary }),
+    },
+  };
+}

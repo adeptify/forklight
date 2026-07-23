@@ -1,0 +1,95 @@
+version: 2
+name: Require a bounded Worker checkpoint before completion
+project: ../..
+contract:
+  outcome: Every Worker prompt must require one post-edit bounded checkpoint using all approved acceptance command IDs before the Worker reports completion.
+  context:
+    - Two real self-hosting Tasks completed without a checkpoint event even though the checkpoint MCP was available to each Worker.
+    - The runtime prompt currently says ForkLight verifies independently but does not explicitly require the Worker to invoke the bounded checkpoint tool.
+    - A focused regression test is already present and failing, while the active daemon was built with the intended protocol so this Task can prove the real tool call.
+  inScope:
+    - Add one shared checkpoint protocol section to legacy and version two Worker prompts.
+    - Enumerate every acceptance command as a deterministic acceptance-N identifier.
+    - Explain that checkpoint evidence is non-authoritative and independent verification still runs afterward.
+  outOfScope:
+    - Do not change checkpoint execution, daemon protocol, persistence, permissions, MCP registration, or verification authority.
+    - Do not add a database entity, service, dependency, commit, or push.
+    - Do not weaken or remove the seeded regression test.
+  executionSteps:
+    - Read the prompt builders and focused regression to locate the missing runtime instruction.
+    - Add the smallest shared formatter that names every approved checkpoint command ID.
+    - Invoke the required checkpoint with all three approved command IDs after the final edit.
+    - If checkpoint evidence fails, correct the implementation and invoke the checkpoint again before reporting completion.
+  deliverables:
+    - Legacy and version two prompts both require the bounded checkpoint without changing its authority.
+    - Focused prompt, TypeScript, and patch-whitespace checks pass.
+  modules:
+    - name: Worker prompt checkpoint protocol
+      responsibility: Tell an isolated Worker exactly when and how to run approved acceptance commands without granting Shell access or verification authority.
+      consumes:
+        - Existing TaskSpec acceptance command count and immutable prompt sections.
+      produces:
+        - One deterministic prompt section containing every acceptance-N command identifier.
+      boundaries:
+        - It only formats instructions and never executes commands, changes permissions, or treats checkpoint output as authoritative.
+  callChain:
+    - Runner builds the Worker prompt from the stored TaskSpec.
+    - The prompt exposes the checkpoint MCP tool and deterministic acceptance command identifiers.
+    - Worker edits only its isolated workspace and calls the bounded checkpoint after its final edit.
+    - ForkLight records checkpoint events, then independently reruns every acceptance command before Main Codex review.
+  scenarios:
+    - name: version two task with multiple commands
+      given: A version two Task has three acceptance commands.
+      when: ForkLight builds the Worker prompt.
+      then: The prompt requires one checkpoint call containing acceptance-1, acceptance-2, and acceptance-3.
+    - name: checkpoint reports a failure
+      given: The bounded checkpoint returns at least one failed approved command.
+      when: The Worker reads the checkpoint evidence.
+      then: The prompt requires correction and another checkpoint before completion while independent verification remains authoritative.
+    - name: legacy task
+      given: A legacy Task has one acceptance command.
+      when: ForkLight builds its Worker prompt.
+      then: The same shared protocol requires acceptance-1 without granting arbitrary command execution.
+  risks:
+    - Ambiguous wording could still let a Worker skip the tool or mistake checkpoint output for final verification.
+    - Duplicated legacy and version two wording could drift unless one shared formatter produces both sections.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 50
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1m]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task.ts
+    - tests/task.test.ts
+delivery:
+  buildCommands:
+    - npm run build
+  activationCommands:
+    - node dist/src/cli.js daemon stop; for i in {1..100}; do node dist/src/cli.js daemon status >/dev/null 2>&1 || break; sleep 0.05; done; node dist/src/cli.js daemon start
+  activationCheckCommands:
+    - node dist/src/cli.js daemon status | grep -q '"buildIdentity"'
+acceptance:
+  criteria:
+    - Both prompt versions require one bounded post-edit checkpoint with every deterministic command identifier.
+    - Checkpoint wording preserves independent verification as the authoritative gate.
+    - The focused regression, TypeScript compilation, and whitespace audit pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

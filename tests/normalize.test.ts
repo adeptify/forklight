@@ -3,6 +3,24 @@ import test from "node:test";
 import { ClaudeEventNormalizer } from "../src/events/normalize.js";
 import { resolveWorkerFailure } from "../src/workers/claude.js";
 
+test("labels successful Worker terminal text as an unverified claim", () => {
+  const normalizer = new ClaudeEventNormalizer();
+  const events = normalizer.parseLine(JSON.stringify({
+    type: "result",
+    is_error: false,
+    result: "All tests pass and 3 files changed",
+  }));
+
+  const payload = events[0]?.payload as Record<string, unknown> | undefined;
+  assert.equal(events[0]?.type, "worker.completed");
+  assert.deepEqual(payload?.claim, {
+    label: "unverified-claim",
+    text: "All tests pass and 3 files changed",
+  });
+  assert.equal("result" in (payload ?? {}), false);
+  assert.equal(events[0]?.terminal?.resultText, "All tests pass and 3 files changed");
+});
+
 test("normalizes tool lifecycle and terminal result without token noise", () => {
   const normalizer = new ClaudeEventNormalizer();
   assert.deepEqual(normalizer.parseLine(JSON.stringify({ type: "stream_event" })), []);

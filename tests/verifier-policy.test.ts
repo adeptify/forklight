@@ -4,8 +4,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { SettingsService } from "../src/core/settings.js";
-import { buildTaskRecord, registerTaskFromSpec } from "../src/core/runner.js";
+import { registerTaskFromSpec } from "../src/core/runner.js";
 import { loadTaskSpec } from "../src/core/task.js";
 import type { TaskRecord } from "../src/core/types.js";
 import { StateStore } from "../src/state/store.js";
@@ -197,6 +196,40 @@ acceptance:
     },
   };
 }
+
+test("runs every acceptance command after an earlier command fails", async () => {
+  const { store, task, cleanup } = await fixture("hard", false, false);
+  try {
+    task.spec.acceptance.commands = [
+      `node -e "console.error('first failed'); process.exit(7)"`,
+      `node -e "console.log('second ran')"`,
+      `node -e "console.error('third failed'); process.exit(9)"`,
+    ];
+    const attemptId = "attempt-all-commands";
+    store.createAttempt({
+      id: attemptId,
+      taskId: task.id,
+      ordinal: 1,
+      status: "running",
+      sessionId: task.sessionId,
+      rawLogPath: "/tmp/log",
+      startedAt: new Date().toISOString(),
+    });
+
+    const { verifyTask } = await import("../src/core/verifier.js");
+    const result = await verifyTask(store, task, attemptId);
+
+    assert.deepEqual(result.commands.map((command) => command.exitCode), [7, 0, 9]);
+    assert.equal(result.behaviorPassed, false);
+    assert.deepEqual(result.patches?.business.affectedPaths, []);
+    assert.equal(
+      store.listEvents(task.id).filter((event) => event.type === "verification.command.completed").length,
+      3,
+    );
+  } finally {
+    cleanup();
+  }
+});
 
 test("changeBudgetMode warn allows over-budget Task to pass with warning effect", async () => {
   const { store, task, cleanup } = await fixtureWithBudget("warn", 5);
@@ -513,4 +546,3 @@ acceptance:
     rmSync(root, { recursive: true, force: true });
   }
 });
-

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,7 +12,7 @@ import {
   type CandidateOverride,
   type CompetitionCandidateInput,
 } from "../src/core/competition.js";
-import type { CompetitionSettings, ForkLightSettings } from "../src/core/settings.js";
+import type { CompetitionSettings } from "../src/core/settings.js";
 import { SettingsService } from "../src/core/settings.js";
 import type {
   AttemptRecord,
@@ -829,7 +828,7 @@ test("coordinator rejects all-or-nothing without persisting any task, event, com
 
 test("coordinator creates byte-equivalent isolated candidates from one snapshot with cross-provider config", async () => {
   const src = makeSourceProject();
-  const { coordinator, store, home, cleanup } = setupCoordinator(src);
+  const { coordinator, store, cleanup } = setupCoordinator(src);
   try {
     const baseSpec = makeContractSpec(src);
     const candidates: CandidateOverride[] = [
@@ -917,38 +916,14 @@ test("coordinator creates byte-equivalent isolated candidates from one snapshot 
 
 test("candidates clone canonical snapshot after live source changes", async () => {
   const src = makeSourceProject();
-  const { coordinator, store, home, cleanup } = setupCoordinator(src);
-
-  // Patch prepareWorkspace to inject a source change between candidates
-  const originalPrepare = (
-    await import("../src/workspace/copy.js")
-  ).prepareWorkspace;
-  let injected = false;
-  const patched = async (...args: Parameters<typeof originalPrepare>) => {
-    const result = await originalPrepare(...args);
-    if (!injected) {
-      // After first candidate is prepared, modify the live source
-      writeFileSync(path.join(src, "src", "after-snapshot.ts"), "export const after = 1;\n");
-      injected = true;
-    }
-    return result;
-  };
-  // Override the module-level import — since it's imported by name, we can't easily mock.
-  // Instead, test that the snapshot captures the state at creation time by verifying
-  // that the source change does NOT appear in candidate workspaces.
-  // We'll write the file before create but verify the manifest is what it was at snapshot.
-
-  // Simpler approach: create the file BEFORE create but after building the in-memory intent,
-  // but the coordinator snapshots first so the race doesn't matter.
-  // Better test: create a competition, then verify that post-snapshot source changes
-  // are invisible to candidates.
+  const { coordinator, store, cleanup } = setupCoordinator(src);
   const baseSpec = makeContractSpec(src);
   const candidates: CandidateOverride[] = [
     { providerName: "deepseek", modelName: "v4" },
     { providerName: "minimax", modelName: "m3" },
   ];
 
-  const { competition, taskIds } = await coordinator.create(baseSpec, "/test.yaml", candidates);
+  const { taskIds } = await coordinator.create(baseSpec, "/test.yaml", candidates);
 
   // Now add a file to the live source after competition creation
   writeFileSync(path.join(src, "src", "after-snapshot.ts"), "export const after = 1;\n");

@@ -4,8 +4,16 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   CompetitionRecord,
+  AttemptAuthorization,
+  AttemptExecutionOptions,
+  CheckpointReport,
+  CheckpointRequest,
   DependencyRecord,
   IntegrationResultRecord,
+  IntegrationOperationView,
+  IntegrationStageEvidence,
+  MainReviewDecision,
+  MainReviewDecisionKind,
   PlanItemRecord,
   PlanRecord,
   ProbeEvidence,
@@ -15,6 +23,9 @@ import type {
   TaskSpec,
   TaskStatus,
 } from "../core/types.js";
+import { runCheckpoint } from "../core/checkpoint.js";
+import { authorizeExtraAttempt } from "../core/attempt-authorization.js";
+import { latestMainReview, recordMainReview } from "../core/main-review.js";
 import type { ProviderName } from "../core/providers.js";
 import { providerNames } from "../core/providers.js";
 import {
@@ -58,7 +69,6 @@ import {
 } from "../core/statistics.js";
 import {
   SettingsService,
-  type ExecutionSettings,
   type ForkLightSettings,
   type TaskPolicy,
 } from "../core/settings.js";
@@ -67,7 +77,6 @@ import { assertWorkspaceExists } from "../workspace/copy.js";
 import {
   applyIntegration,
   preflightIntegration,
-  type IntegrationResult,
   type PreflightReceipt,
 } from "../core/integration.js";
 import { getTaskEconomicsReport, type TaskEconomicsReport } from "../core/task-economics-report.js";
@@ -82,6 +91,16 @@ import {
 import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
 import type { DirectCodexSampleReview } from "../core/direct-codex-review.js";
 import type { DirectCodexPublicationPreview, DirectCodexRegistrationResult } from "../core/direct-codex-publication-service.js";
+import { currentBuildIdentity } from "../core/build-identity.js";
+import {
+  buildIntegrationOperationView,
+  type IntegrationOperationContext,
+} from "../core/integration-operation.js";
+import { buildTaskDecisionView } from "../core/task-decision-view.js";
+import {
+  launchActivationRunner,
+  writeActivationHandoff,
+} from "../activation/runner.js";
 
 export interface PlanRegistrationResult {
   planId: string;
@@ -93,6 +112,7 @@ interface QueuedJob {
   resuming: boolean;
   revising?: boolean;
   feedback?: string;
+  executionOptions?: AttemptExecutionOptions;
 }
 
 type ProviderProbeOutcome = ProbeEvidence | { error: string };
@@ -176,6 +196,8 @@ async function stopOrphanWorker(pid: number): Promise<void> {
 export class DaemonCoordinator {
   private readonly queue: QueuedJob[] = [];
   private readonly active = new Map<string, Promise<void>>();
+  private readonly activeIntegrations = new Map<string, Promise<void>>();
+  private readonly integrationOperations = new Map<string, IntegrationOperationContext>();
   private closing = false;
 
   constructor(
@@ -204,7 +226,12 @@ export class DaemonCoordinator {
       activeTaskIds: [...this.active.keys()],
       queuedTaskIds: this.queue.map((job) => job.taskId),
       databasePath: this.store.databasePath,
+      buildIdentity: currentBuildIdentity(),
     };
+  }
+
+  checkpoint(request: CheckpointRequest): Promise<CheckpointReport> {
+    return runCheckpoint(this.store, request);
   }
 
   async submitFile(taskFile: string): Promise<TaskRecord> {
@@ -399,20 +426,38 @@ export class DaemonCoordinator {
     return this.submitPlan(report.plan);
   }
 
-  resume(taskId: string, feedback?: string): TaskRecord {
+  resume(
+    taskId: string,
+    feedback?: string,
+    authorization?: AttemptAuthorization,
+  ): TaskRecord {
     const task = this.store.getTask(taskId);
     if (task.status !== "interrupted" && task.status !== "failed") {
       throw new Error(`Task ${taskId} cannot resume from status ${task.status}`);
     }
     const maxAttempts = this.settings.get().execution.maxAttempts;
     const attemptCount = this.store.listAttempts(taskId).length;
-    if (attemptCount >= maxAttempts) {
+    if (attemptCount >= maxAttempts && authorization === undefined) {
       throw new Error(`Task ${taskId} has reached maximum attempts (${maxAttempts})`);
     }
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    if (this.active.has(taskId) || this.queue.some((job) => job.taskId === taskId)) {
+      throw new Error(`Task ${taskId} is already queued or running`);
+    }
+    const executionOptions = authorization === undefined
+      ? undefined
+      : authorizeExtraAttempt(
+          this.store,
+          taskId,
+          authorization,
+          maxAttempts,
+          this.settings.get().execution.maximumBudgetUsd,
+        );
     this.enqueue({
       taskId,
       resuming: attemptCount > 0,
       ...(feedback === undefined ? {} : { feedback }),
+      ...(executionOptions === undefined ? {} : { executionOptions }),
     });
     return task;
   }
@@ -431,9 +476,19 @@ export class DaemonCoordinator {
    *  Queue-admission is verified BEFORE prepareReviseTask so a rejection
    *  never strands the Task in queued state with a recorded event.  The
    *  enqueue method retains its own defensive duplicate assertion. */
-  revise(taskId: string, feedback: string): TaskRecord {
-    const maxAttempts = this.settings.get().execution.maxAttempts;
-    const check = checkReviseEligibility(this.store, taskId, feedback, maxAttempts);
+  revise(
+    taskId: string,
+    feedback: string,
+    authorization?: AttemptAuthorization,
+  ): TaskRecord {
+    const execution = this.settings.get().execution;
+    const maxAttempts = execution.maxAttempts;
+    const check = checkReviseEligibility(
+      this.store,
+      taskId,
+      feedback,
+      authorization === undefined ? maxAttempts : maxAttempts + 1,
+    );
     if (!check.eligible) {
       throw new Error(check.reason !== undefined
         ? describeReviseRejection(check.reason)
@@ -448,6 +503,20 @@ export class DaemonCoordinator {
     if (this.active.has(taskId) || this.queue.some((job) => job.taskId === taskId)) {
       throw new Error(`Task ${taskId} is already queued or running`);
     }
+    const executionOptions = authorization === undefined
+      ? undefined
+      : authorizeExtraAttempt(
+          this.store,
+          taskId,
+          authorization,
+          maxAttempts,
+          execution.maximumBudgetUsd,
+        );
+    recordMainReview(this.store, taskId, {
+      decision: "revise",
+      reason: check.canonicalFeedback!,
+      confirm: true,
+    });
     const queued = prepareReviseTask(this.store, taskId);
     this.enqueue({
       taskId,
@@ -456,8 +525,18 @@ export class DaemonCoordinator {
       // canonicalFeedback is defined when eligible: true (proven above);
       // the exact trimmed value is what the Worker receives.
       feedback: check.canonicalFeedback!,
+      ...(executionOptions === undefined ? {} : { executionOptions }),
     }, true);
     return queued;
+  }
+
+  mainReview(
+    taskId: string,
+    decision: MainReviewDecisionKind,
+    reason: string,
+    confirm: true,
+  ): MainReviewDecision {
+    return recordMainReview(this.store, taskId, { decision, reason, confirm });
   }
 
   status(taskId: string): TaskRecord {
@@ -544,20 +623,252 @@ export class DaemonCoordinator {
     } catch {
       // The diff is created when verification starts.
     }
+    const attempts = this.store.listAttempts(taskId);
+    const events = this.store.listEvents(taskId);
     return {
+      task,
+      attempts,
+      events,
+      mainReview: latestMainReview(events),
+      decision: buildTaskDecisionView({
+        task,
+        attempts,
+        events,
+        integrationResults: this.store.listIntegrationResults(taskId),
+      }),
+      diff,
+    };
+  }
+
+  taskDecision(taskId: string): import("../core/types.js").TaskDecisionView {
+    const task = this.store.getTask(taskId);
+    return buildTaskDecisionView({
       task,
       attempts: this.store.listAttempts(taskId),
       events: this.store.listEvents(taskId),
-      diff,
-    };
+      integrationResults: this.store.listIntegrationResults(taskId),
+    });
   }
 
   async integrationPreflight(taskId: string): Promise<PreflightReceipt> {
     return preflightIntegration(this.store, taskId, this.settings.get().integration);
   }
 
-  async integrationApply(taskId: string, receiptId: string): Promise<IntegrationResult> {
-    return applyIntegration(this.store, taskId, receiptId, this.settings.get().integration);
+  startIntegration(taskId: string, receiptId: string): IntegrationOperationView {
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    this.store.getTask(taskId);
+    const receipt = this.store.getIntegrationReceipt(receiptId);
+    if (receipt === undefined) throw new Error("Integration receipt not found");
+    if (receipt.taskId !== taskId) throw new Error("Integration receipt belongs to another Task");
+    if (receipt.consumed) throw new Error("Integration receipt has already been consumed");
+    if (receipt.rejectionReasons.length > 0) {
+      throw new Error("Integration preflight receipt did not pass");
+    }
+    if (Date.parse(receipt.expiresAt) <= Date.now()) {
+      throw new Error("Integration preflight receipt has expired");
+    }
+    if ([...this.integrationOperations.values()].some(
+      (operation) =>
+        operation.receiptId === receiptId
+        && this.activeIntegrations.has(operation.operationId),
+    )) {
+      throw new Error("Integration receipt already has a running operation");
+    }
+
+    const context: IntegrationOperationContext = {
+      operationId: randomUUID(),
+      taskId,
+      receiptId,
+    };
+    this.integrationOperations.set(context.operationId, context);
+    this.store.addEvent(
+      taskId,
+      undefined,
+      "integration.operation.started",
+      "Integration operation started",
+      context,
+    );
+    const execution = applyIntegration(
+      this.store,
+      taskId,
+      receiptId,
+      this.settings.get().integration,
+      context.operationId,
+    )
+      .then(async (result) => {
+        if (result.status !== "activation-pending") return;
+        const task = this.store.getTask(taskId);
+        try {
+          const handoffPath = await writeActivationHandoff(
+            task.paths.root,
+            {
+              ...result.handoff,
+              home: path.dirname(this.store.databasePath),
+            },
+          );
+          launchActivationRunner(
+            handoffPath,
+            path.join(task.paths.logs, `activation-${context.operationId}.log`),
+          );
+        } catch (error) {
+          this.completeIntegrationActivation(
+            context.operationId,
+            taskId,
+            receiptId,
+            {
+              stage: "runtime-activated",
+              status: "failed",
+              error: `Activation runner launch failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            },
+          );
+        }
+      })
+      .catch(() => {
+        if (this.store.getIntegrationResult(context.operationId) === undefined) {
+          this.store.addEvent(
+            taskId,
+            undefined,
+            "integration.operation.recovered",
+            "Integration background execution ended without a final result",
+            { ...context, status: "outcome-unknown" },
+          );
+        }
+      })
+      .finally(() => {
+        this.activeIntegrations.delete(context.operationId);
+      });
+    this.activeIntegrations.set(context.operationId, execution);
+    return buildIntegrationOperationView(this.store, context, true);
+  }
+
+  private integrationContext(operationId: string): IntegrationOperationContext {
+    const known = this.integrationOperations.get(operationId);
+    if (known !== undefined) return known;
+    const result = this.store.getIntegrationResult(operationId);
+    if (result === undefined) throw new Error(`Unknown Integration operation: ${operationId}`);
+    const context = {
+      operationId,
+      taskId: result.taskId,
+      receiptId: result.receiptId,
+    };
+    this.integrationOperations.set(operationId, context);
+    return context;
+  }
+
+  integrationStatus(operationId: string): IntegrationOperationView {
+    const context = this.integrationContext(operationId);
+    return buildIntegrationOperationView(
+      this.store,
+      context,
+      this.activeIntegrations.has(operationId),
+    );
+  }
+
+  async waitIntegration(
+    operationId: string,
+    timeoutMs: number,
+  ): Promise<IntegrationOperationView> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 3_600_000) {
+      throw new Error("Integration wait timeoutMs must be an integer from 1 to 3600000");
+    }
+    const context = this.integrationContext(operationId);
+    const deadline = Date.now() + timeoutMs;
+    while (
+      this.store.getIntegrationResult(operationId) === undefined
+      && Date.now() < deadline
+    ) {
+      await sleep(Math.min(50, Math.max(1, deadline - Date.now())));
+    }
+    const completed = this.store.getIntegrationResult(operationId) !== undefined;
+    return buildIntegrationOperationView(
+      this.store,
+      context,
+      this.activeIntegrations.has(operationId),
+      !completed,
+    );
+  }
+
+  completeIntegrationActivation(
+    operationId: string,
+    taskId: string,
+    receiptId: string,
+    evidence: IntegrationStageEvidence,
+  ): IntegrationOperationView {
+    const context = this.integrationContext(operationId);
+    if (context.taskId !== taskId || context.receiptId !== receiptId) {
+      throw new Error("Activation completion does not match Integration operation");
+    }
+    if (this.store.getIntegrationResult(operationId) !== undefined) {
+      throw new Error("Integration operation already has a final result");
+    }
+    if (
+      evidence.stage !== "runtime-activated"
+      || (evidence.status !== "passed" && evidence.status !== "failed")
+    ) {
+      throw new Error("Activation completion requires passed or failed runtime evidence");
+    }
+    const allCommandsPassed =
+      evidence.commands?.every((command) => command.exitCode === 0) ?? true;
+    if (
+      (evidence.status === "passed" && !allCommandsPassed)
+      || (evidence.status === "failed" && allCommandsPassed && evidence.error === undefined)
+    ) {
+      throw new Error("Activation completion status conflicts with command evidence");
+    }
+
+    const before = buildIntegrationOperationView(this.store, context, true);
+    const stage = (name: IntegrationStageEvidence["stage"]): IntegrationStageEvidence | undefined =>
+      before.stages.find((candidate) => candidate.stage === name);
+    if (stage("source-applied")?.status !== "passed") {
+      throw new Error("Activation completion requires source-applied evidence");
+    }
+    if (stage("source-verified")?.status !== "passed") {
+      throw new Error("Activation completion requires source-verified evidence");
+    }
+    const build = stage("artifact-built");
+    if (build?.status !== "passed" && build?.status !== "not-applicable") {
+      throw new Error("Activation completion requires artifact-built evidence");
+    }
+
+    this.store.addEvent(
+      taskId,
+      undefined,
+      "integration.stage.completed",
+      `runtime-activated: ${evidence.status}`,
+      { operationId, receiptId, evidence },
+    );
+    const stages = [
+      ...before.stages.filter((candidate) => candidate.stage !== "runtime-activated"),
+      evidence,
+    ];
+    const task = this.store.getTask(taskId);
+    const verificationCommands = stage("source-verified")?.commands;
+    const record: IntegrationResultRecord = {
+      id: operationId,
+      receiptId,
+      taskId,
+      status: evidence.status === "passed" ? "applied" : "retained-failure",
+      backupDir: path.join(task.paths.root, "integration", receiptId, "backup"),
+      stages,
+      ...(verificationCommands === undefined ? {} : { verificationCommands }),
+      ...(evidence.status === "passed"
+        ? { appliedAt: new Date().toISOString() }
+        : { error: evidence.error ?? "Runtime activation failed; source changes retained" }),
+      createdAt: new Date().toISOString(),
+    };
+    this.store.saveIntegrationResult(record);
+    this.store.addEvent(
+      taskId,
+      undefined,
+      "integration.apply.completed",
+      evidence.status === "passed"
+        ? "Integration applied, built, and activated successfully"
+        : "Integration source retained after runtime activation failure",
+      record,
+    );
+    return buildIntegrationOperationView(this.store, context, false);
   }
 
   integrationHistory(
@@ -668,6 +979,7 @@ export class DaemonCoordinator {
     for (const comp of this.store.listCompetitions("running")) {
       new CompetitionCoordinator(this.store, this.settings).reconcile(comp.id);
     }
+    this.recoverIntegrationOperations();
     return recovered;
   }
 
@@ -680,6 +992,58 @@ export class DaemonCoordinator {
       }
     }
     await Promise.allSettled(this.active.values());
+    await Promise.allSettled(this.activeIntegrations.values());
+  }
+
+  private recoverIntegrationOperations(): void {
+    for (const task of this.store.listTasks()) {
+      const events = this.store.listEvents(task.id);
+      for (const event of events) {
+        if (
+          event.type !== "integration.operation.started"
+          || event.payload === null
+          || typeof event.payload !== "object"
+        ) {
+          continue;
+        }
+        const payload = event.payload as Partial<IntegrationOperationContext>;
+        if (
+          typeof payload.operationId !== "string"
+          || typeof payload.taskId !== "string"
+          || typeof payload.receiptId !== "string"
+          || payload.taskId !== task.id
+        ) {
+          continue;
+        }
+        const context: IntegrationOperationContext = {
+          operationId: payload.operationId,
+          taskId: payload.taskId,
+          receiptId: payload.receiptId,
+        };
+        this.integrationOperations.set(context.operationId, context);
+        if (this.store.getIntegrationResult(context.operationId) !== undefined) continue;
+        const alreadyRecovered = events.some((candidate) => {
+          if (
+            candidate.type !== "integration.operation.recovered"
+            || candidate.payload === null
+            || typeof candidate.payload !== "object"
+          ) {
+            return false;
+          }
+          return (candidate.payload as { operationId?: unknown }).operationId
+            === context.operationId;
+        });
+        if (!alreadyRecovered) {
+          this.store.addEvent(
+            task.id,
+            undefined,
+            "integration.operation.recovered",
+            "Daemon restart found Integration outcome unknown",
+            { ...context, status: "outcome-unknown" },
+          );
+        }
+      }
+    }
   }
 
   queueTask(taskId: string): TaskRecord {
@@ -822,14 +1186,23 @@ export class DaemonCoordinator {
       // attempt in the existing session and workspace.
       await executeAttempt(
         this.store, this.store.getTask(job.taskId), true, undefined,
-        job.feedback, exec, settings.providerDefaults,
+        job.feedback, exec, settings.providerDefaults, job.executionOptions,
       );
     } else if (job.resuming) {
       const attemptCount = this.store.listAttempts(job.taskId).length;
-      if (attemptCount >= exec.maxAttempts) {
-        throw new Error(`Task ${job.taskId} has reached maximum attempts (${exec.maxAttempts})`);
+      const maximumOrdinal = job.executionOptions?.maximumOrdinal ?? exec.maxAttempts;
+      if (attemptCount >= maximumOrdinal) {
+        throw new Error(`Task ${job.taskId} has reached maximum attempts (${maximumOrdinal})`);
       }
-      await resumeTask(this.store, job.taskId, undefined, job.feedback, exec, settings.providerDefaults);
+      await resumeTask(
+        this.store,
+        job.taskId,
+        undefined,
+        job.feedback,
+        exec,
+        settings.providerDefaults,
+        job.executionOptions,
+      );
     } else {
       let task = this.store.getTask(job.taskId);
       try {

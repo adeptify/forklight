@@ -1,6 +1,15 @@
 import type {
-  AttemptRecord, EventRecord, EventType, TaskRecord, TaskStatus,
+  AttemptRecord,
+  DeliveryLineage,
+  EventRecord,
+  EventType,
+  IntegrationResultRecord,
+  TaskDecisionView,
+  TaskRecord,
+  TaskStatus,
 } from "../core/types.js";
+import { buildDeliveryLineage } from "../core/delivery-lineage.js";
+import { buildTaskDecisionView } from "../core/task-decision-view.js";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["succeeded", "failed", "interrupted"]);
 
@@ -115,6 +124,8 @@ export interface CompactInspection {
   attempts: CompactAttemptEvidence[];
   events: CompactEventEvidence[];
   verification: CompactVerificationHint;
+  lineage: DeliveryLineage;
+  decision: TaskDecisionView;
   diff: { generated: boolean; utf8Bytes: number; lineCount: number };
 }
 
@@ -430,6 +441,8 @@ export function buildCompactInspection(input: {
   events: EventRecord[];
   diff: string | undefined;
   eventLimit: number;
+  integrationResults?: IntegrationResultRecord[];
+  decision?: TaskDecisionView;
   nowMs?: number;
   quietAfterMs?: number;
 }): CompactInspection {
@@ -476,6 +489,13 @@ export function buildCompactInspection(input: {
       summary: event.summary,
     })),
     verification: extractVerificationHint(input.events),
+    lineage: buildDeliveryLineage(input.attempts, input.events),
+    decision: input.decision ?? buildTaskDecisionView({
+      task: input.task,
+      attempts: input.attempts,
+      events: input.events,
+      integrationResults: input.integrationResults ?? [],
+    }),
     diff: {
       generated: diff !== undefined,
       utf8Bytes: diff === undefined ? 0 : new TextEncoder().encode(diff).byteLength,
@@ -520,6 +540,8 @@ export function humanCompactInspectionLines(inspection: CompactInspection): stri
     `updatedAt: ${inspection.task.updatedAt}`,
     `activity: ${inspection.progress.activity}`,
     `latestEventSequence: ${inspection.progress.latestEventSequence}`,
+    `decision: ${inspection.decision.stage}`,
+    `nextAction: ${inspection.decision.nextAction}`,
     `attempts: ${inspection.attempts.length}`,
   ];
   for (const attempt of inspection.attempts) {
@@ -539,6 +561,19 @@ export function humanCompactInspectionLines(inspection: CompactInspection): stri
     );
   } else {
     lines.push("verification: not-recorded");
+  }
+  lines.push(
+    `lineage: complete=${inspection.lineage.complete}`
+    + ` attempts=${inspection.lineage.attemptCount}`
+    + ` verified=${inspection.lineage.verifiedAttemptCount}`
+    + ` corrections=${inspection.lineage.correctionAttemptIds.length}`,
+    `  hopChurn: files=${inspection.lineage.hopChurn.filesChanged}`
+    + ` lines=${inspection.lineage.hopChurn.changedLines}`,
+    `  combinedDeliveryDiff: files=${inspection.lineage.combinedDeliveryDiff.filesChanged}`
+    + ` lines=${inspection.lineage.combinedDeliveryDiff.changedLines}`,
+  );
+  if (inspection.lineage.missingAttemptIds.length > 0) {
+    lines.push(`  missingPatchEvidence: ${inspection.lineage.missingAttemptIds.length}`);
   }
   lines.push(`events: ${inspection.events.length}`);
   for (const event of inspection.events) {

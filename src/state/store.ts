@@ -947,6 +947,15 @@ export class StateStore {
       );
   }
 
+  getIntegrationResult(resultId: string): IntegrationResultRecord | undefined {
+    const row = this.db
+      .prepare("SELECT record_json FROM integration_results WHERE id = ?")
+      .get(resultId) as { record_json: string } | undefined;
+    return row === undefined
+      ? undefined
+      : parseRecord<IntegrationResultRecord>(row.record_json, "integration result");
+  }
+
   listIntegrationResults(taskId: string): IntegrationResultRecord[] {
     const rows = this.db
       .prepare(

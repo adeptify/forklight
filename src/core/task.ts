@@ -8,6 +8,7 @@ import { normalizeDirectCodexProfileId } from "./direct-codex-calibration.js";
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "./settings.js";
 import type {
   ContractTaskSpec,
+  DeliverySpec,
   QualityCheck,
   QualityReport,
   TaskContract,
@@ -17,16 +18,41 @@ import type {
   TaskSpec,
 } from "./types.js";
 
+const DELIVERY_COMMAND_MAX_COUNT = 16;
+
 const DEFAULT_EXCLUDES = [
   ".git",
   ".runtime",
   ".forklight",
   "node_modules",
-  "dist",
-  "build",
-  ".next",
   ".DS_Store",
 ];
+
+function generatedPathPatterns(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error("task.workspace.generatedPaths must be an array of relative POSIX patterns");
+  }
+  const patterns = value.map((candidate) => {
+    if (
+      typeof candidate !== "string"
+      || candidate.length === 0
+      || candidate !== candidate.trim()
+      || candidate.length > 240
+      || candidate.includes("\0")
+      || candidate.includes("\\")
+      || path.posix.isAbsolute(candidate)
+      || /^[A-Za-z]:\//.test(candidate)
+      || candidate.split("/").some((segment) => segment === "." || segment === ".." || !segment)
+    ) {
+      throw new Error(
+        "task.workspace.generatedPaths must contain relative POSIX patterns of at most 240 characters",
+      );
+    }
+    return candidate;
+  });
+  return [...new Set(patterns)];
+}
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -56,6 +82,33 @@ function objectArray(value: unknown, label: string): Record<string, unknown>[] {
   return value.map((item, index) => object(item, `${label}[${index}]`));
 }
 
+function deliverySpec(value: unknown): DeliverySpec | undefined {
+  if (value === undefined) return undefined;
+  const delivery = object(value, "task.delivery");
+  const allowed = new Set([
+    "buildCommands",
+    "activationCommands",
+    "activationCheckCommands",
+  ]);
+  if (Object.keys(delivery).some((key) => !allowed.has(key))) {
+    throw new Error("task.delivery contains an unsupported field");
+  }
+  const commandList = (key: keyof DeliverySpec): string[] => {
+    const commands = stringArray(delivery[key], `task.delivery.${key}`);
+    if (commands.length > DELIVERY_COMMAND_MAX_COUNT) {
+      throw new Error(
+        `task.delivery.${key} must contain at most ${DELIVERY_COMMAND_MAX_COUNT} commands`,
+      );
+    }
+    return commands;
+  };
+  return {
+    buildCommands: commandList("buildCommands"),
+    activationCommands: commandList("activationCommands"),
+    activationCheckCommands: commandList("activationCheckCommands"),
+  };
+}
+
 function booleanValue(value: unknown, label: string, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
@@ -66,14 +119,6 @@ function policyModeValue(value: unknown, label: string, fallback: PolicyMode): P
   if (value === undefined) return fallback;
   if (value === "hard" || value === "warn" || value === "score" || value === "off") return value;
   throw new Error(`${label} must be hard, warn, score, or off`);
-}
-
-function numberValue(value: unknown, label: string, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    throw new Error(`${label} must be a positive number`);
-  }
-  return value;
 }
 
 function positiveInteger(value: unknown, label: string): number {
@@ -346,6 +391,8 @@ export function parseTaskSpec(
   if (acceptanceCommands.length === 0) {
     throw new Error("task.acceptance.commands must contain at least one independent verification command");
   }
+  const generatedPaths = generatedPathPatterns(workspace.generatedPaths);
+  const delivery = deliverySpec(root.delivery);
 
   const common = {
     name: stringValue(root.name, "task.name"),
@@ -378,12 +425,14 @@ export function parseTaskSpec(
       exclude: Array.from(
         new Set([...DEFAULT_EXCLUDES, ...stringArray(workspace.exclude, "task.workspace.exclude")]),
       ),
+      ...(generatedPaths === undefined ? {} : { generatedPaths }),
     },
     worker: {
       allowEdits: booleanValue(worker.allowEdits, "task.worker.allowEdits", true),
       allowedCommands: workerAllowedCommands,
       focusPaths: stringArray(worker.focusPaths, "task.worker.focusPaths"),
     },
+    ...(delivery === undefined ? {} : { delivery }),
     ...(taskClass !== undefined ? { taskClass } : {}),
     ...(directCodexProfileId !== undefined ? { directCodexProfileId } : {}),
     completionPolicy: {
@@ -465,6 +514,18 @@ function feedbackSection(feedback?: string): string[] {
     : [];
 }
 
+function checkpointProtocolSection(acceptanceCommands: string[]): string[] {
+  const ids = acceptanceCommands.map((_, i) => `acceptance-${i + 1}`);
+  return [
+    "",
+    "Required bounded checkpoint:",
+    "- Before reporting completion, you must call mcp__forklight_checkpoint__run once after your final edit.",
+    `- Pass every approved command id: ${ids.join(", ")}.`,
+    "- This checkpoint is non-authoritative feedback; ForkLight will still rerun every command independently.",
+    "- If the checkpoint reports a failure, correct the implementation and call it again before reporting completion.",
+  ];
+}
+
 function buildLegacyPrompt(
   spec: Extract<TaskSpec, { version: 1 }>,
   resuming: boolean,
@@ -487,6 +548,7 @@ function buildLegacyPrompt(
     "",
     "Acceptance commands ForkLight will run after you finish:",
     ...spec.acceptance.commands.map((command) => `- ${command}`),
+    ...checkpointProtocolSection(spec.acceptance.commands),
     ...feedbackSection(feedback),
   ];
   return lines.join("\n");
@@ -563,6 +625,7 @@ export function buildWorkerPrompt(spec: TaskSpec, resuming: boolean, feedback?: 
     "",
     "Independent acceptance commands:",
     ...spec.acceptance.commands.map((command) => `- ${command}`),
+    ...checkpointProtocolSection(spec.acceptance.commands),
     ...feedbackSection(feedback),
     "",
     "Return a concise summary containing: files changed, contract behavior delivered, verification evidence, and remaining risks.",

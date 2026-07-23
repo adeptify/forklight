@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -19,7 +18,6 @@ import {
 } from "../src/cli/supervision.js";
 import { StateStore } from "../src/state/store.js";
 
-const ROOT = process.cwd();
 const TS = "2026-07-23T12:00:00.000Z";
 
 function makeTask(id: string, status: TaskStatus = "running"): TaskRecord {
@@ -100,18 +98,6 @@ function fakeLifecycle(steps: TaskProgressSnapshot[]) {
 function withStore<T>(home: string, fn: (store: StateStore) => T): T {
   const store = new StateStore(home);
   try { return fn(store); } finally { store.close(); }
-}
-
-async function runCli(home: string, arguments_: string[]): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    execFile(process.execPath, [
-      "--disable-warning=ExperimentalWarning", "--import", "tsx",
-      path.join(ROOT, "src/cli.ts"), ...arguments_,
-    ], { cwd: ROOT, encoding: "utf8", env: { ...process.env, FORKLIGHT_HOME: home } },
-    (error, stdout, stderr) => error
-      ? reject(error)
-      : resolve({ stdout: String(stdout), stderr: String(stderr) }));
-  });
 }
 
 test("wait returns changed after status change with caller timing", async () => {
@@ -298,6 +284,15 @@ test("compact inspection is allowlisted, latest-event bounded, and omits Diff co
   assert.match(compact.verification.policyHint ?? "", /change_budget_exceeded/);
   assert.equal(compact.verification.behaviorHint, "commands_passed");
   assert.equal(compact.verification.sourceHint, "source_unchanged");
+  assert.deepEqual(compact.lineage, {
+    complete: false,
+    missingAttemptIds: ["private-attempt-id"],
+    attemptCount: 1,
+    verifiedAttemptCount: 0,
+    hopChurn: { filesChanged: 0, changedLines: 0 },
+    combinedDeliveryDiff: { filesChanged: 0, changedLines: 0 },
+    correctionAttemptIds: [],
+  });
   const jsonOutput = `${JSON.stringify(compact, null, 2)}\n`;
   assert.doesNotMatch(jsonOutput, /PRIVATE_/);
   assert.match(humanCompactInspectionLines(compact), /verification: passed=false/);
@@ -330,4 +325,62 @@ test("compact inspection handles absent verification and empty diff", () => {
   assert.equal(compact.verification.present, false);
   assert.equal(compact.diff.generated, false);
   assert.equal(compact.progress.latestEventSequence, 0);
+});
+
+test("compact inspection exposes authority without raw claim or verification payloads", () => {
+  const task = makeTask("decision", "failed");
+  const events = [
+    {
+      id: 1,
+      taskId: task.id,
+      sequence: 1,
+      timestamp: TS,
+      type: "worker.completed",
+      summary: "Worker reported completion",
+      payload: {
+        claim: { label: "unverified-claim", text: "All tests pass" },
+        private: "DO_NOT_SURFACE",
+      },
+    },
+    {
+      id: 2,
+      taskId: task.id,
+      sequence: 2,
+      timestamp: TS,
+      type: "verification.completed",
+      summary: "Independent verification failed",
+      payload: {
+        passed: false,
+        behaviorPassed: false,
+        policyPassed: true,
+        sourceCompatible: true,
+        commands: [{
+          command: "npm test",
+          exitCode: 1,
+          stdout: "",
+          stderr: "failure",
+          durationMs: 1,
+          timedOut: false,
+        }],
+        diffPath: task.paths.diff,
+        sourceUnchanged: true,
+        private: "DO_NOT_SURFACE",
+      },
+    },
+  ] as EventRecord[];
+  const compact = buildCompactInspection({
+    task,
+    attempts: [],
+    events,
+    diff: undefined,
+    eventLimit: 0,
+  });
+  assert.equal(compact.decision.stage, "machine-failed");
+  assert.equal(compact.decision.workerClaim?.label, "unverified-claim");
+  assert.equal(compact.decision.verification?.behaviorPassed, false);
+  assert.equal(
+    compact.decision.nextAction,
+    "Review remediation and decide whether to resume",
+  );
+  assert.doesNotMatch(JSON.stringify(compact), /DO_NOT_SURFACE/);
 });

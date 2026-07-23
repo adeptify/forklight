@@ -13,7 +13,7 @@
     "forklight-mcp": "dist/src/mcp/main.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-console-assets.mjs && node scripts/copy-setup-assets.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/write-build-identity.mjs && node scripts/copy-console-assets.mjs && node scripts/copy-setup-assets.mjs",
     "dev": "node --disable-warning=ExperimentalWarning --import tsx src/cli.ts",
     "test": "node --disable-warning=ExperimentalWarning --test --import tsx tests/*.test.ts",
     "check": "npm run build && npm test",

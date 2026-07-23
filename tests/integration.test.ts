@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,13 +9,19 @@ import {
   preflightIntegration,
   applyIntegration,
 } from "../src/core/integration.js";
+import { recordMainReview } from "../src/core/main-review.js";
 import type { IntegrationSettings } from "../src/core/settings.js";
-import type { TaskRecord, TaskSpec } from "../src/core/types.js";
+import type {
+  AttemptRecord,
+  DeliverySpec,
+  TaskRecord,
+  TaskSpec,
+  VerificationResult,
+} from "../src/core/types.js";
 import { StateStore } from "../src/state/store.js";
-import {
-  prepareWorkspace,
-  writeWorkspaceDiff,
-} from "../src/workspace/copy.js";
+import { prepareWorkspace } from "../src/workspace/copy.js";
+import { createPathPolicy } from "../src/workspace/path-policy.js";
+import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
 
 // --- Helpers ---
 
@@ -54,6 +61,8 @@ function spec(project: string, acceptanceCommands: string[]): TaskSpec {
 async function buildSucceededTask(
   store: StateStore,
   acceptanceCommands: string[],
+  withAcceptedMainReview = true,
+  delivery?: DeliverySpec,
 ): Promise<{ task: TaskRecord; sourceDir: string; taskHome: string }> {
   const root = await mkdtemp(path.join(tmpdir(), "fl-int-"));
   const sourceDir = path.join(root, "source");
@@ -64,6 +73,7 @@ async function buildSucceededTask(
 
   const paths = taskPaths(taskHome, "task-1");
   const taskSpec = spec(sourceDir, acceptanceCommands);
+  if (delivery !== undefined) taskSpec.delivery = delivery;
   await prepareWorkspace(taskSpec, paths);
 
   // Simulate worker edit in workspace
@@ -71,7 +81,7 @@ async function buildSucceededTask(
     path.join(paths.workspace, "readme.md"),
     "# hello\n\nThis is the changed text.\n",
   );
-  await writeWorkspaceDiff(paths, []);
+  await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
 
   const task: TaskRecord = {
     id: "task-1",
@@ -82,10 +92,54 @@ async function buildSucceededTask(
     spec: taskSpec,
     paths,
     sessionId: "test-session",
+    currentAttemptId: "attempt-1",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
   store.createTask(task);
+  const attempt: AttemptRecord = {
+    id: "attempt-1",
+    taskId: task.id,
+    ordinal: 1,
+    status: "succeeded",
+    sessionId: task.sessionId,
+    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+    startedAt: task.createdAt,
+    finishedAt: task.updatedAt,
+    exitCode: 0,
+    runtimeBudgetUsd: taskSpec.runtime.maxBudgetUsd,
+  };
+  store.createAttempt(attempt);
+  const verification: VerificationResult = {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: acceptanceCommands.map((command) => ({
+      command,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      durationMs: 1,
+      timedOut: false,
+    })),
+    diffPath: paths.diff,
+    sourceUnchanged: true,
+  };
+  store.addEvent(
+    task.id,
+    attempt.id,
+    "verification.completed",
+    "Independent verification passed",
+    verification,
+  );
+  if (withAcceptedMainReview) {
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Integration fixture independently verified",
+      confirm: true,
+    });
+  }
   return { task: store.getTask(task.id), sourceDir, taskHome };
 }
 
@@ -125,10 +179,99 @@ test("preflight passes and apply succeeds with passing acceptance", async () => 
 
   const result = await applyIntegration(store, task.id, receipt.id, INTEGRATION_DEFAULTS);
   assert.equal(result.status, "applied");
+  assert.deepEqual(
+    result.stages?.map(({ stage, status }) => [stage, status]),
+    [
+      ["source-applied", "passed"],
+      ["source-verified", "passed"],
+      ["artifact-built", "not-applicable"],
+      ["runtime-activated", "not-applicable"],
+    ],
+  );
 
   // Verify the source file changed
   const content = await readFile(path.join(sourceDir, "readme.md"), "utf8");
   assert.match(content, /changed text/);
+});
+
+test("integration runs all build commands and retains source when build fails", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-build-"));
+  const store = new StateStore(root);
+  try {
+    const marker = path.join(root, "build-after-failure.txt");
+    const { task, sourceDir } = await buildSucceededTask(
+      store,
+      ["true"],
+      true,
+      {
+        buildCommands: [
+          "node -e \"process.exit(7)\"",
+          `node -e 'require("node:fs").writeFileSync(process.argv[1], "ran")' ${JSON.stringify(marker)}`,
+        ],
+        activationCommands: [],
+        activationCheckCommands: [],
+      },
+    );
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    const result = await applyIntegration(
+      store,
+      task.id,
+      receipt.id,
+      INTEGRATION_DEFAULTS,
+    );
+
+    assert.equal(result.status, "retained-failure");
+    assert.equal(await readFile(marker, "utf8"), "ran");
+    assert.match(await readFile(path.join(sourceDir, "readme.md"), "utf8"), /changed text/);
+    const build = result.stages?.find((stage) => stage.stage === "artifact-built");
+    assert.equal(build?.status, "failed");
+    assert.deepEqual(build?.commands?.map((command) => command.exitCode), [7, 0]);
+  } finally {
+    store.close();
+  }
+});
+
+test("passing machine verification cannot preflight without current Main Codex accept", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-review-gate-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"], false);
+    const rejected = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(rejected.rejectionReasons.includes("Main Codex review acceptance is required"));
+
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Diff is scoped and independently verified",
+      confirm: true,
+    });
+    const accepted = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.deepEqual(accepted.rejectionReasons, []);
+  } finally {
+    store.close();
+  }
+});
+
+test("integration verification supports Git commands without source repository access", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-git-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, [
+      "git diff --check",
+      `test -n "$(git status --porcelain)"`,
+    ]);
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.deepEqual(receipt.rejectionReasons, []);
+
+    const result = await applyIntegration(store, task.id, receipt.id, INTEGRATION_DEFAULTS);
+    assert.equal(result.status, "applied");
+    assert.deepEqual(
+      result.verificationCommands?.map((command) => command.exitCode),
+      [0, 0],
+    );
+    assert.equal(existsSync(path.join(task.sourcePath, ".git")), false);
+  } finally {
+    store.close();
+  }
 });
 
 test("failed verification rolls back patch", async () => {
@@ -573,7 +716,7 @@ test("concurrent edit of new file during verification is detected", async () => 
     path.join(task.paths.workspace, "newfile.txt"),
     "patched content\n",
   );
-  await writeWorkspaceDiff(task.paths, []);
+  await writeWorkspacePatchReport(task.paths, createPathPolicy(task.spec));
 
   const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
   assert.equal(receipt.rejectionReasons.length, 0);
@@ -620,9 +763,8 @@ test("concurrent affected-file edit is retained even when verification passes", 
 test("rollback with missing backup records failure evidence", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "fl-int-"));
   const store = new StateStore(root);
-  const { task, sourceDir } = await buildSucceededTask(store, ["sleep 2 && false"]);
+  const { task } = await buildSucceededTask(store, ["sleep 2 && false"]);
 
-  const before = await readFile(path.join(sourceDir, "readme.md"), "utf8");
   const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
   assert.equal(receipt.rejectionReasons.length, 0);
 

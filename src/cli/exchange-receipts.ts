@@ -23,7 +23,9 @@ export type TaskScopedCliOperation =
   | "forklight_submit" | "forklight_status" | "forklight_wait"
   | "forklight_inspect" | "forklight_resume"
   | "forklight_integration_preflight" | "forklight_integration_apply"
+  | "forklight_integration_status" | "forklight_integration_wait"
   | "forklight_integration_history" | "forklight_revise"
+  | "forklight_main_review"
   | "forklight_direct_codex_capture";
 
 export type { TaskIdSource };

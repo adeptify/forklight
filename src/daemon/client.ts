@@ -5,18 +5,35 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { daemonLogPath, daemonSocketPath, forklightHome } from "../core/config.js";
-import type { DaemonMethod, DaemonRequest, DaemonResponse } from "./protocol.js";
+import {
+  compareBuildIdentity,
+  currentBuildIdentity,
+  isBuildIdentity,
+  type BuildIdentity,
+} from "../core/build-identity.js";
+import {
+  requiresMatchingBuildIdentity,
+  type DaemonMethod,
+  type DaemonRequest,
+  type DaemonResponse,
+} from "./protocol.js";
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-export function daemonRequest<T = unknown>(
+export function daemonExchange(
   method: DaemonMethod,
   params: Record<string, unknown> = {},
   home = forklightHome(),
-): Promise<T> {
-  const request: DaemonRequest = { id: randomUUID(), method, params };
+  clientIdentity: BuildIdentity = currentBuildIdentity(),
+): Promise<DaemonResponse> {
+  const request: DaemonRequest = {
+    id: randomUUID(),
+    method,
+    params,
+    clientIdentity,
+  };
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(daemonSocketPath(home));
     let settled = false;
@@ -30,7 +47,7 @@ export function daemonRequest<T = unknown>(
     };
     const timer = setTimeout(() => {
       fail(new Error(`ForkLight daemon request timed out: ${method}`));
-    }, 15_000);
+    }, daemonRequestTimeoutMs(method, params));
     socket.once("error", fail);
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on("data", (chunk: Buffer) => {
@@ -49,10 +66,50 @@ export function daemonRequest<T = unknown>(
       settled = true;
       clearTimeout(timer);
       socket.end();
-      if (!response.ok) reject(new Error(response.error ?? "ForkLight daemon request failed"));
-      else resolve(response.result as T);
+      resolve(response);
     });
   });
+}
+
+export async function daemonRequest<T = unknown>(
+  method: DaemonMethod,
+  params: Record<string, unknown> = {},
+  home = forklightHome(),
+): Promise<T> {
+  const clientIdentity = currentBuildIdentity();
+  if (requiresMatchingBuildIdentity(method)) {
+    const handshake = await daemonExchange("health", {}, home, clientIdentity);
+    if (!handshake.ok) {
+      throw new Error(handshake.error ?? "ForkLight daemon identity handshake failed");
+    }
+    if (!isBuildIdentity(handshake.serverIdentity)) {
+      throw new Error("ForkLight daemon identity is unavailable; rebuild and restart before changes");
+    }
+    const comparison = compareBuildIdentity(clientIdentity, handshake.serverIdentity);
+    if (!comparison.protocolCompatible) {
+      throw new Error("ForkLight protocol mismatch; rebuild and restart before changes");
+    }
+    if (!comparison.sameBuild) {
+      throw new Error("ForkLight build mismatch; rebuild and restart before changes");
+    }
+  }
+  const response = await daemonExchange(method, params, home, clientIdentity);
+  if (!response.ok) {
+    throw new Error(response.error ?? "ForkLight daemon request failed");
+  }
+  return response.result as T;
+}
+
+export function daemonRequestTimeoutMs(
+  method: DaemonMethod,
+  params: Record<string, unknown>,
+): number {
+  const requested = method === "integration_wait" ? params.timeoutMs : undefined;
+  return typeof requested === "number"
+    && Number.isSafeInteger(requested)
+    && requested > 0
+    ? Math.max(15_000, requested + 5_000)
+    : 15_000;
 }
 
 export async function ensureDaemon(home = forklightHome()): Promise<Record<string, unknown>> {
@@ -75,12 +132,40 @@ export async function ensureDaemon(home = forklightHome()): Promise<Record<strin
   );
 }
 
+export function daemonLaunchArguments(moduleUrl: string): {
+  executable: string;
+  args: string[];
+  mode: "dist" | "source-dev";
+} {
+  const modulePath = fileURLToPath(moduleUrl);
+  const directory = path.dirname(modulePath);
+  if (modulePath.endsWith(".ts")) {
+    return {
+      executable: process.execPath,
+      args: [
+        "--disable-warning=ExperimentalWarning",
+        "--import",
+        "tsx",
+        path.join(directory, "main.ts"),
+      ],
+      mode: "source-dev",
+    };
+  }
+  return {
+    executable: process.execPath,
+    args: [
+      "--disable-warning=ExperimentalWarning",
+      path.join(directory, "main.js"),
+    ],
+    mode: "dist",
+  };
+}
+
 export function startDaemonProcess(home = forklightHome()): number {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const logFd = openSync(daemonLogPath(home), "a", 0o600);
-  const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
-  const mainPath = path.join(currentDirectory, "main.js");
-  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", mainPath], {
+  const launch = daemonLaunchArguments(import.meta.url);
+  const child = spawn(launch.executable, launch.args, {
     detached: true,
     env: { ...process.env, FORKLIGHT_HOME: home },
     stdio: ["ignore", logFd, logFd],

@@ -1,0 +1,88 @@
+version: 2
+name: Document the bounded Worker checkpoint
+project: ../..
+contract:
+  outcome: The operations guide must explain the bounded checkpoint, its command-ID boundary, its non-authoritative role, and the hard requirement that it complete before a Task can succeed.
+  context:
+    - The Worker runtime now exposes a checkpoint MCP that can run only acceptance commands already approved in the Task Contract.
+    - The operations guide jumps from Worker execution to independent verification and does not explain this intermediate feedback loop.
+    - This focused documentation change is the final real self-hosting proof for the repaired checkpoint runtime.
+  inScope:
+    - Add one concise checkpoint subsection to the existing inspect-results workflow.
+    - Explain deterministic acceptance-N command identifiers and the lack of arbitrary Shell access.
+    - Distinguish checkpoint feedback from ForkLight independent verification and Main Codex review.
+  outOfScope:
+    - Do not change code, tests, configuration, permissions, provider behavior, or any other document.
+    - Do not add a service, entity, dependency, commit, or push.
+    - Do not claim that checkpoint output can approve Integration.
+  executionSteps:
+    - Read the operations workflow around Worker results and independent verification.
+    - Add the smallest user-facing checkpoint explanation in the correct sequence.
+    - Run the required bounded checkpoint with all approved command IDs after the final edit.
+    - Correct the documentation if any checkpoint command fails, then run the checkpoint again.
+  deliverables:
+    - One concise operations-guide section that states the checkpoint boundary and authority accurately.
+  modules:
+    - name: Operations checkpoint guidance
+      responsibility: Explain how Worker self-check feedback fits between isolated editing and independent ForkLight verification without changing runtime behavior.
+      consumes:
+        - Existing checkpoint command identifiers, authority boundary, and Task success policy.
+      produces:
+        - User-facing operational guidance in the existing workflow document.
+      boundaries:
+        - It documents current verified behavior and never invents configuration, commands, or approval authority.
+  callChain:
+    - Task Contract declares independent acceptance commands before execution.
+    - Worker edits in isolation and invokes checkpoint by deterministic command identifiers.
+    - ForkLight records non-authoritative feedback and independently reruns every command.
+    - Main Codex reviews verified evidence before any confirmed Integration.
+  scenarios:
+    - name: checkpoint passes
+      given: The Worker invokes every approved acceptance command and all finish successfully.
+      when: Worker execution ends.
+      then: ForkLight still reruns independent verification before the Task can proceed to Main Codex review.
+    - name: checkpoint missing or failed
+      given: The Worker skips the checkpoint, the tool is unavailable, or any approved command fails.
+      when: ForkLight determines the Attempt outcome.
+      then: The Task cannot report success and no checkpoint can authorize Integration.
+  risks:
+    - Vague wording could make users believe the Worker gained arbitrary Shell access.
+    - Calling the checkpoint authoritative would collapse the independent verification boundary.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 40
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1m]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - docs/operations.md
+delivery:
+  buildCommands:
+    - npm run build
+  activationCommands:
+    - node dist/src/cli.js daemon stop; for i in {1..100}; do node dist/src/cli.js daemon status >/dev/null 2>&1 || break; sleep 0.05; done; node dist/src/cli.js daemon start
+  activationCheckCommands:
+    - node dist/src/cli.js daemon status | grep -q '"buildIdentity"'
+acceptance:
+  criteria:
+    - The guide explains checkpoint command boundaries, non-authoritative evidence, and the independent final gate.
+    - Only the operations guide changes and the text remains concise.
+  commands:
+    - rg -q 'acceptance-N' docs/operations.md && rg -q 'non-authoritative' docs/operations.md
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

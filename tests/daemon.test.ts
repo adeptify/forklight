@@ -8,9 +8,16 @@ import type {
   PlanItemRecord,
   PlanRecord,
   TaskRecord,
+  VerificationResult,
 } from "../src/core/types.js";
 import type { PlanBoard, PlanBoardSummary } from "../src/core/board.js";
-import { daemonRequest } from "../src/daemon/client.js";
+import {
+  daemonExchange,
+  daemonLaunchArguments,
+  daemonRequest,
+  daemonRequestTimeoutMs,
+} from "../src/daemon/client.js";
+import { requiresMatchingBuildIdentity } from "../src/daemon/protocol.js";
 import { DaemonCoordinator, probeProvidersBounded } from "../src/daemon/coordinator.js";
 import { assertWorkPlan } from "../src/core/plan.js";
 import { buildTaskRecord, registerTaskFromSpec } from "../src/core/runner.js";
@@ -18,10 +25,30 @@ import { parseTaskSpec } from "../src/core/task.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
 import { SettingsService } from "../src/core/settings.js";
 import { StateStore } from "../src/state/store.js";
+import {
+  PROTOCOL_VERSION,
+  currentBuildIdentity,
+} from "../src/core/build-identity.js";
 
 // --- revise harness ---
 
 const REVISE_PROBE = "forklight-revise-PROBE-MARKER-2026";
+
+test("identity matching protects state changes but lets a new build stop an old daemon", () => {
+  assert.equal(requiresMatchingBuildIdentity("settings_update"), true);
+  assert.equal(requiresMatchingBuildIdentity("integration_apply"), true);
+  assert.equal(requiresMatchingBuildIdentity("shutdown"), false);
+  assert.equal(requiresMatchingBuildIdentity("health"), false);
+});
+
+test("Integration wait socket deadline covers the requested wait interval", () => {
+  assert.equal(daemonRequestTimeoutMs("health", {}), 15_000);
+  assert.equal(daemonRequestTimeoutMs("integration_wait", { timeoutMs: 1 }), 15_000);
+  assert.equal(
+    daemonRequestTimeoutMs("integration_wait", { timeoutMs: 60_000 }),
+    65_000,
+  );
+});
 
 function standaloneSucceededTask(
   store: StateStore, name: string, status: TaskRecord["status"] = "succeeded",
@@ -55,6 +82,58 @@ function standaloneSucceededTask(
   return store.getTask(task.id);
 }
 
+function seedPassingVerification(
+  store: StateStore,
+  task: TaskRecord,
+  preferredAttemptId?: string,
+): string {
+  const now = new Date().toISOString();
+  let attempt = preferredAttemptId === undefined
+    ? store.listAttempts(task.id).at(-1)
+    : store.listAttempts(task.id).find((candidate) => candidate.id === preferredAttemptId);
+  if (attempt === undefined) {
+    const ordinal = store.nextAttemptOrdinal(task.id);
+    attempt = {
+      id: preferredAttemptId ?? `review-attempt-${task.id}`,
+      taskId: task.id,
+      ordinal,
+      status: "succeeded",
+      sessionId: task.sessionId,
+      rawLogPath: "/dev/null",
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      runtimeBudgetUsd: task.spec.runtime.maxBudgetUsd,
+    };
+    store.createAttempt(attempt);
+  }
+  store.updateTask(task.id, { currentAttemptId: attempt.id });
+  const verification: VerificationResult = {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [{
+      command: "true",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      durationMs: 1,
+      timedOut: false,
+    }],
+    diffPath: task.paths.diff,
+    sourceUnchanged: true,
+  };
+  store.addEvent(
+    task.id,
+    attempt.id,
+    "verification.completed",
+    "Independent verification passed",
+    verification,
+  );
+  return attempt.id;
+}
+
 function testCoordinator(store: StateStore, maxConcurrency: number): DaemonCoordinator {
   const settings = new SettingsService(store);
   return new DaemonCoordinator(store, settings, maxConcurrency);
@@ -63,6 +142,33 @@ function testCoordinator(store: StateStore, maxConcurrency: number): DaemonCoord
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
+
+test("source-dev daemon launch uses tsx while dist launch uses compiled JavaScript", () => {
+  assert.deepEqual(
+    daemonLaunchArguments("file:///repo/src/daemon/client.ts"),
+    {
+      executable: process.execPath,
+      args: [
+        "--disable-warning=ExperimentalWarning",
+        "--import",
+        "tsx",
+        "/repo/src/daemon/main.ts",
+      ],
+      mode: "source-dev",
+    },
+  );
+  assert.deepEqual(
+    daemonLaunchArguments("file:///repo/dist/src/daemon/client.js"),
+    {
+      executable: process.execPath,
+      args: [
+        "--disable-warning=ExperimentalWarning",
+        "/repo/dist/src/daemon/main.js",
+      ],
+      mode: "dist",
+    },
+  );
+});
 
 function graphTask(store: StateStore, name: string): TaskRecord {
   return registerTaskFromSpec(
@@ -148,8 +254,73 @@ test("daemon serves health and task-list requests over its local socket", async 
     const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
     assert.equal(health.ok, true);
     assert.equal(health.maxConcurrency, 1);
+    assert.deepEqual(health.buildIdentity, currentBuildIdentity());
     const tasks = await daemonRequest<unknown[]>("list", {}, home);
     assert.deepEqual(tasks, []);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("daemon exposes identity, warns on read mismatch, and blocks stale mutations", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-daemon-identity-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const current = currentBuildIdentity();
+  try {
+    const staleRead = await daemonExchange(
+      "health",
+      {},
+      home,
+      { ...current, buildId: "stale-client-build" },
+    );
+    assert.equal(staleRead.ok, true);
+    assert.match(staleRead.warning ?? "", /rebuild|restart/i);
+    assert.deepEqual(staleRead.serverIdentity, current);
+
+    const staleMutation = await daemonExchange(
+      "settings_reset",
+      {},
+      home,
+      { ...current, buildId: "stale-client-build" },
+    );
+    assert.equal(staleMutation.ok, false);
+    assert.match(staleMutation.error ?? "", /build mismatch/i);
+
+    const protocolMutation = await daemonExchange(
+      "settings_reset",
+      {},
+      home,
+      { ...current, protocolVersion: PROTOCOL_VERSION - 1 },
+    );
+    assert.equal(protocolMutation.ok, false);
+    assert.match(protocolMutation.error ?? "", /protocol mismatch/i);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("daemon exposes checkpoint_run with bounded command-id input", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-daemon-checkpoint-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    await assert.rejects(
+      () => daemonRequest(
+        "checkpoint_run",
+        { taskId: "missing-task", attemptId: "attempt", commandIds: ["acceptance-1"] },
+        home,
+      ),
+      /Unknown ForkLight task: missing-task/,
+    );
+    await assert.rejects(
+      () => daemonRequest(
+        "checkpoint_run",
+        { taskId: "missing-task", attemptId: "attempt", commandIds: "acceptance-1" },
+        home,
+      ),
+      /commandIds must be an array/,
+    );
   } finally {
     await daemon.close();
   }
@@ -391,6 +562,20 @@ test("resume rejects when stored attempts equal configured maxAttempts", async (
   assert.throws(
     () => coordinator.resume(task.id),
     /reached maximum attempts/,
+  );
+  const queued = coordinator.resume(task.id, undefined, {
+    additionalAttempts: 1,
+    maxBudgetUsd: null,
+    reason: "Explicit bounded correction",
+    confirm: true,
+  });
+  assert.equal(queued.id, task.id);
+  assert.deepEqual(coordinator.health().queuedTaskIds, [task.id]);
+  const authorization = store.listEvents(task.id)
+    .find((event) => event.type === "attempt.authorization.granted");
+  assert.equal(
+    (authorization?.payload as { targetOrdinal?: number } | undefined)?.targetOrdinal,
+    3,
   );
   await coordinator.shutdown();
   store.close();
@@ -1037,15 +1222,46 @@ test("daemon plan submission works with spaces in directory path", async () => {
 
 // --- revise: succeeded-only pre-integration correction ---
 
+test("daemon records explicit Main Codex review and rejects missing confirm", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-main-review-daemon-"));
+  const store = new StateStore(home);
+  const task = standaloneSucceededTask(store, "main-review-daemon");
+  seedPassingVerification(store, task);
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    await assert.rejects(
+      () => daemonRequest("main_review", {
+        taskId: task.id,
+        decision: "accept",
+        reason: "Reviewed",
+      }, home),
+      /confirm/,
+    );
+    const review = await daemonRequest<Record<string, unknown>>("main_review", {
+      taskId: task.id,
+      decision: "accept",
+      reason: "Diff is scoped and independently verified",
+      confirm: true,
+    }, home);
+    assert.equal(review.decision, "accept");
+    assert.equal(review.attemptId, store.getTask(task.id).currentAttemptId);
+  } finally {
+    await daemon.close();
+    store.close();
+  }
+});
+
 test("revise moves eligible succeeded task to queued with content-free event", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-revise-ok-"));
   const store = new StateStore(home);
   const coordinator = testCoordinator(store, 0);
   const task = standaloneSucceededTask(store, "eligible-standalone");
+  const verifiedAttemptId = seedPassingVerification(store, task);
   // Seed live-attempt pointers so prepareReviseTask must clear them.
   store.setTaskStatus(task.id, "running", {
     startedAt: new Date().toISOString(),
-    currentAttemptId: "seed-attempt",
+    currentAttemptId: verifiedAttemptId,
     workerPid: 99999,
   });
   store.setTaskStatus(task.id, "succeeded", { error: null });
@@ -1189,6 +1405,7 @@ test("revise rejects blank/padded/oversized feedback with the character limit on
   const store = new StateStore(home);
   const coordinator = testCoordinator(store, 0);
   const task = standaloneSucceededTask(store, "feedback");
+  seedPassingVerification(store, task);
   const initialEvents = store.listEvents(task.id).length;
   try {
     for (const blank of ["", "   ", "\n\n", " \t \n"]) {
@@ -1198,12 +1415,13 @@ test("revise rejects blank/padded/oversized feedback with the character limit on
         `blank feedback ${JSON.stringify(blank)} must be rejected`,
       );
     }
-    // 4000 trimmed chars wrapped in spaces is accepted (limit is on the trimmed value).
-    const accepted = coordinator.revise(task.id, `   ${"x".repeat(4000)}   `);
+    // 1000 trimmed chars wrapped in spaces is accepted (limit is on the
+    // canonical structured main-review reason, not its padding).
+    const accepted = coordinator.revise(task.id, `   ${"x".repeat(1000)}   `);
     assert.equal(accepted.status, "queued");
-    // 4097 trimmed chars is rejected regardless of padding.
+    // 1001 trimmed chars is rejected regardless of padding.
     assert.throws(
-      () => coordinator.revise(task.id, `   ${"y".repeat(4097)}   `),
+      () => coordinator.revise(task.id, `   ${"y".repeat(1001)}   `),
       /revision feedback exceeds configured upper bound/,
     );
     assert.equal(store.getTask(task.id).status, "queued",
@@ -1272,11 +1490,12 @@ test("revise preserves prior attempts and the same session, clearing stale live-
   const ts = new Date().toISOString();
   for (const a of [
     { id: "ha1", ordinal: 1, status: "succeeded" as const, exitCode: 0 },
-    { id: "ha2", ordinal: 2, status: "failed" as const, exitCode: 1 },
+    { id: "ha2", ordinal: 2, status: "succeeded" as const, exitCode: 0 },
   ]) {
     store.createAttempt({ ...a, taskId: task.id, sessionId: previousSessionId,
       rawLogPath: "/dev/null", startedAt: ts, finishedAt: ts });
   }
+  seedPassingVerification(store, task, "ha2");
   const eventsBefore = store.listEvents(task.id).length;
   try {
     coordinator.revise(task.id, "fix the contract please");
@@ -1292,7 +1511,7 @@ test("revise preserves prior attempts and the same session, clearing stale live-
     }
     // Only the revision event is appended; no integration or workspace mutation.
     const afterRevise = store.listEvents(task.id);
-    assert.equal(afterRevise.length, eventsBefore + 1);
+    assert.equal(afterRevise.length, eventsBefore + 2);
     assert.equal(afterRevise[afterRevise.length - 1]!.type, "task.revise.requested");
   } finally {
     await coordinator.shutdown();
@@ -1323,8 +1542,8 @@ test("revise admission rejection leaves status, attempts, and events unchanged",
   // stays in the coordinator's internal queue after a successful revise.
   const coordinator = testCoordinator(store, 0);
   const task = standaloneSucceededTask(store, "admission-dupe");
+  seedPassingVerification(store, task);
   const initialEvents = store.listEvents(task.id).length;
-  const initialStatus = store.getTask(task.id).status;
   try {
     // First revise succeeds and leaves a job in the queue.
     coordinator.revise(task.id, "first revise pass");
@@ -1343,8 +1562,8 @@ test("revise admission rejection leaves status, attempts, and events unchanged",
     );
     // Task status, attempts, and events are unchanged by the rejection.
     assert.equal(store.getTask(task.id).status, "succeeded");
-    assert.equal(store.listEvents(task.id).length, initialEvents + 1,
-      "only the first revise event must exist; rejection appends nothing");
+    assert.equal(store.listEvents(task.id).length, initialEvents + 2,
+      "only the first structured review and revise events must exist; rejection appends nothing");
   } finally {
     await coordinator.shutdown();
     store.close();
@@ -1567,6 +1786,7 @@ test("revise via daemon protocol surfaces the same eligibility and privacy behav
   const home = await mkdtemp(path.join(tmpdir(), "forklight-revise-daemon-"));
   const store = new StateStore(home);
   const task = standaloneSucceededTask(store, "daemon-eligible");
+  seedPassingVerification(store, task);
   const daemon = new ForkLightDaemon(home, 0);
   await daemon.start();
   try {
@@ -1577,9 +1797,15 @@ test("revise via daemon protocol surfaces the same eligibility and privacy behav
     assert.equal(queued.status, "queued",
       "daemon must return the canonical queued record");
     assert.equal(store.getTask(task.id).status, "queued");
-    // Daemon-recorded events never contain the feedback marker.
-    assert.ok(!JSON.stringify(store.listEvents(task.id)).includes(REVISE_PROBE),
-      "daemon-recorded events must never contain the feedback marker");
+    const events = store.listEvents(task.id);
+    const review = events.find((event) => event.type === "main-review.completed");
+    assert.equal(
+      (review?.payload as { decision?: string } | undefined)?.decision,
+      "revise",
+    );
+    const revision = events.find((event) => event.type === "task.revise.requested");
+    assert.ok(!JSON.stringify(revision).includes(REVISE_PROBE),
+      "content-free revision event must not contain review reason");
     // Whitespace-only feedback is rejected by the shared eligibility
     // boundary with the same fixed privacy-safe reason the local fallback uses.
     await assert.rejects(

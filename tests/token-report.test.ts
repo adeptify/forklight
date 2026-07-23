@@ -10,7 +10,7 @@ import path from "node:path";
 import test from "node:test";
 import type { AttemptRecord, AttemptTokenUsage, TaskRecord } from "../src/core/types.js";
 import { createRedactedExchangeMeasurement } from "../src/core/token-efficiency.js";
-import { getTaskTokenReport, type TaskTokenReport } from "../src/core/token-report.js";
+import { getTaskTokenReport } from "../src/core/token-report.js";
 import { StateStore } from "../src/state/store.js";
 
 const TS = "2026-07-23T12:00:00.000Z";
@@ -566,10 +566,6 @@ function publicationEnvelope(cls: string, profileId: string, calOverrides:
     },
     envelopeSchemaVersion: 1,
   };
-}
-
-function withClass(makeId: string, taskClass?: string): TaskRecord {
-  return withIdentity(makeId, taskClass);
 }
 
 function withIdentity(makeId: string, taskClass?: string,

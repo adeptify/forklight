@@ -37,6 +37,14 @@
 
 模型观察：DeepSeek Pro 在本轮能完成跨模块实现与纠错，但首次 Attempt 读取和推理偏多；DeepSeek Flash 在同类小任务上连续三次未形成可验收交付；MiniMax 形成了大部分正确实现，但旧预算限制使 ForkLight 没有保存可直接集成的成功结果。上述只是当前任务样本，不应直接泛化成永久模型排名。
 
+## 2026-07-23 Lean Core Wave 2：Workspace 与 Diff 真相
+
+- 状态：实现完成并通过确定性混合工作区 Dogfood；真实外部模型执行仍待后续统一 Dogfood。
+- 证据：`PathPolicy` 对业务、生成噪音和 `.forklight` 内部文件使用同一分类；默认嵌套 Python/测试缓存与合同声明的自定义缓存进入 generated evidence，`dist`、迁移和生成源码默认仍视为业务交付。Patch 生成只运行一次 `git diff --no-index --binary`，再拆分 raw/generated/integration artifacts，全程不删除 baseline 或 workspace 文件。
+- 混合夹具：Node 业务文件进入 business/integration patch，嵌套 `__pycache__` 进入 generated patch，内部上下文不进入 Integration；生成文件在 Patch 后仍可逐字读取。Verifier、checkpoint 和 Integration 的 Git 命令使用 Task root 下的外置 Git/index，workspace 与原项目均没有新增 `.git`。
+- 上下文与清理：500 文件夹具只展示至多 200 条路径，同时保留总数、顶层统计、focus paths 与截断说明；TypeScript `noUnusedLocals` / `noUnusedParameters` 已开启，删除 24 处编译器确认的死导入、死参数、死 helper 和一段未执行的测试伪 mock。
+- 验收：Wave 2 聚焦 100/100；完整 `npm run check` 为 690/690；`npx tsc -p tsconfig.json --noEmit` 与 `git diff --check` 通过。没有数据库迁移，也没有新增 glob/static-analysis 依赖。
+
 ## 2026-07-22 初始观察
 
 ### FL-D01：本地技能存在但当前 Codex 技能目录未暴露
@@ -253,10 +261,11 @@
 
 ### FL-D31：Worker 自报“已验证”早于独立 Verifier 结论
 
-- 状态：已复现。
+- 状态：核心语义已实现并完成确定性验证；Console 分栏与真实外部模型 Dogfood 待后续 Wave。
 - 证据：DeepSeek Pro 任务 `ba6a5f15-42a8-4bc1-a0b4-2875f428b938` 首次 Worker 结果声称改动已经验证，但随后 ForkLight 独立运行 `npm run check` 时发现新增测试的 TypeScript 错误并判定 Attempt 失败。
 - 影响：控制台若突出展示 Worker 最终文本，会让用户在真正验收前看到误导性的成功语气；模型自报无法替代独立验证。
 - 候选改进：界面把 Worker Claim 与 Independent Verification 分栏显示；Verifier 未完成前不得展示系统级“已验证”，失败时明确标注 Worker 声明被验收推翻。
+- 本轮交付：成功终态文本现在保存为带 `unverified-claim` 标签的 Worker Claim，完整原文只留在 Attempt 私有记录；独立 Verifier 继续作为行为结论的唯一机器权威。回归测试证明 Claim 不会被写成 `behaviorPassed`。
 
 ### FL-D32：缺少“为主线程节约多少 Token”的可解释核算
 
@@ -296,10 +305,12 @@
 
 ### FL-D37：Worker 自报的 Diff 规模不能作为预算证据
 
-- 状态：已在 MiniMax 与 DeepSeek Pro 两个候选中复现。
+- 状态：Claim 隔离与分类 Diff 已实现并完成确定性验证；Console 展示待后续 Wave。
 - 证据：MiniMax 声称实现符合 390 行限制，Verifier 实算 468 行；DeepSeek Pro 任务 `26b0545d-cdfa-4a2c-a70e-7f4cb9666e61` 声称“line count is close to the budget”并“all files are updated and verified”，Verifier 实算 5 文件 / 488 行且 `npm run check` 有 7 个 TypeScript 错误。
 - 影响：自然语言总结会制造已受控的错觉；若控制台突出 Worker Claim，用户可能在独立证据出现前误判质量和预算。
 - 候选改进：Worker 结束后先由 ForkLight 计算文件数、Diff 行数、编译/测试结果，再生成终态摘要；所有 Worker 自报数字标记为 claim，不能参与门禁、排名或预算统计。
+- 本轮交付：Worker 终态中的 Diff/测试表述统一归入未验证 Claim；预算与命令结论仍只来自 ForkLight 机器计算的 `VerificationResult`。
+- Wave 2 补充：Verifier 现在把机器 Diff 拆为 business、generated、integration 三类，预算只使用 business evidence；generated 与 raw patch 仍留作审计，不由 Worker 自报数字参与门禁。
 
 ### FL-D38：当前 `costUsd` 是 Claude Code 固定费率估算，不是 Provider 官方费用
 
@@ -425,10 +436,12 @@
 
 ### FL-D55：缺少实时 Diff 反馈和最小纠正上下文会放大 Token 税
 
-- 状态：同一 MiniMax Session 中稳定复现，尚未实现产品修复。
+- 状态：补救包、分类 Diff checkpoint 与有限 Workspace Context 已实现并完成确定性验证；真实外部模型 Dogfood 待后续 Wave。
 - 证据：上述任务 Attempt 2 运行 178 turns，终态 usage 为 input 65,735、output 87,474、cache-read 34,519,680，runtime estimate USD `19.775365`。Worker 没有 shell/diff 工具，只能反复 Read、Grep、压缩并猜测当前体积，曾从约 803 行逐步压到 701 行仍差 1 行；Attempt 3 为修一个 parser error 又重新处理长合同，26 turns、cache-read 6,509,312，最终因修复新增代码回到 721 行。两轮官网费用均因任务缺少显式 MiniMax billing route 而保持 `route-required`，不能按 0；即使补 route，逐请求 usage 不完整仍应保持 exact unavailable。
 - 影响：`maxBudgetUsd: null` 取消了费用硬停止，却没有执行阶段控制、实时体积反馈或纠正上下文裁剪；模型大量消耗发生在“估算如何过门”而不是功能实现。Console 只显示 running，也无法说明正在推理、编辑、压缩还是验证。
 - 候选改进：ForkLight 应向 Worker提供只读、机器计算的 `filesChanged / changedLines / limit / delta`，接近门槛时发一次 bounded feedback；Resume 支持 `minimal correction context`，只发送当前 diff、失败命令、主审查结论和仍生效的不变量。阶段心跳、连续无进展、软费用提醒与 synthesis checkpoint 均可配置，且与用户费用硬上限分离。
+- 本轮交付：Worker 可通过唯一的私有 MCP 工具按 `acceptance-N` 请求合同命令检查，并收到明确标为 `non-authoritative-checkpoint` 的命令结果和原始 Diff 计数；任意 Shell、命令文本和原项目写权限仍未开放。Resume 改为消费最新完整 Verification 的全部失败命令、策略发现和受影响源冲突，不再只给最后一条 stderr。
+- Wave 2 补充：checkpoint 现在返回同一套 business/generated/integration patch evidence；Workspace Context 对大仓库限制为 200 条优先索引，先列 focus paths、根入口和顶层统计，不再把完整文件清单重复塞给 Worker。
 
 ### FL-D56：无关源文件变化会让行为与策略都通过的 Task 被误判失败
 
@@ -447,11 +460,12 @@
 
 ### FL-D58：Diff 硬门同时暴露了机器计数缺失和可读性退化
 
-- 状态：当前功能已通过主审修正并安全合入；产品策略仍待实现。
+- 状态：统一机器计数与分类 Patch 已实现并完成确定性验证；策略档位与 Console 呈现仍待实现。
 - 证据：同一任务 Attempt 2 的独立验收为 400/400 tests、`sourceUnchanged=true`，但机器实算 834 行，超过合同 750 行。MiniMax 自报 748 行，是因为只相加了新增文件行数和 `server.ts` 的净增量，漏掉了 43 行删除。Attempt 3 在明确反馈后压到 733 行并通过，但为过硬门把多个 handler 压成拥挤单行；主 Codex审查又发现六个已知 Task 工具的 `ensureDaemon` 位于 receipt wrapper 外，daemon 启动错误不会留下失败证据，随后在真实源码中纠正并恢复可读结构。
 - 影响：Worker claim 不能作为预算证据；静态行数 hard gate 会把优化目标从正确性和可维护性转向文本压缩，并可能制造测试未覆盖的边界缺陷。将 Attempt 2 记为普通模型失败也会丢失“行为全过、策略不符”的事实。
 - 候选改进：ForkLight 在 Worker 执行中提供只读机器 Diff 计数，并明确 `additions + deletions`；Verifier 分开输出 `behaviorPassed`、`policyPassed` 和 `mainReviewAccepted`。Diff 预测与质量预算默认支持 `warn/score`，只有明确 profile 才为 hard；主审查发现的问题可进入独立 correction 状态，不与 Provider 或模型失败混算。
 - 再次证据：DeepSeek 任务 `7e60b684-62fe-4fbc-8c25-be231c7a2057` 第三轮的两条验收命令均通过，Worker 自报约 843 行，`verification.completed.changeBudget.changedLines` 为 `887`，而 `inspect --summary` 的 `diff.lineCount` 又是 patch 文件总行数 `937`。三种口径同时出现，最终只因 887/850 被标记 failed；正确实现已由主 Codex安全合入并在真实源码通过 568/568。UI 与 Worker 必须统一展示 additions、deletions、changedLines 和 patchLines，策略只能绑定一个明确口径。
+- Wave 2 补充：`WorkspacePatchReport` 为每类 Patch 固定保存 `filesChanged`、`changedLines` 与 `affectedPaths`；Verifier 的 change budget 只绑定 business changedLines，Integration 只消费 integration patch，raw/generated evidence 单独保留。
 
 ### FL-D59：无效 MiniMax 计费路由直到任务结束才被发现
 
@@ -592,10 +606,12 @@
 
 ### FL-D78：完全禁止 Worker shell 会把编译反馈推迟到终态，放大盲目纠正成本
 
-- 状态：本轮由主 Codex 在隔离工作区主动执行 bounded build/focused tests 才提前收敛；ForkLight 尚无 Worker 可请求的安全验证 checkpoint。
+- 状态：受控 checkpoint 与 Verifier-only Git 已实现并完成确定性验证；真实外部模型调用仍待 Dogfood。
 - 证据：MiniMax Worker 只有 Read/Glob/Grep/Edit/Write，不能运行合同已经声明的验收命令。Attempt 1 靠逐文件读取检查时漏掉 `tests/task-economics-report.test.ts:543` 的缺失括号；Attempt 2 修正后仍无法看到 41 个 focused tests 中两个夹具错误，只能继续 Grep/Read 猜测。主 Codex 分别跑出明确 build 错误与 39/41 结果后中止并反馈，第三轮才达到 41/41。前两轮因 SIGTERM 没有 terminal result，Token 与费用证据为 `usage-missing`，不能按 0。
 - 影响：禁止任意 shell 是重要安全边界，但“Worker 无法请求任何受控验证”会增加 turns、重复读和纠正轮次；在单任务不限预算时尤其容易产生 Token 税。主调度能手工进入隔离区执行并不是可复用产品体验。
 - 候选改进：增加 daemon 执行的只读/白名单 verification checkpoint：Worker 只能请求合同内既有命令，daemon 在隔离环境运行、限制超时与输出并把结构化结果返回 Session；是否允许、触发阶段、次数和 Token/时间提醒可配置。任意 shell 仍保持 hard 禁止，checkpoint/fixture 失败与模型、Provider 失败分开统计。
+- 本轮交付：daemon 新增内部 `checkpoint_run`，只接受当前运行 Task/Attempt 与确定性命令 ID；私有 MCP 只暴露一个 `run` 工具，配置不含凭据、原项目路径或验收命令文本。独立 Verifier 在 Worker 结束后仍会重新运行全部命令，checkpoint 不获得验收权威。
+- Wave 2 补充：合同命令中的 `git diff --check` 和 `git status --porcelain` 由 Task root 下的 Verifier-only bare Git/index 支撑；同一环境用于 checkpoint、最终 Verifier 和 Integration 验收，但不会写入 workspace、MCP 配置或 Worker 权限。
 
 ### FL-D79：Integration 再次显示 build 通过，但主项目 dist 实际没有刷新
 
@@ -769,10 +785,11 @@
 
 ### FL-D103：Resume 反馈没有同时呈现全部机器拒绝维度，Worker 连续追逐局部失败
 
-- 状态：MCP parent Task 三轮结束后由主 Codex识别；当前 Task 历史保持 failed，产品级 remediation packet 尚未实现。
+- 状态：Verifier 维度补救包已实现并完成确定性验证；主审结构化结论将在纠偏 Wave 接入。
 - 证据：Task `f5b750b3-d9f9-4f7e-8ff7-09b5bae159cb` Attempt 1 先遇到测试夹具编译失败和 `993 > 850`；Attempt 2 修复编译后只剩两个错误断言，但仍是 `992 > 850`；Attempt 3 继续追逐断言，最终为 92/93 且 `991 > 850`。三轮每次都获得局部验收反馈，却没有把 behavior、policy、source compatibility 与主审语义放在同一张纠正清单中。
 - 影响：Worker 会合理地优先修当前命令失败，同时重复忽略另一个必然拒绝条件，消耗额外 Attempt、Token 和费用。顶层 failed 也无法告诉用户它不是 Provider 故障。
 - 候选改进：Resume 前生成一次结构化 remediation packet，至少同时列出 `behaviorFailures`、`policyFailures`、`sourceCompatibility`、`mainReviewFindings` 和 `requiredOutcome`；后续 Attempt 必须逐项回报 resolved / unresolved，而不是只消费最后一条 stderr。
+- 本轮交付：Verifier 不再首错即停，会顺序跑完全部验收命令；`RemediationPacket` 从最新权威 `verification.completed` 派生所有失败命令、已通过检查、策略发现与受影响源冲突，并对输出做尾部限长。主审发现项尚未混入该包，避免提前宣称全维完成。
 
 ### FL-D104：错误测试会诱导 Worker 破坏 canonical authority，测试通过不能替代主审
 
@@ -1033,7 +1050,7 @@
 | FL-D27 / D28 | 全索引税；focus 非 allowlist | OPEN |
 | FL-D30 | resume 不能新预算授权 | OPEN |
 | FL-D42 / D63 | 无 cancel/pause；中止丢 usage | OPEN |
-| FL-D55 / D62 / D78 | 无实时 Diff；无进展≠有事件；无受控 verify checkpoint | OPEN |
+| FL-D55 / D62 / D78 | 分类 Diff checkpoint 与 Verifier Git 已有；阶段进展和真实 Dogfood 待补 | PARTIAL |
 | FL-D107 | stop_reason error 被当成功 | FIXED-ish |
 
 #### E. 进展可见性与主线程监督（**账本 P0 相关**）
@@ -1051,10 +1068,10 @@
 
 | ID | 要点 | 状态 |
 |----|------|------|
-| FL-D31 / D37 | Worker claim vs independent verify | OPEN/PRODUCT |
+| FL-D31 / D37 | Worker claim 已显式标为未验证；Console 分栏待补 | PARTIAL |
 | FL-D33 / D56 / D87 / D110 | 全局 sourceUnchanged 误杀 | OPEN / RECURRING |
 | FL-D41 / D108 | hard/warn/score/off；零 Diff 交付 | PARTIAL（competition no-change 已有） |
-| FL-D103 | resume 反馈缺全维 remediation packet | OPEN |
+| FL-D103 | Verifier 维度已齐；main review 维度待接入 | PARTIAL |
 
 #### G. 主审 / 纠正 / 状态机
 
@@ -1357,3 +1374,67 @@
 - Resume 一次性预算授权（D30）  
 - Integration 异步 operation id（Wave 4）  
 
+
+## 2026-07-24 Lean Core 最终 Dogfood 与状态对账
+
+状态：五个 Wave 已实现；真实 DeepSeek Pro 自举闭环已完成；待最终
+commit / push。
+
+### 真实任务
+
+| Task | 真实作用 | 结果 |
+| --- | --- | --- |
+| `f1c20436-8acd-42ec-9de9-b72dbea8d304` | 修复最新 Integration operation 误继承旧 result | 3 个 Attempt 后通过；首次激活暴露 stale daemon 关闭失败，失败证据保留 |
+| `888b4664-50d3-4ab4-aaf8-058ed219ad7d` | 修复旧 Main Review 支配新 verification | 1 个 Attempt；四阶段 Integration 与新 daemon 激活成功 |
+| `de7a1459-6665-4214-bb92-b3661bc15405` | 让 Worker prompt 强制 checkpoint | Worker 真调用但 MCP 启动失败；促成运行时隔离修复 |
+| `cce02568-5653-4123-9d8d-e246cfdb28d0` | 最终完整 checkpoint / correction / activation 自举 | Attempt 1 因缺 checkpoint 明确失败；Attempt 2 checkpoint 全绿；Main Codex 要求 revise；Attempt 3 再次 checkpoint 全绿；四阶段激活完成 |
+
+最终任务的关键证据：
+
+- Checkpoint MCP 初始化：`connected`；工具列表包含
+  `mcp__forklight_checkpoint__run`。
+- Attempt 2、3 均产生 `checkpoint.started` 与 `checkpoint.completed`，三个
+  `acceptance-N` 命令全部 `exitCode=0`、`timedOut=false`。
+- Main Review 先记录 `revise`，后绑定最新 verification 记录 `accept`。
+- Integration operation
+  `03c8226b-b8b4-43c8-8712-3fde8147db3d` 的
+  `source-applied`、`source-verified`、`artifact-built`、
+  `runtime-activated` 全部通过。
+
+### 本轮新发现并关闭
+
+| ID | 问题 | 状态与证据 |
+| --- | --- | --- |
+| FL-D116 | `integration wait` 的客户端 socket 固定 15 秒，短于用户请求的等待时间 | **关闭**：deadline 取请求时间加缓冲；daemon 回归测试覆盖 |
+| FL-D117 | 新 build 无法停止旧 daemon，导致自举激活卡死 | **关闭**：业务 mutation 仍要求 identity matched；`shutdown` 是窄恢复例外；真实第二轮激活通过 |
+| FL-D118 | 旧 Main Review 会继续支配更新的 verification | **关闭**：只接受绑定最新 verification sequence 的 review；真实 correction 任务通过 |
+| FL-D119 | `submit` 人类输出重复打印 `taskId` | **关闭**：统一复用 canonical summary；真实 submit 只出现一次 |
+| FL-D120 | checkpoint MCP 配置存在，但 prompt 未要求调用 | **关闭**：两类 prompt 都枚举全部 `acceptance-N` 并要求完成 |
+| FL-D121 | checkpoint MCP 在 macOS sandbox 内因依赖、父路径和 socket 权限不完整而启动失败 | **关闭**：仅放行运行依赖、路径祖先和 daemon socket；真实 MCP connected |
+| FL-D122 | Worker 跳过或无法完成 checkpoint 时，Task 仍可能显示 succeeded | **关闭**：checkpoint 缺失、命令不全、失败或超时均阻止成功；最终任务 Attempt 1 真实失败 |
+| FL-D123 | Console 默认展开完整 Worker 长汇报，可读性差 | **关闭**：Decision View 仅给 360 字有标记预览，deep inspect 保留全文；浏览器复验通过 |
+
+### 既有根因簇对账
+
+| 根因簇 / 代表 ID | 最终状态 |
+| --- | --- |
+| R1 监督轮询：D68 / D83 / D97 / D111 | **关闭**：event-sequence progress cursor、compact inspect、event-aware wait |
+| R2 结果语义：D23 / D54 / D63 / D71 / D90 / D103 | **关闭**：behavior / policy / source 分栏与完整 remediation |
+| R3 源兼容：D33 / D56 / D87 / D110 | **关闭**：affected-path hard gate；unrelated drift 仅审计 |
+| R4 策略与限制：D10 / D46 / D55 / D58 / D84 | **关闭**：profile 语义、可行性预检、机器 Patch 指标 |
+| R5 correction：D30 / D67 / D78 | **关闭**：一次授权、受控 checkpoint、真实失败后恢复 |
+| R6 Integration：D34 / D50 / D61 / D79 / D99 / D100 / D113 | **关闭**：异步 operation、四阶段、outcome-unknown |
+| R7 runtime identity：D35 / D69 / D93 | **关闭**：CLI/MCP/daemon identity 与可执行恢复 |
+| R8 Main Review / lineage：D94 / D98 / D104 / D105 | **关闭**：review 绑定 verification，correction lineage 可见 |
+| R9 合同占位符：D70 / D112 | **仍开放**：自然语言 `unknown` 仍可能被 placeholder hard gate 误伤 |
+| R10 费用：D38 / D47 / D59 / D73 / D75 / D91 | **部分外部限制**：runtime estimate 与 official cost 已分离；DeepSeek Pro 仍 `unsupported-model`，MiniMax 仍需 request-level usage |
+
+### 不夸大的结论
+
+- 真实 DeepSeek Pro Attempts 继续只有 Claude-side runtime estimate；当前官方
+  catalog 无 `deepseek-v4-pro[1m]` 精确报价身份，因此 official cost 保持
+  `unsupported-model`，不能用 runtime estimate 冒充 Provider 账单。
+- MiniMax 的 aggregate terminal usage 仍不能解析每请求 pricing tier，保持
+  `per-request-usage-required`。
+- FL-D70 / FL-D112 未包含在本次 lean-core Goal 内，继续留在产品 backlog，
+  不标记已解决。

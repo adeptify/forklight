@@ -19,7 +19,6 @@ import type {
   RankingFactor,
   RankingPolicy,
   StagedTaskRegistration,
-  TaskRecord,
   TaskSpec,
   TaskStatus,
   VerificationResult,
