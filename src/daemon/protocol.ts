@@ -5,6 +5,7 @@ export type DaemonMethod =
   | "status"
   | "inspect"
   | "resume"
+  | "revise"
   | "list"
   | "plan_submit_file"
   | "plan_board"
@@ -27,6 +28,12 @@ export type DaemonMethod =
   | "console_stop"
   | "provider_status"
   | "provider_probe"
+  | "task_economics"
+  | "direct_codex_capture"
+  | "direct_codex_inbox"
+  | "direct_codex_review"
+  | "direct_codex_publication_preview"
+  | "direct_codex_publication_register"
   | "shutdown";
 
 export interface DaemonRequest {

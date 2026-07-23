@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { access, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { SettingsService } from "../src/core/settings.js";
 import { StateStore } from "../src/state/store.js";
 import {
   createClaudeProbeRunner,
+  providerProbeBatchFailed,
   ProviderProbeService,
   type ProbeRunner,
   type KeychainChecker,
@@ -29,7 +30,7 @@ function makeSettings(store: StateStore): SettingsService {
 }
 
 function stubRunner(
-  results: Record<string, { ok: boolean; category?: ProbeFailureCategory; latencyMs: number }>,
+  results: Record<string, { ok: boolean; category?: ProbeFailureCategory; summary?: string; latencyMs: number }>,
 ): ProbeRunner {
   return async (_config, _apiKey, _policy) => {
     const name = _config.name;
@@ -171,12 +172,14 @@ test("failure categories persist without raw provider output", async () => {
     const store = makeStore();
     const service = new ProviderProbeService(
       store, makeSettings(store),
-      stubRunner({ deepseek: { ok: false, category, latencyMs: 7 } }),
+      stubRunner({ deepseek: { ok: false, category, summary: "Safe bounded evidence", latencyMs: 7 } }),
       stubKeychain(new Set(["forklight.deepseek.api-key"])),
       stubKeychainReader(), stubClock(0),
     );
     const evidence = await service.probeProvider("deepseek");
     assert.equal(evidence.failureCategory, category);
+    assert.equal(evidence.failureSummary, "Safe bounded evidence");
+    assert.equal(store.getProbeEvidence("deepseek")?.failureSummary, "Safe bounded evidence");
     assert.equal(service.getProviderStatus("deepseek").status, "failed");
   }
 });
@@ -248,6 +251,56 @@ test("Claude probe runner classifies authentication failures emitted on stdout",
     { ok: nested.ok, category: nested.category },
     { ok: false, category: "authentication" },
   );
+});
+
+test("Claude probe runner isolates provider settings and cleans configuration", async () => {
+  const defaults = new SettingsService(makeStore()).get();
+  const config = resolveProvider("minimax", {}, defaults.providerDefaults.minimax);
+  let isolatedDir = "";
+  const runner = createClaudeProbeRunner(async (_command, args, options) => {
+    isolatedDir = options.env.CLAUDE_CONFIG_DIR ?? "";
+    assert.equal(options.cwd, isolatedDir);
+    assert.notEqual(isolatedDir, "/global/deepseek-config");
+    assert.equal(options.env.ANTHROPIC_BASE_URL, config.endpoint);
+    assert.equal(options.env.ANTHROPIC_MODEL, config.model);
+    assert.equal(args[args.indexOf("--model") + 1], config.model);
+    await access(isolatedDir);
+    return { stdout: '{"type":"result","is_error":false}\n', stderr: "" };
+  });
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = "/global/deepseek-config";
+  try {
+    assert.equal((await runner(config, "transient-key", {
+      probeTimeoutMs: 1000, maxBudgetUsd: 0.01, cacheLifetimeMs: 1000, maxProbeConcurrency: 1,
+    })).ok, true);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+  await assert.rejects(access(isolatedDir));
+});
+
+test("provider probe batch classification is deterministic", () => {
+  assert.equal(providerProbeBatchFailed({ minimax: { status: "verified" } }), false);
+  assert.equal(providerProbeBatchFailed({ minimax: { status: "failed" } }), true);
+  assert.equal(providerProbeBatchFailed({ minimax: { error: "probe failed" } }), true);
+  assert.equal(providerProbeBatchFailed({ minimax: null }), true);
+});
+
+test("Claude probe runner redacts and bounds failure evidence while cleaning after throws", async () => {
+  const config = resolveProvider("minimax");
+  let isolatedDir = "";
+  const runner = createClaudeProbeRunner(async (_command, _args, options) => {
+    isolatedDir = options.env.CLAUDE_CONFIG_DIR ?? "";
+    throw new Error(`401 invalid api key transient-secret ${"x".repeat(500)}`);
+  });
+  const result = await runner(config, "transient-secret", {
+    probeTimeoutMs: 1000, maxBudgetUsd: 0.01, cacheLifetimeMs: 1000, maxProbeConcurrency: 1,
+  });
+  assert.equal(result.category, "authentication");
+  assert.ok(result.summary !== undefined && result.summary.length <= 240);
+  assert.ok(!result.summary.includes("transient-secret"));
+  await assert.rejects(access(isolatedDir));
 });
 
 // --- Staleness ---

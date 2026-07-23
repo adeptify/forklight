@@ -1,3 +1,6 @@
+import type { PricingUnavailableReason } from "./pricing.js";
+import type { QuotedCost, UnavailableCost } from "./pricing-calculator.js";
+
 export type TaskStatus =
   | "queued"
   | "waiting"
@@ -31,12 +34,15 @@ export type EventType =
   | "integration.preflight.completed"
   | "integration.apply.started"
   | "integration.apply.completed"
-  | "integration.rollback.completed";
+  | "integration.rollback.completed"
+  | "task.revise.requested";
 
 export interface ProviderSpec {
   name: "deepseek" | "qwen" | "minimax" | "glm";
   model: string;
   endpoint?: string;
+  /** Explicit billing route — never forwarded to Worker environment or persisted as a credential. */
+  pricingRoute?: string;
   keychainService: string;
   keychainAccount?: string;
 }
@@ -45,7 +51,7 @@ export interface RuntimeSpec {
   name: "claude-code";
   executable: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
-  maxBudgetUsd: number;
+  maxBudgetUsd: number | null;
 }
 
 export interface TaskModuleContract {
@@ -92,6 +98,16 @@ interface SharedTaskSpec {
     allowEdits: boolean;
     allowedCommands: string[];
     focusPaths: string[];
+  };
+  taskClass?: string;
+  /** Exact direct-Codex execution-profile identity selected by the operator.
+   *  Must be a canonical profile id validated by the shared normalizer.
+   *  Absent for legacy tasks; never inferred from provider, model, or runtime. */
+  directCodexProfileId?: string;
+  /** Snapped completion policy at Task creation time.
+   *  Absent in legacy stored Tasks; runtime code must fall back to hard. */
+  completionPolicy?: {
+    noChangeMode: PolicyMode;
   };
 }
 
@@ -156,6 +172,38 @@ export interface TaskRecord {
   error?: string;
 }
 
+export interface AttemptOfficialCostQuoted {
+  readonly stage: "calculation";
+  readonly quoted: true;
+  /** Immutable calculator result — deeply frozen at persistence time. */
+  readonly result: QuotedCost;
+}
+
+export interface AttemptOfficialCostUsageUnavailable {
+  readonly stage: "usage";
+  readonly quoted: false;
+  readonly reason: "usage-missing" | "service-tier-missing";
+}
+
+export interface AttemptOfficialCostIdentityUnavailable {
+  readonly stage: "pricing-identity";
+  readonly quoted: false;
+  readonly reason: PricingUnavailableReason;
+}
+
+export interface AttemptOfficialCostCalculationUnavailable {
+  readonly stage: "calculation";
+  readonly quoted: false;
+  /** Immutable unavailable result — deeply frozen at persistence time. */
+  readonly result: UnavailableCost;
+}
+
+export type AttemptOfficialCost =
+  | AttemptOfficialCostQuoted
+  | AttemptOfficialCostUsageUnavailable
+  | AttemptOfficialCostIdentityUnavailable
+  | AttemptOfficialCostCalculationUnavailable;
+
 export interface AttemptRecord {
   id: string;
   taskId: string;
@@ -171,6 +219,28 @@ export interface AttemptRecord {
   turns?: number;
   resultText?: string;
   error?: string;
+  usage?: AttemptTokenUsage;
+  runtimeCostEstimateUsd?: number;
+  officialCost?: AttemptOfficialCost;
+}
+
+export interface ModelTokenUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+}
+
+export interface AttemptTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  serviceTier?: string;
+  perModel?: ModelTokenUsage[];
+  source: "terminal-result";
+  complete: true;
 }
 
 export interface StagedTaskRegistration {
@@ -218,6 +288,9 @@ export interface VerificationResult {
     maxDiffLines: number;
     withinBudget: boolean;
   };
+  /** Structured completion policy evaluation.
+   *  Absent for legacy verification stored before this field was introduced. */
+  completionPolicy?: CompletionPolicyCheck;
 }
 
 export interface NormalizedWorkerEvent {
@@ -227,9 +300,13 @@ export interface NormalizedWorkerEvent {
   sessionId?: string;
   terminal?: {
     isError: boolean;
+    /** Stable content-free diagnostic when the terminal envelope is an error. */
+    failureReason?: string;
     resultText?: string;
     costUsd?: number;
     turns?: number;
+    runtimeCostEstimateUsd?: number;
+    usage?: AttemptTokenUsage;
   };
 }
 
@@ -263,7 +340,18 @@ export interface PlanItemStatus {
 }
 
 export type CompetitionStatus = "pending" | "running" | "completed";
-export type RankingFactor = "verification" | "diffFocus" | "retries" | "cost" | "duration";
+export type RankingFactor = "verification" | "diffFocus" | "retries" | "cost" | "duration" | "delivery";
+
+export type PolicyMode = "hard" | "warn" | "score" | "off";
+
+export interface CompletionPolicyCheck {
+  /** The evidence outcome and configured effect remain separate. */
+  check: "satisfied" | "hard-fail" | "warning" | "score-evidence" | "ignored" | "not-applicable";
+  /** The snapped policy mode that produced this outcome. */
+  noChangeMode: PolicyMode;
+  /** Human-readable evidence for the policy decision. */
+  message: string;
+}
 
 export interface RankingPolicy {
   weights: Record<RankingFactor, number>;
@@ -370,6 +458,7 @@ export interface ProbeEvidence {
   latencyMs: number;
   timestamp: string;
   failureCategory?: ProbeFailureCategory;
+  failureSummary?: string;
 }
 
 export interface ProviderStatus {

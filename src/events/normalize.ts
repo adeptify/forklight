@@ -1,4 +1,4 @@
-import type { NormalizedWorkerEvent } from "../core/types.js";
+import type { AttemptTokenUsage, ModelTokenUsage, NormalizedWorkerEvent } from "../core/types.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -18,6 +18,64 @@ function toolTarget(name: string, input: JsonObject): string {
   const target =
     input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.query ?? input.description;
   return target === undefined ? "" : truncate(target, 240);
+}
+
+function strictNonNegativeInt(value: unknown): number | undefined {
+  if (typeof value !== "number") return undefined;
+  if (!Number.isFinite(value)) return undefined;
+  if (!Number.isInteger(value)) return undefined;
+  if (value < 0) return undefined;
+  return value;
+}
+
+function parseModelUsage(value: unknown): ModelTokenUsage[] | undefined {
+  const models = asObject(value);
+  if (!models) return undefined;
+  const entries: ModelTokenUsage[] = [];
+  for (const [model, data] of Object.entries(models)) {
+    const d = asObject(data);
+    if (!d) continue;
+    const inputTokens = strictNonNegativeInt(d.inputTokens);
+    const outputTokens = strictNonNegativeInt(d.outputTokens);
+    const cacheReadInputTokens = strictNonNegativeInt(d.cacheReadInputTokens);
+    const cacheCreationInputTokens = strictNonNegativeInt(d.cacheCreationInputTokens);
+    if (
+      inputTokens === undefined ||
+      outputTokens === undefined ||
+      cacheReadInputTokens === undefined ||
+      cacheCreationInputTokens === undefined
+    ) continue;
+    entries.push({ model, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens });
+  }
+  return entries.length > 0 ? entries : undefined;
+}
+
+function parseTokenUsage(root: JsonObject): AttemptTokenUsage | undefined {
+  const usage = asObject(root.usage);
+  if (!usage) return undefined;
+  const inputTokens = strictNonNegativeInt(usage.input_tokens);
+  const outputTokens = strictNonNegativeInt(usage.output_tokens);
+  const cacheReadInputTokens = strictNonNegativeInt(usage.cache_read_input_tokens);
+  const cacheCreationInputTokens = strictNonNegativeInt(usage.cache_creation_input_tokens);
+  if (
+    inputTokens === undefined ||
+    outputTokens === undefined ||
+    cacheReadInputTokens === undefined ||
+    cacheCreationInputTokens === undefined
+  ) {
+    return undefined;
+  }
+  const perModel = parseModelUsage(root.modelUsage);
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadInputTokens,
+    cacheCreationInputTokens,
+    ...(typeof usage.service_tier === "string" ? { serviceTier: usage.service_tier } : {}),
+    ...(perModel === undefined ? {} : { perModel }),
+    source: "terminal-result",
+    complete: true,
+  };
 }
 
 export class ClaudeEventNormalizer {
@@ -58,24 +116,45 @@ export class ClaudeEventNormalizer {
 
     if (type === "result") {
       const isError = root.is_error === true;
+      const stopReason = typeof root.stop_reason === "string" ? root.stop_reason : undefined;
+      const subtype = typeof root.subtype === "string" ? root.subtype : undefined;
+      // Explicit runtime error signals override is_error false.
+      // A Worker that reports stop_reason "error" or an error subtype terminated
+      // abnormally even when the envelope omits is_error or the process exits zero.
+      const terminalError = isError
+        || stopReason === "error"
+        || (subtype !== undefined && (subtype === "error" || subtype.startsWith("error_")));
       const resultText = typeof root.result === "string" ? root.result : undefined;
       const costUsd = typeof root.total_cost_usd === "number" ? root.total_cost_usd : undefined;
       const turns = typeof root.num_turns === "number" ? root.num_turns : undefined;
+      const usage = parseTokenUsage(root);
+      const summary = terminalError
+        ? (stopReason === "error" && !isError
+            ? "Worker terminated with error stop reason"
+            : subtype !== undefined && !isError
+              ? "Worker reported an error terminal subtype"
+              : "Worker reported failure")
+        : "Worker reported completion";
       return [
         {
-          type: isError ? "worker.failed" : "worker.completed",
-          summary: isError ? "Worker reported failure" : "Worker reported completion",
+          type: terminalError ? "worker.failed" : "worker.completed",
+          summary,
           payload: {
             subtype: root.subtype,
+            ...(stopReason !== undefined ? { stopReason } : {}),
             ...(resultText === undefined ? {} : { result: truncate(resultText, 2_000) }),
             ...(costUsd === undefined ? {} : { costUsd }),
             ...(turns === undefined ? {} : { turns }),
+            ...(usage === undefined ? {} : { usage }),
           },
           terminal: {
-            isError,
+            isError: terminalError,
+            ...(terminalError ? { failureReason: summary } : {}),
             ...(resultText === undefined ? {} : { resultText }),
             ...(costUsd === undefined ? {} : { costUsd }),
             ...(turns === undefined ? {} : { turns }),
+            ...(costUsd !== undefined ? { runtimeCostEstimateUsd: costUsd } : {}),
+            ...(usage === undefined ? {} : { usage }),
           },
         },
       ];

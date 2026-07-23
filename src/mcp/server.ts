@@ -3,11 +3,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { forklightHome } from "../core/config.js";
 import type { ProviderModelSummary } from "../core/statistics.js";
+import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
 import type { TaskRecord } from "../core/types.js";
 import { assessTaskQuality, parseTaskSpec } from "../core/task.js";
 import { type ProviderName } from "../core/providers.js";
 import { daemonRequest, ensureDaemon } from "../daemon/client.js";
 import type { ForkLightSettings, TaskPolicy } from "../core/settings.js";
+import { withMcpExchangeReceipt } from "./exchange-receipts.js";
 
 const SERVER_INSTRUCTIONS =
   "ForkLight runs bounded external coding Workers through DeepSeek, Qwen, MiniMax, or GLM. Before submit, the main Codex agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, module inputs and outputs, call chain, scenarios, risks, and independent acceptance. Validate the contract first. Submit returns immediately: poll status, then inspect the diff and verification result. The main Codex agent remains accountable for review and user approvals. Never call ForkLight a native Codex subagent, and never use it to commit or push.";
@@ -152,6 +154,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         contractQuality: settings.contractQuality,
         execution: settings.execution,
         providerDefaults: settings.providerDefaults,
+        completionPolicy: settings.completionPolicy,
       };
       const spec = parseTaskSpec(
         inlineTask(input, settings),
@@ -234,19 +237,29 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     async (input) => {
       await ensureDaemon(home);
       const settings = await daemonRequest<ForkLightSettings>("settings_get", {}, home);
-      const task = await daemonRequest<TaskRecord>(
-        "submit",
-        {
-          baseDirectory: input.project,
-          task: inlineTask(input, settings),
-        },
+      let submittedTaskId: string | undefined;
+      return withMcpExchangeReceipt({
+        operation: "forklight_submit",
         home,
-      );
-      const summary = taskSummary(task);
-      return textAndData(
-        summary,
-        `ForkLight task ${task.id} was queued for ${task.spec.provider.name}/${task.spec.provider.model}. Poll forklight_status with this task ID.`,
-      );
+        args: input,
+        taskId: () => submittedTaskId,
+        invoke: async () => {
+          const task = await daemonRequest<TaskRecord>(
+            "submit",
+            {
+              baseDirectory: input.project,
+              task: inlineTask(input, settings),
+            },
+            home,
+          );
+          submittedTaskId = task.id;
+          const summary = taskSummary(task);
+          return textAndData(
+            summary,
+            `ForkLight task ${task.id} was queued for ${task.spec.provider.name}/${task.spec.provider.model}. Poll forklight_status with this task ID.`,
+          );
+        },
+      });
     },
   );
 
@@ -259,9 +272,17 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ taskId }) => {
-      await ensureDaemon(home);
-      const task = await daemonRequest<TaskRecord>("status", { taskId }, home);
-      return textAndData(taskSummary(task));
+      return withMcpExchangeReceipt({
+        operation: "forklight_status",
+        home,
+        args: { taskId },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const task = await daemonRequest<TaskRecord>("status", { taskId }, home);
+          return textAndData(taskSummary(task));
+        },
+      });
     },
   );
 
@@ -275,13 +296,21 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ taskId }) => {
-      await ensureDaemon(home);
-      const result = await daemonRequest<Record<string, unknown>>("inspect", { taskId }, home);
-      const diff = typeof result.diff === "string" && result.diff.length > 120_000
-        ? `${result.diff.slice(0, 120_000)}\n[diff truncated by ForkLight MCP]`
-        : result.diff;
-      const bounded = { ...result, diff };
-      return textAndData(bounded, JSON.stringify(bounded, null, 2));
+      return withMcpExchangeReceipt({
+        operation: "forklight_inspect",
+        home,
+        args: { taskId },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const result = await daemonRequest<Record<string, unknown>>("inspect", { taskId }, home);
+          const diff = typeof result.diff === "string" && result.diff.length > 120_000
+            ? `${result.diff.slice(0, 120_000)}\n[diff truncated by ForkLight MCP]`
+            : result.diff;
+          const bounded = { ...result, diff };
+          return textAndData(bounded, JSON.stringify(bounded, null, 2));
+        },
+      });
     },
   );
 
@@ -297,16 +326,24 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async ({ taskId, feedback }) => {
-      await ensureDaemon(home);
-      const task = await daemonRequest<TaskRecord>(
-        "resume",
-        { taskId, ...(feedback === undefined ? {} : { feedback }) },
+      return withMcpExchangeReceipt({
+        operation: "forklight_resume",
         home,
-      );
-      return textAndData(
-        taskSummary(task),
-        `ForkLight task ${taskId} was queued for resume. Poll forklight_status.`,
-      );
+        args: { taskId, ...(feedback === undefined ? {} : { feedback }) },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const task = await daemonRequest<TaskRecord>(
+            "resume",
+            { taskId, ...(feedback === undefined ? {} : { feedback }) },
+            home,
+          );
+          return textAndData(
+            taskSummary(task),
+            `ForkLight task ${taskId} was queued for resume. Poll forklight_status.`,
+          );
+        },
+      });
     },
   );
 
@@ -433,13 +470,21 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ taskId }) => {
-      await ensureDaemon(home);
-      const receipt = await daemonRequest<Record<string, unknown>>(
-        "integration_preflight",
-        { taskId },
+      return withMcpExchangeReceipt({
+        operation: "forklight_integration_preflight",
         home,
-      );
-      return textAndData(receipt);
+        args: { taskId },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const receipt = await daemonRequest<Record<string, unknown>>(
+            "integration_preflight",
+            { taskId },
+            home,
+          );
+          return textAndData(receipt);
+        },
+      });
     },
   );
 
@@ -459,13 +504,21 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async ({ taskId, receiptId }) => {
-      await ensureDaemon(home);
-      const result = await daemonRequest<Record<string, unknown>>(
-        "integration_apply",
-        { taskId, receiptId, confirm: true },
+      return withMcpExchangeReceipt({
+        operation: "forklight_integration_apply",
         home,
-      );
-      return textAndData(result);
+        args: { taskId, receiptId, confirm: true },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const result = await daemonRequest<Record<string, unknown>>(
+            "integration_apply",
+            { taskId, receiptId, confirm: true },
+            home,
+          );
+          return textAndData(result);
+        },
+      });
     },
   );
 
@@ -479,13 +532,21 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ taskId }) => {
-      await ensureDaemon(home);
-      const history = await daemonRequest<Record<string, unknown>>(
-        "integration_history",
-        { taskId },
+      return withMcpExchangeReceipt({
+        operation: "forklight_integration_history",
         home,
-      );
-      return textAndData(history);
+        args: { taskId },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const history = await daemonRequest<Record<string, unknown>>(
+            "integration_history",
+            { taskId },
+            home,
+          );
+          return textAndData(history);
+        },
+      });
     },
   );
 
@@ -620,6 +681,186 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       return textAndData(
         result,
         `Provider probe completed for ${provider ?? "all providers"}. Results are cached; use forklight_provider_status to re-read without cost.`,
+      );
+    },
+  );
+
+  // --- Direct-Codex calibration MCP adapter ---------------------------------
+  // Five thin handlers that delegate all identity grammar, arithmetic,
+  // Task-pair validation, review immutability, cross-field review semantics,
+  // publication readiness, versioning, and persistence to the daemon methods.
+  // Only capture is measured with an exchange receipt; pair-level and
+  // publication operations are unattributed.
+
+  const codexTerminalUsageSchema = z.object({
+    type: z.literal("turn.completed"),
+    usage: z.object({
+      input_tokens: z.number().int().min(0),
+      cached_input_tokens: z.number().int().min(0),
+      cache_write_input_tokens: z.number().int().min(0),
+      output_tokens: z.number().int().min(0),
+      reasoning_output_tokens: z.number().int().min(0),
+    }).strict(),
+  }).strict();
+
+  const codexSampleMetadataSchema = z.object({
+    sampleId: z.string().min(1),
+    forklightTaskId: z.string().min(1),
+    exactTaskClass: z.string().min(1),
+    directCodexProfileId: z.string().min(1),
+    directRunRef: z.string().min(1),
+    pairingRef: z.string().min(1),
+    capturedAt: z.string().min(1),
+  }).strict();
+
+  server.registerTool(
+    "forklight_direct_codex_capture",
+    {
+      title: "Capture direct Codex paired sample",
+      description:
+        "Capture one count-only Codex turn.completed terminal event with seven explicit metadata fields as immutable paired-sample evidence. Delegates identity, arithmetic, and validation to the daemon.",
+      inputSchema: z.object({
+        usage: codexTerminalUsageSchema,
+        metadata: codexSampleMetadataSchema,
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ usage, metadata }) => {
+      await ensureDaemon(home);
+      let resolvedTaskId: string | undefined;
+      return withMcpExchangeReceipt({
+        operation: "forklight_direct_codex_capture",
+        home,
+        args: { usage, metadata },
+        taskId: () => resolvedTaskId,
+        invoke: async () => {
+          const sample = await daemonRequest<DirectCodexPairedSample>(
+            "direct_codex_capture",
+            { usage, metadata },
+            home,
+          );
+          resolvedTaskId = sample.forklightTaskId;
+          return textAndData(
+            sample,
+            `Direct Codex sample ${sample.sampleId} captured for Task ${sample.forklightTaskId}.`,
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_direct_codex_inbox",
+    {
+      title: "List direct Codex inbox for exact pair",
+      description:
+        "Return every DirectCodexPairedSample for the exact taskClass × directCodexProfileId pair, each with its explicit review state. Pending, accepted, and rejected states are included. Read-only.",
+      inputSchema: z.object({
+        taskClass: z.string().min(1),
+        directCodexProfileId: z.string().min(1),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskClass, directCodexProfileId }) => {
+      await ensureDaemon(home);
+      const items = await daemonRequest<readonly Record<string, unknown>[]>(
+        "direct_codex_inbox",
+        { taskClass, directCodexProfileId },
+        home,
+      );
+      return textAndData(items);
+    },
+  );
+
+  server.registerTool(
+    "forklight_direct_codex_review",
+    {
+      title: "Record explicit immutable review",
+      description:
+        "Record one immutable review decision for an existing DirectCodexPairedSample. Accepts 'accepted' or 'rejected' with a bounded enum rejection reason. Requires explicit confirm true. Delegates all identity, decision, and immutability rules to the daemon.",
+      inputSchema: z.object({
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that the review decision is final. Must be true.",
+        ),
+        sampleId: z.string().min(1),
+        decision: z.enum(["accepted", "rejected"]),
+        rejectionReason: z.enum([
+          "not-equivalent-task",
+          "insufficient-quality",
+          "incomplete-evidence",
+          "duplicate-evidence",
+        ]).optional(),
+        reviewer: z.literal("main-codex"),
+        reviewedAt: z.string().min(1),
+        schemaVersion: z.literal(1),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input) => {
+      await ensureDaemon(home);
+      const review = await daemonRequest<Record<string, unknown>>(
+        "direct_codex_review",
+        input as unknown as Record<string, unknown>,
+        home,
+      );
+      return textAndData(
+        review,
+        `Direct Codex sample ${review.sampleId} review recorded: ${review.decision}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_direct_codex_publication_preview",
+    {
+      title: "Preview direct Codex publication readiness",
+      description:
+        "Evaluate publication readiness for an exact taskClass × directCodexProfileId pair. Returns accepted/rejected/pending counts, next version, accepted sample IDs, and readiness status. Read-only — never mutates state.",
+      inputSchema: z.object({
+        taskClass: z.string().min(1),
+        directCodexProfileId: z.string().min(1),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskClass, directCodexProfileId }) => {
+      await ensureDaemon(home);
+      const preview = await daemonRequest<Record<string, unknown>>(
+        "direct_codex_publication_preview",
+        { taskClass, directCodexProfileId },
+        home,
+      );
+      return textAndData(preview);
+    },
+  );
+
+  server.registerTool(
+    "forklight_direct_codex_publication_register",
+    {
+      title: "Register direct Codex calibration publication",
+      description:
+        "Register a confirmed calibration publication from only immutable accepted paired samples. Requires explicit confirm true. Delegates all readiness, versioning, and persistence to the daemon. Evidence set is immutable once registered.",
+      inputSchema: z.object({
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that the publication registration is approved. Must be true.",
+        ),
+        method: z.string().min(1),
+        confidence: z.enum(["low", "medium", "high"]),
+        createdAt: z.string().min(1),
+        taskClass: z.string().min(1),
+        directCodexProfileId: z.string().min(1),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "direct_codex_publication_register",
+        input as unknown as Record<string, unknown>,
+        home,
+      );
+      return textAndData(
+        result,
+        `Direct Codex publication version ${(result.summary as Record<string, unknown>).version} registered for ${(result.publication as Record<string, unknown>).directCodexProfileId}.`,
       );
     },
   );

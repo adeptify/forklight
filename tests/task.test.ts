@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { buildTaskRecord, registerTaskFromSpec } from "../src/core/runner.js";
 import { assessTaskQuality, buildWorkerPrompt, loadTaskSpec, parseTaskSpec } from "../src/core/task.js";
+import { budgetArguments } from "../src/workers/claude.js";
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "../src/core/settings.js";
 import { StateStore } from "../src/state/store.js";
 
@@ -288,6 +289,7 @@ acceptance:
     contractQuality: strict,
     execution: defaults.execution,
     providerDefaults: defaults.providerDefaults,
+    completionPolicy: defaults.completionPolicy,
   };
   // Strict maxFiles=2 rejects spec whose changeBudget.maxFiles=3.
   await assert.rejects(
@@ -358,6 +360,7 @@ acceptance:
         defaultKeychainService: "forklight.custom.keychain",
       },
     },
+    completionPolicy: defaults.completionPolicy,
   };
   const loaded = await loadTaskSpec(taskFile, policy);
   assert.equal(loaded.spec.provider.name, "qwen");
@@ -438,6 +441,7 @@ acceptance:
         defaultKeychainService: "forklight.config.keychain",
       },
     },
+    completionPolicy: defaults.completionPolicy,
   };
   const loaded = await loadTaskSpec(taskFile, policy);
   // Explicit values win even though configured defaults differ.
@@ -510,6 +514,7 @@ acceptance:
           defaultModel: "first-model",
         },
       },
+      completionPolicy: defaults.completionPolicy,
     };
     const { spec: spec1 } = await loadTaskSpec(taskFile, policy1);
     const record1 = registerTaskFromSpec(store, spec1, taskFile);
@@ -529,6 +534,7 @@ acceptance:
           defaultModel: "second-model",
         },
       },
+      completionPolicy: defaults.completionPolicy,
     };
     const { spec: spec2 } = await loadTaskSpec(taskFile, policy2);
     const record2 = registerTaskFromSpec(store, spec2, taskFile);
@@ -544,6 +550,273 @@ acceptance:
     assert.equal(stored2.spec.provider.name, "qwen");
 
     assert.notEqual(record1.id, record2.id);
+  } finally {
+    store.close();
+  }
+});
+
+// --- unlimited budget semantics ---
+
+function contractSpec(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 2,
+    name: "Budget test",
+    project: process.cwd(),
+    contract: {
+      outcome: "A reasonable outcome description",
+      context: ["c"], inScope: ["i"], outOfScope: ["o"],
+      executionSteps: ["s"], deliverables: ["d"],
+      modules: [{ name: "m", responsibility: "long enough responsibility", consumes: ["c"], produces: ["p"], boundaries: ["b"] }],
+      callChain: ["a", "b"],
+      scenarios: [
+        { name: "normal", given: "g", when: "w", then: "t" },
+        { name: "edge", given: "g", when: "w", then: "t" },
+      ],
+      risks: ["r"],
+      changeBudget: { maxFiles: 4, maxDiffLines: 300 },
+    },
+    worker: { focusPaths: ["src"] },
+    acceptance: { criteria: ["c"], commands: ["true"] },
+    ...overrides,
+  };
+}
+
+function policyWithBudget(defaultMaxBudgetUsd: number | null): TaskPolicy {
+  const defaults = cloneDefaults();
+  return {
+    contractQuality: defaults.contractQuality,
+    execution: { ...defaults.execution, defaultMaxBudgetUsd },
+    providerDefaults: defaults.providerDefaults,
+    completionPolicy: defaults.completionPolicy,
+  };
+}
+
+test("null default propagates to runtime spec when task omits budget", () => {
+  const spec = parseTaskSpec(contractSpec(), process.cwd(), policyWithBudget(null));
+  assert.equal(spec.runtime.maxBudgetUsd, null);
+});
+
+test("explicit null wins over finite default", () => {
+  const spec = parseTaskSpec(
+    contractSpec({ runtime: { maxBudgetUsd: null } }),
+    process.cwd(),
+    policyWithBudget(0.5),
+  );
+  assert.equal(spec.runtime.maxBudgetUsd, null);
+});
+
+test("finite budget above maximum throws at parse time", () => {
+  assert.throws(
+    () => parseTaskSpec(
+      contractSpec({ runtime: { maxBudgetUsd: 100 } }),
+      process.cwd(),
+    ),
+    /exceeds configured maximum/,
+  );
+});
+
+test("budgetArguments omits flag for null", () => {
+  assert.deepEqual(budgetArguments(null), []);
+});
+
+test("budgetArguments emits flag and value for finite number", () => {
+  assert.deepEqual(budgetArguments(2.5), ["--max-budget-usd", "2.5"]);
+});
+
+test("budgetArguments round-trips zero without special-casing", () => {
+  assert.deepEqual(budgetArguments(0), ["--max-budget-usd", "0"]);
+});
+
+test("creation-time budget snapshot survives later policy changes", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-budget-snap-"));
+  const store = new StateStore(home);
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-task-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: Budget snap test
+project: ./project
+worker:
+  focusPaths: [src]
+contract:
+  outcome: A reasonable outcome description
+  context: [c]
+  inScope: [i]
+  outOfScope: [o]
+  executionSteps: [s]
+  deliverables: [d]
+  modules:
+    - name: m
+      responsibility: long enough responsibility
+      consumes: [c]
+      produces: [p]
+      boundaries: [b]
+  callChain: [a, b]
+  scenarios:
+    - name: normal
+      given: g
+      when: w
+      then: t
+    - name: edge
+      given: g
+      when: w
+      then: t
+  risks: [r]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 300
+acceptance:
+  criteria: [c]
+  commands:
+    - "true"
+`,
+  );
+  try {
+    const defaults = cloneDefaults();
+    const unlimited: TaskPolicy = {
+      contractQuality: defaults.contractQuality,
+      execution: { ...defaults.execution, defaultMaxBudgetUsd: null },
+      providerDefaults: defaults.providerDefaults,
+      completionPolicy: defaults.completionPolicy,
+    };
+    const { spec: spec1 } = await loadTaskSpec(taskFile, unlimited);
+    const record1 = registerTaskFromSpec(store, spec1, taskFile);
+    assert.equal(record1.spec.runtime.maxBudgetUsd, null);
+
+    // Later task registered with a finite default does not mutate the earlier record.
+    const finite: TaskPolicy = {
+      contractQuality: defaults.contractQuality,
+      execution: { ...defaults.execution, defaultMaxBudgetUsd: 3 },
+      providerDefaults: defaults.providerDefaults,
+      completionPolicy: defaults.completionPolicy,
+    };
+    await loadTaskSpec(taskFile, finite);
+
+    const stored = store.getTask(record1.id);
+    assert.equal(stored.spec.runtime.maxBudgetUsd, null);
+  } finally {
+    store.close();
+  }
+});
+
+// --- Completion policy snapshot ---
+
+function policyWithCompletion(noChangeMode: string): TaskPolicy {
+  const defaults = cloneDefaults();
+  return {
+    contractQuality: defaults.contractQuality,
+    execution: defaults.execution,
+    providerDefaults: defaults.providerDefaults,
+    completionPolicy: { noChangeMode: noChangeMode as "hard" | "warn" | "score" | "off" },
+  };
+}
+
+test("newly parsed task snapshots configurable no-change policy", () => {
+  const defaults = cloneDefaults();
+  // Default policy
+  const specDefault = parseTaskSpec(contractSpec(), process.cwd());
+  assert.equal(specDefault.completionPolicy?.noChangeMode, "hard");
+
+  // Score policy
+  const specScore = parseTaskSpec(contractSpec(), process.cwd(), policyWithCompletion("score"));
+  assert.equal(specScore.completionPolicy?.noChangeMode, "score");
+
+  // Off policy
+  const specOff = parseTaskSpec(contractSpec(), process.cwd(), policyWithCompletion("off"));
+  assert.equal(specOff.completionPolicy?.noChangeMode, "off");
+});
+
+test("task-level completion policy explicitly overrides the global default", () => {
+  const spec = parseTaskSpec(
+    contractSpec({ completionPolicy: { noChangeMode: "warn" } }),
+    process.cwd(),
+    policyWithCompletion("score"),
+  );
+  assert.equal(spec.completionPolicy?.noChangeMode, "warn");
+});
+
+test("task-level completion policy rejects invalid modes and unsupported fields", () => {
+  assert.throws(
+    () => parseTaskSpec(
+      contractSpec({ completionPolicy: { noChangeMode: "advisory" } }),
+      process.cwd(),
+    ),
+    /task\.completionPolicy\.noChangeMode must be hard, warn, score, or off/,
+  );
+  assert.throws(
+    () => parseTaskSpec(
+      contractSpec({ completionPolicy: { noChangeMode: "hard", modelBan: true } }),
+      process.cwd(),
+    ),
+    /task\.completionPolicy contains an unsupported field/,
+  );
+});
+
+test("completion policy snapshot survives later settings changes", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cp-snap-"));
+  const store = new StateStore(home);
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-task-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: CP snap test
+project: ./project
+worker:
+  focusPaths: [src]
+contract:
+  outcome: A reasonable outcome description
+  context: [c]
+  inScope: [i]
+  outOfScope: [o]
+  executionSteps: [s]
+  deliverables: [d]
+  modules:
+    - name: m
+      responsibility: long enough responsibility
+      consumes: [c]
+      produces: [p]
+      boundaries: [b]
+  callChain: [a, b]
+  scenarios:
+    - name: normal
+      given: g
+      when: w
+      then: t
+    - name: edge
+      given: g
+      when: w
+      then: t
+  risks: [r]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 300
+acceptance:
+  criteria: [c]
+  commands:
+    - "true"
+`,
+  );
+  try {
+    // Create under score mode
+    const { spec: specScore } = await loadTaskSpec(taskFile, policyWithCompletion("score"));
+    const record = registerTaskFromSpec(store, specScore, taskFile);
+    assert.equal(record.spec.completionPolicy?.noChangeMode, "score");
+
+    // Later task created with different policy
+    const { spec: specOff } = await loadTaskSpec(taskFile, policyWithCompletion("off"));
+    const record2 = registerTaskFromSpec(store, specOff, taskFile);
+
+    // First record still has score policy — immutable
+    const stored1 = store.getTask(record.id);
+    assert.equal(stored1.spec.completionPolicy?.noChangeMode, "score");
+
+    // Second record has off policy
+    const stored2 = store.getTask(record2.id);
+    assert.equal(stored2.spec.completionPolicy?.noChangeMode, "off");
   } finally {
     store.close();
   }

@@ -6,13 +6,21 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PlanBoard, PlanBoardSummary } from "./core/board.js";
+import type { DirectCodexPairedSample } from "./core/direct-codex-calibration.js";
+import type {
+  DirectCodexPublicationPreview, DirectCodexRegistrationResult,
+} from "./core/direct-codex-publication-service.js";
+import type { DirectCodexSampleReview } from "./core/direct-codex-review.js";
+import type { DirectCodexInboxItem } from "./core/direct-codex-workflow-service.js";
 import { forklightHome } from "./core/config.js";
-import { createClaudeProbeRunner, realExecFile } from "./core/provider-probe.js";
+import { createClaudeProbeRunner, providerProbeBatchFailed, realExecFile } from "./core/provider-probe.js";
 import { providerReadiness } from "./core/providers.js";
 import type { ProviderModelSummary } from "./core/statistics.js";
-import type { EventRecord, NormalizedWorkerEvent, TaskRecord } from "./core/types.js";
+import type {
+  AttemptRecord, EventRecord, NormalizedWorkerEvent, TaskRecord,
+} from "./core/types.js";
 import { loadWorkPlan } from "./core/plan.js";
-import { reconcileTask, resumeTask, runNewTask } from "./core/runner.js";
+import { reconcileTask, resumeTask, reviseTask, runNewTask } from "./core/runner.js";
 import { assessTaskQuality, loadTaskSpec } from "./core/task.js";
 import { createKeychainStore } from "./core/secrets.js";
 import { SettingsService, type TaskPolicy } from "./core/settings.js";
@@ -21,6 +29,16 @@ import type { DaemonMethod } from "./daemon/protocol.js";
 import { createSystemInspector, SetupService } from "./setup/service.js";
 import { SetupServer } from "./setup/server.js";
 import { StateStore } from "./state/store.js";
+import { withCliExchangeReceipt, humanTokenReportLines } from "./cli/exchange-receipts.js";
+import {
+  buildCompactInspection,
+  humanCompactInspectionLines,
+  humanWaitLines,
+  parseInspectSummaryOptions,
+  parseWaitOptions,
+  waitForTask,
+} from "./cli/supervision.js";
+import { getTaskTokenReport } from "./core/token-report.js";
 
 function usage(): string {
   return `ForkLight 0.2
@@ -34,8 +52,10 @@ Usage:
   forklight inspect-plan <plan-id> [--json]
   forklight board [--json]
   forklight status <task-id> [--json]
+  forklight wait <task-id> --timeout-ms <positive integer> [--poll-ms <positive integer>] [--until change|terminal] [--json]
   forklight resume <task-id>
-  forklight inspect <task-id> [--json]
+  forklight revise <task-id> --feedback <text>
+  forklight inspect <task-id> [--summary] [--events <nonnegative integer>] [--json]
   forklight list [--json]
   forklight stats [--json] [--provider <name>] [--model <name>] [--since <ISO>] [--until <ISO>]
   forklight daemon <start|status|stop>
@@ -44,6 +64,12 @@ Usage:
   forklight integration preflight <task-id> [--json]
   forklight integration apply <task-id> --receipt <receipt-id> --confirm [--json]
   forklight integration history <task-id> [--json]
+  forklight tokens <task-id> [--json]
+  forklight direct-codex capture --usage <json-object> --metadata <json-object> [--json]
+  forklight direct-codex inbox --task-class <class> --profile-id <id> [--json]
+  forklight direct-codex review --sample-id <id> --decision <accepted|rejected> [--rejection-reason <reason>] --reviewer <reviewer> --reviewed-at <canonical-ISO> --schema-version <version> --confirm [--json]
+  forklight direct-codex publication-preview --task-class <class> --profile-id <id> [--json]
+  forklight direct-codex publication-register --task-class <class> --profile-id <id> --method <method> --confidence <level> --created-at <canonical-ISO> --confirm [--json]
   forklight compete <task.yaml> --candidates <json>
   forklight competition status <id> [--json]
   forklight competition list [--json]
@@ -61,10 +87,15 @@ function required(value: string | undefined, label: string): string {
   return value;
 }
 
-function printProgress(event: NormalizedWorkerEvent): void {
+function progressLine(event: NormalizedWorkerEvent): string | undefined {
   if (event.type === "worker.message" && event.summary.length > 180) return;
   const time = new Date().toLocaleTimeString("en-GB", { hour12: false });
-  process.stdout.write(`[${time}] ${event.summary}\n`);
+  return `[${time}] ${event.summary}\n`;
+}
+
+function printProgress(event: NormalizedWorkerEvent): void {
+  const line = progressLine(event);
+  if (line !== undefined) process.stdout.write(line);
 }
 
 function taskSummary(task: TaskRecord): Record<string, unknown> {
@@ -85,46 +116,222 @@ function taskSummary(task: TaskRecord): Record<string, unknown> {
   };
 }
 
-function printHumanStatus(task: TaskRecord): void {
+/** Render the human status block (one `key: value` line per defined
+ *  field) as a single exact string.  Returns the empty string when the
+ *  task has no defined summary fields. */
+function humanStatusLines(task: TaskRecord): string {
   const summary = taskSummary(task);
+  const lines: string[] = [];
   for (const [key, value] of Object.entries(summary)) {
-    if (value !== undefined) process.stdout.write(`${key}: ${String(value)}\n`);
+    if (value !== undefined) lines.push(`${key}: ${String(value)}`);
   }
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
 
-async function inspect(store: StateStore, taskId: string, json: boolean): Promise<void> {
-  const task = reconcileTask(store, taskId);
-  const attempts = store.listAttempts(taskId);
-  const events = store.listEvents(taskId);
-  let diff = "";
-  try {
-    diff = await readFile(task.paths.diff, "utf8");
-  } catch {
-    // A diff does not exist until independent verification begins.
-  }
-  if (json) {
-    process.stdout.write(`${JSON.stringify({ task, attempts, events, diff }, null, 2)}\n`);
-    return;
-  }
-  printHumanStatus(task);
-  process.stdout.write(`attempts: ${attempts.length}\n`);
+function printHumanStatus(task: TaskRecord): void {
+  process.stdout.write(humanStatusLines(task));
+}
+
+/** Render the human inspect block as a single exact string. */
+function humanInspectLines(
+  task: TaskRecord, attempts: AttemptRecord[], events: EventRecord[], diff: string,
+): string {
+  const lines: string[] = [];
+  const statusBody = humanStatusLines(task);
+  if (statusBody.length > 0) lines.push(statusBody.replace(/\n$/, ""));
+  lines.push(`attempts: ${attempts.length}`);
   for (const attempt of attempts) {
-    process.stdout.write(
-      `  #${attempt.ordinal} ${attempt.status} exit=${attempt.exitCode ?? "-"} cost=$${attempt.costUsd?.toFixed(4) ?? "-"} turns=${attempt.turns ?? "-"}\n`,
+    lines.push(
+      `  #${attempt.ordinal} ${attempt.status} exit=${attempt.exitCode ?? "-"} cost=$${attempt.costUsd?.toFixed(4) ?? "-"} turns=${attempt.turns ?? "-"}`,
     );
   }
-  process.stdout.write("events:\n");
-  for (const event of events) printStoredEvent(event);
-  process.stdout.write(`diff: ${task.paths.diff}${diff ? ` (${diff.split("\n").length - 1} lines)` : " (not generated)"}\n`);
+  lines.push("events:");
+  for (const event of events) lines.push(`  ${event.sequence}. ${event.type} — ${event.summary}`);
+  lines.push(`diff: ${task.paths.diff}${diff ? ` (${diff.split("\n").length - 1} lines)` : " (not generated)"}`);
+  return `${lines.join("\n")}\n`;
 }
 
-function printStoredEvent(event: EventRecord): void {
-  process.stdout.write(`  ${event.sequence}. ${event.type} — ${event.summary}\n`);
+/** Render the human integration preflight block as a single exact
+ *  string.  Field order, indentation, and `"(none)"` fallbacks match
+ *  the legacy output byte-for-byte. */
+function humanIntegrationPreflightLines(receipt: Record<string, unknown>): string {
+  const lines: string[] = [];
+  lines.push(`receiptId: ${receipt.id}`);
+  lines.push(`taskId: ${receipt.taskId}`);
+  const reasons = receipt.rejectionReasons as string[];
+  lines.push(`passed: ${reasons.length === 0}`);
+  if (reasons.length > 0) {
+    lines.push("rejectionReasons:");
+    for (const reason of reasons) lines.push(`  - ${reason}`);
+  }
+  const files = receipt.affectedFiles as string[];
+  lines.push(`affectedFiles: ${files.join(", ") || "(none)"}`);
+  lines.push(`patchDigest: ${receipt.patchDigest || "(none)"}`);
+  return `${lines.join("\n")}\n`;
+}
+
+/** Render the human integration apply block as a single exact string. */
+function humanIntegrationApplyLines(result: Record<string, unknown>): string {
+  const lines: string[] = [];
+  lines.push(`status: ${result.status}`);
+  lines.push(`receiptId: ${result.receiptId}`);
+  if (result.error) lines.push(`error: ${result.error}`);
+  if (result.appliedAt) lines.push(`appliedAt: ${result.appliedAt}`);
+  return `${lines.join("\n")}\n`;
+}
+
+/** Render the human integration history block as a single exact string. */
+function humanIntegrationHistoryLines(history: {
+  receipts: unknown[]; results: unknown[];
+}): string {
+  const lines: string[] = [];
+  lines.push(`receipts: ${history.receipts.length}`);
+  lines.push(`results: ${history.results.length}`);
+  for (const result of history.results) {
+    const r = result as Record<string, unknown>;
+    lines.push(`  ${r.status} — ${r.receiptId}${r.error ? ` (${r.error})` : ""}`);
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function option(arguments_: string[], flag: string): string | undefined {
   const index = arguments_.indexOf(flag);
   return index >= 0 ? arguments_[index + 1] : undefined;
+}
+
+interface DirectCodexCliOptions {
+  readonly values: Readonly<Record<string, string>>;
+  readonly switches: ReadonlySet<string>;
+}
+
+function parseDirectCodexOptions(
+  arguments_: string[], valueFlags: readonly string[], switchFlags: readonly string[] = ["--json"],
+): DirectCodexCliOptions {
+  const values: Record<string, string> = {};
+  const switches = new Set<string>();
+  const valueSet = new Set(valueFlags);
+  const switchSet = new Set(switchFlags);
+  const seen = new Set<string>();
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const flag = arguments_[index]!;
+    if ((!valueSet.has(flag) && !switchSet.has(flag)) || seen.has(flag)) {
+      throw new Error("Invalid direct-codex arguments");
+    }
+    seen.add(flag);
+    if (switchSet.has(flag)) {
+      switches.add(flag);
+      continue;
+    }
+    const value = arguments_[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("Invalid direct-codex arguments");
+    }
+    values[flag] = value;
+    index += 1;
+  }
+  return { values, switches };
+}
+
+function requiredDirectCodexOption(options: DirectCodexCliOptions, flag: string): string {
+  const value = options.values[flag];
+  if (value === undefined) throw new Error(`Missing direct-codex option: ${flag}`);
+  return value;
+}
+
+function parseDirectCodexJsonObject(raw: string, flag: "--usage" | "--metadata"): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("shape");
+    return parsed as Record<string, unknown>;
+  } catch {
+    throw new Error(`Invalid ${flag} JSON object`);
+  }
+}
+
+function parseCliScalar(raw: string): unknown {
+  try { return JSON.parse(raw) as unknown; } catch { return raw; }
+}
+
+function humanDirectCodexSampleLines(sample: DirectCodexPairedSample): string {
+  return [
+    `sampleId: ${sample.sampleId}`,
+    `forklightTaskId: ${sample.forklightTaskId}`,
+    `exactTaskClass: ${sample.exactTaskClass}`,
+    `directCodexProfileId: ${sample.directCodexProfileId}`,
+    `inputTokens: ${sample.inputTokens}`,
+    `outputTokens: ${sample.outputTokens}`,
+    `cacheReadInputTokens: ${sample.cacheReadInputTokens}`,
+    `cacheCreationInputTokens: ${sample.cacheCreationInputTokens}`,
+    `source: ${sample.source}`,
+    `complete: ${sample.complete}`,
+    `directRunRef: ${sample.directRunRef}`,
+    `pairingRef: ${sample.pairingRef}`,
+    `capturedAt: ${sample.capturedAt}`,
+    `schemaVersion: ${sample.schemaVersion}`,
+  ].join("\n") + "\n";
+}
+
+function humanDirectCodexInboxLines(
+  taskClass: string, profileId: string, items: readonly DirectCodexInboxItem[],
+): string {
+  const lines = [
+    `exactTaskClass: ${taskClass}`,
+    `directCodexProfileId: ${profileId}`,
+    `items: ${items.length}`,
+  ];
+  for (const item of items) {
+    const sample = item.sample;
+    lines.push(`  ${sample.sampleId}: ${item.reviewState}`);
+    lines.push(`    forklightTaskId: ${sample.forklightTaskId}`);
+    lines.push(`    capturedAt: ${sample.capturedAt}`);
+    lines.push(`    tokens: input=${sample.inputTokens} output=${sample.outputTokens} cacheRead=${sample.cacheReadInputTokens} cacheCreation=${sample.cacheCreationInputTokens}`);
+    if (item.review !== undefined) {
+      lines.push(`    reviewer: ${item.review.reviewer}`);
+      lines.push(`    reviewedAt: ${item.review.reviewedAt}`);
+      if (item.review.decision === "rejected") {
+        lines.push(`    rejectionReason: ${item.review.rejectionReason}`);
+      }
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function humanDirectCodexReviewLines(review: DirectCodexSampleReview): string {
+  const lines = [`sampleId: ${review.sampleId}`, `decision: ${review.decision}`];
+  if (review.decision === "rejected") lines.push(`rejectionReason: ${review.rejectionReason}`);
+  lines.push(`reviewer: ${review.reviewer}`);
+  lines.push(`reviewedAt: ${review.reviewedAt}`);
+  lines.push(`schemaVersion: ${review.schemaVersion}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function humanDirectCodexPublicationPreviewLines(preview: DirectCodexPublicationPreview): string {
+  return [
+    `exactTaskClass: ${preview.exactTaskClass}`,
+    `directCodexProfileId: ${preview.directCodexProfileId}`,
+    `readiness: ${preview.readiness}`,
+    `nextVersion: ${preview.nextVersion ?? "unavailable"}`,
+    `acceptedCount: ${preview.acceptedCount}`,
+    `rejectedCount: ${preview.rejectedCount}`,
+    `pendingCount: ${preview.pendingCount}`,
+    `hasNewAcceptedEvidence: ${preview.hasNewAcceptedEvidence}`,
+    `acceptedSampleIds: ${preview.acceptedSampleIds.join(", ") || "(none)"}`,
+  ].join("\n") + "\n";
+}
+
+function humanDirectCodexRegistrationLines(result: DirectCodexRegistrationResult): string {
+  const calibration = result.publication.calibration;
+  return [
+    "registered: true",
+    `exactTaskClass: ${calibration.taskClass}`,
+    `directCodexProfileId: ${result.publication.directCodexProfileId}`,
+    `version: ${result.summary.version}`,
+    `acceptedSampleCount: ${result.summary.acceptedSampleCount}`,
+    `acceptedSampleIds: ${result.summary.acceptedSampleIds.join(", ")}`,
+    `method: ${calibration.method}`,
+    `confidence: ${calibration.confidence}`,
+    `createdAt: ${calibration.createdAt}`,
+  ].join("\n") + "\n";
 }
 
 function findSetupAssets(): string {
@@ -194,24 +401,30 @@ function health(json: boolean): void {
   } catch {
     // Reported in health output.
   }
-  const readiness = providerReadiness();
-  const result = {
-    ok: claudeVersion !== "unavailable" && readiness.anyReady,
-    node: process.version,
-    claudeCode: claudeVersion,
-    providers: readiness.providers,
-    home: forklightHome(),
-  };
-  if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  else {
-    process.stdout.write(`ok: ${result.ok}\nnode: ${result.node}\nclaudeCode: ${result.claudeCode}\n`);
-    process.stdout.write("providers:\n");
-    for (const [name, provider] of Object.entries(result.providers)) {
-      process.stdout.write(
-        `  ${name}: ready=${provider.ready} model=${provider.defaultModel} endpoint=${provider.endpoint}\n`,
-      );
+  const store = new StateStore(forklightHome());
+  try {
+    const settings = new SettingsService(store).get();
+    const readiness = providerReadiness(settings.providerDefaults);
+    const result = {
+      ok: claudeVersion !== "unavailable" && readiness.anyReady,
+      node: process.version,
+      claudeCode: claudeVersion,
+      providers: readiness.providers,
+      home: forklightHome(),
+    };
+    if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    else {
+      process.stdout.write(`ok: ${result.ok}\nnode: ${result.node}\nclaudeCode: ${result.claudeCode}\n`);
+      process.stdout.write("providers:\n");
+      for (const [name, provider] of Object.entries(result.providers)) {
+        process.stdout.write(
+          `  ${name}: ready=${provider.ready} model=${provider.defaultModel} endpoint=${provider.endpoint}\n`,
+        );
+      }
+      process.stdout.write(`home: ${result.home}\n`);
     }
-    process.stdout.write(`home: ${result.home}\n`);
+  } finally {
+    store.close();
   }
 }
 
@@ -259,6 +472,11 @@ function printProviderProbe(result: Record<string, unknown>): void {
       process.stdout.write(
         `${name}: ${o.status} model=${o.model} latency=${o.latencyMs}ms endpoint=${o.endpointOrigin}\n`,
       );
+      if (o.failureCategory) {
+        process.stdout.write(
+          `  failure: ${o.failureCategory}${o.failureSummary ? ` - ${o.failureSummary}` : ""}\n`,
+        );
+      }
     }
   }
 }
@@ -275,6 +493,122 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "direct-codex") {
+    const subcommand = required(positional, "direct-codex subcommand");
+    if (subcommand === "capture") {
+      const options = parseDirectCodexOptions(rest, ["--usage", "--metadata"]);
+      const usageEvent = parseDirectCodexJsonObject(
+        requiredDirectCodexOption(options, "--usage"), "--usage",
+      );
+      const metadata = parseDirectCodexJsonObject(
+        requiredDirectCodexOption(options, "--metadata"), "--metadata",
+      );
+      const displayJson = options.switches.has("--json");
+      let capturedTaskId: string | undefined;
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_direct_codex_capture",
+        home: forklightHome(),
+        args: { usage: usageEvent, metadata, json: displayJson },
+        taskId: () => capturedTaskId,
+        invoke: async () => {
+          await ensureDaemon();
+          const sample = await daemonRequest<DirectCodexPairedSample>(
+            "direct_codex_capture", { usage: usageEvent, metadata },
+          );
+          capturedTaskId = sample.forklightTaskId;
+          return sample;
+        },
+        renderOutput: (sample) => displayJson
+          ? `${JSON.stringify(sample, null, 2)}\n`
+          : humanDirectCodexSampleLines(sample),
+      });
+      process.stdout.write(output);
+      return;
+    }
+
+    if (subcommand === "inbox") {
+      const options = parseDirectCodexOptions(rest, ["--task-class", "--profile-id"]);
+      const taskClass = requiredDirectCodexOption(options, "--task-class");
+      const profileId = requiredDirectCodexOption(options, "--profile-id");
+      await ensureDaemon();
+      const items = await daemonRequest<readonly DirectCodexInboxItem[]>("direct_codex_inbox", {
+        taskClass, directCodexProfileId: profileId,
+      });
+      process.stdout.write(options.switches.has("--json")
+        ? `${JSON.stringify(items, null, 2)}\n`
+        : humanDirectCodexInboxLines(taskClass, profileId, items));
+      return;
+    }
+
+    if (subcommand === "review") {
+      const options = parseDirectCodexOptions(rest, [
+        "--sample-id", "--decision", "--rejection-reason", "--reviewer",
+        "--reviewed-at", "--schema-version",
+      ], ["--confirm", "--json"]);
+      const sampleId = requiredDirectCodexOption(options, "--sample-id");
+      const decision = requiredDirectCodexOption(options, "--decision");
+      const reviewer = requiredDirectCodexOption(options, "--reviewer");
+      const reviewedAt = requiredDirectCodexOption(options, "--reviewed-at");
+      const schemaVersion = parseCliScalar(requiredDirectCodexOption(options, "--schema-version"));
+      if (!options.switches.has("--confirm")) {
+        throw new Error("Direct Codex review requires explicit --confirm");
+      }
+      const rejectionReason = options.values["--rejection-reason"];
+      const params = {
+        sampleId, decision,
+        ...(rejectionReason === undefined ? {} : { rejectionReason }),
+        reviewer, reviewedAt, schemaVersion, confirm: true,
+      };
+      await ensureDaemon();
+      const review = await daemonRequest<DirectCodexSampleReview>("direct_codex_review", params);
+      process.stdout.write(options.switches.has("--json")
+        ? `${JSON.stringify(review, null, 2)}\n`
+        : humanDirectCodexReviewLines(review));
+      return;
+    }
+
+    if (subcommand === "publication-preview") {
+      const options = parseDirectCodexOptions(rest, ["--task-class", "--profile-id"]);
+      const taskClass = requiredDirectCodexOption(options, "--task-class");
+      const directCodexProfileId = requiredDirectCodexOption(options, "--profile-id");
+      await ensureDaemon();
+      const preview = await daemonRequest<DirectCodexPublicationPreview>(
+        "direct_codex_publication_preview", { taskClass, directCodexProfileId },
+      );
+      process.stdout.write(options.switches.has("--json")
+        ? `${JSON.stringify(preview, null, 2)}\n`
+        : humanDirectCodexPublicationPreviewLines(preview));
+      return;
+    }
+
+    if (subcommand === "publication-register") {
+      const options = parseDirectCodexOptions(rest, [
+        "--task-class", "--profile-id", "--method", "--confidence", "--created-at",
+      ], ["--confirm", "--json"]);
+      const taskClass = requiredDirectCodexOption(options, "--task-class");
+      const directCodexProfileId = requiredDirectCodexOption(options, "--profile-id");
+      const method = requiredDirectCodexOption(options, "--method");
+      const confidence = requiredDirectCodexOption(options, "--confidence");
+      const createdAt = requiredDirectCodexOption(options, "--created-at");
+      if (!options.switches.has("--confirm")) {
+        throw new Error("Direct Codex publication registration requires explicit --confirm");
+      }
+      await ensureDaemon();
+      const result = await daemonRequest<DirectCodexRegistrationResult>(
+        "direct_codex_publication_register",
+        { taskClass, directCodexProfileId, method, confidence, createdAt, confirm: true },
+      );
+      process.stdout.write(options.switches.has("--json")
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanDirectCodexRegistrationLines(result));
+      return;
+    }
+
+    throw new Error(
+      "Unknown direct-codex subcommand. Use: capture, inbox, review, publication-preview, or publication-register.",
+    );
+  }
+
   if (command === "validate") {
     const store = new StateStore(forklightHome());
     try {
@@ -283,6 +617,7 @@ async function main(): Promise<void> {
         contractQuality: settings.contractQuality,
         execution: settings.execution,
         providerDefaults: settings.providerDefaults,
+        completionPolicy: settings.completionPolicy,
       };
       const loaded = await loadTaskSpec(required(positional, "task file"), policy);
       const report = assessTaskQuality(loaded.spec, settings.contractQuality);
@@ -308,6 +643,7 @@ async function main(): Promise<void> {
         contractQuality: settings.contractQuality,
         execution: settings.execution,
         providerDefaults: settings.providerDefaults,
+        completionPolicy: settings.completionPolicy,
       };
       const report = await loadWorkPlan(required(positional, "plan file"), policy);
       if (json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -330,7 +666,7 @@ async function main(): Promise<void> {
     await ensureDaemon();
     const result = await daemonRequest<{ planId: string; taskIdsByItemId: Record<string, string> }>(
       "plan_submit_file",
-      { planFile: required(positional, "plan file") },
+      { planFile: path.resolve(required(positional, "plan file")) },
     );
     process.stdout.write(`planId: ${result.planId}\n`);
     for (const [itemId, taskId] of Object.entries(result.taskIdsByItemId).sort()) {
@@ -400,12 +736,22 @@ async function main(): Promise<void> {
   }
 
   if (command === "submit") {
-    await ensureDaemon();
-    const task = await daemonRequest<TaskRecord>("submit_file", {
-      taskFile: required(positional, "task file"),
+    const taskFile = path.resolve(required(positional, "task file"));
+    let submittedTaskId: string | undefined;
+    const { output } = await withCliExchangeReceipt({
+      operation: "forklight_submit",
+      home: forklightHome(),
+      args: { taskFile },
+      taskId: () => submittedTaskId,
+      invoke: async () => {
+        await ensureDaemon();
+        const task = await daemonRequest<TaskRecord>("submit_file", { taskFile });
+        submittedTaskId = task.id;
+        return task;
+      },
+      renderOutput: (task) => `taskId: ${task.id}\n${humanStatusLines(task)}`,
     });
-    process.stdout.write(`taskId: ${task.id}\n`);
-    printHumanStatus(task);
+    process.stdout.write(output);
     return;
   }
 
@@ -465,58 +811,67 @@ async function main(): Promise<void> {
 
   if (command === "integration") {
     const subcommand = required(positional, "integration subcommand (preflight, apply, or history)");
-    await ensureDaemon();
     if (subcommand === "preflight") {
-      const receipt = await daemonRequest<Record<string, unknown>>("integration_preflight", {
-        taskId: required(rest[0], "task id"),
+      const taskId = required(rest[0], "task id");
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_integration_preflight",
+        home: forklightHome(),
+        args: { taskId, json },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon();
+          return daemonRequest<Record<string, unknown>>("integration_preflight", { taskId });
+        },
+        renderOutput: (receipt) => json
+          ? `${JSON.stringify(receipt, null, 2)}\n`
+          : humanIntegrationPreflightLines(receipt),
       });
-      if (json) process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
-      else {
-        process.stdout.write(`receiptId: ${receipt.id}\n`);
-        process.stdout.write(`taskId: ${receipt.taskId}\n`);
-        const reasons = receipt.rejectionReasons as string[];
-        process.stdout.write(`passed: ${reasons.length === 0}\n`);
-        if (reasons.length > 0) {
-          process.stdout.write("rejectionReasons:\n");
-          for (const reason of reasons) process.stdout.write(`  - ${reason}\n`);
-        }
-        const files = receipt.affectedFiles as string[];
-        process.stdout.write(`affectedFiles: ${files.join(", ") || "(none)"}\n`);
-        process.stdout.write(`patchDigest: ${receipt.patchDigest || "(none)"}\n`);
-      }
+      process.stdout.write(output);
       return;
     }
     if (subcommand === "apply") {
       const taskId = required(rest[0], "task id");
-      const receiptId = required(option(rest, "--receipt"), "receipt id (--receipt)");
-      if (!rest.includes("--confirm")) throw new Error("Apply requires explicit --confirm\n\n" + usage());
-      const result = await daemonRequest<Record<string, unknown>>("integration_apply", {
+      // --confirm and --receipt are validated INSIDE the receipt wrapper
+      // so that attributable failures (Task id is already known) are
+      // captured before any daemon mutation.  Missing task id would be
+      // unattributable and is therefore still validated outside.
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_integration_apply",
+        home: forklightHome(),
+        args: { taskId, receiptId: option(rest, "--receipt"), confirm: rest.includes("--confirm"), json },
         taskId,
-        receiptId,
-        confirm: true,
+        invoke: async () => {
+          const receiptId = required(option(rest, "--receipt"), "receipt id (--receipt)");
+          if (!rest.includes("--confirm")) throw new Error("Apply requires explicit --confirm\n\n" + usage());
+          await ensureDaemon();
+          return daemonRequest<Record<string, unknown>>("integration_apply", {
+            taskId, receiptId, confirm: true,
+          });
+        },
+        renderOutput: (result) => json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : humanIntegrationApplyLines(result),
       });
-      if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      else {
-        process.stdout.write(`status: ${result.status}\n`);
-        process.stdout.write(`receiptId: ${result.receiptId}\n`);
-        if (result.error) process.stdout.write(`error: ${result.error}\n`);
-        if (result.appliedAt) process.stdout.write(`appliedAt: ${result.appliedAt}\n`);
-      }
+      process.stdout.write(output);
       return;
     }
     if (subcommand === "history") {
-      const history = await daemonRequest<{ receipts: unknown[]; results: unknown[] }>("integration_history", {
-        taskId: required(rest[0], "task id"),
+      const taskId = required(rest[0], "task id");
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_integration_history",
+        home: forklightHome(),
+        args: { taskId, json },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon();
+          return daemonRequest<{ receipts: unknown[]; results: unknown[] }>(
+            "integration_history", { taskId });
+        },
+        renderOutput: (history) => json
+          ? `${JSON.stringify(history, null, 2)}\n`
+          : humanIntegrationHistoryLines(history),
       });
-      if (json) process.stdout.write(`${JSON.stringify(history, null, 2)}\n`);
-      else {
-        process.stdout.write(`receipts: ${history.receipts.length}\n`);
-        process.stdout.write(`results: ${history.results.length}\n`);
-        for (const result of history.results) {
-          const r = result as Record<string, unknown>;
-          process.stdout.write(`  ${r.status} — ${r.receiptId}${r.error ? ` (${r.error})` : ""}\n`);
-        }
-      }
+      process.stdout.write(output);
       return;
     }
     throw new Error(`Unknown integration subcommand: ${subcommand}. Use: preflight, apply, or history.`);
@@ -524,7 +879,7 @@ async function main(): Promise<void> {
 
   if (command === "compete") {
     await ensureDaemon();
-    const taskFile = required(positional, "task file");
+    const taskFile = path.resolve(required(positional, "task file"));
     const raw = required(option(rest, "--candidates"), "--candidates JSON array");
     let candidates: unknown[];
     try { candidates = JSON.parse(raw) as unknown[]; if (!Array.isArray(candidates)) throw new Error("not an array"); }
@@ -634,6 +989,7 @@ async function main(): Promise<void> {
       });
       if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       else printProviderProbe(result);
+      if (providerProbeBatchFailed(result)) process.exitCode = 1;
       return;
     }
     throw new Error(`Unknown providers subcommand: ${subcommand}. Use: status or probe.`);
@@ -766,6 +1122,7 @@ async function main(): Promise<void> {
         contractQuality: settings.contractQuality,
         execution: settings.execution,
         providerDefaults: settings.providerDefaults,
+        completionPolicy: settings.completionPolicy,
       };
       const result = await runNewTask(
         store,
@@ -782,30 +1139,206 @@ async function main(): Promise<void> {
       const taskId = required(positional, "task id");
       const feedbackIndex = rest.indexOf("--feedback");
       const feedback = feedbackIndex === -1 ? undefined : required(rest[feedbackIndex + 1], "feedback text");
-      try {
-        await ensureDaemon();
-        const task = await daemonRequest<TaskRecord>("resume", {
-          taskId,
-          ...(feedback === undefined ? {} : { feedback }),
-        });
-        process.stdout.write(`queued: ${task.id}\n`);
-      } catch {
-        const result = await resumeTask(store, taskId, printProgress, feedback);
-        printHumanStatus(result.task);
-        if (result.task.status !== "succeeded") {
-          process.exitCode = result.task.status === "interrupted" ? 130 : 1;
-        }
+      // The daemon path writes "queued: <id>\n" and exits.  The local
+      // fallback runs the worker and emits progress lines via
+      // `printProgress`; those lines and the final human status block
+      // are accumulated into the rendered-output closure so the receipt
+      // measures the exact same bytes that will be written to stdout
+      // (no duplicate output, exact exit code preserved).
+      const progressLines: string[] = [];
+      let renderedOutput = "";
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_resume",
+        home: forklightHome(),
+        args: { taskId, ...(feedback === undefined ? {} : { feedback }) },
+        taskId,
+        invoke: async () => {
+          try {
+            await ensureDaemon();
+            const task = await daemonRequest<TaskRecord>("resume", {
+              taskId,
+              ...(feedback === undefined ? {} : { feedback }),
+            });
+            renderedOutput = `queued: ${task.id}\n`;
+            return task;
+          } catch {
+            const result = await resumeTask(store, taskId, (event) => {
+              const line = progressLine(event);
+              if (line !== undefined) progressLines.push(line);
+            }, feedback);
+            const statusBlock = humanStatusLines(result.task);
+            renderedOutput = `${progressLines.join("")}${statusBlock}`;
+            if (result.task.status !== "succeeded") {
+              process.exitCode = result.task.status === "interrupted" ? 130 : 1;
+            }
+            return result.task;
+          }
+        },
+        renderOutput: () => renderedOutput,
+      });
+      process.stdout.write(output);
+      return;
+    }
+    if (command === "revise") {
+      const taskId = required(positional, "task id");
+      // The shared eligibility boundary (checkReviseEligibility) canonicalizes
+      // the feedback once.  The receipt only carries the raw character length.
+      const feedbackIndex = rest.indexOf("--feedback");
+      if (feedbackIndex === -1) {
+        throw new Error("revise requires --feedback\n\n" + usage());
       }
+      const feedback = required(rest[feedbackIndex + 1], "feedback text");
+      // Same exchange-receipt semantics as resume: daemon path renders
+      // "queued: <id>\n"; local fallback accumulates progress lines plus
+      // the final human status block.  Resolve persisted settings once so
+      // the local fallback applies the same execution and provider-default
+      // policy the daemon coordinator would use.
+      const reviseSettings = new SettingsService(store).get();
+      const progressLines: string[] = [];
+      let renderedOutput = "";
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_revise",
+        home: forklightHome(),
+        args: { taskId, feedbackLength: feedback.length },
+        taskId,
+        invoke: async () => {
+          try {
+            await ensureDaemon();
+            const task = await daemonRequest<TaskRecord>("revise", {
+              taskId, feedback,
+            });
+            renderedOutput = `queued: ${task.id}\n`;
+            return task;
+          } catch {
+            const result = await reviseTask(
+              store, taskId, feedback, (event) => {
+                const line = progressLine(event);
+                if (line !== undefined) progressLines.push(line);
+              },
+              reviseSettings.execution,
+              reviseSettings.providerDefaults,
+            );
+            const statusBlock = humanStatusLines(result.task);
+            renderedOutput = `${progressLines.join("")}${statusBlock}`;
+            if (result.task.status !== "succeeded") {
+              process.exitCode = result.task.status === "interrupted" ? 130 : 1;
+            }
+            return result.task;
+          }
+        },
+        renderOutput: () => renderedOutput,
+      });
+      process.stdout.write(output);
       return;
     }
     if (command === "status") {
-      const task = reconcileTask(store, required(positional, "task id"));
-      if (json) process.stdout.write(`${JSON.stringify(taskSummary(task), null, 2)}\n`);
-      else printHumanStatus(task);
+      const taskId = required(positional, "task id");
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_status",
+        home: forklightHome(),
+        args: { taskId, json },
+        taskId,
+        invoke: async () => reconcileTask(store, taskId),
+        renderOutput: (task) => json
+          ? `${JSON.stringify(taskSummary(task), null, 2)}\n`
+          : humanStatusLines(task),
+      });
+      process.stdout.write(output);
+      return;
+    }
+    if (command === "wait") {
+      const taskId = required(positional, "task id");
+      const settings = new SettingsService(store).get();
+      const waitOptions = parseWaitOptions(rest, settings.console.refreshIntervalMs);
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_wait",
+        home: forklightHome(),
+        args: {
+          taskId,
+          timeoutMs: waitOptions.timeoutMs,
+          pollMs: waitOptions.pollMs,
+          until: waitOptions.until,
+          json: waitOptions.json,
+        },
+        taskId,
+        invoke: async () => waitForTask(waitOptions, {
+          readTask: () => reconcileTask(store, taskId),
+          sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+          now: () => Date.now(),
+        }),
+        renderOutput: (result) => waitOptions.json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : humanWaitLines(result),
+      });
+      process.stdout.write(output);
       return;
     }
     if (command === "inspect") {
-      await inspect(store, required(positional, "task id"), json);
+      const taskId = required(positional, "task id");
+      const summaryRequested = rest.includes("--summary") || rest.includes("--events");
+      if (summaryRequested) {
+        const settings = new SettingsService(store).get();
+        const summaryOptions = parseInspectSummaryOptions(rest, settings.console.eventListLimit);
+        const { output } = await withCliExchangeReceipt({
+          operation: "forklight_inspect",
+          home: forklightHome(),
+          args: {
+            taskId,
+            json: summaryOptions.json,
+            summary: true,
+            events: summaryOptions.eventLimit,
+          },
+          taskId,
+          invoke: async () => {
+            const task = reconcileTask(store, taskId);
+            const attempts = store.listAttempts(taskId);
+            const events = store.listEvents(taskId);
+            let diff: string | undefined;
+            try {
+              diff = await readFile(task.paths.diff, "utf8");
+            } catch {
+              // A diff does not exist until independent verification begins.
+            }
+            return buildCompactInspection({
+              task, attempts, events, diff, eventLimit: summaryOptions.eventLimit,
+            });
+          },
+          renderOutput: (inspection) => summaryOptions.json
+            ? `${JSON.stringify(inspection, null, 2)}\n`
+            : humanCompactInspectionLines(inspection),
+        });
+        process.stdout.write(output);
+        return;
+      }
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_inspect",
+        home: forklightHome(),
+        args: { taskId, json },
+        taskId,
+        invoke: async () => {
+          const task = reconcileTask(store, taskId);
+          const attempts = store.listAttempts(taskId);
+          const events = store.listEvents(taskId);
+          let diff = "";
+          try {
+            diff = await readFile(task.paths.diff, "utf8");
+          } catch {
+            // A diff does not exist until independent verification begins.
+          }
+          return { task, attempts, events, diff };
+        },
+        renderOutput: ({ task, attempts, events, diff }) => json
+          ? `${JSON.stringify({ task, attempts, events, diff }, null, 2)}\n`
+          : humanInspectLines(task, attempts, events, diff),
+      });
+      process.stdout.write(output);
+      return;
+    }
+    if (command === "tokens") {
+      const taskId = required(positional, "task id");
+      const report = getTaskTokenReport(store, taskId);
+      if (json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      else process.stdout.write(humanTokenReportLines(report));
       return;
     }
     if (command === "list") {

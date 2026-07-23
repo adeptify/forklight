@@ -12,13 +12,14 @@ function stateMsg(kind,text){return h("div","state-msg "+kind,text);}
 function sec(title){return h("div","section-title",title);}
 function fr(){return document.createDocumentFragment();}
 
-var S={settings:null,health:null,boards:null,tasks:null,competitions:null,stats:null,lastOk:0,connected:false,hadOk:false,tab:"overview",detail:null,timer:null};
+var S={settings:null,health:null,boards:null,tasks:null,competitions:null,stats:null,lastOk:0,connected:false,hadOk:false,tab:"overview",detail:null,detailReturnFocus:null,timer:null,token:null};
 var viewEl,detailEl,statusEl,footerEl;
 
 /* --- Utils --- */
 function fmtTm(iso){if(!iso)return "-";var d=new Date(iso);return d.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});}
 function fmtSince(iso){if(!iso)return "-";var ms=Date.now()-new Date(iso).getTime();if(ms<60000)return Math.round(ms/1000)+"s ago";if(ms<3600000)return Math.round(ms/60000)+"m ago";if(ms<86400000)return Math.round(ms/3600000)+"h ago";return Math.round(ms/86400000)+"d ago";}
 function num(v,dec,tag){if(v===undefined||v===null)return "-";return (tag||"")+v.toFixed(dec||0);}
+function unit(v,dec,suffix){if(v===undefined||v===null)return "-";return v.toFixed(dec||0)+(suffix||"");}
 function cardHead(title,sub,b){var d=h("div","card-header"),l=h("div","");l.appendChild(h("div","card-title",title));if(sub)l.appendChild(h("div","card-subtitle mono",sub));d.appendChild(l);if(b)d.appendChild(b);return d;}
 function theadRow(labels){var tr=document.createElement("tr");labels.forEach(function(l){tr.appendChild(h("th",l.indexOf(" numeric")>=0?"numeric":"",l.replace(" numeric","")));});return tr;}
 
@@ -37,14 +38,24 @@ function row(tableData,clickFn){
 }
 
 /* --- API --- */
-function fetchJSON(path){return fetch(path).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json();});}
+function readToken(){
+  var raw=window.location.hash;
+  if(!raw||raw.charAt(0)!=="#")return null;
+  var token=raw.slice(1);
+  if(!window.history||!history.replaceState)return null;
+  try{history.replaceState(null,"",window.location.pathname+window.location.search);}catch(_){return null;}
+  if(token.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(token))return null;
+  return token;
+}
+function fetchJSON(path){return fetch(path,{headers:{"X-ForkLight-Console-Token":S.token}}).then(function(r){if(!r.ok){var e=new Error("HTTP "+r.status);e.status=r.status;throw e;}return r.json();});}
+function showUnauthenticated(){viewEl.replaceChildren(stateMsg("disconnected","No authenticated Console session. Reopen the Console link from ForkLight."));statusEl.textContent="Unauthenticated - reopen Console link";}
 
 /* --- Polling: recursive setTimeout, cannot overlap --- */
 function scheduleNext(){var ms=S.settings&&S.settings.console&&S.settings.console.refreshIntervalMs?Math.max(200,S.settings.console.refreshIntervalMs):1000;S.timer=setTimeout(refresh,ms);}
 function refresh(){S.timer=null;
   Promise.all([fetchJSON("/health"),fetchJSON("/board"),fetchJSON("/tasks"),fetchJSON("/competitions"),fetchJSON("/stats"),fetchJSON("/settings")]).then(function(v){
     S.health=v[0];S.boards=v[1];S.tasks=v[2];S.competitions=v[3];S.stats=v[4];S.settings=v[5];S.lastOk=Date.now();S.connected=true;S.hadOk=true;
-  }).catch(function(){S.connected=false;}).then(function(){render();scheduleNext();});
+  }).catch(function(e){S.connected=false;if(e&&e.status===401)S.token=null;}).then(function(){if(!S.token){showUnauthenticated();return;}render();scheduleNext();});
 }
 function startPoll(){viewEl.appendChild(stateMsg("loading","Connecting to ForkLight daemon"));refresh();}
 
@@ -131,10 +142,10 @@ function rOverview(){viewEl.textContent="";
   viewEl.appendChild(sec("Provider Statistics"));
   if(!S.stats||!S.stats.length){viewEl.appendChild(stateMsg("empty","No completed tasks for statistics"));}
   else {var tbl=h("table",""),thd=h("thead","");
-    thd.appendChild(theadRow(["Provider","Model","N numeric","Success numeric","Verified numeric","Avg Retries numeric","Avg Cost numeric","Avg Duration numeric"]));tbl.appendChild(thd);
+    thd.appendChild(theadRow(["Provider","Model","N numeric","Success numeric","Verified numeric","Avg Retries numeric","Avg Runtime Estimate (USD) numeric","Avg Duration numeric"]));tbl.appendChild(thd);
     var tbd=document.createElement("tbody");S.stats.forEach(function(s){
-      tbd.appendChild(row([h("td","",s.provider),h("td","",s.model),td("numeric",""+s.sampleSize),td("numeric",(s.successRate*100).toFixed(0)+"%"),td("numeric",""+s.verifiedSuccessCount),td("numeric",num(s.avgRetries,1)),td("numeric",num(s.avgCostUsd,3,"$")),td("numeric",num(s.avgDurationMs!==undefined?s.avgDurationMs/1000:undefined,1,"s"))]));
-    });tbl.appendChild(tbd);viewEl.appendChild(tbl);}
+      tbd.appendChild(row([h("td","",s.provider),h("td","",s.model),td("numeric",""+s.sampleSize),td("numeric",(s.successRate*100).toFixed(0)+"%"),td("numeric",""+s.verifiedSuccessCount),td("numeric",num(s.avgRetries,1)),td("numeric",num(s.avgCostUsd,3,"$")),td("numeric",unit(s.avgDurationMs!==undefined?s.avgDurationMs/1000:undefined,1,"s"))]));
+    });tbl.appendChild(tbd);viewEl.appendChild(tbl);viewEl.appendChild(evCaveat("Runtime estimate is Claude-side telemetry, not Provider official cost. Official native-currency statistics are not available yet."));}
 }
 
 /* --- Render: plans --- */
@@ -172,14 +183,15 @@ function rCompetitions(){viewEl.textContent="";if(!S.hadOk){showDisconnected();r
 /* --- Render: stats --- */
 function rStats(){viewEl.textContent="";if(!S.hadOk){showDisconnected();return;}
   if(!S.stats||!S.stats.length){viewEl.appendChild(stateMsg("empty","No completed tasks for statistics"));return;}
+  viewEl.appendChild(evCaveat("Runtime estimate is Claude-side telemetry, not Provider official cost. Official native-currency statistics are not available yet."));
   S.stats.forEach(function(s){
     var c=card(null,[cardHead(s.provider+"/"+s.model,"",h("span","",""+s.sampleSize+" tasks"))]);
     c.appendChild(hd("div","grid-2",[
       h("div","dim","Success: "+(s.successRate*100).toFixed(0)+"% (verified: "+s.verifiedSuccessCount+")"),
       h("div","dim","Avg Retries: "+num(s.avgRetries,1)),
-      h("div","dim","Avg Cost: "+num(s.avgCostUsd,3,"$")),
-      h("div","dim","Avg Duration: "+num(s.avgDurationMs!==undefined?s.avgDurationMs/1000:undefined,1,"s")),
-      h("div","dim","Avg First Action: "+num(s.avgTimeToFirstEffectiveActionMs!==undefined?s.avgTimeToFirstEffectiveActionMs/1000:undefined,1,"s")),
+      h("div","dim","Avg Runtime Estimate (USD): "+num(s.avgCostUsd,3,"$")),
+      h("div","dim","Avg Duration: "+unit(s.avgDurationMs!==undefined?s.avgDurationMs/1000:undefined,1,"s")),
+      h("div","dim","Avg First Action: "+unit(s.avgTimeToFirstEffectiveActionMs!==undefined?s.avgTimeToFirstEffectiveActionMs/1000:undefined,1,"s")),
       h("div","dim","Avg Turns: "+num(s.avgTurns,1)),
     ]));
     if(s.failureDistribution&&Object.keys(s.failureDistribution).length){
@@ -199,10 +211,25 @@ function rSettings(){viewEl.textContent="";if(!S.hadOk){showDisconnected();retur
 }
 
 /* --- Detail views --- */
-function hideDetail(){detailEl.hidden=true;detailEl.textContent="";S.detail=null;}
-function loadingDetail(msg){S.detail=true;detailEl.hidden=false;detailEl.textContent="";detailEl.appendChild(stateMsg("loading",msg));}
-function showDetail(frag){detailEl.hidden=false;detailEl.textContent="";detailEl.appendChild(frag);S.detail=true;}
+function hideDetail(){detailEl.hidden=true;detailEl.textContent="";S.detail=null;var target=S.detailReturnFocus;S.detailReturnFocus=null;if(target&&document.contains(target)&&typeof target.focus==="function")target.focus();else{var activeTab=$("#fl-tabs button.active");if(activeTab)activeTab.focus();}}
+function loadingDetail(msg){if(!S.detail)S.detailReturnFocus=document.activeElement;S.detail=true;detailEl.hidden=false;detailEl.textContent="";detailEl.appendChild(stateMsg("loading",msg));}
+function showDetail(frag){detailEl.hidden=false;detailEl.textContent="";detailEl.appendChild(frag);S.detail=true;var close=detailEl.querySelector(".detail-close");if(close)close.focus();}
 function closeBtn(){var b=h("button","detail-close","Close");b.addEventListener("click",hideDetail);return b;}
+
+/* --- Economics Evidence helpers (textContent-only) --- */
+function evRow(key,val){var r=h("div","ev-row");r.appendChild(h("span","ev-key",key));var v=h("span","ev-value");if(typeof val==="string")v.textContent=val;else if(val)v.appendChild(val);r.appendChild(v);return r;}
+function evRowMixed(key,parts){var r=h("div","ev-row");r.appendChild(h("span","ev-key",key));var v=h("span","ev-value");parts.forEach(function(p){if(p===null||p===undefined)return;if(typeof p==="string"||typeof p==="number")v.appendChild(document.createTextNode(String(p)));else v.appendChild(p);});r.appendChild(v);return r;}
+function evCard(title){var c=h("div","ev-card");if(title)c.appendChild(h("div","ev-card-title",title));return c;}
+function evCaveat(text){return h("div","ev-caveat",text);}
+function evPill(text,level){return h("span","ev-pill"+(level?" ev-pill-"+level:""),text);}
+function evUnavailableRow(key,kind,reason){var r=h("div","ev-row ev-row-unavailable");r.appendChild(h("span","ev-key",key));var v=h("span","ev-value");v.appendChild(evPill(kind||"unavailable",kind==="high"?"high":(kind==="medium"?"medium":(kind==="low"?"low":""))));if(reason){v.appendChild(document.createTextNode(" "));v.appendChild(h("span","ev-unavailable-reason",reason));}r.appendChild(v);return r;}
+function evRange(min,max){return h("span","ev-range mono",num(min,0)+" - "+num(max,0));}
+function evLink(url){var raw=String(url||""),parsed;try{parsed=new URL(raw);}catch(_e){return h("span","ev-source ev-source-invalid",raw);}if(parsed.protocol!=="http:"&&parsed.protocol!=="https:")return h("span","ev-source ev-source-invalid",raw);var a=document.createElement("a");a.href=parsed.href;a.className="ev-source";a.rel="noopener noreferrer";a.target="_blank";a.textContent=raw;return a;}
+function evSources(urls){var d=h("div","ev-sources");urls.forEach(function(u,i){if(i>0)d.appendChild(document.createTextNode(" "));d.appendChild(evLink(u));});return d;}
+function evBreakdownPills(bd){var d=h("div","ev-unavailable-breakdown");Object.keys(bd).sort().forEach(function(k){var p=h("span","ev-breakdown-pill",k+" ("+bd[k]+")");d.appendChild(p);});return d;}
+function evAmount(amount){if(typeof amount!=="number"||!Number.isFinite(amount))return "-";var abs=Math.abs(amount);if(abs===0)return "0.00";if(abs<0.000001)return amount.toExponential(3);var decimals=abs>=1?2:Math.min(8,Math.max(4,Math.ceil(-Math.log10(abs))+2));return amount.toFixed(decimals).replace(/(\.\d*?[1-9])0+$|\.0+$/,"$1");}
+function evCost(amount,currency){var formatted=evAmount(amount);return formatted==="-"?formatted:formatted+" "+currency;}
+function evReason(reason){var map={"no-measurements":"no exchange measurements or receipts captured","invalid-exact-evidence":"exact exchange evidence invalid","invalid-measurement":"invalid exchange measurement","invalid-receipt-evidence":"invalid exchange receipt","incomplete-worker-usage":"Worker Token usage incomplete","missing-exchange-evidence":"no exchange evidence captured","direct-baseline-missing":"no compatible calibration registered for this task class","incompatible-baseline":"calibration not compatible","task-class-mismatch":"task class does not match calibration","task-class-required":"current task class must be supplied","zero-baseline":"baseline cannot be zero"};return map[reason]||reason;}
 
 function showPlanBoard(id){
   loadingDetail("Loading plan board");
@@ -235,6 +262,7 @@ function showTask(id){
       hd("div","",[h("span","dim","Session: "),h("span","mono truncate",t.sessionId||"")]),
     ]));
     if(t.error){var eb=h("div","error-box");eb.appendChild(h("strong","","Error: "));eb.appendChild(document.createTextNode(t.error));f.appendChild(eb);}
+    if(t.economics){var ee=renderEconomicsEvidence(t.economics);if(ee)f.appendChild(ee);}
     if(t.timeline&&t.timeline.length){
       f.appendChild(h("div","section-title mb-4","Event Timeline ("+t.timeline.length+")"));
       var tl=h("div","timeline");t.timeline.forEach(function(e){
@@ -244,6 +272,132 @@ function showTask(id){
     var il=h("button","back-link mt-12","Integration History");il.addEventListener("click",function(){showIntegration(t.id);});
     f.appendChild(hd("div","mt-12",[il]));showDetail(f);
   }).catch(function(e){detailEl.replaceChildren(closeBtn(),stateMsg("error","Failed: "+e.message));});
+}
+
+/* --- Economics Evidence renderer (textContent-only) --- */
+function renderEconomicsEvidence(e){
+  if(!e||typeof e!=="object"){var e1=document.createDocumentFragment();e1.appendChild(sec("Economics Evidence"));e1.appendChild(stateMsg("empty","Economics evidence unavailable"));return e1;}
+  var f=fr();
+  f.appendChild(sec("Economics Evidence"));
+  var grid=hd("div","economics-grid");
+
+  // --- Budget card (distinct from cost and runtime)
+  var b=e.runtimeBudget||{};
+  var budgetCard=evCard("Runtime Budget (Task spec cap)");
+  if(b.capped){
+    budgetCard.appendChild(evRowMixed("Max Claude runtime",[evCost(b.maxBudgetUsd,"USD")," ",evPill("capped")]));
+    budgetCard.appendChild(evCaveat("Caps Claude runtime spend only - not a Provider bill, not official cost evidence"));
+  }else{
+    budgetCard.appendChild(evRow("Max Claude runtime","uncapped"));
+    budgetCard.appendChild(evCaveat("Task spec did not set runtime.maxBudgetUsd; uncapped Claude runtime, not a Provider spending authority"));
+  }
+  grid.appendChild(budgetCard);
+
+  // --- Runtime estimate card (distinct from official cost)
+  var re=e.runtimeEstimate||{};
+  var total=re.sampleCount+re.missingCount;
+  var reCard=evCard("Runtime Estimate (runtimeCostEstimateUsd, Claude-side)");
+  reCard.appendChild(evRowMixed("Estimated total",[evCost(re.observedTotalUsd,"USD")," across "+re.sampleCount+" of "+total+" attempt"+(total===1?"":"s")]));
+  reCard.appendChild(evRow("Evidence state",re.complete?"complete":"incomplete"));
+  if(!re.complete&&re.missingCount>0){reCard.appendChild(evCaveat("Missing samples: "+re.missingCount+" attempt"+(re.missingCount===1?"":"s")+" - interrupted or legacy Attempts have no runtimeCostEstimateUsd; legacy costUsd is never aggregated"));}
+  reCard.appendChild(evCaveat("This is an internal Claude runtime estimate - distinct from the official Provider source quote below; never a Provider bill"));
+  grid.appendChild(reCard);
+
+  // --- Official cost cards (one per currency; sum kept out of UI)
+  var oc=e.officialCost||{};
+  var totals=oc.totals||[];
+  if(totals.length===0){
+    var noQuote=evCard("Official Cost (Provider source quote)");
+    noQuote.appendChild(evRow("Quoted totals","none"));
+    noQuote.appendChild(evCaveat("No Attempt carried a quoted official cost"));
+    grid.appendChild(noQuote);
+  }else{
+    totals.forEach(function(t){
+      var card=evCard("Official Cost ("+t.currency+") - Provider source quote");
+      card.appendChild(evRowMixed("Quoted total",[evCost(t.total,t.currency)," from "+t.quotedCount+" attempt"+(t.quotedCount===1?"":"s")]));
+      if(t.providerBillClaim){card.appendChild(evCaveat("Quoted source asserts this matches the Provider bill"));}
+      else{card.appendChild(evCaveat("Quoted source matches Provider list price - not a Provider bill"));}
+      var srcs=t.sources||[];
+      if(srcs.length){
+        card.appendChild(evRow("Source"+(srcs.length>1?"s":""),evSources(srcs)));
+      }
+      grid.appendChild(card);
+    });
+  }
+  var ua=oc.unavailable||{};
+  if(ua.unavailableCount>0){
+    var uCard=evCard("Official Cost unavailable ("+ua.unavailableCount+" attempt"+(ua.unavailableCount===1?"":"s")+")");
+    uCard.appendChild(evCaveat("Unavailable Attempts are kept explicit and never coerced to zero - shown below by typed stage:reason"));
+    if(ua.breakdown){uCard.appendChild(evBreakdownPills(ua.breakdown));}
+    var entries=(ua.entries||[]).slice(0,5);
+    entries.forEach(function(en){uCard.appendChild(evCaveat("Attempt #"+en.ordinal+" - "+en.stage+": "+en.reason));});
+    if(ua.entries&&ua.entries.length>5){uCard.appendChild(evCaveat("and "+(ua.entries.length-5)+" more unavailable Attempt(s) - not shown"));}
+    grid.appendChild(uCard);
+  }
+
+  // --- Token report sections (Worker, Exchange, Boundary, Direct-Codex) ---
+  var tr=(e.tokenReport&&e.tokenReport.report)||{};
+  var wv=tr.workerVolume||{kind:"incomplete"};
+  var wvCard=evCard("Worker Token Volume (gross external Worker Tokens - this is offloaded coding-assistant work)");
+  if(wv.kind==="complete"){
+    wvCard.appendChild(evRow("Gross Worker Tokens",num(wv.grossWorkerTokens,0)+" tokens"));
+    wvCard.appendChild(evRow("Samples",""+wv.sampleCount+" (complete)"));
+  }else{
+    wvCard.appendChild(evRow("Gross Worker Tokens",num(wv.grossWorkerTokens,0)+" tokens"));
+    var sc=wv.sampleCount||0,cm=wv.completeSampleCount||0;
+    wvCard.appendChild(evRow("Samples",cm+" complete of "+sc));
+    wvCard.appendChild(evCaveat("Worker evidence incomplete - "+wv.missingSampleCount+" attempt"+(wv.missingSampleCount===1?"":"s")+" without terminal-result usage"));
+  }
+  wvCard.appendChild(evCaveat("Gross external Worker Tokens consumed by coding-assistant work - distinct from any savings or reduction figure"));
+  grid.appendChild(wvCard);
+
+  var ee=tr.exchangeEstimate||{kind:"unavailable"};
+  var eeCard=evCard("Orchestration Exchange (ForkLight <-> Codex, redacted count-only evidence)");
+  if(ee.kind==="exact"){
+    eeCard.appendChild(evRowMixed("Token estimate",[num(ee.tokens,0)+" tokens (exact)  ",evPill("high","high")]));
+    eeCard.appendChild(evCaveat("Source: "+ee.source));
+  }else if(ee.kind==="range"){
+    eeCard.appendChild(evRowMixed("Token estimate (range)",[evRange(ee.range.min,ee.range.max)," tokens  ",evPill(ee.range.confidence,ee.range.confidence)]));
+    eeCard.appendChild(evCaveat("Method: "+ee.range.method+" - confidence reflects estimate breadth, not certainty"));
+  }else{
+    eeCard.appendChild(evUnavailableRow("Token estimate","unavailable",evReason(ee.reason)));
+  }
+  eeCard.appendChild(evCaveat("CLI receipts describe producer output before a shell pipeline exits - captured exchange is not exact Codex-visible context"));
+  grid.appendChild(eeCard);
+
+  var br=tr.boundaryReduction||{available:false};
+  var brCard=evCard("Boundary Reduction (measured Worker Tokens minus orchestration exchange, NOT a direct-Codex counterfactual)");
+  if(br.available){
+    brCard.appendChild(evRowMixed("Reduction range",[evRange(br.tokens.min,br.tokens.max)," Tokens  ",evPill(br.tokens.confidence,br.tokens.confidence)]));
+    brCard.appendChild(evCaveat("Method: "+br.tokens.method));
+    brCard.appendChild(evCaveat("This is a measured reduction on the ForkLight side - never to be presented as direct-Codex savings"));
+  }else{
+    brCard.appendChild(evUnavailableRow("Reduction range","unavailable",evReason(br.reason)));
+    brCard.appendChild(evCaveat("Boundary reduction stays unavailable while Worker usage or exchange evidence is missing"));
+  }
+  grid.appendChild(brCard);
+
+  var ds=tr.directCodexSavings||{available:false};
+  var dsCard=evCard("Direct-Codex Savings (counterfactual - not yet measurable without compatible calibration)");
+  if(ds.available){
+    var bas=ds.baseline||{};
+    dsCard.appendChild(evRowMixed("Baseline (calibration)",[num(bas.minTokens,0)+"-"+num(bas.maxTokens,0)+" tokens, task class: "+bas.taskClass+", "+bas.method+"  ",evPill(bas.confidence,bas.confidence)]));
+    dsCard.appendChild(evRowMixed("Absolute savings",[evRange(ds.absoluteSavings.min,ds.absoluteSavings.max)," Tokens  ",evPill(ds.absoluteSavings.confidence,ds.absoluteSavings.confidence)]));
+    if(ds.percentageSavings&&ds.percentageSavings.available){
+      dsCard.appendChild(evRowMixed("Percentage savings",[num(ds.percentageSavings.range.min,1)+"% - "+num(ds.percentageSavings.range.max,1)+"%  ",evPill(ds.percentageSavings.range.confidence,ds.percentageSavings.range.confidence)]));
+      dsCard.appendChild(evCaveat("Method: "+ds.percentageSavings.range.method));
+    }else{
+      dsCard.appendChild(evUnavailableRow("Percentage savings","unavailable",evReason("zero-baseline")));
+    }
+  }else{
+    dsCard.appendChild(evRow("Status","not yet measurable"));
+    dsCard.appendChild(evUnavailableRow("Direct-Codex savings","not yet measurable",evReason(ds.reason)));
+    dsCard.appendChild(evCaveat("Direct-Codex savings is a counterfactual; the UI does not invent or estimate savings without a compatible task-class calibration"));
+  }
+  grid.appendChild(dsCard);
+
+  f.appendChild(grid);
+  return f;
 }
 
 function showCompetition(cid){
@@ -294,11 +448,14 @@ function render(){updStatus();
 
 /* --- Init --- */
 function init(){
+  S.token=readToken();
   viewEl=document.getElementById("fl-view");detailEl=document.getElementById("fl-detail");statusEl=document.getElementById("fl-status-bar");footerEl=document.getElementById("fl-footer");
+  if(!S.token){showUnauthenticated();return;}
   $$("#fl-tabs button").forEach(function(btn){btn.addEventListener("click",function(){
     $$("#fl-tabs button").forEach(function(b){b.classList.remove("active");});btn.classList.add("active");
     S.tab=btn.getAttribute("data-tab");hideDetail();render();
   });});
+  document.addEventListener("keydown",function(e){if(e.key==="Escape"&&S.detail)hideDetail();});
   startPoll();
 }
 document.addEventListener("DOMContentLoaded",init);

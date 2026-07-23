@@ -1,8 +1,11 @@
 import type { StateStore } from "../state/store.js";
+import type { PolicyMode } from "./types.js";
 
 // --- Versioned settings contract ---
 
 export const SETTINGS_VERSION = 1;
+
+export type { PolicyMode } from "./types.js";
 
 export interface ContractQualitySettings {
   maxFiles: number;
@@ -21,10 +24,14 @@ export interface ExecutionSettings {
   noProgressTimeoutMs: number;
   defaultEffort: EffortLevel;
   defaultProvider: "deepseek" | "qwen" | "minimax" | "glm";
-  defaultMaxBudgetUsd: number;
+  defaultMaxBudgetUsd: number | null;
   maximumBudgetUsd: number;
   maxAttempts: number;
   workerStopGraceMs: number;
+}
+
+export interface CompletionPolicySettings {
+  noChangeMode: PolicyMode;
 }
 
 export interface RankingWeightSettings {
@@ -33,6 +40,7 @@ export interface RankingWeightSettings {
   retries: number;
   cost: number;
   duration: number;
+  delivery: number;
 }
 
 export interface CompetitionSettings {
@@ -84,6 +92,7 @@ export interface ProviderDefaultsSettings {
 export interface ForkLightSettings {
   version: typeof SETTINGS_VERSION;
   contractQuality: ContractQualitySettings;
+  completionPolicy: CompletionPolicySettings;
   execution: ExecutionSettings;
   competition: CompetitionSettings;
   integration: IntegrationSettings;
@@ -99,6 +108,7 @@ export interface TaskPolicy {
   contractQuality: ContractQualitySettings;
   execution: ExecutionSettings;
   providerDefaults: ProviderDefaultsSettings;
+  completionPolicy: CompletionPolicySettings;
 }
 
 // --- Built-in defaults matching current behavior ---
@@ -115,6 +125,9 @@ const DEFAULTS: ForkLightSettings = {
     minCallChainSteps: 2,
     minOutcomeCharacters: 12,
     minModuleResponsibilityCharacters: 8,
+  },
+  completionPolicy: {
+    noChangeMode: "hard",
   },
   execution: {
     maxConcurrency: 2,
@@ -136,6 +149,7 @@ const DEFAULTS: ForkLightSettings = {
       retries: 0.2,
       cost: 0,
       duration: 0,
+      delivery: 0.3,
     },
   },
   integration: {
@@ -196,6 +210,7 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
     "maxFiles", "maxDiffLines", "maxFocusPaths", "minScenarios",
     "minCallChainSteps", "minOutcomeCharacters", "minModuleResponsibilityCharacters",
   ],
+  completionPolicy: ["noChangeMode"],
   execution: [
     "maxConcurrency", "noProgressTimeoutMs", "defaultEffort",
     "defaultProvider", "defaultMaxBudgetUsd", "maximumBudgetUsd",
@@ -216,7 +231,7 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
 const TOP_LEVEL_KEYS = Object.keys(KNOWN_SECTIONS);
 
 const RANKING_WEIGHT_FIELDS: readonly string[] = [
-  "verification", "diffFocus", "retries", "cost", "duration",
+  "verification", "diffFocus", "retries", "cost", "duration", "delivery",
 ];
 
 const PROVIDER_DEFAULT_FIELDS: readonly string[] = [
@@ -226,6 +241,7 @@ const PROVIDER_DEFAULT_FIELDS: readonly string[] = [
 
 const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"]);
 const VALID_PROVIDER_NAMES = new Set<string>(["deepseek", "qwen", "minimax", "glm"]);
+const VALID_POLICY_MODES = new Set<string>(["hard", "warn", "score", "off"]);
 
 // Rejects credential-bearing field names.  `defaultKeychainService` names a
 // macOS Keychain service (not a credential), so "keychain" is intentionally absent.
@@ -256,6 +272,14 @@ function assertPositiveInteger(v: unknown, label: string): asserts v is number {
   assert(
     typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1,
     `${label} must be a positive integer, got ${JSON.stringify(v)}`,
+  );
+}
+
+function assertNonNegativeNumberOrNull(v: unknown, label: string): asserts v is number | null {
+  if (v === null) return;
+  assert(
+    typeof v === "number" && Number.isFinite(v) && v >= 0,
+    `${label} must be a non-negative number or null, got ${JSON.stringify(v)}`,
   );
 }
 
@@ -334,6 +358,13 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
     assertNonNegativeInteger(cq[f], `contractQuality.${f}`);
   }
 
+  const cp = validateSection(doc.completionPolicy, "completionPolicy.");
+  assertNoUnknownFields(cp, KNOWN_SECTIONS.completionPolicy!, "completionPolicy.");
+  assert(
+    typeof cp.noChangeMode === "string" && VALID_POLICY_MODES.has(cp.noChangeMode),
+    `completionPolicy.noChangeMode must be one of ${[...VALID_POLICY_MODES].join(", ")}`,
+  );
+
   const ex = validateSection(doc.execution, "execution.");
   assertNoUnknownFields(ex, KNOWN_SECTIONS.execution!, "execution.");
   assertPositiveInteger(ex.maxConcurrency, "execution.maxConcurrency");
@@ -347,12 +378,14 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
     typeof ex.defaultProvider === "string" && VALID_PROVIDER_NAMES.has(ex.defaultProvider),
     `execution.defaultProvider must be one of ${[...VALID_PROVIDER_NAMES].join(", ")}`,
   );
-  assertNonNegativeNumber(ex.defaultMaxBudgetUsd, "execution.defaultMaxBudgetUsd");
+  assertNonNegativeNumberOrNull(ex.defaultMaxBudgetUsd, "execution.defaultMaxBudgetUsd");
   assertNonNegativeNumber(ex.maximumBudgetUsd, "execution.maximumBudgetUsd");
-  assert(
-    (ex.maximumBudgetUsd as number) >= (ex.defaultMaxBudgetUsd as number),
-    "execution.maximumBudgetUsd must be >= defaultMaxBudgetUsd",
-  );
+  if (ex.defaultMaxBudgetUsd !== null) {
+    assert(
+      ex.maximumBudgetUsd >= ex.defaultMaxBudgetUsd,
+      "execution.maximumBudgetUsd must be >= defaultMaxBudgetUsd",
+    );
+  }
   assertPositiveInteger(ex.maxAttempts, "execution.maxAttempts");
   assertPositiveInteger(ex.workerStopGraceMs, "execution.workerStopGraceMs");
   assert(ex.workerStopGraceMs >= 100, "execution.workerStopGraceMs must be at least 100 ms");

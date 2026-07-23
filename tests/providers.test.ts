@@ -4,9 +4,10 @@ import {
   providerDefinition,
   providerEnvironment,
   providerNames,
+  providerReadiness,
   resolveProvider,
 } from "../src/core/providers.js";
-import type { ProviderDefaultSettings } from "../src/core/settings.js";
+import { cloneDefaults, type ProviderDefaultSettings } from "../src/core/settings.js";
 import { parseTaskSpec } from "../src/core/task.js";
 
 test("provider registry exposes Claude Code-compatible defaults", () => {
@@ -196,3 +197,51 @@ for (const { provider, field, configured, verify } of providerDefaultTable) {
     verify(config, env);
   });
 }
+
+// --- providerReadiness with effective defaults ---
+
+test("providerReadiness with built-in defaults checks keychain presence without credentials", () => {
+  const readiness = providerReadiness();
+  assert.equal(typeof readiness.anyReady, "boolean");
+  for (const name of providerNames()) {
+    const provider = readiness.providers[name];
+    assert.ok(provider, `missing readiness entry for ${name}`);
+    assert.equal(typeof provider.ready, "boolean");
+    assert.equal(typeof provider.defaultModel, "string");
+    assert.equal(typeof provider.endpoint, "string");
+    assert.equal(typeof provider.keychainService, "string");
+    // Never leaks credential values.
+    const serialized = JSON.stringify(provider);
+    assert.equal(serialized.includes("password"), false);
+    assert.equal(serialized.includes("apiKey"), false);
+    assert.equal(serialized.includes("secret"), false);
+    assert.equal(serialized.includes("token"), false);
+    if (!provider.ready) assert.equal(provider.error, "Keychain entry not found");
+  }
+});
+
+test("providerReadiness reflects non-built-in Provider defaults", () => {
+  const defaults = cloneDefaults();
+  const customDefaults = JSON.parse(JSON.stringify(defaults.providerDefaults)) as typeof defaults.providerDefaults;
+  customDefaults.deepseek.defaultModel = "deepseek-v4-pro";
+  customDefaults.deepseek.defaultEndpoint = "https://custom.example.com/anthropic";
+  customDefaults.deepseek.defaultKeychainService = "forklight.deepseek.custom-key";
+  const readiness = providerReadiness(customDefaults);
+  const ds = readiness.providers.deepseek;
+  assert.equal(ds.defaultModel, "deepseek-v4-pro");
+  assert.equal(ds.endpoint, "https://custom.example.com/anthropic");
+  assert.equal(ds.keychainService, "forklight.deepseek.custom-key");
+});
+
+test("providerReadiness with custom defaults never leaks keychain account or credential", () => {
+  const defaults = cloneDefaults();
+  const customDefaults = JSON.parse(JSON.stringify(defaults.providerDefaults)) as typeof defaults.providerDefaults;
+  customDefaults.deepseek.defaultKeychainService = "forklight.deepseek.api-key";
+  customDefaults.deepseek.defaultModel = "deepseek-v4-pro";
+  const readiness = providerReadiness(customDefaults);
+  const serialized = JSON.stringify(readiness);
+  assert.equal(serialized.includes("password"), false);
+  assert.equal(serialized.includes("secret"), false);
+  assert.equal(serialized.includes("apiKey"), false);
+  assert.equal(serialized.includes("credential"), false);
+});

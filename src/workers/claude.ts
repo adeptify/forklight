@@ -4,7 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import type { AttemptRecord, NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
+import type { AttemptRecord, AttemptTokenUsage, NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
 import type { StateStore } from "../state/store.js";
 import { buildWorkerPrompt } from "../core/task.js";
 import { providerEnvironment, resolveProvider } from "../core/providers.js";
@@ -19,6 +19,8 @@ export interface WorkerExecutionResult {
   costUsd?: number;
   turns?: number;
   error?: string;
+  usage?: AttemptTokenUsage;
+  runtimeCostEstimateUsd?: number;
 }
 
 export interface WorkerRunHooks {
@@ -50,6 +52,11 @@ export function allowedToolArguments(task: TaskRecord): {
   return { tools: allowed.join(","), allowed: allowed.join(","), denied: denied.join(",") };
 }
 
+export function budgetArguments(maxBudgetUsd: number | null): string[] {
+  if (maxBudgetUsd === null) return [];
+  return ["--max-budget-usd", String(maxBudgetUsd)];
+}
+
 function claudeArguments(task: TaskRecord, resuming: boolean, prompt: string): string[] {
   const permission = allowedToolArguments(task);
   const args = [
@@ -70,8 +77,7 @@ function claudeArguments(task: TaskRecord, resuming: boolean, prompt: string): s
     task.spec.provider.model,
     "--effort",
     task.spec.runtime.effort,
-    "--max-budget-usd",
-    String(task.spec.runtime.maxBudgetUsd),
+    ...budgetArguments(task.spec.runtime.maxBudgetUsd),
     "--name",
     `forklight-${task.id.slice(0, 8)}`,
     "--verbose",
@@ -154,6 +160,16 @@ function redact(value: string, secret: string): string {
 
 export function interruptedExitCode(exitCode: number): number {
   return exitCode === 0 ? 130 : exitCode;
+}
+
+export function resolveWorkerFailure(
+  terminal: NormalizedWorkerEvent["terminal"] | undefined,
+  stderr: string,
+): string {
+  return terminal?.resultText?.trim()
+    || terminal?.failureReason
+    || stderr.trim().slice(0, 2_000)
+    || "Claude Code exited without a successful result event";
 }
 
 export async function runClaudeWorker(
@@ -297,6 +313,8 @@ export async function runClaudeWorker(
       ...(terminal?.resultText === undefined ? {} : { resultText: terminal.resultText }),
       ...(terminal?.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
       ...(terminal?.turns === undefined ? {} : { turns: terminal.turns }),
+      ...(terminal?.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
+      ...(terminal?.usage === undefined ? {} : { usage: terminal.usage }),
       error: "No effective implementation progress detected within the configured interval; worker was terminated by the progress watchdog",
     };
   }
@@ -312,6 +330,8 @@ export async function runClaudeWorker(
       ...(terminal?.resultText === undefined ? {} : { resultText: terminal.resultText }),
       ...(terminal?.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
       ...(terminal?.turns === undefined ? {} : { turns: terminal.turns }),
+      ...(terminal?.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
+      ...(terminal?.usage === undefined ? {} : { usage: terminal.usage }),
       error: "Worker execution interrupted",
     };
   }
@@ -332,7 +352,9 @@ export async function runClaudeWorker(
       ...(terminal?.resultText === undefined ? {} : { resultText: terminal.resultText }),
       ...(terminal?.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
       ...(terminal?.turns === undefined ? {} : { turns: terminal.turns }),
-      error: terminal?.resultText ?? (stderr.slice(0, 2_000) || "Claude Code exited without a result event"),
+      ...(terminal?.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
+      ...(terminal?.usage === undefined ? {} : { usage: terminal.usage }),
+      error: resolveWorkerFailure(terminal, stderr),
     };
   }
 
@@ -342,5 +364,7 @@ export async function runClaudeWorker(
     ...(terminal.resultText === undefined ? {} : { resultText: terminal.resultText }),
     ...(terminal.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
     ...(terminal.turns === undefined ? {} : { turns: terminal.turns }),
+    ...(terminal.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
+    ...(terminal.usage === undefined ? {} : { usage: terminal.usage }),
   };
 }

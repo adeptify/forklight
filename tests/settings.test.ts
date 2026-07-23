@@ -305,3 +305,47 @@ test("stored settings gain probe defaults on migration", async () => {
   assert.equal(migrated.probe.cacheLifetimeMs, 300_000);
   assert.equal(migrated.probe.maxProbeConcurrency, 2);
 });
+
+// --- Completion policy settings ---
+
+test("completion policy defaults are hard no-change and delivery weight", () => {
+  const s = svc().get();
+  assert.equal(s.completionPolicy.noChangeMode, "hard");
+  assert.equal(s.competition.rankingWeights.delivery, 0.3);
+});
+
+test("completion policy partial update preserves other fields", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-s-"));
+  const service = new SettingsService(new StateStore(home));
+  service.update({ completionPolicy: { noChangeMode: "score" } });
+  const s = service.get();
+  assert.equal(s.completionPolicy.noChangeMode, "score");
+  assert.equal(s.execution.maxConcurrency, 2); // other section unchanged
+  service.update({ competition: { rankingWeights: { delivery: 0.8 } } });
+  const s2 = service.get();
+  assert.equal(s2.competition.rankingWeights.delivery, 0.8);
+  assert.equal(s2.completionPolicy.noChangeMode, "score"); // unchanged by ranking update
+});
+
+const policyRejections: Array<{ label: string; patch: Record<string, unknown>; pattern: RegExp }> = [
+  { label: "invalid mode", patch: { completionPolicy: { noChangeMode: "strict" } }, pattern: /noChangeMode/ },
+  { label: "empty mode", patch: { completionPolicy: { noChangeMode: "" } }, pattern: /noChangeMode/ },
+  { label: "unknown field", patch: { completionPolicy: { extraField: true } }, pattern: /not a recognized settings field/ },
+];
+
+for (const { label, patch, pattern } of policyRejections) {
+  test(`rejects completion policy ${label}`, () => {
+    assert.throws(() => svc().update(patch), pattern);
+  });
+}
+
+test("stored settings gain completionPolicy defaults on migration", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-s-"));
+  const store = new StateStore(home);
+  const legacy = structuredClone(new SettingsService(store).get()) as unknown as Record<string, unknown>;
+  delete legacy.completionPolicy;
+  store.saveSettings(legacy);
+
+  const migrated = new SettingsService(store).get();
+  assert.equal(migrated.completionPolicy.noChangeMode, "hard");
+});

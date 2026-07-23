@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -7,6 +8,8 @@ import type { DaemonCoordinator } from "../daemon/coordinator.js";
 import type { ConsoleSettings } from "../core/settings.js";
 
 const LOOPBACK = "127.0.0.1";
+const TOKEN_BYTES = 32;
+const TOKEN_HEADER = "x-forklight-console-token";
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -52,12 +55,19 @@ function redactKeychain(value: unknown): unknown {
 export class ConsoleServer {
   private server: ReturnType<typeof createServer> | undefined = undefined;
   private actualPort = 0;
+  private readonly token: string;
 
   constructor(
     private readonly coordinator: DaemonCoordinator,
     private readonly settings: ConsoleSettings,
     private readonly staticRoot: string,
-  ) {}
+  ) {
+    this.token = randomBytes(TOKEN_BYTES).toString("base64url");
+  }
+
+  getToken(): string {
+    return this.token;
+  }
 
   async start(): Promise<number> {
     if (this.server) return this.actualPort;
@@ -109,6 +119,7 @@ export class ConsoleServer {
       const route = new URL(raw, `http://${LOOPBACK}:${this.actualPort}`).pathname;
       const match = this.matchRoute(route);
       if (match) {
+        if (!this.authenticate(req)) { this.sendJson(req, res, 401, { error: "Unauthorized" }); return; }
         const body = await match.handler(match.params);
         this.sendOk(req, res, body);
         return;
@@ -121,6 +132,14 @@ export class ConsoleServer {
       const msg = status === 500 ? "Internal server error" : (error as Error).message;
       this.sendJson(req, res, status, { error: msg });
     }
+  }
+
+  private authenticate(req: IncomingMessage): boolean {
+    const header = req.headers[TOKEN_HEADER];
+    if (typeof header !== "string") return false;
+    if (header.length > 256) return false;
+    if (header.length !== this.token.length) return false;
+    return timingSafeEqual(Buffer.from(header), Buffer.from(this.token));
   }
 
   private matchRoute(
@@ -179,6 +198,10 @@ export class ConsoleServer {
         handler: (p) => {
           const task = this.coordinator.status(p.taskId!);
           const timeline = this.coordinator.taskTimeline(p.taskId!, this.settings.eventListLimit);
+          // Embed the canonical Task economics report unchanged - the
+          // coordinator is the single source of truth; the server does no
+          // recomputation, currency conversion, or relabelling here.
+          const economics = this.coordinator.taskEconomics(p.taskId!);
           return {
             id: task.id,
             name: task.name,
@@ -193,6 +216,7 @@ export class ConsoleServer {
             finishedAt: task.finishedAt,
             error: task.error,
             timeline,
+            economics,
           };
         },
       };

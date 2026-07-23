@@ -135,7 +135,7 @@ test("verified focused candidate wins with every factor and missing evidence vis
 
   assert.equal(result.recommendation?.candidateId, "focused");
   assert.equal(result.candidates[0]?.candidateId, "focused");
-  assert.equal(result.candidates[0]?.factors.length, 5);
+  assert.equal(result.candidates[0]?.factors.length, 6);
   assert.equal(
     result.candidates[0]?.factors.find((factor) => factor.factor === "duration")?.weight,
     0,
@@ -226,11 +226,12 @@ test("rankingPolicy uses configured competition settings as base weights and tie
     minCandidates: 2,
     maxCandidates: 4,
     tieThreshold: 0.05,
-    rankingWeights: { verification: 2, diffFocus: 0.5, retries: 0.3, cost: 0.2, duration: 0.8 },
+    rankingWeights: { verification: 2, diffFocus: 0.5, retries: 0.3, cost: 0.2, duration: 0.8, delivery: 0.3 },
   };
   const policy = rankingPolicy({}, configured);
   assert.equal(policy.weights.verification, 2);
   assert.equal(policy.weights.duration, 0.8);
+  assert.equal(policy.weights.delivery, 0.3);
   assert.equal(policy.tieThreshold, 0.05);
   // tieThreshold is always present (required field)
   assert.ok(typeof policy.tieThreshold === "number");
@@ -241,7 +242,7 @@ test("explicit per-call override wins over configured settings weights", () => {
     minCandidates: 2,
     maxCandidates: 4,
     tieThreshold: 0.05,
-    rankingWeights: { verification: 2, diffFocus: 0.5, retries: 0.3, cost: 0.2, duration: 0.8 },
+    rankingWeights: { verification: 2, diffFocus: 0.5, retries: 0.3, cost: 0.2, duration: 0.8, delivery: 0.3 },
   };
   const policy = rankingPolicy({ duration: 0.1, cost: 0 }, configured);
   assert.equal(policy.weights.duration, 0.1);
@@ -305,7 +306,7 @@ test("configured duration weight changes recommendation in service evaluation", 
     // Bake configured policy into the competition at creation time.
     const speedSettings: CompetitionSettings = {
       minCandidates: 2, maxCandidates: 4, tieThreshold: 0.01,
-      rankingWeights: { verification: 1, diffFocus: 0.3, retries: 0.2, cost: 0, duration: 0.8 },
+      rankingWeights: { verification: 1, diffFocus: 0.3, retries: 0.2, cost: 0, duration: 0.8, delivery: 0.3 },
     };
     const comp: CompetitionRecord = {
       id: "speed-comp", name: "speed", contractTaskId: slow.id,
@@ -336,7 +337,7 @@ test("verification remains disqualifying regardless of configured weights", () =
   const missing = candidate("no-verify", task("nv", "deepseek", "v4"));
   const configured: CompetitionSettings = {
     minCandidates: 2, maxCandidates: 4, tieThreshold: 1e-9,
-    rankingWeights: { verification: 5, diffFocus: 0, retries: 0, cost: 0, duration: 0 },
+    rankingWeights: { verification: 5, diffFocus: 0, retries: 0, cost: 0, duration: 0, delivery: 0 },
   };
   const policy = rankingPolicy({}, configured);
   const result = scoreCandidates("dq", [missing], policy, {
@@ -493,6 +494,298 @@ test("coordinator rejects all-or-nothing: duplicate candidates, blank model, cou
   } finally {
     cleanup();
   }
+});
+
+// --- Delivery factor and completion-policy competition tests ---
+
+function verificationWithPolicy(
+  passed: boolean,
+  filesChanged = 1,
+  changedLines = 20,
+  completionPolicy?: import("../src/core/types.js").CompletionPolicyCheck,
+): VerificationResult {
+  return {
+    passed,
+    commands: [
+      { command: "npm test", exitCode: passed ? 0 : 1, stdout: "", stderr: "", durationMs: 1, timedOut: false },
+    ],
+    diffPath: "/diff",
+    sourceUnchanged: true,
+    changeBudget: {
+      filesChanged,
+      changedLines,
+      maxFiles: 10,
+      maxDiffLines: 200,
+      withinBudget: passed,
+    },
+    ...(completionPolicy === undefined ? {} : { completionPolicy }),
+  };
+}
+
+test("legacy zero-diff editable candidate is ineligible and cannot be recommended", () => {
+  // This mimics the real MiniMax-M3 regression: verification passed (commands
+  // succeeded against unchanged workspace), but no files changed and the
+  // completionPolicy field is absent (legacy record).
+  const zeroDiff = candidate(
+    "minimax-zero",
+    task("minimax-task", "minimax", "m3", "succeeded", 10),
+    // Legacy verification: passed=true, but zero changes and no completionPolicy
+    {
+      passed: true,
+      commands: [{ command: "npm test", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+      diffPath: "/diff",
+      sourceUnchanged: true,
+      changeBudget: {
+        filesChanged: 0,
+        changedLines: 0,
+        maxFiles: 10,
+        maxDiffLines: 200,
+        withinBudget: true,
+      },
+      // completionPolicy intentionally absent (legacy)
+    },
+    [attempt("minimax-task", 1, 0.1)],
+  );
+  const realDelivery = candidate(
+    "deepseek-real",
+    task("deepseek-task", "deepseek", "v4", "succeeded", 15),
+    verification(true, 3, 80),
+    [attempt("deepseek-task", 1, 0.2)],
+  );
+  const result = scoreCandidates("zero-diff-regression", [zeroDiff, realDelivery], DEFAULT_RANKING_POLICY, {
+    evaluationId: "regression-eval",
+    createdAt: new Date().toISOString(),
+  });
+
+  // MiniMax zero-diff must be ineligible
+  const minimaxScore = result.candidates.find((c) => c.candidateId === "minimax-zero");
+  assert.ok(minimaxScore, "MiniMax candidate should exist");
+  assert.equal(minimaxScore.eligible, false);
+  assert.match(minimaxScore.disqualificationReason ?? "", /No workspace changes/);
+
+  // DeepSeek with real delivery must win
+  const deepseekScore = result.candidates.find((c) => c.candidateId === "deepseek-real");
+  assert.ok(deepseekScore, "DeepSeek candidate should exist");
+  assert.equal(deepseekScore.eligible, true);
+
+  // Recommendation must be DeepSeek, not MiniMax
+  assert.equal(result.recommendation?.candidateId, "deepseek-real");
+});
+
+test("score-mode no-change candidate receives delivery penalty while changed candidate gets full credit", () => {
+  const scoreNoChangeCp: import("../src/core/types.js").CompletionPolicyCheck = {
+    check: "score-evidence",
+    noChangeMode: "score",
+    message: "No workspace changes detected; recorded as scoring penalty evidence",
+  };
+  const noChange = candidate(
+    "score-nochange",
+    task("sc-nc", "minimax", "m3", "succeeded", 10),
+    verificationWithPolicy(true, 0, 0, scoreNoChangeCp),
+    [attempt("sc-nc", 1, 0.1)],
+  );
+  const changed = candidate(
+    "score-changed",
+    task("sc-ch", "deepseek", "v4", "succeeded", 10),
+    verificationWithPolicy(true, 2, 40, {
+      check: "satisfied",
+      noChangeMode: "score",
+      message: "Worker delivered changes: 2 file(s), 40 line(s)",
+    }),
+    [attempt("sc-ch", 1, 0.1)],
+  );
+  const result = scoreCandidates("score-mode", [noChange, changed], DEFAULT_RANKING_POLICY, {
+    evaluationId: "score-eval",
+    createdAt: new Date().toISOString(),
+  });
+
+  // Both are eligible
+  assert.equal(result.candidates.every((c) => c.eligible), true);
+
+  // No-change candidate has delivery penalty (rawValue=0)
+  const ncScore = result.candidates.find((c) => c.candidateId === "score-nochange")!;
+  const ncDelivery = ncScore.factors.find((f) => f.factor === "delivery")!;
+  assert.equal(ncDelivery.available, true);
+  assert.equal(ncDelivery.rawValue, 0);
+  assert.equal(ncDelivery.weightedScore, 0);
+
+  // Changed candidate has full delivery credit
+  const chScore = result.candidates.find((c) => c.candidateId === "score-changed")!;
+  const chDelivery = chScore.factors.find((f) => f.factor === "delivery")!;
+  assert.equal(chDelivery.available, true);
+  assert.equal(chDelivery.rawValue, 1);
+  assert.equal(chDelivery.weightedScore, DEFAULT_RANKING_POLICY.weights.delivery);
+
+  // Changed candidate wins
+  assert.equal(result.recommendation?.candidateId, "score-changed");
+});
+
+test("hard-mode no-change is ineligible through completion policy", () => {
+  const hardNoChangeCp: import("../src/core/types.js").CompletionPolicyCheck = {
+    check: "hard-fail",
+    noChangeMode: "hard",
+    message: "No workspace changes detected after editable Worker completed",
+  };
+  const noChange = candidate(
+    "hard-nochange",
+    task("h-nc", "minimax", "m3", "succeeded", 10),
+    verificationWithPolicy(true, 0, 0, hardNoChangeCp),
+    [attempt("h-nc", 1, 0.1)],
+  );
+  const result = scoreCandidates("hard-mode", [noChange], DEFAULT_RANKING_POLICY, {
+    evaluationId: "hard-eval",
+    createdAt: new Date().toISOString(),
+  });
+
+  assert.equal(result.candidates[0]?.eligible, false);
+  assert.match(result.candidates[0]?.disqualificationReason ?? "", /No workspace changes/);
+  assert.equal(result.recommendation, undefined);
+});
+
+test("warn-mode no-change is eligible but delivery factor is non-scoring", () => {
+  const warnNoChangeCp: import("../src/core/types.js").CompletionPolicyCheck = {
+    check: "warning",
+    noChangeMode: "warn",
+    message: "Warning: No workspace changes detected after editable Worker completed",
+  };
+  const noChange = candidate(
+    "warn-nochange",
+    task("w-nc", "minimax", "m3", "succeeded", 10),
+    verificationWithPolicy(true, 0, 0, warnNoChangeCp),
+    [attempt("w-nc", 1, 0.1)],
+  );
+  const changed = candidate(
+    "warn-changed",
+    task("w-ch", "deepseek", "v4", "succeeded", 10),
+    verificationWithPolicy(true, 1, 10, {
+      check: "satisfied",
+      noChangeMode: "warn",
+      message: "Worker delivered changes: 1 file(s), 10 line(s)",
+    }),
+    [attempt("w-ch", 1, 0.1)],
+  );
+  const result = scoreCandidates("warn-mode", [noChange, changed], DEFAULT_RANKING_POLICY, {
+    evaluationId: "warn-eval",
+    createdAt: new Date().toISOString(),
+  });
+
+  // Both eligible
+  assert.equal(result.candidates.every((c) => c.eligible), true);
+
+  // No-change delivery is non-scoring (available=false)
+  const ncScore = result.candidates.find((c) => c.candidateId === "warn-nochange")!;
+  const ncDelivery = ncScore.factors.find((f) => f.factor === "delivery")!;
+  assert.equal(ncDelivery.available, false);
+  assert.equal(ncDelivery.weightedScore, 0);
+
+  // Warn mode is evidence-only for both candidates; it never changes ranking.
+  const chScore = result.candidates.find((c) => c.candidateId === "warn-changed")!;
+  const chDelivery = chScore.factors.find((f) => f.factor === "delivery")!;
+  assert.equal(chDelivery.available, true);
+  assert.equal(chDelivery.rawValue, 1);
+  assert.equal(chDelivery.weight, 0);
+  assert.equal(chDelivery.weightedScore, 0);
+});
+
+test("read-only task delivery is not-applicable", () => {
+  const roCp: import("../src/core/types.js").CompletionPolicyCheck = {
+    check: "not-applicable",
+    noChangeMode: "hard",
+    message: "Read-only Task; no-change delivery policy does not apply",
+  };
+  const roTask = candidate(
+    "readonly",
+    task("ro", "deepseek", "v4", "succeeded", 10),
+    verificationWithPolicy(true, 0, 0, roCp),
+    [attempt("ro", 1, 0.1)],
+  );
+  const result = scoreCandidates("ro-comp", [roTask], DEFAULT_RANKING_POLICY, {
+    evaluationId: "ro-eval",
+    createdAt: new Date().toISOString(),
+  });
+
+  assert.equal(result.candidates[0]?.eligible, true);
+  const delivery = result.candidates[0]?.factors.find((f) => f.factor === "delivery");
+  assert.equal(delivery?.available, false);
+  assert.match(delivery?.evidence ?? "", /does not apply/);
+});
+
+test("off-mode no-change is eligible and cannot affect ranking", () => {
+  const noChange = candidate(
+    "off-nochange",
+    task("off-nc", "minimax", "m3", "succeeded", 10),
+    verificationWithPolicy(true, 0, 0, {
+      check: "ignored",
+      noChangeMode: "off",
+      message: "No workspace changes detected; no-change policy is off",
+    }),
+    [attempt("off-nc", 1, 0.1)],
+  );
+  const result = scoreCandidates("off-mode", [noChange], DEFAULT_RANKING_POLICY, {
+    evaluationId: "off-eval",
+    createdAt: new Date().toISOString(),
+  });
+
+  assert.equal(result.candidates[0]?.eligible, true);
+  const delivery = result.candidates[0]?.factors.find((factor) => factor.factor === "delivery");
+  assert.equal(delivery?.available, false);
+  assert.equal(delivery?.weight, 0);
+  assert.equal(delivery?.weightedScore, 0);
+});
+
+test("legacy ranking policy without delivery weight is normalized safely", () => {
+  const changed = candidate(
+    "legacy-policy",
+    task("legacy-policy-task", "deepseek", "v4", "succeeded", 10),
+    verificationWithPolicy(true, 1, 10, {
+      check: "satisfied",
+      noChangeMode: "score",
+      message: "Worker delivered changes: 1 file(s), 10 line(s)",
+    }),
+    [attempt("legacy-policy-task", 1, 0.1)],
+  );
+  const legacyPolicy = {
+    weights: {
+      verification: 1,
+      diffFocus: 0.3,
+      retries: 0.2,
+      cost: 0,
+      duration: 0,
+    },
+    tieThreshold: 1e-9,
+  } as unknown as import("../src/core/types.js").RankingPolicy;
+  const result = scoreCandidates("legacy-policy", [changed], legacyPolicy, {
+    evaluationId: "legacy-policy-eval",
+    createdAt: new Date().toISOString(),
+  });
+
+  assert.equal(result.policy.weights.delivery, DEFAULT_RANKING_POLICY.weights.delivery);
+  const delivery = result.candidates[0]?.factors.find((factor) => factor.factor === "delivery");
+  assert.equal(delivery?.weight, DEFAULT_RANKING_POLICY.weights.delivery);
+});
+
+test("delivery factor is configurable through ranking policy override", () => {
+  const changed = candidate(
+    "c1",
+    task("c1-task", "deepseek", "v4", "succeeded", 10),
+    verificationWithPolicy(true, 2, 50, {
+      check: "satisfied",
+      noChangeMode: "score",
+      message: "Worker delivered changes: 2 file(s), 50 line(s)",
+    }),
+    [attempt("c1-task", 1, 0.1)],
+  );
+  // Use a policy with elevated delivery weight
+  const policy = rankingPolicy({ delivery: 1.5 });
+  const result = scoreCandidates("delivery-weight", [changed], policy, {
+    evaluationId: "dw-eval",
+    createdAt: new Date().toISOString(),
+  });
+
+  const delivery = result.candidates[0]?.factors.find((f) => f.factor === "delivery");
+  assert.equal(delivery?.weight, 1.5);
+  assert.equal(delivery?.weightedScore, 1.5);
+  assert.equal(result.policy.weights.delivery, 1.5);
 });
 
 test("coordinator rejects all-or-nothing without persisting any task, event, competition, or workspace directory", async () => {

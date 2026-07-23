@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { isProviderName, providerDefinition, providerNames } from "./providers.js";
+import { normalizeDirectCodexProfileId } from "./direct-codex-calibration.js";
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "./settings.js";
 import type {
   ContractTaskSpec,
@@ -11,6 +12,7 @@ import type {
   QualityReport,
   TaskContract,
   TaskModuleContract,
+  PolicyMode,
   TaskScenarioContract,
   TaskSpec,
 } from "./types.js";
@@ -58,6 +60,12 @@ function booleanValue(value: unknown, label: string, fallback: boolean): boolean
   if (value === undefined) return fallback;
   if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
   return value;
+}
+
+function policyModeValue(value: unknown, label: string, fallback: PolicyMode): PolicyMode {
+  if (value === undefined) return fallback;
+  if (value === "hard" || value === "warn" || value === "score" || value === "off") return value;
+  throw new Error(`${label} must be hard, warn, score, or off`);
 }
 
 function numberValue(value: unknown, label: string, fallback: number): number {
@@ -264,6 +272,11 @@ export function parseTaskSpec(
   const runtime = object(root.runtime ?? {}, "task.runtime");
   const workspace = object(root.workspace ?? {}, "task.workspace");
   const worker = object(root.worker ?? {}, "task.worker");
+  const completionPolicy = object(root.completionPolicy ?? {}, "task.completionPolicy");
+  const completionKeys = Object.keys(completionPolicy);
+  if (completionKeys.some((key) => key !== "noChangeMode")) {
+    throw new Error("task.completionPolicy contains an unsupported field");
+  }
   const acceptance = object(root.acceptance ?? {}, "task.acceptance");
   const projectInput = stringValue(root.project, "task.project");
   const project = path.resolve(baseDirectory, expandHome(projectInput));
@@ -286,22 +299,43 @@ export function parseTaskSpec(
   if (!["low", "medium", "high", "xhigh", "max"].includes(effort)) {
     throw new Error("task.runtime.effort must be low, medium, high, xhigh, or max");
   }
-  const maxBudgetUsd = numberValue(
-    runtime.maxBudgetUsd,
-    "task.runtime.maxBudgetUsd",
-    execSettings.defaultMaxBudgetUsd,
-  );
-  if (maxBudgetUsd > execSettings.maximumBudgetUsd) {
-    throw new Error(
-      `task.runtime.maxBudgetUsd $${maxBudgetUsd} exceeds configured maximum $${execSettings.maximumBudgetUsd}`,
-    );
-  }
+  const maxBudgetUsd = (() => {
+    const raw = runtime.maxBudgetUsd;
+    if (raw === null) return null;
+    if (raw === undefined) return execSettings.defaultMaxBudgetUsd;
+    if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
+      throw new Error("task.runtime.maxBudgetUsd must be a positive number or null");
+    }
+    if (raw > execSettings.maximumBudgetUsd) {
+      throw new Error(
+        `task.runtime.maxBudgetUsd $${raw} exceeds configured maximum $${execSettings.maximumBudgetUsd}`,
+      );
+    }
+    return raw;
+  })();
   const workerAllowedCommands = stringArray(worker.allowedCommands, "task.worker.allowedCommands");
   if (workerAllowedCommands.length > 0) {
     throw new Error(
       "ForkLight requires task.worker.allowedCommands to be empty; acceptance commands run independently",
     );
   }
+  const taskClass = (() => {
+    const raw = root.taskClass;
+    if (raw === undefined) return undefined;
+    if (typeof raw !== "string" || raw.trim() === "" || raw.trim().length > 80)
+      throw new Error("task.taskClass must be a non-empty string of at most 80 characters when supplied");
+    return raw.trim();
+  })();
+  const directCodexProfileId = (() => {
+    const raw = root.directCodexProfileId;
+    if (raw === undefined) return undefined;
+    return normalizeDirectCodexProfileId(raw);
+  })();
+  const completionPolicyMode = policyModeValue(
+    completionPolicy.noChangeMode,
+    "task.completionPolicy.noChangeMode",
+    policy?.completionPolicy.noChangeMode ?? cloneDefaults().completionPolicy.noChangeMode,
+  );
   const acceptanceCommands = stringArray(acceptance.commands, "task.acceptance.commands");
   if (acceptanceCommands.length === 0) {
     throw new Error("task.acceptance.commands must contain at least one independent verification command");
@@ -324,6 +358,9 @@ export function parseTaskSpec(
       ...(provider.keychainAccount === undefined
         ? {}
         : { keychainAccount: stringValue(provider.keychainAccount, "task.provider.keychainAccount") }),
+      ...(provider.pricingRoute === undefined
+        ? {}
+        : { pricingRoute: stringValue(provider.pricingRoute, "task.provider.pricingRoute") }),
     },
     runtime: {
       name: "claude-code" as const,
@@ -340,6 +377,11 @@ export function parseTaskSpec(
       allowEdits: booleanValue(worker.allowEdits, "task.worker.allowEdits", true),
       allowedCommands: workerAllowedCommands,
       focusPaths: stringArray(worker.focusPaths, "task.worker.focusPaths"),
+    },
+    ...(taskClass !== undefined ? { taskClass } : {}),
+    ...(directCodexProfileId !== undefined ? { directCodexProfileId } : {}),
+    completionPolicy: {
+      noChangeMode: completionPolicyMode,
     },
   };
 

@@ -20,11 +20,16 @@ import type {
   TaskRecord,
   TaskStatus,
 } from "../core/types.js";
+import { normalizeDirectCodexPairedSample, normalizeDirectCodexProfileId, normalizeDirectCodexProfilePublication, type DirectCodexPairedSample, type DirectCodexProfilePublication } from "../core/direct-codex-calibration.js";
+import { normalizeDirectCodexSampleReview, type DirectCodexSampleReview } from "../core/direct-codex-review.js";
+import { normalizeDirectCodexCalibrationRecord, normalizeOrchestrationExchangeReceipt, type DirectCodexCalibrationRecord, type OrchestrationExchangeReceipt } from "../core/token-efficiency.js";
 
-type TaskRecordPatch = Omit<Partial<TaskRecord>, "error" | "finishedAt" | "workerPid"> & {
+type TaskRecordPatch = Omit<Partial<TaskRecord>, "error" | "finishedAt" | "workerPid" | "currentAttemptId" | "startedAt"> & {
   error?: string | null;
   finishedAt?: string | null;
   workerPid?: number | null;
+  currentAttemptId?: string | null;
+  startedAt?: string | null;
 };
 
 function now(): string {
@@ -34,6 +39,46 @@ function now(): string {
 function parseRecord<T>(value: unknown, label: string): T {
   if (typeof value !== "string") throw new Error(`Invalid ${label} record in state database`);
   return JSON.parse(value) as T;
+}
+
+interface CalibrationRow {
+  id: string;
+  task_class: string;
+  version: number;
+  created_at: string;
+  record_json: string;
+}
+
+function parseCalibrationRow(
+  row: CalibrationRow,
+  expectedTaskClass?: string,
+): DirectCodexCalibrationRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.record_json);
+  } catch {
+    throw new Error("Corrupt calibration record in state database");
+  }
+  const record = normalizeDirectCodexCalibrationRecord(parsed);
+  const expectedId = `${record.taskClass}:v${record.version}`;
+  if (
+    (expectedTaskClass !== undefined && record.taskClass !== expectedTaskClass) ||
+    row.id !== expectedId ||
+    row.task_class !== record.taskClass ||
+    row.version !== record.version ||
+    row.created_at !== record.createdAt
+  ) {
+    throw new Error("Corrupt calibration record in state database");
+  }
+  return record;
+}
+
+function normalizeProfileQueryTaskClass(input: unknown): string {
+  if (typeof input !== "string" || input !== input.trim()
+    || input.length === 0 || input.length > 80) {
+    throw new TypeError("Invalid direct-Codex profile publication query");
+  }
+  return input;
 }
 
 export class StateStore {
@@ -165,6 +210,54 @@ export class StateStore {
         record_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS orchestration_exchange_receipts (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        captured_at TEXT NOT NULL,
+        record_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_exchange_receipts_task
+        ON orchestration_exchange_receipts(task_id, captured_at, id);
+      CREATE TABLE IF NOT EXISTS direct_codex_calibrations (
+        id TEXT PRIMARY KEY,
+        task_class TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        UNIQUE(task_class, version)
+      );
+      CREATE INDEX IF NOT EXISTS idx_direct_codex_calibrations_class
+        ON direct_codex_calibrations(task_class, version);
+      CREATE TABLE IF NOT EXISTS direct_codex_profile_publications (
+        task_class TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        PRIMARY KEY (task_class, profile_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS idx_direct_codex_profile_publications_pair
+        ON direct_codex_profile_publications(task_class, profile_id, version DESC);
+      CREATE TABLE IF NOT EXISTS direct_codex_paired_samples (
+        sample_id TEXT PRIMARY KEY,
+        forklight_task_id TEXT NOT NULL REFERENCES tasks(id),
+        task_class TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        direct_run_ref TEXT NOT NULL UNIQUE,
+        pairing_ref TEXT NOT NULL UNIQUE,
+        captured_at TEXT NOT NULL,
+        record_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_direct_codex_paired_samples_pair
+        ON direct_codex_paired_samples(task_class, profile_id, captured_at);
+      CREATE TABLE IF NOT EXISTS direct_codex_review_decisions (
+        sample_id TEXT PRIMARY KEY REFERENCES direct_codex_paired_samples(sample_id),
+        decision TEXT NOT NULL,
+        rejection_reason TEXT,
+        reviewer TEXT NOT NULL,
+        reviewed_at TEXT NOT NULL,
+        record_json TEXT NOT NULL
+      );
     `);
   }
 
@@ -193,7 +286,7 @@ export class StateStore {
   updateTask(taskId: string, patch: TaskRecordPatch): TaskRecord {
     const current = this.getTask(taskId);
     const merged: Record<string, unknown> = { ...current, ...patch, id: current.id, updatedAt: now() };
-    for (const key of ["error", "finishedAt", "workerPid"] as const) {
+    for (const key of ["error", "finishedAt", "workerPid", "currentAttemptId", "startedAt"] as const) {
       if (merged[key] === null) delete merged[key];
     }
     const updated = merged as unknown as TaskRecord;
@@ -844,5 +937,395 @@ export class StateStore {
     return rows.map((row) =>
       parseRecord<IntegrationResultRecord>(row.record_json, "integration result"),
     );
+  }
+
+  saveExchangeReceipt(input: unknown): void {
+    const receipt = normalizeOrchestrationExchangeReceipt(input);
+    this.db
+      .prepare(
+        `INSERT INTO orchestration_exchange_receipts (id, task_id, captured_at, record_json)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(receipt.id, receipt.taskId, receipt.capturedAt, JSON.stringify(receipt));
+  }
+
+  listExchangeReceipts(taskId: string): OrchestrationExchangeReceipt[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, task_id, captured_at, record_json
+         FROM orchestration_exchange_receipts
+         WHERE task_id = ? ORDER BY captured_at, id`,
+      )
+      .all(taskId) as unknown as Array<{
+      id: string; task_id: string; captured_at: string; record_json: string;
+    }>;
+    return rows.map((row) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.record_json);
+      } catch {
+        throw new Error("Corrupt receipt record in state database");
+      }
+      const receipt = normalizeOrchestrationExchangeReceipt(parsed);
+      // Verify task attribution against requested task first
+      if (receipt.taskId !== taskId) {
+        throw new Error("Receipt task mismatch in state database");
+      }
+      // Cross-check stored columns against the normalized canonical receipt
+      if (receipt.id !== row.id || receipt.taskId !== row.task_id || receipt.capturedAt !== row.captured_at) {
+        throw new Error("Corrupt receipt record in state database");
+      }
+      return receipt;
+    });
+  }
+
+  saveDirectCodexCalibration(input: unknown): void {
+    const record = normalizeDirectCodexCalibrationRecord(input);
+    const id = `${record.taskClass}:v${record.version}`;
+    this.db
+      .prepare(
+        `INSERT INTO direct_codex_calibrations (id, task_class, version, created_at, record_json)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, record.taskClass, record.version, record.createdAt, JSON.stringify(record));
+  }
+
+  listDirectCodexCalibrations(taskClass?: string): DirectCodexCalibrationRecord[] {
+    const rows = taskClass === undefined
+      ? (this.db
+          .prepare(
+            `SELECT id, task_class, version, created_at, record_json FROM direct_codex_calibrations
+             ORDER BY task_class, version`,
+          )
+          .all() as unknown as CalibrationRow[])
+      : (this.db
+          .prepare(
+            `SELECT id, task_class, version, created_at, record_json FROM direct_codex_calibrations
+             WHERE task_class = ? ORDER BY version`,
+          )
+          .all(taskClass) as unknown as CalibrationRow[]);
+    return rows.map((row) => parseCalibrationRow(row, taskClass));
+  }
+
+  latestDirectCodexCalibration(taskClass: string): DirectCodexCalibrationRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, task_class, version, created_at, record_json FROM direct_codex_calibrations
+         WHERE task_class = ? ORDER BY version DESC LIMIT 1`,
+      )
+      .get(taskClass) as CalibrationRow | undefined;
+    if (!row) return undefined;
+    return parseCalibrationRow(row, taskClass);
+  }
+
+  // --- Direct-Codex profile publication registry ---
+
+  private static parseProfilePublicationRow(
+    row: { task_class: string; profile_id: string; version: number; created_at: string; record_json: string },
+    expectedTaskClass: string,
+    expectedProfileId: string,
+  ): DirectCodexProfilePublication {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.record_json);
+    } catch {
+      throw new Error("Corrupt profile publication record in state database");
+    }
+    const publication = normalizeDirectCodexProfilePublication(parsed);
+    // Cross-check identity columns against canonical normalized JSON
+    if (
+      publication.directCodexProfileId !== expectedProfileId ||
+      publication.calibration.taskClass !== expectedTaskClass ||
+      row.task_class !== publication.calibration.taskClass ||
+      row.profile_id !== publication.directCodexProfileId ||
+      row.version !== publication.calibration.version ||
+      row.created_at !== publication.calibration.createdAt
+    ) {
+      throw new Error("Corrupt profile publication record in state database");
+    }
+    return publication;
+  }
+
+  saveDirectCodexProfilePublication(input: unknown): void {
+    const publication = normalizeDirectCodexProfilePublication(input);
+    this.db
+      .prepare(
+        `INSERT INTO direct_codex_profile_publications (task_class, profile_id, version, created_at, record_json)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        publication.calibration.taskClass,
+        publication.directCodexProfileId,
+        publication.calibration.version,
+        publication.calibration.createdAt,
+        JSON.stringify(publication),
+      );
+  }
+
+  listDirectCodexProfilePublications(
+    taskClass: string,
+    profileId: string,
+  ): DirectCodexProfilePublication[] {
+    const exactTaskClass = normalizeProfileQueryTaskClass(taskClass);
+    const exactProfileId = normalizeDirectCodexProfileId(profileId);
+    const rows = this.db
+      .prepare(
+        `SELECT task_class, profile_id, version, created_at, record_json
+         FROM direct_codex_profile_publications
+         WHERE task_class = ? AND profile_id = ?
+         ORDER BY version`,
+      )
+      .all(exactTaskClass, exactProfileId) as unknown as Array<{
+        task_class: string; profile_id: string; version: number; created_at: string; record_json: string;
+      }>;
+    return rows.map((row) =>
+      StateStore.parseProfilePublicationRow(row, exactTaskClass, exactProfileId),
+    );
+  }
+
+  latestDirectCodexProfilePublication(
+    taskClass: string,
+    profileId: string,
+  ): DirectCodexProfilePublication | undefined {
+    const exactTaskClass = normalizeProfileQueryTaskClass(taskClass);
+    const exactProfileId = normalizeDirectCodexProfileId(profileId);
+    const row = this.db
+      .prepare(
+        `SELECT task_class, profile_id, version, created_at, record_json
+         FROM direct_codex_profile_publications
+         WHERE task_class = ? AND profile_id = ?
+         ORDER BY version DESC LIMIT 1`,
+      )
+      .get(exactTaskClass, exactProfileId) as {
+        task_class: string; profile_id: string; version: number; created_at: string; record_json: string;
+      } | undefined;
+    if (!row) return undefined;
+    return StateStore.parseProfilePublicationRow(row, exactTaskClass, exactProfileId);
+  }
+
+  // --- Direct-Codex paired-sample evidence registry ---
+
+  private static parsePairedSampleRow(
+    row: { sample_id: string; forklight_task_id: string; task_class: string; profile_id: string;
+      direct_run_ref: string; pairing_ref: string; captured_at: string; record_json: string },
+    expectedTaskClass: string,
+    expectedProfileId: string,
+  ): DirectCodexPairedSample {
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.record_json); }
+    catch { throw new Error("Corrupt paired-sample record in state database"); }
+    let sample: DirectCodexPairedSample;
+    try { sample = normalizeDirectCodexPairedSample(parsed); }
+    catch { throw new Error("Corrupt paired-sample record in state database"); }
+    if (
+      sample.sampleId !== row.sample_id ||
+      sample.forklightTaskId !== row.forklight_task_id ||
+      sample.exactTaskClass !== row.task_class ||
+      sample.directCodexProfileId !== row.profile_id ||
+      sample.directRunRef !== row.direct_run_ref ||
+      sample.pairingRef !== row.pairing_ref ||
+      sample.capturedAt !== row.captured_at ||
+      sample.exactTaskClass !== expectedTaskClass ||
+      sample.directCodexProfileId !== expectedProfileId
+    ) {
+      throw new Error("Corrupt paired-sample record in state database");
+    }
+    return sample;
+  }
+
+  private static parseReviewRow(
+    row: { sample_id: string; decision: string; rejection_reason: string | null;
+      reviewer: string; reviewed_at: string; record_json: string },
+  ): DirectCodexSampleReview {
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.record_json); }
+    catch { throw new Error("Corrupt review-decision record in state database"); }
+    let review: DirectCodexSampleReview;
+    try { review = normalizeDirectCodexSampleReview(parsed); }
+    catch { throw new Error("Corrupt review-decision record in state database"); }
+    if (
+      review.sampleId !== row.sample_id ||
+      review.decision !== row.decision ||
+      (review.rejectionReason ?? null) !== row.rejection_reason ||
+      review.reviewer !== row.reviewer ||
+      review.reviewedAt !== row.reviewed_at
+    ) {
+      throw new Error("Corrupt review-decision record in state database");
+    }
+    return review;
+  }
+
+  private verifySampleTaskIdentity(sample: DirectCodexPairedSample): void {
+    let task: TaskRecord;
+    try { task = this.getTask(sample.forklightTaskId); }
+    catch { throw new Error("Corrupt paired-sample record in state database"); }
+    if (!task.spec.taskClass || task.spec.taskClass !== sample.exactTaskClass ||
+        !task.spec.directCodexProfileId || task.spec.directCodexProfileId !== sample.directCodexProfileId) {
+      throw new Error("Corrupt paired-sample record in state database");
+    }
+  }
+
+  private static validateSampleId(id: unknown): string {
+    if (typeof id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(id)) {
+      throw new TypeError("Invalid sampleId");
+    }
+    return id;
+  }
+
+  saveDirectCodexPairedSample(input: unknown): void {
+    const sample = normalizeDirectCodexPairedSample(input);
+    let task: TaskRecord;
+    try { task = this.getTask(sample.forklightTaskId); }
+    catch { throw new Error("Sample references unknown Task"); }
+    if (!task.spec.taskClass || task.spec.taskClass !== sample.exactTaskClass) {
+      throw new Error("Sample taskClass does not match declared Task identity");
+    }
+    if (!task.spec.directCodexProfileId || task.spec.directCodexProfileId !== sample.directCodexProfileId) {
+      throw new Error("Sample directCodexProfileId does not match declared Task identity");
+    }
+    this.db
+      .prepare(
+        `INSERT INTO direct_codex_paired_samples (sample_id, forklight_task_id, task_class, profile_id, direct_run_ref, pairing_ref, captured_at, record_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(sample.sampleId, sample.forklightTaskId, sample.exactTaskClass,
+        sample.directCodexProfileId, sample.directRunRef, sample.pairingRef,
+        sample.capturedAt, JSON.stringify(sample));
+  }
+
+  getDirectCodexPairedSample(sampleId: string): DirectCodexPairedSample {
+    StateStore.validateSampleId(sampleId);
+    const row = this.db
+      .prepare(
+        `SELECT sample_id, forklight_task_id, task_class, profile_id, direct_run_ref, pairing_ref, captured_at, record_json
+         FROM direct_codex_paired_samples WHERE sample_id = ?`,
+      )
+      .get(sampleId) as {
+        sample_id: string; forklight_task_id: string; task_class: string; profile_id: string;
+        direct_run_ref: string; pairing_ref: string; captured_at: string; record_json: string;
+      } | undefined;
+    if (!row) throw new Error("Unknown paired sample");
+    const sample = StateStore.parsePairedSampleRow(row, row.task_class, row.profile_id);
+    this.verifySampleTaskIdentity(sample);
+    return sample;
+  }
+
+  listDirectCodexPairedSamples(taskClass: unknown, profileId: unknown): DirectCodexPairedSample[] {
+    const exactTaskClass = normalizeProfileQueryTaskClass(taskClass);
+    const exactProfileId = normalizeDirectCodexProfileId(profileId);
+    const rows = this.db
+      .prepare(
+        `SELECT sample_id, forklight_task_id, task_class, profile_id, direct_run_ref, pairing_ref, captured_at, record_json
+         FROM direct_codex_paired_samples
+         WHERE task_class = ? AND profile_id = ?
+         ORDER BY captured_at, sample_id`,
+      )
+      .all(exactTaskClass, exactProfileId) as unknown as Array<{
+        sample_id: string; forklight_task_id: string; task_class: string; profile_id: string;
+        direct_run_ref: string; pairing_ref: string; captured_at: string; record_json: string;
+      }>;
+    return rows.map((row) => {
+      const s = StateStore.parsePairedSampleRow(row, exactTaskClass, exactProfileId);
+      this.verifySampleTaskIdentity(s);
+      return s;
+    });
+  }
+
+  // --- Direct-Codex review-decision registry ---
+
+  saveDirectCodexSampleReview(input: unknown): void {
+    const review = normalizeDirectCodexSampleReview(input);
+    // Validate sample through full read path — corrupt/identity-ineligible propagate
+    try { this.getDirectCodexPairedSample(review.sampleId); }
+    catch (e) {
+      if (e instanceof Error && e.message === "Unknown paired sample") {
+        throw new Error("Unknown paired sample for review");
+      }
+      throw e;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO direct_codex_review_decisions (sample_id, decision, rejection_reason, reviewer, reviewed_at, record_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(review.sampleId, review.decision, review.rejectionReason ?? null,
+        review.reviewer, review.reviewedAt, JSON.stringify(review));
+  }
+
+  /** Throwing review getter — delegates to the optional getter for its
+   *  one canonical SQL, parse, and identity-validation path, and throws
+   *  when no review row exists.  Corruption and identity mismatch fail
+   *  closed identically to the optional path. */
+  getDirectCodexSampleReview(sampleId: string): DirectCodexSampleReview {
+    const review = this.getDirectCodexSampleReviewOptional(sampleId);
+    if (review === undefined) {
+      throw new Error("No review decision for sample");
+    }
+    return review;
+  }
+
+  /** Optional bounded review lookup: returns `undefined` only when no
+   *  decision row exists.  When a row is present the review is re-normalized
+   *  and the referenced sample/Task identity chain is revalidated — corrupt
+   *  or identity-ineligible evidence fails closed with a non-echoing error
+   *  just like {@link getDirectCodexSampleReview}. */
+  getDirectCodexSampleReviewOptional(sampleId: string): DirectCodexSampleReview | undefined {
+    StateStore.validateSampleId(sampleId);
+    const row = this.db
+      .prepare(
+        `SELECT sample_id, decision, rejection_reason, reviewer, reviewed_at, record_json
+         FROM direct_codex_review_decisions WHERE sample_id = ?`,
+      )
+      .get(sampleId) as {
+        sample_id: string; decision: string; rejection_reason: string | null;
+        reviewer: string; reviewed_at: string; record_json: string;
+      } | undefined;
+    if (!row) return undefined;
+    const review = StateStore.parseReviewRow(row);
+    // Revalidate the referenced sample/Task identity chain
+    this.getDirectCodexPairedSample(review.sampleId);
+    return review;
+  }
+
+  listPendingDirectCodexPairedSamples(
+    taskClass: string, profileId: string,
+  ): DirectCodexPairedSample[] {
+    const exactTaskClass = normalizeProfileQueryTaskClass(taskClass);
+    const exactProfileId = normalizeDirectCodexProfileId(profileId);
+    // Validate all reviews for this pair fail-closed before excluding
+    const reviewRows = this.db
+      .prepare(
+        `SELECT r.sample_id, r.decision, r.rejection_reason, r.reviewer, r.reviewed_at, r.record_json
+         FROM direct_codex_review_decisions r
+         JOIN direct_codex_paired_samples s ON s.sample_id = r.sample_id
+         WHERE s.task_class = ? AND s.profile_id = ?`,
+      )
+      .all(exactTaskClass, exactProfileId) as unknown as Array<{
+        sample_id: string; decision: string; rejection_reason: string | null;
+        reviewer: string; reviewed_at: string; record_json: string;
+      }>;
+    const reviewedIds = new Set<string>();
+    for (const rr of reviewRows) {
+      StateStore.parseReviewRow(rr);
+      reviewedIds.add(rr.sample_id);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT sample_id, forklight_task_id, task_class, profile_id, direct_run_ref, pairing_ref, captured_at, record_json
+         FROM direct_codex_paired_samples
+         WHERE task_class = ? AND profile_id = ?
+         ORDER BY captured_at, sample_id`,
+      )
+      .all(exactTaskClass, exactProfileId) as unknown as Array<{
+        sample_id: string; forklight_task_id: string; task_class: string; profile_id: string;
+        direct_run_ref: string; pairing_ref: string; captured_at: string; record_json: string;
+      }>;
+    return rows
+      .map((row) => {
+        const s = StateStore.parsePairedSampleRow(row, exactTaskClass, exactProfileId);
+        this.verifySampleTaskIdentity(s);
+        return s;
+      })
+      .filter((s) => !reviewedIds.has(s.sampleId));
   }
 }

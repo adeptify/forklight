@@ -38,6 +38,20 @@ function httpGet(url: string): Promise<HttpResponse> {
   });
 }
 
+function httpGetAuth(url: string, token: string): Promise<HttpResponse> {
+  return new Promise((resolve, reject) => {
+    get(url, { headers: { "X-ForkLight-Console-Token": token } }, (res) => {
+      let data = "";
+      res.on("data", (chunk: Buffer) => (data += chunk.toString()));
+      res.on("end", () => {
+        try { resolve({ status: res.statusCode ?? 0, body: JSON.parse(data), headers: res.headers }); }
+        catch { resolve({ status: res.statusCode ?? 0, body: data, headers: res.headers }); }
+      });
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
 /**
  * Offline smoke verification — exercises the local control path without
  * contacting any model provider, mutating a source project, integrating,
@@ -111,15 +125,23 @@ test("smoke: daemon lifecycle, settings read/write, console read endpoints, safe
     const port = started.port as number;
     assert.ok(port > 0);
     assert.equal(started.loopback, "127.0.0.1");
+    assert.ok(typeof started.launchUrl === "string", "console_start must include launchUrl");
+    const launchUrl = started.launchUrl as string;
+    assert.match(launchUrl, /^http:\/\/127\.0\.0\.1:\d+#[A-Za-z0-9_-]+$/);
+    const token = launchUrl.split("#")[1]!;
+    assert.ok(token.length >= 8 && token.length <= 256);
 
     const status = await daemonRequest<Record<string, unknown>>("console_status", {}, home);
     assert.equal(status.running, true);
     assert.equal(status.port, port);
+    assert.equal(status.authentication, "required");
+    assert.ok(!("launchUrl" in status), "console_status must not expose launchUrl");
+    assert.ok(!("token" in status), "console_status must not expose token");
 
     // --- console read-only endpoints ---
     const baseUrl = `http://127.0.0.1:${port}`;
 
-    const healthRes = await httpGet(`${baseUrl}/health`);
+    const healthRes = await httpGetAuth(`${baseUrl}/health`, token);
     assert.equal(healthRes.status, 200);
     const h = healthRes.body as Record<string, unknown>;
     assert.equal(typeof h.pid, "number");
@@ -136,33 +158,38 @@ test("smoke: daemon lifecycle, settings read/write, console read endpoints, safe
       }
     }
 
-    const settingsRes = await httpGet(`${baseUrl}/settings`);
+    const settingsRes = await httpGetAuth(`${baseUrl}/settings`, token);
     assert.equal(settingsRes.status, 200);
     // redacted: no keychain fields
     const bodyStr = JSON.stringify(settingsRes.body);
     assert.ok(!/keychain/i.test(bodyStr), "settings must not expose keychain fields");
 
-    const boardRes = await httpGet(`${baseUrl}/board`);
+    const boardRes = await httpGetAuth(`${baseUrl}/board`, token);
     assert.equal(boardRes.status, 200);
     assert.ok(Array.isArray(boardRes.body));
 
-    const tasksRes = await httpGet(`${baseUrl}/tasks`);
+    const tasksRes = await httpGetAuth(`${baseUrl}/tasks`, token);
     assert.equal(tasksRes.status, 200);
     assert.ok(Array.isArray(tasksRes.body));
 
-    const compRes = await httpGet(`${baseUrl}/competitions`);
+    const compRes = await httpGetAuth(`${baseUrl}/competitions`, token);
     assert.equal(compRes.status, 200);
     assert.ok(Array.isArray(compRes.body));
 
-    const statsRes = await httpGet(`${baseUrl}/stats`);
+    const statsRes = await httpGetAuth(`${baseUrl}/stats`, token);
     assert.equal(statsRes.status, 200);
     assert.ok(Array.isArray(statsRes.body));
 
-    // unknown route returns 404
+    // unauthenticated data route → 401
+    const unauthRes = await httpGet(`${baseUrl}/health`);
+    assert.equal(unauthRes.status, 401);
+    assert.equal((unauthRes.body as Record<string, unknown>).error, "Unauthorized");
+
+    // unknown route returns 404 (static serving, no auth needed)
     const missingRes = await httpGet(`${baseUrl}/no-such-route`);
     assert.equal(missingRes.status, 404);
 
-    // read-only enforcement: POST returns 405
+    // read-only enforcement: POST returns 405 (before auth)
     const { request } = await import("node:http");
     const postRes = await new Promise<HttpResponse>((resolve, reject) => {
       const u = new URL(`${baseUrl}/health`);

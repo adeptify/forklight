@@ -48,9 +48,9 @@ th{color:var(--dim);font-weight:600;font-size:10px;text-transform:uppercase}
 tr.clickable{cursor:pointer}tr.clickable:hover td{background:var(--bg)}tr.clickable:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
 tr.clickable:focus-visible td{background:var(--bg)}
 .numeric{text-align:right;font-variant-numeric:tabular-nums}
-#fl-detail{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-top:var(--gap)}
+#fl-detail{position:fixed;top:0;right:0;bottom:0;z-index:30;width:min(760px,calc(100vw - 48px));overflow-y:auto;background:var(--surface);border:0;border-left:1px solid var(--border);padding:16px;margin:0;box-shadow:-18px 0 48px rgba(0,0,0,.45)}
 #fl-detail[hidden]{display:none}
-.detail-close{float:right;background:none;border:1px solid var(--border);color:var(--dim);border-radius:var(--radius);cursor:pointer;padding:2px 8px;font-size:12px}
+.detail-close{position:sticky;top:0;z-index:1;float:right;background:var(--surface);border:1px solid var(--border);color:var(--dim);border-radius:var(--radius);cursor:pointer;padding:4px 10px;font-size:12px}
 .detail-close:hover{color:var(--text)}
 .timeline{max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px}
 .timeline-entry{padding:2px 0;font-size:11px;border-bottom:1px solid var(--border);display:flex;gap:8px}
@@ -73,3 +73,28 @@ tr.clickable:focus-visible td{background:var(--bg)}
 .pill-row{display:flex;flex-wrap:wrap;gap:2px;margin-top:4px}
 .pill-badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:600;background:var(--yellow);color:#000}
 .summary-line{font-size:11px;color:var(--dim)}
+
+/* Economics Evidence — compact asymmetric desktop, single-column mobile */
+.economics-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap);margin-bottom:var(--gap);min-width:0}
+.ev-card{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px;min-width:0;word-wrap:break-word;overflow-wrap:break-word}
+.ev-card-title{font-weight:600;font-size:12px;color:var(--text);margin-bottom:6px;letter-spacing:.2px}
+.ev-row{display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:11px;border-bottom:1px dashed var(--border);align-items:baseline;min-width:0}
+.ev-row:last-child{border-bottom:none}
+.ev-row-unavailable{border-bottom-style:solid;border-color:var(--yellow)}
+.ev-key{color:var(--dim);flex-shrink:0;font-size:10px}
+.ev-value{text-align:right;word-break:break-word;min-width:0;font-variant-numeric:tabular-nums}
+.ev-pill{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:600;background:var(--border);color:var(--text);vertical-align:middle}
+.ev-pill-high{background:var(--green);color:#000}
+.ev-pill-medium{background:var(--yellow);color:#000}
+.ev-pill-low{background:var(--border);color:var(--dim)}
+.ev-range{font-variant-numeric:tabular-nums}
+.ev-caveat{font-size:10px;color:var(--dim);font-style:italic;margin-top:4px;padding:2px 0}
+.ev-unavailable-reason{color:var(--yellow)}
+.ev-source{color:var(--blue);text-decoration:underline;word-break:break-all}
+.ev-source:hover{color:var(--text)}
+.ev-source:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:2px}
+.ev-sources{display:inline-flex;flex-direction:column;align-items:flex-end;gap:2px}
+.ev-unavailable-breakdown{display:flex;flex-wrap:wrap;gap:2px;margin:4px 0}
+.ev-breakdown-pill{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:600;background:var(--yellow);color:#000}
+@media(max-width:768px){.economics-grid{grid-template-columns:1fr}}
+@media(max-width:768px){#fl-detail{left:0;width:100vw;padding:12px;border-left:0}}

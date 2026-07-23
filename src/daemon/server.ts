@@ -95,13 +95,15 @@ export class ForkLightDaemon {
   private async startConsole(): Promise<Record<string, unknown>> {
     const settings = this.settingsService.get();
     if (this.consoleServer?.isRunning()) {
-      return { running: true, port: this.consoleServer.getPort(), loopback: "127.0.0.1" };
+      const launchUrl = `http://127.0.0.1:${this.consoleServer.getPort()}#${this.consoleServer.getToken()}`;
+      return { running: true, port: this.consoleServer.getPort(), loopback: "127.0.0.1", launchUrl };
     }
     const distConsole = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "console", "public");
     const staticRoot = existsSync(path.join(distConsole, "index.html")) ? distConsole : path.join(this.home, "console");
     this.consoleServer = new ConsoleServer(this.coordinator, settings.console, staticRoot);
     const port = await this.consoleServer.start();
-    return { running: true, port, loopback: "127.0.0.1" };
+    const launchUrl = `http://127.0.0.1:${port}#${this.consoleServer.getToken()}`;
+    return { running: true, port, loopback: "127.0.0.1", launchUrl };
   }
 
   private async stopConsole(): Promise<Record<string, unknown>> {
@@ -114,7 +116,7 @@ export class ForkLightDaemon {
 
   private consoleStatus(): Record<string, unknown> {
     if (this.consoleServer?.isRunning()) {
-      return { running: true, port: this.consoleServer.getPort(), loopback: "127.0.0.1" };
+      return { running: true, port: this.consoleServer.getPort(), loopback: "127.0.0.1", authentication: "required" };
     }
     return { running: false };
   }
@@ -163,6 +165,16 @@ export class ForkLightDaemon {
           requiredString(params.taskId, "taskId"),
           typeof params.feedback === "string" && params.feedback.trim() ? params.feedback.trim() : undefined,
         );
+      case "revise": {
+        // Non-string feedback is routed through the shared eligibility
+        // boundary as an empty string so checkReviseEligibility produces
+        // the same canonical "missing-feedback" reason the local path uses.
+        const feedback = typeof params.feedback === "string" ? params.feedback : "";
+        return this.coordinator.revise(
+          requiredString(params.taskId, "taskId"),
+          feedback,
+        );
+      }
       case "list": {
         const statuses = Array.isArray(params.statuses)
           ? params.statuses.filter((value): value is TaskStatus => typeof value === "string")
@@ -264,6 +276,18 @@ export class ForkLightDaemon {
           : undefined;
         return this.coordinator.providerProbe(providerName);
       }
+      case "task_economics":
+        return this.coordinator.taskEconomics(requiredString(params.taskId, "taskId"));
+      case "direct_codex_capture":
+        return this.coordinator.directCodexCapture(params.usage, params.metadata);
+      case "direct_codex_inbox":
+        return this.coordinator.directCodexInbox(params.taskClass, params.directCodexProfileId);
+      case "direct_codex_review":
+        return this.coordinator.directCodexReview(request.params ?? {});
+      case "direct_codex_publication_preview":
+        return this.coordinator.directCodexPublicationPreview(request.params ?? {});
+      case "direct_codex_publication_register":
+        return this.coordinator.directCodexPublicationRegister(request.params ?? {});
       default:
         throw new Error(`Unknown daemon method: ${String(request.method)}`);
     }

@@ -2,11 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import path from "node:path";
 import type {
+  AttemptOfficialCost,
   AttemptRecord,
+  AttemptTokenUsage,
   NormalizedWorkerEvent,
+  ProviderSpec,
   TaskRecord,
   VerificationResult,
 } from "./types.js";
+import { resolveAttemptOfficialCost } from "./attempt-economics.js";
 import { taskPaths } from "./config.js";
 import { loadTaskSpec } from "./task.js";
 import { cloneDefaults, type ExecutionSettings, type ProviderDefaultsSettings, type TaskPolicy } from "./settings.js";
@@ -44,6 +48,10 @@ function latestVerificationFeedback(store: StateStore, taskId: string): string |
 
 function timestamp(): string {
   return new Date().toISOString();
+}
+
+function buildOfficialCost(provider: ProviderSpec, usage?: AttemptTokenUsage): AttemptOfficialCost {
+  return resolveAttemptOfficialCost(provider, usage);
 }
 
 interface TaskRecordInput {
@@ -216,6 +224,7 @@ export async function executeAttempt(
         finishedAt: failedAt,
         exitCode: 1,
         error: message,
+        officialCost: buildOfficialCost(task.spec.provider),
       });
       store.setTaskStatus(task.id, "failed", {
         finishedAt: failedAt,
@@ -238,7 +247,10 @@ export async function executeAttempt(
       ...(worker.resultText === undefined ? {} : { resultText: worker.resultText }),
       ...(worker.costUsd === undefined ? {} : { costUsd: worker.costUsd }),
       ...(worker.turns === undefined ? {} : { turns: worker.turns }),
+      ...(worker.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
+      ...(worker.usage === undefined ? {} : { usage: worker.usage }),
       ...(worker.error === undefined ? {} : { error: worker.error }),
+      officialCost: buildOfficialCost(task.spec.provider, worker.usage),
     });
     store.setTaskStatus(task.id, "interrupted", {
       finishedAt: workerFinishedAt,
@@ -257,7 +269,10 @@ export async function executeAttempt(
       ...(worker.resultText === undefined ? {} : { resultText: worker.resultText }),
       ...(worker.costUsd === undefined ? {} : { costUsd: worker.costUsd }),
       ...(worker.turns === undefined ? {} : { turns: worker.turns }),
+      ...(worker.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
+      ...(worker.usage === undefined ? {} : { usage: worker.usage }),
       error: worker.error ?? "Worker execution failed",
+      officialCost: buildOfficialCost(task.spec.provider, worker.usage),
     });
     store.setTaskStatus(task.id, "failed", {
       finishedAt: workerFinishedAt,
@@ -278,7 +293,10 @@ export async function executeAttempt(
     ...(worker.resultText === undefined ? {} : { resultText: worker.resultText }),
     ...(worker.costUsd === undefined ? {} : { costUsd: worker.costUsd }),
     ...(worker.turns === undefined ? {} : { turns: worker.turns }),
+    ...(worker.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
+    ...(worker.usage === undefined ? {} : { usage: worker.usage }),
     ...(!verification.passed ? { error: "Independent verification failed" } : {}),
+    officialCost: buildOfficialCost(task.spec.provider, worker.usage),
   });
   store.setTaskStatus(task.id, finalStatus, {
     finishedAt,
@@ -362,4 +380,128 @@ export function reconcileTask(store: StateStore, taskId: string): TaskRecord {
     );
     return updated;
   }
+}
+
+// --- Revision: standalone succeeded-only pre-integration correction ---
+
+/** Fixed upper bound for revise feedback, measured in characters (UTF-16
+ *  code units) of the trimmed feedback.  Bounded so the operator never
+ *  accidentally forwards a full prompt, contract body, or other sensitive
+ *  Task content through the correction channel. */
+export const REVISE_FEEDBACK_MAX_LENGTH = 4096;
+
+export type ReviseRejectionReason =
+  | "not-succeeded"
+  | "missing-feedback"
+  | "feedback-too-long"
+  | "exhausted-attempts"
+  | "plan-member"
+  | "competition-candidate"
+  | "integration-history";
+
+export interface ReviseCheckResult {
+  readonly eligible: boolean;
+  readonly reason?: ReviseRejectionReason;
+  /** Canonical trimmed feedback; only present when eligible.  This is
+   *  the exact string the daemon, coordinator, and local fallback all
+   *  pass forward to the Worker. */
+  readonly canonicalFeedback?: string;
+}
+
+/** Pure eligibility check shared by daemon and local-fallback paths.
+ *  Trims the feedback exactly once, validates emptiness and length on
+ *  the trimmed value, and returns the canonical trimmed string.  Every
+ *  rejection reason is a fixed privacy-safe label that never echoes
+ *  feedback content, Task names, paths, prompts, outputs, or credentials. */
+export function checkReviseEligibility(
+  store: StateStore,
+  taskId: string,
+  feedback: string,
+  maxAttempts: number,
+): ReviseCheckResult {
+  const trimmed = feedback.trim();
+  if (!trimmed) return { eligible: false, reason: "missing-feedback" };
+  if (trimmed.length > REVISE_FEEDBACK_MAX_LENGTH) {
+    return { eligible: false, reason: "feedback-too-long" };
+  }
+  const task = store.getTask(taskId);
+  if (task.status !== "succeeded") return { eligible: false, reason: "not-succeeded" };
+  if (store.getPlanItemByTaskId(taskId) !== undefined) return { eligible: false, reason: "plan-member" };
+  if (store.getCompetitionByCandidateTaskId(taskId) !== undefined) {
+    return { eligible: false, reason: "competition-candidate" };
+  }
+  if (store.listIntegrationResults(taskId).length > 0) {
+    return { eligible: false, reason: "integration-history" };
+  }
+  if (store.listAttempts(taskId).length >= maxAttempts) {
+    return { eligible: false, reason: "exhausted-attempts" };
+  }
+  return { eligible: true, canonicalFeedback: trimmed };
+}
+
+/** Fixed non-echoing reason string for each rejection.  These strings
+ *  are safe to surface in CLI output, daemon errors, and events. */
+export function describeReviseRejection(reason: ReviseRejectionReason): string {
+  switch (reason) {
+    case "not-succeeded": return "revision requires succeeded Task";
+    case "missing-feedback": return "revision requires explicit trimmed feedback";
+    case "feedback-too-long": return "revision feedback exceeds configured upper bound";
+    case "exhausted-attempts": return "revision requires remaining configured attempts";
+    case "plan-member": return "revision rejected: Task belongs to a plan";
+    case "competition-candidate": return "revision rejected: Task is a competition candidate";
+    case "integration-history": return "revision rejected: Task has integration history";
+  }
+}
+
+/** Move an eligible standalone succeeded Task to queued for a content-free,
+ *  bounded review-revision attempt.  Old attempts and verification results
+ *  remain immutable; the prior terminal and live-attempt fields
+ *  (finishedAt, error, workerPid, currentAttemptId, startedAt) are cleared
+ *  so downstream consumers cannot mistake the pre-revision succeeded state
+ *  or its live-attempt pointers for the current one.  Historical Attempt
+ *  rows are preserved by the Store's existing patch semantics. */
+export function prepareReviseTask(store: StateStore, taskId: string): TaskRecord {
+  store.setTaskStatus(taskId, "queued", {
+    finishedAt: null,
+    error: null,
+    workerPid: null,
+    currentAttemptId: null,
+    startedAt: null,
+  });
+  store.addEvent(
+    taskId,
+    undefined,
+    "task.revise.requested",
+    "Task revision requested for main-review correction",
+    { reason: "main-review-correction" },
+  );
+  return store.getTask(taskId);
+}
+
+export async function reviseTask(
+  store: StateStore,
+  taskId: string,
+  feedback: string,
+  onProgress?: ProgressListener,
+  execution?: ExecutionSettings,
+  providerDefaults?: ProviderDefaultsSettings,
+): Promise<RunResult> {
+  const exec = execution ?? cloneDefaults().execution;
+  const check = checkReviseEligibility(store, taskId, feedback, exec.maxAttempts);
+  if (!check.eligible) {
+    throw new Error(check.reason !== undefined
+      ? describeReviseRejection(check.reason)
+      : "revise rejected");
+  }
+  // Transition to queued first, then re-read so the post-clearance record
+  // is what executeAttempt sees; its `task.startedAt === undefined` branch
+  // re-seeds startedAt with the new attempt's timestamp.
+  prepareReviseTask(store, taskId);
+  const cleared = store.getTask(taskId);
+  // Verifier feedback is intentionally NOT combined — the previous attempt
+  // is what main Codex is correcting; canonical main-Codex feedback stands
+  // alone as the correction instruction.
+  return executeAttempt(
+    store, cleared, true, onProgress, check.canonicalFeedback, exec, providerDefaults,
+  );
 }

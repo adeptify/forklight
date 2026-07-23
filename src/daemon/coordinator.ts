@@ -29,7 +29,10 @@ import {
 import { assertWorkPlan, type WorkPlan } from "../core/plan.js";
 import {
   buildTaskRecord,
+  checkReviseEligibility,
+  describeReviseRejection,
   executeAttempt,
+  prepareReviseTask,
   prepareTaskWorkspace,
   registerTaskFromSpec,
   resumeTask,
@@ -67,6 +70,18 @@ import {
   type IntegrationResult,
   type PreflightReceipt,
 } from "../core/integration.js";
+import { getTaskEconomicsReport, type TaskEconomicsReport } from "../core/task-economics-report.js";
+import {
+  captureDirectCodexSample,
+  listDirectCodexInbox,
+  recordDirectCodexReview,
+  previewDirectCodexPublication,
+  registerDirectCodexCalibrationPublication,
+  type DirectCodexInboxItem,
+} from "../core/direct-codex-workflow-service.js";
+import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
+import type { DirectCodexSampleReview } from "../core/direct-codex-review.js";
+import type { DirectCodexPublicationPreview, DirectCodexRegistrationResult } from "../core/direct-codex-publication-service.js";
 
 export interface PlanRegistrationResult {
   planId: string;
@@ -76,6 +91,7 @@ export interface PlanRegistrationResult {
 interface QueuedJob {
   taskId: string;
   resuming: boolean;
+  revising?: boolean;
   feedback?: string;
 }
 
@@ -118,6 +134,7 @@ function taskPolicy(settings: ForkLightSettings): TaskPolicy {
     contractQuality: settings.contractQuality,
     execution: settings.execution,
     providerDefaults: settings.providerDefaults,
+    completionPolicy: settings.completionPolicy,
   };
 }
 
@@ -400,8 +417,80 @@ export class DaemonCoordinator {
     return task;
   }
 
+  /** Request a main-review correction attempt for a standalone succeeded
+   *  Task.  Validates eligibility (status, plan/competition membership,
+   *  integration history, attempt budget, canonical trimmed feedback
+   *  under the configured character bound), then checks queue admission
+   *  (closing, active, already queued) before transitioning the Task
+   *  to queued (clearing terminal and live-attempt fields and recording
+   *  a content-free revision event).  Finally enqueues a revise job that
+   *  reuses the existing session and workspace with the canonical
+   *  feedback.  Returns the canonical queued TaskRecord so callers can
+   *  verify the transition occurred before return.
+   *
+   *  Queue-admission is verified BEFORE prepareReviseTask so a rejection
+   *  never strands the Task in queued state with a recorded event.  The
+   *  enqueue method retains its own defensive duplicate assertion. */
+  revise(taskId: string, feedback: string): TaskRecord {
+    const maxAttempts = this.settings.get().execution.maxAttempts;
+    const check = checkReviseEligibility(this.store, taskId, feedback, maxAttempts);
+    if (!check.eligible) {
+      throw new Error(check.reason !== undefined
+        ? describeReviseRejection(check.reason)
+        : "revise rejected");
+    }
+    // Verify queue admission before mutating the Task — a failed enqueue
+    // after prepareReviseTask would strand the Task in queued state with
+    // a recorded event and no corresponding job.
+    if (this.closing) {
+      throw new Error("ForkLight daemon is shutting down");
+    }
+    if (this.active.has(taskId) || this.queue.some((job) => job.taskId === taskId)) {
+      throw new Error(`Task ${taskId} is already queued or running`);
+    }
+    const queued = prepareReviseTask(this.store, taskId);
+    this.enqueue({
+      taskId,
+      resuming: true,
+      revising: true,
+      // canonicalFeedback is defined when eligible: true (proven above);
+      // the exact trimmed value is what the Worker receives.
+      feedback: check.canonicalFeedback!,
+    }, true);
+    return queued;
+  }
+
   status(taskId: string): TaskRecord {
     return this.store.getTask(taskId);
+  }
+
+  /** Return the canonical TaskEconomicsReport unchanged — no arithmetic, no
+   *  calibration inference, no Task class discovery, and no private content.
+   *  The Store verify step is delegated to getTaskEconomicsReport. */
+  taskEconomics(taskId: string): TaskEconomicsReport {
+    return getTaskEconomicsReport(this.store, taskId);
+  }
+
+  // --- Direct-Codex calibration workflow ---
+
+  directCodexCapture(usage: unknown, metadata: unknown): DirectCodexPairedSample {
+    return captureDirectCodexSample(this.store, usage, metadata);
+  }
+
+  directCodexInbox(taskClass: unknown, profileId: unknown): readonly DirectCodexInboxItem[] {
+    return listDirectCodexInbox(this.store, taskClass, profileId);
+  }
+
+  directCodexReview(params: unknown): DirectCodexSampleReview {
+    return recordDirectCodexReview(this.store, params);
+  }
+
+  directCodexPublicationPreview(params: unknown): DirectCodexPublicationPreview {
+    return previewDirectCodexPublication(this.store, params);
+  }
+
+  directCodexPublicationRegister(params: unknown): DirectCodexRegistrationResult {
+    return registerDirectCodexCalibrationPublication(this.store, params);
   }
 
   list(statuses?: TaskStatus[], limit = 20): TaskRecord[] {
@@ -727,7 +816,15 @@ export class DaemonCoordinator {
 
   private async execute(job: QueuedJob, settings: ForkLightSettings): Promise<void> {
     const exec = settings.execution;
-    if (job.resuming) {
+    if (job.revising) {
+      // Revise: status already transitioned to queued and revision
+      // event recorded before enqueue; executeAttempt starts the new
+      // attempt in the existing session and workspace.
+      await executeAttempt(
+        this.store, this.store.getTask(job.taskId), true, undefined,
+        job.feedback, exec, settings.providerDefaults,
+      );
+    } else if (job.resuming) {
       const attemptCount = this.store.listAttempts(job.taskId).length;
       if (attemptCount >= exec.maxAttempts) {
         throw new Error(`Task ${job.taskId} has reached maximum attempts (${exec.maxAttempts})`);

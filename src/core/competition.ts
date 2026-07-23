@@ -14,6 +14,7 @@ import type {
   CompetitionCandidateScore,
   CompetitionEvaluationRecord,
   CompetitionFactorScore,
+  CompletionPolicyCheck,
   CompetitionRecord,
   RankingFactor,
   RankingPolicy,
@@ -31,6 +32,7 @@ export const DEFAULT_RANKING_POLICY: RankingPolicy = {
     retries: 0.2,
     cost: 0,
     duration: 0,
+    delivery: 0.3,
   },
   tieThreshold: 1e-9,
 };
@@ -59,6 +61,8 @@ interface CandidateMetrics {
   retries: number;
   cost?: number;
   duration?: number;
+  /** Resolved completion policy check — may be derived from legacy evidence. */
+  completionPolicy: CompletionPolicyCheck | undefined;
 }
 
 const TERMINAL = new Set<TaskStatus>(["succeeded", "failed", "interrupted"]);
@@ -67,8 +71,11 @@ export function rankingPolicy(
   override: RankingPolicyOverride = {},
   settings?: CompetitionSettings,
 ): RankingPolicy {
-  const defaultWeights = settings?.rankingWeights ?? DEFAULT_RANKING_POLICY.weights;
-  const weights = { ...defaultWeights, ...override };
+  const weights = {
+    ...DEFAULT_RANKING_POLICY.weights,
+    ...(settings?.rankingWeights ?? {}),
+    ...override,
+  };
   for (const [factor, weight] of Object.entries(weights)) {
     if (!Number.isFinite(weight) || weight < 0) {
       throw new Error(`Ranking weight ${factor} must be a finite non-negative number`);
@@ -77,13 +84,21 @@ export function rankingPolicy(
   if (weights.verification <= 0) {
     throw new Error("Verification must retain a positive ranking weight");
   }
+  const tieThreshold = settings?.tieThreshold ?? DEFAULT_RANKING_POLICY.tieThreshold;
+  if (!Number.isFinite(tieThreshold) || tieThreshold < 0) {
+    throw new Error("Tie threshold must be a finite non-negative number");
+  }
   return {
     weights,
-    tieThreshold: settings?.tieThreshold ?? DEFAULT_RANKING_POLICY.tieThreshold,
+    tieThreshold,
   };
 }
 
 function verificationFailure(verification: VerificationResult): string {
+  const cp = verification.completionPolicy;
+  if (cp && cp.check === "hard-fail") {
+    return cp.message;
+  }
   const budget = verification.changeBudget;
   if (budget && !budget.withinBudget) {
     return `Change budget exceeded: ${budget.filesChanged}/${budget.maxFiles} files, ${budget.changedLines}/${budget.maxDiffLines} lines`;
@@ -130,6 +145,39 @@ function metrics(input: CompetitionCandidateInput): CandidateMetrics {
     : undefined;
   const cost = completeTotal(input.evidence, "costUsd");
 
+  // Resolve completion policy check from verification evidence.
+  // Legacy records (no completionPolicy field) fall back to hard mode when
+  // the Task was editable and produced no workspace changes.
+  const allowEdits = task.spec.worker?.allowEdits ?? true;
+  const noChanges = budget
+    && budget.filesChanged === 0
+    && budget.changedLines === 0;
+  let completionPolicy: CompletionPolicyCheck | undefined = verification?.completionPolicy;
+  if (!completionPolicy && allowEdits && noChanges) {
+    completionPolicy = {
+      check: "hard-fail",
+      noChangeMode: "hard",
+      message: "No workspace changes detected (legacy fallback: hard)",
+    };
+  }
+  if (!completionPolicy && allowEdits && budget && !noChanges) {
+    completionPolicy = {
+      check: "satisfied",
+      noChangeMode: "hard",
+      message: "Workspace changes detected (legacy fallback: hard)",
+    };
+  }
+  if (!completionPolicy && !allowEdits) {
+    completionPolicy = {
+      check: "not-applicable",
+      noChangeMode: "hard",
+      message: "Read-only Task; no-change delivery policy does not apply",
+    };
+  }
+  if (reason === undefined && completionPolicy?.check === "hard-fail") {
+    reason = completionPolicy.message;
+  }
+
   return {
     candidate: input,
     eligible: reason === undefined,
@@ -138,6 +186,7 @@ function metrics(input: CompetitionCandidateInput): CandidateMetrics {
     retries: Math.max(0, input.evidence.attempts.length - 1),
     ...(cost === undefined ? {} : { cost }),
     ...(validDuration === undefined ? {} : { duration: validDuration }),
+    completionPolicy,
   };
 }
 
@@ -190,6 +239,35 @@ function candidateScore(
   }
 
   const focusScore = item.diffFocus === undefined ? 0 : Math.max(0, 1 - item.diffFocus);
+  // Legacy policies may lack the delivery weight; normalize to default.
+  const deliveryWeight = typeof policy.weights.delivery === "number" && policy.weights.delivery >= 0
+    ? policy.weights.delivery
+    : DEFAULT_RANKING_POLICY.weights.delivery;
+  const cp = item.completionPolicy;
+  const effectiveDeliveryWeight = cp?.noChangeMode === "score" ? deliveryWeight : 0;
+  let deliveryRawValue: number | undefined;
+  let deliveryNormValue: number;
+  let deliveryEvidence: string;
+  if (cp?.check === "satisfied") {
+    deliveryRawValue = 1;
+    deliveryNormValue = 1;
+    deliveryEvidence = "Delivery check satisfied";
+  } else if (cp?.check === "score-evidence") {
+    deliveryRawValue = 0;
+    deliveryNormValue = 0;
+    deliveryEvidence = "No workspace changes detected; delivery penalty applied";
+  } else if (!cp || cp.check === "not-applicable" || cp.check === "ignored") {
+    deliveryRawValue = undefined;
+    deliveryNormValue = 0;
+    deliveryEvidence = cp?.message ?? "Delivery evidence unavailable";
+  } else {
+    // warning or unknown — non-scoring
+    deliveryRawValue = undefined;
+    deliveryNormValue = 0;
+    deliveryEvidence = cp.check === "warning"
+      ? "Warning: No workspace changes detected (warn mode, non-scoring)"
+      : cp.message;
+  }
   const factors = [
     factor("verification", policy.weights.verification, 1, 1, "independent verification passed"),
     factor(
@@ -220,6 +298,7 @@ function candidateScore(
       inverse(item.duration, eligible.flatMap((candidate) => candidate.duration ?? [])),
       item.duration === undefined ? "duration evidence unavailable" : `${(item.duration / 1000).toFixed(1)}s`,
     ),
+    factor("delivery", effectiveDeliveryWeight, deliveryRawValue, deliveryNormValue, deliveryEvidence),
   ];
   return {
     ...base,
@@ -235,10 +314,17 @@ export function scoreCandidates(
   policy: RankingPolicy,
   metadata: { evaluationId: string; createdAt: string },
 ): CompetitionEvaluationRecord {
+  const effectivePolicy = {
+    ...rankingPolicy(policy.weights),
+    tieThreshold: policy.tieThreshold,
+  };
+  if (!Number.isFinite(effectivePolicy.tieThreshold) || effectivePolicy.tieThreshold < 0) {
+    throw new Error("Tie threshold must be a finite non-negative number");
+  }
   const measured = candidates.map(metrics);
   const eligible = measured.filter((candidate) => candidate.eligible);
   const scores = measured
-    .map((candidate) => candidateScore(candidate, policy, eligible))
+    .map((candidate) => candidateScore(candidate, effectivePolicy, eligible))
     .sort((a, b) =>
       Number(b.eligible) - Number(a.eligible)
       || b.totalScore - a.totalScore
@@ -246,9 +332,12 @@ export function scoreCandidates(
   const ranked = scores.filter((candidate) => candidate.eligible);
   const complete = measured.every((candidate) => TERMINAL.has(candidate.candidate.evidence.task.status));
   const tied = ranked.length > 1
-    && Math.abs(ranked[0]!.totalScore - ranked[1]!.totalScore) < policy.tieThreshold;
+    && Math.abs(ranked[0]!.totalScore - ranked[1]!.totalScore) < effectivePolicy.tieThreshold;
   const winner = complete && !tied ? ranked[0] : undefined;
-  const positiveWeight = Object.values(policy.weights).reduce((total, weight) => total + weight, 0);
+  const positiveWeight = Math.max(
+    0,
+    ...ranked.map((candidate) => candidate.factors.reduce((total, current) => total + current.weight, 0)),
+  );
   const gap = winner && ranked[1] ? winner.totalScore - ranked[1].totalScore : undefined;
   const confidence = gap === undefined
     ? 0.5
@@ -257,7 +346,7 @@ export function scoreCandidates(
   return {
     id: metadata.evaluationId,
     competitionId,
-    policy,
+    policy: effectivePolicy,
     candidates: scores,
     ...(winner === undefined
       ? {}
