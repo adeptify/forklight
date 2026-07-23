@@ -32,6 +32,8 @@ export interface ExecutionSettings {
 
 export interface CompletionPolicySettings {
   noChangeMode: PolicyMode;
+  /** Enforcement for Task changeBudget overruns (default hard). */
+  changeBudgetMode: PolicyMode;
 }
 
 export interface RankingWeightSettings {
@@ -128,6 +130,7 @@ const DEFAULTS: ForkLightSettings = {
   },
   completionPolicy: {
     noChangeMode: "hard",
+    changeBudgetMode: "hard",
   },
   execution: {
     maxConcurrency: 2,
@@ -210,7 +213,7 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
     "maxFiles", "maxDiffLines", "maxFocusPaths", "minScenarios",
     "minCallChainSteps", "minOutcomeCharacters", "minModuleResponsibilityCharacters",
   ],
-  completionPolicy: ["noChangeMode"],
+  completionPolicy: ["noChangeMode", "changeBudgetMode"],
   execution: [
     "maxConcurrency", "noProgressTimeoutMs", "defaultEffort",
     "defaultProvider", "defaultMaxBudgetUsd", "maximumBudgetUsd",
@@ -363,6 +366,10 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
   assert(
     typeof cp.noChangeMode === "string" && VALID_POLICY_MODES.has(cp.noChangeMode),
     `completionPolicy.noChangeMode must be one of ${[...VALID_POLICY_MODES].join(", ")}`,
+  );
+  assert(
+    typeof cp.changeBudgetMode === "string" && VALID_POLICY_MODES.has(cp.changeBudgetMode),
+    `completionPolicy.changeBudgetMode must be one of ${[...VALID_POLICY_MODES].join(", ")}`,
   );
 
   const ex = validateSection(doc.execution, "execution.");

@@ -108,6 +108,8 @@ interface SharedTaskSpec {
    *  Absent in legacy stored Tasks; runtime code must fall back to hard. */
   completionPolicy?: {
     noChangeMode: PolicyMode;
+    /** How changeBudget overruns affect Task success. Defaults to hard when absent. */
+    changeBudgetMode?: PolicyMode;
   };
 }
 
@@ -306,6 +308,10 @@ export interface VerificationResult {
     maxFiles: number;
     maxDiffLines: number;
     withinBudget: boolean;
+    /** Enforcement mode used for this evaluation. */
+    mode?: PolicyMode;
+    /** Effect of the mode on this verification (independent of withinBudget). */
+    effect?: "satisfied" | "hard-fail" | "warning" | "score-evidence" | "ignored";
   };
   /** Structured completion policy evaluation.
    *  Absent for legacy verification stored before this field was introduced. */

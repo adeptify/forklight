@@ -128,12 +128,20 @@ export class ClaudeEventNormalizer {
       const costUsd = typeof root.total_cost_usd === "number" ? root.total_cost_usd : undefined;
       const turns = typeof root.num_turns === "number" ? root.num_turns : undefined;
       const usage = parseTokenUsage(root);
+      const budgetExceeded = typeof subtype === "string"
+        && (subtype === "error_max_budget_usd"
+          || subtype.includes("max_budget")
+          || subtype.includes("max-budget"));
       const summary = terminalError
-        ? (stopReason === "error" && !isError
-            ? "Worker terminated with error stop reason"
-            : subtype !== undefined && !isError
-              ? "Worker reported an error terminal subtype"
-              : "Worker reported failure")
+        ? (budgetExceeded
+            ? (typeof costUsd === "number"
+                ? `Worker stopped: max budget exceeded (runtime estimate $${costUsd.toFixed(6)})`
+                : "Worker stopped: max budget exceeded")
+            : stopReason === "error" && !isError
+              ? "Worker terminated with error stop reason"
+              : subtype !== undefined && !isError
+                ? "Worker reported an error terminal subtype"
+                : "Worker reported failure")
         : "Worker reported completion";
       return [
         {
@@ -146,6 +154,7 @@ export class ClaudeEventNormalizer {
             ...(costUsd === undefined ? {} : { costUsd }),
             ...(turns === undefined ? {} : { turns }),
             ...(usage === undefined ? {} : { usage }),
+            ...(budgetExceeded ? { failureCategory: "budget" } : {}),
           },
           terminal: {
             isError: terminalError,

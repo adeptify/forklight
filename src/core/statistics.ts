@@ -349,7 +349,12 @@ export function verificationFrom(events: EventRecord[]): VerificationResult | un
     : payload.commands.length > 0 && payload.commands.every((c) => c.exitCode === 0);
   const policyPassed = typeof payload.policyPassed === "boolean"
     ? payload.policyPassed
-    : (payload.changeBudget?.withinBudget ?? true)
+    : (payload.changeBudget?.effect === "hard-fail"
+        ? false
+        : (payload.changeBudget?.withinBudget ?? true)
+          || payload.changeBudget?.effect === "warning"
+          || payload.changeBudget?.effect === "score-evidence"
+          || payload.changeBudget?.effect === "ignored")
       && payload.completionPolicy?.check !== "hard-fail";
   return {
     ...payload,

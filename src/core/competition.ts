@@ -100,7 +100,7 @@ function verificationFailure(verification: VerificationResult): string {
     return cp.message;
   }
   const budget = verification.changeBudget;
-  if (budget && !budget.withinBudget) {
+  if (budget && !budget.withinBudget && (budget.effect === "hard-fail" || budget.effect === undefined)) {
     return `Change budget exceeded: ${budget.filesChanged}/${budget.maxFiles} files, ${budget.changedLines}/${budget.maxDiffLines} lines`;
   }
   const command = verification.commands.find((candidate) => candidate.exitCode !== 0);

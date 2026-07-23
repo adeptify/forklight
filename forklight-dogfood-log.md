@@ -1324,3 +1324,36 @@
 - changeBudget soft/warn 分档（Wave 3）  
 - Integration preflight 与 verifier 完全共用同一 API 面（语义已对齐方向）  
 
+
+## 2026-07-23 Wave 3 交付记录
+
+状态：已在源码实现并通过相关单测；待 build / 重启 daemon 后生效。
+
+### 做了什么（R4 策略门 + 预算终态诚实）
+
+1. **changeBudgetMode**（settings + Task 快照）  
+   - `completionPolicy.changeBudgetMode`: `hard | warn | score | off`（默认 hard）  
+   - Task YAML 可覆盖；创建时 snap 进 `spec.completionPolicy`  
+   - Verifier：仅 `hard` 在超预算时让 `policyPassed=false`；warn/score/off 仍可 `passed=true` 并记录 `changeBudget.effect`  
+   - 行为全绿 + 仅超行数：可用 warn 避免白烧多轮（FL-D54 / D90）
+
+2. **Integration 可行性预检**（FL-D10 / D46 / D84）  
+   - `assessIntegrationFeasibility`：对比 Task changeBudget 与 `integration.reviewedPatchMaxFiles/Lines`  
+   - `forklight validate` 人类与 JSON 输出均展示 OK/WARN，**不阻断**合同质量 PASS（executable but may not be integratable）
+
+3. **预算耗尽终态**（FL-D23）  
+   - normalize：`error_max_budget_usd` 摘要改为明确 “max budget exceeded”  
+   - `resolveWorkerFailure` 优先识别预算耗尽，带 runtime estimate 标注，避免只剩 generic “no result event”
+
+### 测试
+
+- verifier-policy：warn 过预算通过 / hard 过预算失败  
+- integration-feasibility、normalize budget 文案、task/settings changeBudgetMode  
+
+### 明确未做
+
+- 实时机器 Diff 回传 Worker（D55）  
+- 受控 verification checkpoint（D78）  
+- Resume 一次性预算授权（D30）  
+- Integration 异步 operation id（Wave 4）  
+

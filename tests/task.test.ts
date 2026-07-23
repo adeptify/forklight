@@ -703,21 +703,27 @@ acceptance:
 
 // --- Completion policy snapshot ---
 
-function policyWithCompletion(noChangeMode: string): TaskPolicy {
+function policyWithCompletion(
+  noChangeMode: string,
+  changeBudgetMode = "hard",
+): TaskPolicy {
   const defaults = cloneDefaults();
   return {
     contractQuality: defaults.contractQuality,
     execution: defaults.execution,
     providerDefaults: defaults.providerDefaults,
-    completionPolicy: { noChangeMode: noChangeMode as "hard" | "warn" | "score" | "off" },
+    completionPolicy: {
+      noChangeMode: noChangeMode as "hard" | "warn" | "score" | "off",
+      changeBudgetMode: changeBudgetMode as "hard" | "warn" | "score" | "off",
+    },
   };
 }
 
 test("newly parsed task snapshots configurable no-change policy", () => {
-  const defaults = cloneDefaults();
   // Default policy
   const specDefault = parseTaskSpec(contractSpec(), process.cwd());
   assert.equal(specDefault.completionPolicy?.noChangeMode, "hard");
+  assert.equal(specDefault.completionPolicy?.changeBudgetMode, "hard");
 
   // Score policy
   const specScore = parseTaskSpec(contractSpec(), process.cwd(), policyWithCompletion("score"));
@@ -726,6 +732,17 @@ test("newly parsed task snapshots configurable no-change policy", () => {
   // Off policy
   const specOff = parseTaskSpec(contractSpec(), process.cwd(), policyWithCompletion("off"));
   assert.equal(specOff.completionPolicy?.noChangeMode, "off");
+});
+
+test("task snapshots changeBudgetMode from policy and task override", () => {
+  const fromPolicy = parseTaskSpec(contractSpec(), process.cwd(), policyWithCompletion("hard", "warn"));
+  assert.equal(fromPolicy.completionPolicy?.changeBudgetMode, "warn");
+  const fromTask = parseTaskSpec(
+    contractSpec({ completionPolicy: { changeBudgetMode: "score" } }),
+    process.cwd(),
+    policyWithCompletion("hard", "warn"),
+  );
+  assert.equal(fromTask.completionPolicy?.changeBudgetMode, "score");
 });
 
 test("task-level completion policy explicitly overrides the global default", () => {

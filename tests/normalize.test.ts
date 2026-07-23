@@ -124,7 +124,7 @@ test("preserves authoritative usage on error_during_execution and budget errors"
       type: "result",
       subtype: "error_max_budget_usd",
       is_error: true,
-      total_cost_usd: 0,
+      total_cost_usd: 0.518137,
       num_turns: 1,
       usage: {
         input_tokens: 50,
@@ -137,7 +137,33 @@ test("preserves authoritative usage on error_during_execution and budget errors"
   assert.equal(budgetError[0]?.type, "worker.failed");
   assert.equal(budgetError[0]?.terminal?.usage?.inputTokens, 50);
   assert.equal(budgetError[0]?.terminal?.usage?.outputTokens, 0);
-  assert.equal(budgetError[0]?.terminal?.costUsd, 0);
+  assert.equal(budgetError[0]?.terminal?.costUsd, 0.518137);
+  assert.match(budgetError[0]?.summary ?? "", /max budget exceeded/);
+  assert.match(budgetError[0]?.terminal?.failureReason ?? "", /max budget exceeded/);
+  assert.match(
+    resolveWorkerFailure(budgetError[0]?.terminal, ""),
+    /max budget exceeded \(runtime estimate \$0\.518137/,
+  );
+  assert.equal(
+    (budgetError[0]?.payload as { failureCategory?: string } | undefined)?.failureCategory,
+    "budget",
+  );
+});
+
+test("resolveWorkerFailure prefers budget diagnostic over generic no-result wording", () => {
+  assert.match(
+    resolveWorkerFailure(
+      {
+        isError: true,
+        failureReason: "Worker reported failure",
+        resultText: "error_max_budget_usd",
+        costUsd: 0.55,
+        runtimeCostEstimateUsd: 0.55,
+      },
+      "",
+    ),
+    /max budget exceeded \(runtime estimate \$0\.550000/,
+  );
 });
 
 test("rejects malformed usage counters and leaves usage absent", () => {

@@ -162,10 +162,38 @@ export function interruptedExitCode(exitCode: number): number {
   return exitCode === 0 ? 130 : exitCode;
 }
 
+function looksLikeBudgetExhaustion(text: string | undefined): boolean {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return lower.includes("error_max_budget")
+    || lower.includes("max_budget_usd")
+    || lower.includes("max-budget-usd")
+    || lower.includes("exceeded your max budget")
+    || (lower.includes("budget") && (lower.includes("exceed") || lower.includes("reached")));
+}
+
+/**
+ * Prefer explicit budget diagnostics over generic "no result event" (FL-D23).
+ * Runtime estimate is labeled as such — not an official Provider bill.
+ */
 export function resolveWorkerFailure(
   terminal: NormalizedWorkerEvent["terminal"] | undefined,
   stderr: string,
 ): string {
+  const haystack = [
+    terminal?.failureReason,
+    terminal?.resultText,
+    stderr,
+  ].filter((part): part is string => typeof part === "string" && part.trim().length > 0).join("\n");
+
+  if (looksLikeBudgetExhaustion(haystack) || looksLikeBudgetExhaustion(terminal?.failureReason)) {
+    const estimate = terminal?.runtimeCostEstimateUsd ?? terminal?.costUsd;
+    if (typeof estimate === "number" && Number.isFinite(estimate)) {
+      return `Worker stopped: max budget exceeded (runtime estimate $${estimate.toFixed(6)}; not Provider official cost)`;
+    }
+    return "Worker stopped: max budget exceeded";
+  }
+
   return terminal?.resultText?.trim()
     || terminal?.failureReason
     || stderr.trim().slice(0, 2_000)

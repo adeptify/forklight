@@ -274,7 +274,7 @@ export function parseTaskSpec(
   const worker = object(root.worker ?? {}, "task.worker");
   const completionPolicy = object(root.completionPolicy ?? {}, "task.completionPolicy");
   const completionKeys = Object.keys(completionPolicy);
-  if (completionKeys.some((key) => key !== "noChangeMode")) {
+  if (completionKeys.some((key) => key !== "noChangeMode" && key !== "changeBudgetMode")) {
     throw new Error("task.completionPolicy contains an unsupported field");
   }
   const acceptance = object(root.acceptance ?? {}, "task.acceptance");
@@ -331,10 +331,16 @@ export function parseTaskSpec(
     if (raw === undefined) return undefined;
     return normalizeDirectCodexProfileId(raw);
   })();
+  const defaultsCompletion = policy?.completionPolicy ?? cloneDefaults().completionPolicy;
   const completionPolicyMode = policyModeValue(
     completionPolicy.noChangeMode,
     "task.completionPolicy.noChangeMode",
-    policy?.completionPolicy.noChangeMode ?? cloneDefaults().completionPolicy.noChangeMode,
+    defaultsCompletion.noChangeMode,
+  );
+  const changeBudgetMode = policyModeValue(
+    completionPolicy.changeBudgetMode,
+    "task.completionPolicy.changeBudgetMode",
+    defaultsCompletion.changeBudgetMode ?? "hard",
   );
   const acceptanceCommands = stringArray(acceptance.commands, "task.acceptance.commands");
   if (acceptanceCommands.length === 0) {
@@ -382,6 +388,7 @@ export function parseTaskSpec(
     ...(directCodexProfileId !== undefined ? { directCodexProfileId } : {}),
     completionPolicy: {
       noChangeMode: completionPolicyMode,
+      changeBudgetMode,
     },
   };
 

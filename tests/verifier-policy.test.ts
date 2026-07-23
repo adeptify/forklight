@@ -86,7 +86,10 @@ acceptance:
     contractQuality: defaults.contractQuality,
     execution: defaults.execution,
     providerDefaults: defaults.providerDefaults,
-    completionPolicy: { noChangeMode },
+    completionPolicy: {
+      noChangeMode,
+      changeBudgetMode: defaults.completionPolicy.changeBudgetMode,
+    },
   };
   const { spec } = await loadTaskSpec(taskFile, policy);
   const record = registerTaskFromSpec(store, spec, taskFile);
@@ -114,6 +117,126 @@ acceptance:
     },
   };
 }
+
+async function fixtureWithBudget(
+  changeBudgetMode: "hard" | "warn" | "score" | "off",
+  maxDiffLines: number,
+): Promise<VerifierPolicyFixture> {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-vp-budget-"));
+  const store = new StateStore(home);
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-vp-budget-task-"));
+  const project = path.join(root, "project");
+  await mkdir(path.join(project, "src"), { recursive: true });
+  await writeFile(path.join(project, "README.md"), "# Test\n");
+  await writeFile(path.join(project, "src", "main.ts"), "export const x = 1;\n");
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: Budget policy test
+project: ./project
+worker:
+  allowEdits: true
+  focusPaths: [src]
+contract:
+  outcome: A reasonable outcome description
+  context: [c]
+  inScope: [i]
+  outOfScope: [o]
+  executionSteps: [s]
+  deliverables: [d]
+  modules:
+    - name: m
+      responsibility: long enough responsibility
+      consumes: [c]
+      produces: [p]
+      boundaries: [b]
+  callChain: [a, b]
+  scenarios:
+    - name: normal
+      given: g
+      when: w
+      then: t
+    - name: edge
+      given: g
+      when: w
+      then: t
+  risks: [r]
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: ${maxDiffLines}
+acceptance:
+  criteria: [c]
+  commands:
+    - "true"
+`,
+  );
+  const defaults = (await import("../src/core/settings.js")).cloneDefaults();
+  const policy = {
+    contractQuality: defaults.contractQuality,
+    execution: defaults.execution,
+    providerDefaults: defaults.providerDefaults,
+    completionPolicy: { noChangeMode: "hard" as const, changeBudgetMode },
+  };
+  const { spec } = await loadTaskSpec(taskFile, policy);
+  const record = registerTaskFromSpec(store, spec, taskFile);
+  await prepareWorkspace(spec, record.paths);
+  // Large enough delivery to exceed a tight line budget.
+  await writeFile(
+    path.join(record.paths.workspace, "delivery-output.ts"),
+    `${"export const line = 1;\n".repeat(40)}`,
+  );
+  return {
+    home,
+    store,
+    task: record,
+    cleanup: () => {
+      store.close();
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+test("changeBudgetMode warn allows over-budget Task to pass with warning effect", async () => {
+  const { store, task, cleanup } = await fixtureWithBudget("warn", 5);
+  try {
+    const attemptId = "attempt-budget-warn";
+    store.createAttempt({
+      id: attemptId, taskId: task.id, ordinal: 1, status: "running",
+      sessionId: task.sessionId, rawLogPath: "/tmp/log", startedAt: new Date().toISOString(),
+    });
+    const { verifyTask } = await import("../src/core/verifier.js");
+    const result = await verifyTask(store, task, attemptId);
+    assert.equal(result.passed, true);
+    assert.equal(result.behaviorPassed, true);
+    assert.equal(result.policyPassed, true);
+    assert.equal(result.changeBudget?.withinBudget, false);
+    assert.equal(result.changeBudget?.mode, "warn");
+    assert.equal(result.changeBudget?.effect, "warning");
+  } finally {
+    cleanup();
+  }
+});
+
+test("changeBudgetMode hard still fails over-budget Task", async () => {
+  const { store, task, cleanup } = await fixtureWithBudget("hard", 5);
+  try {
+    const attemptId = "attempt-budget-hard";
+    store.createAttempt({
+      id: attemptId, taskId: task.id, ordinal: 1, status: "running",
+      sessionId: task.sessionId, rawLogPath: "/tmp/log", startedAt: new Date().toISOString(),
+    });
+    const { verifyTask } = await import("../src/core/verifier.js");
+    const result = await verifyTask(store, task, attemptId);
+    assert.equal(result.passed, false);
+    assert.equal(result.behaviorPassed, true);
+    assert.equal(result.policyPassed, false);
+    assert.equal(result.changeBudget?.effect, "hard-fail");
+  } finally {
+    cleanup();
+  }
+});
 
 test("unrelated source drift does not fail verification when affected paths are intact", async () => {
   const { store, task, cleanup } = await fixture("hard", true, true);

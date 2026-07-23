@@ -21,6 +21,7 @@ import type {
 } from "./core/types.js";
 import { loadWorkPlan } from "./core/plan.js";
 import { reconcileTask, resumeTask, reviseTask, runNewTask } from "./core/runner.js";
+import { assessIntegrationFeasibility } from "./core/integration-feasibility.js";
 import { assessTaskQuality, loadTaskSpec } from "./core/task.js";
 import { createKeychainStore } from "./core/secrets.js";
 import { SettingsService, type TaskPolicy } from "./core/settings.js";
@@ -626,11 +627,29 @@ async function main(): Promise<void> {
       };
       const loaded = await loadTaskSpec(required(positional, "task file"), policy);
       const report = assessTaskQuality(loaded.spec, settings.contractQuality);
-      if (json) process.stdout.write(`${JSON.stringify({ taskFile: loaded.taskFile, report }, null, 2)}\n`);
-      else {
+      const integration = assessIntegrationFeasibility(loaded.spec, settings.integration);
+      if (json) {
+        process.stdout.write(`${JSON.stringify({
+          taskFile: loaded.taskFile,
+          report,
+          integrationFeasibility: integration,
+        }, null, 2)}\n`);
+      } else {
         process.stdout.write(`Task Contract: ${report.passed ? "PASS" : "FAIL"} (${report.score}/100)\n`);
         for (const check of report.checks) {
           process.stdout.write(`${check.passed ? "✓" : "✗"} ${check.label} — ${check.detail}\n`);
+        }
+        if (integration.applicable) {
+          process.stdout.write(
+            `Integration feasibility: ${integration.integratable ? "OK" : "WARN — executable but may not be integratable"}\n`,
+          );
+          process.stdout.write(
+            `  task budget: ${integration.taskMaxFiles} files / ${integration.taskMaxLines} lines; `
+            + `integration limit: ${integration.integrationMaxFiles} files / ${integration.integrationMaxLines} lines\n`,
+          );
+          for (const issue of integration.issues) {
+            process.stdout.write(`  ! ${issue}\n`);
+          }
         }
       }
       if (!report.passed) process.exitCode = 1;

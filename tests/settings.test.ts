@@ -34,6 +34,8 @@ test("defaults match spec", () => {
   assert.equal(s.contractQuality.minCallChainSteps, 2);
   assert.equal(s.contractQuality.minOutcomeCharacters, 12);
   assert.equal(s.contractQuality.minModuleResponsibilityCharacters, 8);
+  assert.equal(s.completionPolicy.noChangeMode, "hard");
+  assert.equal(s.completionPolicy.changeBudgetMode, "hard");
   assert.equal(s.execution.maxConcurrency, 2);
   assert.equal(s.execution.noProgressTimeoutMs, 1_800_000);
   assert.equal(s.execution.defaultEffort, "high");
@@ -311,6 +313,7 @@ test("stored settings gain probe defaults on migration", async () => {
 test("completion policy defaults are hard no-change and delivery weight", () => {
   const s = svc().get();
   assert.equal(s.completionPolicy.noChangeMode, "hard");
+  assert.equal(s.completionPolicy.changeBudgetMode, "hard");
   assert.equal(s.competition.rankingWeights.delivery, 0.3);
 });
 

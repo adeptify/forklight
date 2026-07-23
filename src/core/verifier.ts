@@ -29,6 +29,27 @@ function resolveNoChangeMode(spec: TaskRecord["spec"]): PolicyMode {
   return spec.completionPolicy?.noChangeMode ?? "hard";
 }
 
+function resolveChangeBudgetMode(spec: TaskRecord["spec"]): PolicyMode {
+  return spec.completionPolicy?.changeBudgetMode ?? "hard";
+}
+
+function modeEffect(
+  mode: PolicyMode,
+  violated: boolean,
+): "satisfied" | "hard-fail" | "warning" | "score-evidence" | "ignored" {
+  if (!violated) return "satisfied";
+  switch (mode) {
+    case "hard":
+      return "hard-fail";
+    case "warn":
+      return "warning";
+    case "score":
+      return "score-evidence";
+    case "off":
+      return "ignored";
+  }
+}
+
 function evaluateCompletionPolicy(
   spec: TaskRecord["spec"],
   diff: { filesChanged: number; changedLines: number },
@@ -119,24 +140,27 @@ export async function verifyTask(
   const affectedPaths = parseAffectedPathsFromWorkspaceDiff(diff);
   const sourceAssessment = await assessSourceCompatibility(task.spec, task.paths, affectedPaths);
 
-  const changeBudget = task.spec.version === 2
-    ? {
-        ...diffMeasure,
-        ...task.spec.contract.changeBudget,
-        withinBudget: false,
-      }
-    : undefined;
-  if (changeBudget) {
-    changeBudget.withinBudget =
-      changeBudget.filesChanged <= changeBudget.maxFiles &&
-      changeBudget.changedLines <= changeBudget.maxDiffLines;
+  const changeBudgetMode = resolveChangeBudgetMode(task.spec);
+  let changeBudget: VerificationResult["changeBudget"];
+  if (task.spec.version === 2) {
+    const withinBudget =
+      diffMeasure.filesChanged <= task.spec.contract.changeBudget.maxFiles
+      && diffMeasure.changedLines <= task.spec.contract.changeBudget.maxDiffLines;
+    changeBudget = {
+      ...diffMeasure,
+      ...task.spec.contract.changeBudget,
+      withinBudget,
+      mode: changeBudgetMode,
+      effect: modeEffect(changeBudgetMode, !withinBudget),
+    };
   }
 
   const completionPolicyCheck = evaluateCompletionPolicy(task.spec, diffMeasure);
 
   const behaviorPassed = commands.length === task.spec.acceptance.commands.length
     && commands.every((command) => command.exitCode === 0);
-  const policyPassed = (changeBudget?.withinBudget ?? true)
+  // Policy hard-fails only for hard-mode change-budget overruns and hard no-change policy.
+  const policyPassed = (changeBudget?.effect !== "hard-fail")
     && completionPolicyCheck.check !== "hard-fail";
   const sourceCompatible = sourceAssessment.compatible;
   const passed = behaviorPassed && policyPassed && sourceCompatible;
@@ -161,9 +185,15 @@ export async function verifyTask(
 
   let summary: string;
   if (passed) {
-    summary = sourceAssessment.unrelatedDriftPaths.length > 0
-      ? "Independent verification passed (unrelated source drift recorded)"
-      : "Independent verification passed";
+    if (changeBudget?.effect === "warning") {
+      summary = "Independent verification passed (change budget warning)";
+    } else if (changeBudget?.effect === "score-evidence") {
+      summary = "Independent verification passed (change budget score evidence)";
+    } else if (sourceAssessment.unrelatedDriftPaths.length > 0) {
+      summary = "Independent verification passed (unrelated source drift recorded)";
+    } else {
+      summary = "Independent verification passed";
+    }
   } else if (!behaviorPassed) {
     summary = "Independent verification failed: acceptance commands";
   } else if (!policyPassed) {
