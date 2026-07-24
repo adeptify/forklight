@@ -169,7 +169,8 @@ git diff --check
 - MiniMax aggregate terminal usage 缺请求级 tier 信息，official cost 为
   `per-request-usage-required`。
 - Provider cached probe 的历史 failed 状态不会因 Keychain 已配置而自动改写。
-- FL-D70 / FL-D112 的自然语言 placeholder 误伤未纳入本次 lean-core Goal，
-  当时仍在 backlog；已于 2026-07-25 后续迭代修复（hard sentinel 与 soft wording
-  拆分，详见 `forklight-dogfood-log.md` 对应条目）。
+- FL-D70 / FL-D112 的自然语言 placeholder 误伤未纳入本次 lean-core Goal；
+  已于 2026-07-25 后续迭代关闭（hard sentinel 与 soft wording 拆分）。
+  同期关闭 FL-D83 status progress（latest-event activity）。详见
+  `PROJECT_STATUS.md` 与 `forklight-dogfood-log.md` 对账节。
 - 本次真实 Dogfood 不能外推为所有 Provider、模型、仓库和任务类型均已验证。

@@ -1,5 +1,10 @@
 import { buildDeliveryLineage } from "./delivery-lineage.js";
 import { latestMainReview } from "./main-review.js";
+import {
+  buildStatusProgress,
+  DEFAULT_QUIET_AFTER_MS,
+  type LatestEventMeta,
+} from "./task-progress.js";
 import type {
   AttemptRecord,
   CheckpointReport,
@@ -271,6 +276,9 @@ export function buildTaskDecisionView(input: {
   attempts: readonly AttemptRecord[];
   events: readonly EventRecord[];
   integrationResults: readonly IntegrationResultRecord[];
+  /** Injected clock for activity classification; defaults to Date.now(). */
+  nowMs?: number;
+  quietAfterMs?: number;
 }): TaskDecisionView {
   const orderedEvents = [...input.events].sort(
     (left, right) => left.sequence - right.sequence,
@@ -296,16 +304,24 @@ export function buildTaskDecisionView(input: {
     ...(currentReview === undefined ? {} : { review: currentReview }),
     ...(integration === undefined ? {} : { integration }),
   });
-  const active =
-    input.task.status === "preparing"
-    || input.task.status === "running"
-    || input.task.status === "verifying";
-  const terminal =
-    input.task.status === "succeeded"
-    || input.task.status === "failed"
-    || input.task.status === "interrupted";
   const claim = workerClaim(input.task, orderedEvents);
   const checkpointReport = checkpoint(orderedEvents);
+  const latestMeta: LatestEventMeta | undefined = latest === undefined
+    ? undefined
+    : {
+      sequence: latest.sequence,
+      timestamp: latest.timestamp,
+      type: latest.type,
+      summary: latest.summary,
+    };
+  // FL-D83: activity is last-event age, not frozen tasks.updatedAt. MCP status
+  // and Console Decision View share this progress model with CLI status.
+  const progress = buildStatusProgress(
+    input.task,
+    latestMeta,
+    input.nowMs ?? Date.now(),
+    input.quietAfterMs ?? DEFAULT_QUIET_AFTER_MS,
+  );
   return {
     taskId: input.task.id,
     ...decision,
@@ -315,12 +331,6 @@ export function buildTaskDecisionView(input: {
     ...(currentReview === undefined ? {} : { mainReview: currentReview }),
     lineage: buildDeliveryLineage(input.attempts, orderedEvents),
     ...(integration === undefined ? {} : { integration }),
-    progress: {
-      activity: active ? "active" : terminal ? "terminal" : "quiet",
-      latestEventSequence: latest?.sequence ?? 0,
-      ...(latest === undefined
-        ? {}
-        : { lastEventAt: latest.timestamp, latestAction: latest.summary }),
-    },
+    progress,
   };
 }

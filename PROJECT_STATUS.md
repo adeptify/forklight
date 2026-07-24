@@ -1,6 +1,6 @@
 # ForkLight Project Status
 
-Last updated: 2026-07-24
+Last updated: 2026-07-25
 
 ## Product boundary
 
@@ -12,13 +12,13 @@ write, Git commit, or push authority.
 
 The Console is a read-only decision surface, not a second orchestration brain.
 
-## Current milestone: lean core complete in the working branch
+## Current milestone: lean core complete; dogfood engineering gaps closed
 
-The five-wave lean-core refactor is implemented in
-`codex/lean-core-refactor`. It keeps the existing persistence model and adds no
+The five-wave lean-core refactor is on `main` (merged from
+`codex/lean-core-refactor`). It keeps the existing persistence model and adds no
 new database table.
 
-Delivered:
+Delivered (lean core):
 
 - Verification separates behavior, policy, source compatibility, and global
   source drift. Unrelated drift is audit evidence; affected-path conflict is a
@@ -47,6 +47,19 @@ Delivered:
   remains available through deep inspect.
 - Delivery lineage distinguishes cumulative correction churn from the final
   combined delivery diff.
+
+Closed after lean core (2026-07-25 dogfood engineering pass):
+
+- **Status progress (FL-D83):** CLI `status` / `list` and MCP `forklight_status`
+  expose real Worker progress via latest-event activity (`active` / `quiet` /
+  `terminal`), `latestEventSequence`, `lastEventAt`, and `latestAction`.
+  Classification does not use frozen `tasks.updatedAt`. Shared helpers live in
+  `src/core/task-progress.ts`; Decision View and CLI status use the same model.
+- **Contract placeholders (FL-D70 / FL-D112 / R9 hard-gate half):** Only true
+  template sentinels (`TODO`/`TBD`/`FIXME` all-caps, `{{...}}`, `___`, `???`)
+  hard-fail quality. Natural-language `unknown`, lowercase `todo`/`tbd`/`fixme`,
+  and Chinese uncertainty phrases are non-blocking warnings with field location
+  and excerpt.
 
 ## Real self-hosting evidence
 
@@ -81,10 +94,12 @@ npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
 git diff --check
 ```
 
-The exact final test count and requirement map are recorded in
+The exact final test count and requirement map for lean core are recorded in
 `docs/superpowers/reports/2026-07-23-forklight-lean-core-refactor-verification.md`.
 
-## Honest external limits
+## Honest external limits and remaining backlog
+
+External / partial (not falsely closed):
 
 - DeepSeek `deepseek-v4-pro[1m]` has no exact supported official-price identity
   in the current catalog. Its Claude-side runtime estimate is not a Provider
@@ -94,3 +109,15 @@ The exact final test count and requirement map are recorded in
 - Provider readiness and cached live-probe evidence are separate. A configured
   credential does not make an old failed probe become verified.
 - ForkLight still does not commit or push on behalf of a Worker.
+
+Engineering / product backlog still open (not claimed fixed by this pass):
+
+- MCP null-budget expression (FL-D92) and broader contract-authoring product
+  taxes beyond the placeholder hard gate.
+- Skill/MCP session discovery friction (FL-D01) is an install/session UX issue,
+  not a status-surface defect.
+- Full P3/P4 plan graphs, competition statistics productization, and a Console
+  config center rewrite remain out of scope for the lean core + this pass.
+
+See `forklight-dogfood-log.md` final reconciliation for closed R1–R8 root-cause
+clusters and the R9/R10 split after this pass.

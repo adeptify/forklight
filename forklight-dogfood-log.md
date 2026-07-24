@@ -644,10 +644,11 @@
 
 ### FL-D83：Task `updatedAt` 不反映 Worker 活动，控制台无法区分活跃思考与停滞
 
-- 状态：本轮通过进程、日志 mtime 和事件流旁路确认 Worker 正常执行；公开状态仍只显示旧时间。
-- 证据：Attempt 3 从 09:24 到 09:30 持续生成 thinking、Read、Edit 和最终 result，日志每秒增长，PID `47149` 存活；`forklight_status` 在整个窗口仍返回 `updatedAt = 2026-07-23T01:12:33.232Z`，直到 Task 终态才跳到 `01:30:12.844Z`。仅看 Task 状态时间会把约 18 分钟真实活动误判为无进展。
-- 影响：用户问“是不是正常执行”时，Console/CLI 不能用自身公开读模型给出可信答案；主 Agent 只能读取内部日志和 PID。反过来，日志增长也不等于有效收敛，所以单纯刷新时间仍不够。
-- 候选改进：公开 `lastEventAt`、`lastEffectiveProgressAt`、当前 stage、最近 action 类别、machine Diff delta、累计 usage/费用可用性和 `nextExpectedSignal`；watchdog 使用有效进展而非 Task 顶层更新时间。状态刷新与模型能力评分无关，不应把长思考直接算失败。
+- 状态：**已关闭（2026-07-25）**。公开 status 读模型改为 latest-event activity，不再用冻结的 `tasks.updatedAt` 充当存活信号。
+- 证据（历史）：Attempt 3 从 09:24 到 09:30 持续生成 thinking、Read、Edit 和最终 result，日志每秒增长，PID `47149` 存活；当时 `forklight_status` 在整个窗口仍返回旧 `updatedAt`，直到终态才跳变。
+- 落地：`src/core/task-progress.ts` 的 `buildStatusProgress` / `classifyActivity` 被 CLI `status`/`list`、`wait` 与 `buildTaskDecisionView`（MCP status）共用；输出 `activity`（active/quiet/terminal）、`latestEventSequence`、`lastEventAt`、`latestAction`。`updatedAt` 仍保留为 spawn/terminal 时间戳。回归：`tests/cli-supervision.test.ts`、`tests/task-decision-view.test.ts`。
+- 影响（历史）：用户问“是不是正常执行”时，只能旁路读日志/PID。
+- 候选改进（未做，非本项关闭条件）：machine Diff delta、usage 实时暴露、`nextExpectedSignal` 等更细信号仍属产品 backlog。
 
 ### FL-D84：Task 合同允许的交付会被独立 Integration 上限再次拒绝
 
@@ -1033,7 +1034,7 @@
 
 | ID | 要点 | 状态 |
 |----|------|------|
-| FL-D02 / D70 / D112 | `unknown` 等词误判占位符 | OPEN / RECURRING |
+| FL-D02 / D70 / D112 | `unknown` 等词误判占位符 | FIXED (2026-07-25 hard/soft split; D02 历史条目) |
 | FL-D04 / D39 / D43 / D44 / D54 / D58 / D90 | Diff hard gate 与估错、压缩诱导 | OPEN/PRODUCT |
 | FL-D07 | 100/100 ≠ 可执行 | OPEN/PRODUCT |
 | FL-D09 / D12 | 任务档位与合同 Token 税 | PRODUCT |
@@ -1061,7 +1062,7 @@
 |----|------|------|
 | FL-D15 | running 藏 401 重试 | OPEN |
 | FL-D25 | 失败缺阶段摘要 | OPEN |
-| FL-D51 / D57 / D83 | heartbeat / stage；updatedAt 不跟活动 | OPEN |
+| FL-D51 / D57 / D83 | heartbeat / stage；updatedAt 不跟活动 | FIXED for D83 status progress (2026-07-25); D51/D57 见 lean-core |
 | FL-D66 | CLI 收据是 pipe 前体积 | PARTIAL |
 | FL-D68 / D97 / D111 | wait change 不看 event stream | OPEN / RECURRING |
 | 账本 | inspect 轮询占主线程 exchange 大头 | OPEN |
@@ -1420,7 +1421,7 @@ commit / push。
 
 | 根因簇 / 代表 ID | 最终状态 |
 | --- | --- |
-| R1 监督轮询：D68 / D83 / D97 / D111 | **关闭**：event-sequence progress cursor、compact inspect、event-aware wait |
+| R1 监督轮询：D68 / D83 / D97 / D111 | **关闭**：event-sequence progress cursor、compact inspect、event-aware wait；2026-07-25 补齐 status/list/MCP Decision View 的 `lastEventAt`+activity（FL-D83） |
 | R2 结果语义：D23 / D54 / D63 / D71 / D90 / D103 | **关闭**：behavior / policy / source 分栏与完整 remediation |
 | R3 源兼容：D33 / D56 / D87 / D110 | **关闭**：affected-path hard gate；unrelated drift 仅审计 |
 | R4 策略与限制：D10 / D46 / D55 / D58 / D84 | **关闭**：profile 语义、可行性预检、机器 Patch 指标 |
@@ -1428,8 +1429,17 @@ commit / push。
 | R6 Integration：D34 / D50 / D61 / D79 / D99 / D100 / D113 | **关闭**：异步 operation、四阶段、outcome-unknown |
 | R7 runtime identity：D35 / D69 / D93 | **关闭**：CLI/MCP/daemon identity 与可执行恢复 |
 | R8 Main Review / lineage：D94 / D98 / D104 / D105 | **关闭**：review 绑定 verification，correction lineage 可见 |
-| R9 合同占位符：D70 / D112 | **仍开放**：自然语言 `unknown` 仍可能被 placeholder hard gate 误伤 |
+| R9 合同占位符 hard gate：D70 / D112 | **关闭（2026-07-25）**：sentinel hard-fail vs 自然语言 soft warning（含 `unknown`/小写 todo/中文待定）；R9 其余（如 D92 null 预算 MCP 表达）仍属 backlog，不宣称整簇产品税已清 |
 | R10 费用：D38 / D47 / D59 / D73 / D75 / D91 | **部分外部限制**：runtime estimate 与 official cost 已分离；DeepSeek Pro 仍 `unsupported-model`，MiniMax 仍需 request-level usage |
+
+### 2026-07-25 工程对账（status progress + placeholder）
+
+| ID | 状态 | 证据 |
+| --- | --- | --- |
+| FL-D83 | **关闭** | `buildStatusProgress` 共享给 CLI status/list 与 Decision View；`tasks.updatedAt` 可冻结而 `progress.lastEventAt`/`activity` 仍反映事件 |
+| FL-D70 / FL-D112 | **关闭** | `assessTaskQuality` hard sentinel 与 soft wording 拆分；`tests/task.test.ts` |
+| R10 / 外部费用 | **仍外部/部分** | 不宣称 DeepSeek Pro 官方价目或 MiniMax request-level usage 已解决 |
+| 历史 inventory 表中大量 OPEN 行 | **可能陈旧** | lean-core 已关闭 R1–R8 多项；以本文件「既有根因簇对账」与代码为准，不在此假称关闭全部 FL-D01–FL-D123 |
 
 ### 不夸大的结论
 
@@ -1438,5 +1448,5 @@ commit / push。
   `unsupported-model`，不能用 runtime estimate 冒充 Provider 账单。
 - MiniMax 的 aggregate terminal usage 仍不能解析每请求 pricing tier，保持
   `per-request-usage-required`。
-- FL-D70 / FL-D112 未包含在本次 lean-core Goal 内，继续留在产品 backlog，
-  不标记已解决。
+- FL-D70 / FL-D112 的 hard-gate 误伤已在 lean-core 之后的 2026-07-25 迭代关闭；
+  R9 中合同/MCP 表达的其他产品税（如 null 预算）未在本轮宣称完成。

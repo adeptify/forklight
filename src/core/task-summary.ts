@@ -18,9 +18,16 @@ export interface SafeTaskSummary {
   progress?: TaskDecisionView["progress"];
 }
 
+/**
+ * Flat TaskRecord projection for the status/list surfaces. `progress` carries
+ * the canonical lastEventAt + activity signal (FL-D83): a running task's
+ * tasks.updatedAt is frozen between spawn and terminal, so callers that want to
+ * show real Worker activity pass the progress cursor computed from
+ * store.latestEventMeta (CLI status) or TaskDecisionView.progress (MCP).
+ */
 export function buildTaskSummary(
   task: TaskRecord,
-  decision?: TaskDecisionView,
+  progress?: TaskDecisionView["progress"],
 ): SafeTaskSummary {
   return {
     taskId: task.id,
@@ -37,6 +44,6 @@ export function buildTaskSummary(
     ...(task.startedAt === undefined ? {} : { startedAt: task.startedAt }),
     ...(task.finishedAt === undefined ? {} : { finishedAt: task.finishedAt }),
     ...(task.error === undefined ? {} : { error: task.error }),
-    ...(decision === undefined ? {} : { progress: decision.progress }),
+    ...(progress === undefined ? {} : { progress }),
   };
 }

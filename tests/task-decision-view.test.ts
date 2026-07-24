@@ -318,3 +318,71 @@ test("a review of an older verification never governs a newer Attempt", () => {
   assert.equal(view.stage, "awaiting-main-review");
   assert.equal(view.nextAction, "Main Codex must review");
 });
+
+// --- Decision View progress uses latest-event activity (FL-D83) ---
+
+test("Decision View progress is active for a recent event even when updatedAt is frozen (FL-D83)", () => {
+  const frozenUpdatedAt = "2026-07-24T00:00:00.000Z";
+  const recentEventAt = "2026-07-24T00:05:00.000Z";
+  const running = {
+    ...task("running"),
+    updatedAt: frozenUpdatedAt,
+  };
+  const events: EventRecord[] = [{
+    id: 1,
+    taskId: "task-1",
+    attemptId: "attempt-1",
+    sequence: 9,
+    timestamp: recentEventAt,
+    type: "worker.tool.completed",
+    summary: "edited src/cli.ts",
+  }];
+  const view = buildTaskDecisionView({
+    task: running,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+    nowMs: Date.parse("2026-07-24T00:05:10.000Z"),
+    quietAfterMs: 30_000,
+  });
+  assert.equal(view.progress.activity, "active");
+  assert.equal(view.progress.latestEventSequence, 9);
+  assert.equal(view.progress.lastEventAt, recentEventAt);
+  assert.equal(view.progress.latestAction, "edited src/cli.ts");
+  assert.equal(running.updatedAt, frozenUpdatedAt);
+});
+
+test("Decision View progress becomes quiet when the last event is stale (FL-D83)", () => {
+  const events: EventRecord[] = [{
+    id: 1,
+    taskId: "task-1",
+    attemptId: "attempt-1",
+    sequence: 2,
+    timestamp: "2026-07-24T00:00:00.000Z",
+    type: "worker.message",
+    summary: "thinking",
+  }];
+  const view = buildTaskDecisionView({
+    task: task("running"),
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+    nowMs: Date.parse("2026-07-24T00:05:00.000Z"),
+    quietAfterMs: 30_000,
+  });
+  assert.equal(view.progress.activity, "quiet");
+  assert.equal(view.progress.lastEventAt, "2026-07-24T00:00:00.000Z");
+  assert.equal(view.progress.latestEventSequence, 2);
+});
+
+test("Decision View progress is terminal for finished tasks (FL-D83)", () => {
+  const events: EventRecord[] = [event(1, "verification.completed", verification(true))];
+  const view = buildTaskDecisionView({
+    task: task("succeeded"),
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+    nowMs: Date.parse(now),
+  });
+  assert.equal(view.progress.activity, "terminal");
+});

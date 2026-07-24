@@ -310,7 +310,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
             daemonRequest<TaskDecisionView>("task_decision", { taskId }, home),
           ]);
           return textAndData({
-            ...buildTaskSummary(task, decision),
+            ...buildTaskSummary(task, decision.progress),
             decision,
           });
         },

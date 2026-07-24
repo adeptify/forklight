@@ -7,15 +7,18 @@ import type { AttemptRecord, EventRecord, TaskRecord, TaskStatus } from "../src/
 import {
   buildCompactInspection,
   buildProgressCursor,
+  buildStatusProgress,
   humanCompactInspectionLines,
   humanWaitLines,
   parseInspectSummaryOptions,
   parseWaitOptions,
   progressCursorKey,
+  toLatestEventMeta,
   waitForTask,
   type LatestEventMeta,
   type TaskProgressSnapshot,
 } from "../src/cli/supervision.js";
+import { buildTaskSummary } from "../src/core/task-summary.js";
 import { StateStore } from "../src/state/store.js";
 
 const TS = "2026-07-23T12:00:00.000Z";
@@ -310,6 +313,105 @@ test("store.latestEventMeta returns newest sequence without payload", async () =
     assert.equal(meta?.type, "worker.message");
     assert.equal(meta?.summary, "hello");
     assert.equal(store.latestEventMeta("missing"), undefined);
+  });
+});
+
+// --- status reflects real Worker activity (FL-D83) ---
+
+test("buildStatusProgress surfaces lastEventAt + activity for a running task (FL-D83)", () => {
+  const task = makeTask("status-active", "running");
+  const latestEvent: LatestEventMeta = {
+    sequence: 42,
+    timestamp: "2026-07-23T12:00:00.000Z",
+    type: "worker.tool.completed",
+    summary: "edited file.ts",
+  };
+  const nowMs = Date.parse("2026-07-23T12:00:05.000Z"); // 5s after the event
+  const progress = buildStatusProgress(task, latestEvent, nowMs, 30_000);
+  assert.equal(progress.activity, "active");
+  assert.equal(progress.latestEventSequence, 42);
+  assert.equal(progress.lastEventAt, "2026-07-23T12:00:00.000Z");
+  assert.equal(progress.latestAction, "edited file.ts");
+});
+
+test("buildStatusProgress marks a stale event quiet and a terminal task terminal (FL-D83)", () => {
+  const running = makeTask("status-quiet", "running");
+  const latestEvent: LatestEventMeta = {
+    sequence: 1,
+    timestamp: "2026-07-23T12:00:00.000Z",
+    type: "worker.message",
+    summary: "thinking",
+  };
+  const stale = Date.parse("2026-07-23T12:05:00.000Z"); // 5 min later
+  assert.equal(buildStatusProgress(running, latestEvent, stale, 30_000).activity, "quiet");
+  const terminal = makeTask("status-terminal", "failed");
+  assert.equal(buildStatusProgress(terminal, latestEvent, stale, 30_000).activity, "terminal");
+});
+
+test("buildStatusProgress with no events is quiet, not terminal, for a running task (FL-D83)", () => {
+  const task = makeTask("status-noevents", "running");
+  const progress = buildStatusProgress(task, undefined, Date.parse(TS), 30_000);
+  assert.equal(progress.activity, "quiet");
+  assert.equal(progress.latestEventSequence, 0);
+  assert.equal(progress.lastEventAt, undefined);
+});
+
+test("status progress reads the real latest event from the store (FL-D83)", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sup-"));
+  withStore(home, (store) => {
+    const task = makeTask("status-store", "running");
+    store.createTask(task);
+    store.addEvent(task.id, undefined, "task.created", "created");
+    store.addEvent(task.id, undefined, "worker.tool.completed", "edited file.ts");
+    const meta = store.latestEventMeta(task.id);
+    assert.ok(meta, "latest event should exist");
+    const latestEvent: LatestEventMeta | undefined = meta === undefined
+      ? undefined
+      : { sequence: meta.sequence, timestamp: meta.timestamp, type: meta.type, summary: meta.summary };
+    const progress = buildStatusProgress(task, latestEvent, Date.parse(meta!.timestamp), 30_000);
+    assert.equal(progress.lastEventAt, meta!.timestamp);
+    assert.equal(progress.activity, "active");
+    assert.equal(progress.latestAction, "edited file.ts");
+    assert.equal(progress.latestEventSequence, 2);
+  });
+});
+
+test("buildTaskSummary carries progress and keeps the frozen updatedAt (FL-D83)", () => {
+  const task = makeTask("status-summary", "running");
+  const latestEvent: LatestEventMeta = {
+    sequence: 7,
+    timestamp: "2026-07-23T12:00:00.000Z",
+    type: "worker.message",
+    summary: "thinking",
+  };
+  const progress = buildStatusProgress(task, latestEvent, Date.parse(TS), 30_000);
+  const summary = buildTaskSummary(task, progress);
+  assert.equal(summary.updatedAt, task.updatedAt);
+  assert.equal(summary.progress?.lastEventAt, "2026-07-23T12:00:00.000Z");
+  assert.equal(summary.progress?.activity, "active");
+});
+
+test("status list-style summary from store mirrors CLI status path with frozen updatedAt (FL-D83)", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sup-"));
+  withStore(home, (store) => {
+    // Spawn-time updatedAt stays frozen; only events advance.
+    const frozenAt = "2026-07-23T11:00:00.000Z";
+    const task = { ...makeTask("status-cli-path", "running"), updatedAt: frozenAt, createdAt: frozenAt };
+    store.createTask(task);
+    store.addEvent(task.id, undefined, "task.created", "queued");
+    store.addEvent(task.id, undefined, "worker.tool.completed", "edited file.ts");
+    const latestEvent = toLatestEventMeta(store.latestEventMeta(task.id));
+    assert.ok(latestEvent);
+    const nowMs = Date.parse(latestEvent!.timestamp) + 5_000;
+    const progress = buildStatusProgress(task, latestEvent, nowMs, 30_000);
+    const summary = buildTaskSummary(task, progress);
+    assert.equal(summary.updatedAt, frozenAt);
+    assert.notEqual(summary.progress?.lastEventAt, frozenAt);
+    assert.equal(summary.progress?.activity, "active");
+    assert.equal(summary.progress?.latestEventSequence, 2);
+    assert.equal(summary.progress?.latestAction, "edited file.ts");
+    // Same shape MCP status spreads into structuredContent via decision.progress.
+    assert.equal(typeof summary.progress?.lastEventAt, "string");
   });
 });
 

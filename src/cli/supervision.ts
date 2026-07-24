@@ -2,7 +2,6 @@ import type {
   AttemptRecord,
   DeliveryLineage,
   EventRecord,
-  EventType,
   IntegrationResultRecord,
   TaskDecisionView,
   TaskRecord,
@@ -10,12 +9,25 @@ import type {
 } from "../core/types.js";
 import { buildDeliveryLineage } from "../core/delivery-lineage.js";
 import { buildTaskDecisionView } from "../core/task-decision-view.js";
+import {
+  classifyActivity,
+  type LatestEventMeta,
+  type ProgressActivity,
+} from "../core/task-progress.js";
+
+export {
+  buildStatusProgress,
+  classifyActivity,
+  DEFAULT_QUIET_AFTER_MS,
+  toLatestEventMeta,
+  type LatestEventMeta,
+  type ProgressActivity,
+} from "../core/task-progress.js";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["succeeded", "failed", "interrupted"]);
 
 export type WaitUntil = "change" | "terminal";
 export type WaitOutcome = "changed" | "terminal" | "timeout";
-export type ProgressActivity = "active" | "quiet" | "terminal";
 
 export interface WaitPolicy {
   timeoutMs: number;
@@ -31,13 +43,6 @@ export interface ProgressCursor {
   latestEventSequence: number;
   currentAttemptId: string | null;
   updatedAt: string;
-}
-
-export interface LatestEventMeta {
-  sequence: number;
-  timestamp: string;
-  type: EventType | string;
-  summary: string;
 }
 
 export interface TaskProgressSnapshot {
@@ -243,19 +248,6 @@ export function progressCursorKey(cursor: ProgressCursor): string {
     cursor.currentAttemptId ?? "",
     cursor.updatedAt,
   ].join("\u0001");
-}
-
-export function classifyActivity(
-  task: TaskRecord,
-  latestEvent: LatestEventMeta | undefined,
-  nowMs: number,
-  quietAfterMs: number,
-): ProgressActivity {
-  if (TERMINAL_STATUSES.has(task.status)) return "terminal";
-  if (latestEvent === undefined) return "quiet";
-  const eventMs = Date.parse(latestEvent.timestamp);
-  if (!Number.isFinite(eventMs)) return "quiet";
-  return nowMs - eventMs <= quietAfterMs ? "active" : "quiet";
 }
 
 export function buildWaitProgressSummary(

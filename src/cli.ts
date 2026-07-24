@@ -17,7 +17,7 @@ import { createClaudeProbeRunner, providerProbeBatchFailed, realExecFile } from 
 import { providerReadiness } from "./core/providers.js";
 import type { ProviderModelSummary } from "./core/statistics.js";
 import type {
-  AttemptAuthorization, AttemptRecord, EventRecord, NormalizedWorkerEvent, TaskRecord,
+  AttemptAuthorization, AttemptRecord, EventRecord, NormalizedWorkerEvent, TaskDecisionView, TaskRecord,
 } from "./core/types.js";
 import { loadWorkPlan } from "./core/plan.js";
 import { reconcileTask, resumeTask, reviseTask, runNewTask } from "./core/runner.js";
@@ -36,12 +36,14 @@ import { withCliExchangeReceipt, humanTokenReportLines } from "./cli/exchange-re
 import {
   buildCompactInspection,
   buildProgressCursor,
+  buildStatusProgress,
+  DEFAULT_QUIET_AFTER_MS,
   humanCompactInspectionLines,
   humanWaitLines,
   parseInspectSummaryOptions,
   parseWaitOptions,
+  toLatestEventMeta,
   waitForTask,
-  type LatestEventMeta,
   type TaskProgressSnapshot,
 } from "./cli/supervision.js";
 import { getTaskTokenReport } from "./core/token-report.js";
@@ -120,11 +122,20 @@ function printProgress(event: NormalizedWorkerEvent): void {
 /** Render the human status block (one `key: value` line per defined
  *  field) as a single exact string.  Returns the empty string when the
  *  task has no defined summary fields. */
-function humanStatusLines(task: TaskRecord): string {
-  const summary = buildTaskSummary(task);
+function humanStatusLines(task: TaskRecord, progress?: TaskDecisionView["progress"]): string {
+  const summary = buildTaskSummary(task, progress);
   const lines: string[] = [];
   for (const [key, value] of Object.entries(summary)) {
-    if (value !== undefined) lines.push(`${key}: ${String(value)}`);
+    if (value === undefined) continue;
+    if (key === "progress" && typeof value === "object" && value !== null) {
+      const p = value as TaskDecisionView["progress"];
+      if (p.lastEventAt !== undefined) lines.push(`lastEventAt: ${p.lastEventAt}`);
+      lines.push(`activity: ${p.activity}`);
+      lines.push(`latestEventSequence: ${String(p.latestEventSequence)}`);
+      if (p.latestAction !== undefined) lines.push(`latestAction: ${p.latestAction}`);
+      continue;
+    }
+    lines.push(`${key}: ${String(value)}`);
   }
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
@@ -1467,15 +1478,21 @@ async function main(): Promise<void> {
     }
     if (command === "status") {
       const taskId = required(positional, "task id");
+      const quietAfterMs = DEFAULT_QUIET_AFTER_MS;
       const { output } = await withCliExchangeReceipt({
         operation: "forklight_status",
         home: forklightHome(),
         args: { taskId, json },
         taskId,
-        invoke: async () => reconcileTask(store, taskId),
-        renderOutput: (task) => json
-          ? `${JSON.stringify(buildTaskSummary(task), null, 2)}\n`
-          : humanStatusLines(task),
+        invoke: async () => {
+          const task = reconcileTask(store, taskId);
+          const latestEvent = toLatestEventMeta(store.latestEventMeta(taskId));
+          const progress = buildStatusProgress(task, latestEvent, Date.now(), quietAfterMs);
+          return { task, progress };
+        },
+        renderOutput: ({ task, progress }) => json
+          ? `${JSON.stringify(buildTaskSummary(task, progress), null, 2)}\n`
+          : humanStatusLines(task, progress),
       });
       process.stdout.write(output);
       return;
@@ -1486,15 +1503,7 @@ async function main(): Promise<void> {
       const waitOptions = parseWaitOptions(rest, settings.console.refreshIntervalMs);
       const readProgress = (): TaskProgressSnapshot => {
         const task = reconcileTask(store, taskId);
-        const meta = store.latestEventMeta(taskId);
-        const latestEvent: LatestEventMeta | undefined = meta === undefined
-          ? undefined
-          : {
-            sequence: meta.sequence,
-            timestamp: meta.timestamp,
-            type: meta.type,
-            summary: meta.summary,
-          };
+        const latestEvent = toLatestEventMeta(store.latestEventMeta(taskId));
         return {
           task,
           cursor: buildProgressCursor(task, latestEvent),
@@ -1605,10 +1614,20 @@ async function main(): Promise<void> {
       return;
     }
     if (command === "list") {
-      const tasks = store.listTasks().slice(0, 20).map((task) => buildTaskSummary(task));
+      const nowMs = Date.now();
+      const tasks = store.listTasks().slice(0, 20).map((task) => {
+        const latestEvent = toLatestEventMeta(store.latestEventMeta(task.id));
+        const progress = buildStatusProgress(task, latestEvent, nowMs, DEFAULT_QUIET_AFTER_MS);
+        return buildTaskSummary(task, progress);
+      });
       if (json) process.stdout.write(`${JSON.stringify(tasks, null, 2)}\n`);
       else for (const task of tasks) {
-        process.stdout.write(`${task.taskId} ${task.status} ${task.name}\n`);
+        const activity = task.progress?.activity ?? "";
+        process.stdout.write(
+          activity
+            ? `${task.taskId} ${task.status} ${activity} ${task.name}\n`
+            : `${task.taskId} ${task.status} ${task.name}\n`,
+        );
       }
       return;
     }
