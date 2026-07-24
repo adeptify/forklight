@@ -1,4 +1,9 @@
-import type { AttemptTokenUsage, ModelTokenUsage, NormalizedWorkerEvent } from "../core/types.js";
+import type {
+  AttemptTokenUsage,
+  ModelTokenUsage,
+  NormalizedWorkerEvent,
+  WorkerClaim,
+} from "../core/types.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -14,7 +19,7 @@ function truncate(value: unknown, limit = 500): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
 
-function toolTarget(name: string, input: JsonObject): string {
+function toolTarget(input: JsonObject): string {
   const target =
     input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.query ?? input.description;
   return target === undefined ? "" : truncate(target, 240);
@@ -143,6 +148,9 @@ export class ClaudeEventNormalizer {
                 ? "Worker reported an error terminal subtype"
                 : "Worker reported failure")
         : "Worker reported completion";
+      const claim: WorkerClaim | undefined = !terminalError && resultText !== undefined
+        ? { label: "unverified-claim", text: truncate(resultText, 2_000) }
+        : undefined;
       return [
         {
           type: terminalError ? "worker.failed" : "worker.completed",
@@ -150,7 +158,10 @@ export class ClaudeEventNormalizer {
           payload: {
             subtype: root.subtype,
             ...(stopReason !== undefined ? { stopReason } : {}),
-            ...(resultText === undefined ? {} : { result: truncate(resultText, 2_000) }),
+            ...(claim === undefined ? {} : { claim }),
+            ...(!terminalError || resultText === undefined
+              ? {}
+              : { result: truncate(resultText, 2_000) }),
             ...(costUsd === undefined ? {} : { costUsd }),
             ...(turns === undefined ? {} : { turns }),
             ...(usage === undefined ? {} : { usage }),
@@ -185,7 +196,7 @@ export class ClaudeEventNormalizer {
         if (this.tools.has(id)) continue;
         const input = asObject(block.input) ?? {};
         this.tools.set(id, block.name);
-        const target = toolTarget(block.name, input);
+        const target = toolTarget(input);
         events.push({
           type: "worker.tool.started",
           summary: `${block.name}${target ? `: ${target}` : ""}`,

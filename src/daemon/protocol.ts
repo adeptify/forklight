@@ -4,7 +4,10 @@ export type DaemonMethod =
   | "submit"
   | "status"
   | "inspect"
+  | "task_decision"
+  | "checkpoint_run"
   | "resume"
+  | "main_review"
   | "revise"
   | "list"
   | "plan_submit_file"
@@ -17,6 +20,9 @@ export type DaemonMethod =
   | "settings_reset"
   | "integration_preflight"
   | "integration_apply"
+  | "integration_status"
+  | "integration_wait"
+  | "integration_activation_complete"
   | "integration_history"
   | "competition_submit_file"
   | "competition_submit"
@@ -40,6 +46,7 @@ export interface DaemonRequest {
   id: string;
   method: DaemonMethod;
   params?: Record<string, unknown>;
+  clientIdentity: BuildIdentity;
 }
 
 export interface DaemonResponse {
@@ -47,4 +54,38 @@ export interface DaemonResponse {
   ok: boolean;
   result?: unknown;
   error?: string;
+  serverIdentity: BuildIdentity;
+  warning?: string;
 }
+
+const READ_ONLY_METHODS = new Set<DaemonMethod>([
+  "health",
+  "status",
+  "inspect",
+  "task_decision",
+  "list",
+  "plan_board",
+  "plan_board_overview",
+  "statistics",
+  "settings_get",
+  "integration_status",
+  "integration_wait",
+  "integration_history",
+  "competition_status",
+  "competition_compare",
+  "competition_list",
+  "console_status",
+  "provider_status",
+  "task_economics",
+  "direct_codex_inbox",
+  "direct_codex_publication_preview",
+]);
+
+export function isMutatingDaemonMethod(method: DaemonMethod): boolean {
+  return !READ_ONLY_METHODS.has(method);
+}
+
+export function requiresMatchingBuildIdentity(method: DaemonMethod): boolean {
+  return isMutatingDaemonMethod(method) && method !== "shutdown";
+}
+import type { BuildIdentity } from "../core/build-identity.js";

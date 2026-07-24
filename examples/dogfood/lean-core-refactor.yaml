@@ -1,0 +1,95 @@
+version: 2
+name: Keep Integration decision evidence on the latest operation
+project: ../..
+contract:
+  outcome: A newer running Integration operation must never inherit an older operation's final result or activation evidence.
+  context:
+    - The pure TaskDecisionView currently selects the latest started operation but falls back to the latest result even when that result belongs to an older operation.
+    - A deterministic regression test is already present and failing; this is the red phase of the self-hosting Dogfood.
+    - The projection is shared by CLI, MCP, and Console, so incorrect operation attribution would mislead every user-facing surface.
+  inScope:
+    - Correct result selection in the pure integration projection so a result is attached only to its matching operation.
+    - Preserve an honest running or indeterminate status when the latest operation has no final result.
+    - Keep the existing authority matrix and legacy result-only behavior passing.
+  outOfScope:
+    - Do not change persistence, daemon operation execution, Integration mutation, activation handoff, CLI, MCP, or Console rendering.
+    - Do not add a database entity, table, service, dependency, commit, or push.
+    - Do not modify the seeded regression test merely to weaken its assertions.
+  executionSteps:
+    - Run the contract-only task-decision test checkpoint before editing and observe the seeded deterministic failure.
+    - Inspect only the TaskDecisionView integration projection and its focused regression test.
+    - Make the smallest source change that prevents cross-operation result attribution.
+    - Run the contract-only checkpoint again for all approved acceptance command IDs and review the actual Diff metrics.
+  deliverables:
+    - A focused TaskDecisionView source correction with the seeded regression and existing authority matrix passing.
+    - Checkpoint evidence before and after the edit, followed by independent all-command verification.
+  modules:
+    - name: TaskDecisionView integration projection
+      responsibility: Project the latest Integration operation and only its own durable result and stage evidence.
+      consumes:
+        - Existing Task, Event, Attempt, and IntegrationResult records.
+      produces:
+        - One non-persisted TaskDecisionView with operation-scoped Integration evidence.
+      boundaries:
+        - It never mutates state or associates evidence by recency when operation identity disagrees.
+  callChain:
+    - CLI, MCP, or Console requests a Task decision from the daemon coordinator.
+    - The coordinator loads existing records once and calls buildTaskDecisionView.
+    - integrationView selects the latest operation and attaches only identity-matching result and stage evidence.
+    - Consumers render the canonical projection without recomputing authority.
+  scenarios:
+    - name: newer operation still running
+      given: An older Integration has an applied result and a newer operation has started without a result.
+      when: TaskDecisionView projects the current Integration.
+      then: The newer operation remains integrating and the older result is not attached.
+    - name: legacy result without start event
+      given: A legacy task has a durable Integration result but no operation-started event.
+      when: TaskDecisionView projects the Integration.
+      then: The legacy result can still identify and complete its own operation.
+    - name: matching result
+      given: The latest started operation has a final result with the same operation ID.
+      when: TaskDecisionView projects the Integration.
+      then: The matching result and stages determine applied, activated, or failed state.
+  risks:
+    - Removing the fallback indiscriminately could hide valid legacy result-only evidence.
+    - Recency sorting could still associate a result with the wrong receipt if identity matching is not explicit.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 80
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1m]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-decision-view.ts
+    - tests/task-decision-view.test.ts
+delivery:
+  buildCommands:
+    - npm run build
+  activationCommands:
+    - node dist/src/cli.js daemon stop; for i in {1..100}; do node dist/src/cli.js daemon status >/dev/null 2>&1 || break; sleep 0.05; done; node dist/src/cli.js daemon start
+  activationCheckCommands:
+    - node dist/src/cli.js daemon status | grep -q '"buildIdentity"'
+acceptance:
+  criteria:
+    - The latest operation never receives an older operation's result.
+    - Matching and legacy result-only evidence remain available.
+    - TypeScript and patch whitespace checks pass without weakening the regression.
+  commands:
+    - node --import tsx --test tests/task-decision-view.test.ts
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

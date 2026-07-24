@@ -73,6 +73,18 @@ tr.clickable:focus-visible td{background:var(--bg)}
 .pill-row{display:flex;flex-wrap:wrap;gap:2px;margin-top:4px}
 .pill-badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:600;background:var(--yellow);color:#000}
 .summary-line{font-size:11px;color:var(--dim)}
+.decision-panel{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin:12px 0}
+.decision-row{display:grid;grid-template-columns:minmax(130px,180px) 1fr;gap:12px;padding:5px 0;border-bottom:1px dashed var(--border)}
+.decision-row:last-child{border-bottom:0}
+.decision-label{color:var(--dim);font-size:11px}
+.decision-value{font-size:12px;overflow-wrap:anywhere}
+.decision-claim .decision-value{color:var(--yellow)}
+.decision-passed .decision-value{color:var(--green)}
+.decision-failed .decision-value{color:var(--red)}
+.decision-next .decision-value{font-weight:600;color:var(--blue)}
+.audit-details{border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin-top:8px}
+.audit-details>summary{cursor:pointer;color:var(--dim);font-weight:600}
+.audit-details[open]>summary{margin-bottom:8px}
 
 /* Economics Evidence — compact asymmetric desktop, single-column mobile */
 .economics-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap);margin-bottom:var(--gap);min-width:0}
@@ -98,3 +110,4 @@ tr.clickable:focus-visible td{background:var(--bg)}
 .ev-breakdown-pill{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:600;background:var(--yellow);color:#000}
 @media(max-width:768px){.economics-grid{grid-template-columns:1fr}}
 @media(max-width:768px){#fl-detail{left:0;width:100vw;padding:12px;border-left:0}}
+@media(max-width:768px){.decision-row{grid-template-columns:1fr;gap:2px}}

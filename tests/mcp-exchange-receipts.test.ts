@@ -21,9 +21,12 @@ import { ForkLightDaemon } from "../src/daemon/server.js";
 import { createForkLightMcpServer } from "../src/mcp/server.js";
 import { StateStore } from "../src/state/store.js";
 import { withMcpExchangeReceipt } from "../src/mcp/exchange-receipts.js";
-import { prepareWorkspace, writeWorkspaceDiff } from "../src/workspace/copy.js";
+import { prepareWorkspace } from "../src/workspace/copy.js";
+import { createPathPolicy } from "../src/workspace/path-policy.js";
+import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
 import { buildTaskRecord } from "../src/core/runner.js";
 import { parseTaskSpec } from "../src/core/task.js";
+import { recordMainReview } from "../src/core/main-review.js";
 
 const SECRET_PROBE = "forklight-test-secret-api-key-XYZ-9876";
 
@@ -97,7 +100,7 @@ async function seedTaskWithDiff(
   };
   await prepareWorkspace(spec, paths);
   await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged text.\n");
-  await writeWorkspaceDiff(paths, []);
+  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
   const startedAt = new Date().toISOString();
   const task: TaskRecord = {
     id: taskId, name: spec.name, status,
@@ -217,7 +220,22 @@ test("forklight_status, forklight_inspect, and forklight_resume emit success rec
 test("forklight_integration_preflight, forklight_integration_apply, and forklight_integration_history emit success receipts", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-receipt-int-"));
   const { task } = await seedTaskWithDiff(home);
-  persistTaskInHome(home, task, `${task.id}-1`);
+  const attemptId = `${task.id}-1`;
+  persistTaskInHome(home, task, attemptId);
+  withStore(home, (store) => {
+    store.addEvent(
+      task.id,
+      attemptId,
+      "verification.completed",
+      "Independent verification passed",
+      { passed: true },
+    );
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Receipt test approval",
+      confirm: true,
+    });
+  });
 
   const { client, close } = await connectMcp(home);
   try {

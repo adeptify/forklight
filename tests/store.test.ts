@@ -558,8 +558,7 @@ test("id/time/task column mismatch → list fails closed with non-echoing error"
 
 // --- Direct-Codex calibration registry ---
 
-import { normalizeDirectCodexProfilePublication, publishDirectCodexCalibration, normalizeDirectCodexPairedSample } from "../src/core/direct-codex-calibration.js";
-import { normalizeDirectCodexSampleReview } from "../src/core/direct-codex-review.js";
+import { publishDirectCodexCalibration, normalizeDirectCodexPairedSample } from "../src/core/direct-codex-calibration.js";
 import { normalizeDirectCodexCalibrationRecord } from "../src/core/token-efficiency.js";
 
 function validCal(overrides?: Record<string, unknown>): Record<string, unknown> {

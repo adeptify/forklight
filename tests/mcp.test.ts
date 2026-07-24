@@ -15,13 +15,18 @@ import type {
   IntegrationResultRecord,
   TaskRecord,
   TaskSpec,
+  VerificationResult,
 } from "../src/core/types.js";
 import { DEFAULT_RANKING_POLICY } from "../src/core/competition.js";
 import { taskPaths } from "../src/core/config.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
+import { daemonRequest } from "../src/daemon/client.js";
 import { createForkLightMcpServer } from "../src/mcp/server.js";
 import { StateStore } from "../src/state/store.js";
-import { prepareWorkspace, writeWorkspaceDiff } from "../src/workspace/copy.js";
+import { prepareWorkspace } from "../src/workspace/copy.js";
+import { createPathPolicy } from "../src/workspace/path-policy.js";
+import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
+import { recordMainReview } from "../src/core/main-review.js";
 
 test("MCP exposes ForkLight tools and reaches the daemon", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-"));
@@ -50,7 +55,10 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_integration_apply",
         "forklight_integration_history",
         "forklight_integration_preflight",
+        "forklight_integration_status",
+        "forklight_integration_wait",
         "forklight_list",
+        "forklight_main_review",
         "forklight_plan_board",
         "forklight_plan_inspect",
         "forklight_plan_submit",
@@ -69,6 +77,20 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
     const health = await client.callTool({ name: "forklight_health", arguments: {} });
     assert.equal(health.isError, undefined);
     assert.equal((health.structuredContent as { ok?: boolean } | undefined)?.ok, true);
+    const healthData = health.structuredContent as {
+      identityStatus?: string;
+      mcpBuildIdentity?: { protocolVersion?: number; buildId?: string };
+      daemonBuildIdentity?: { protocolVersion?: number; buildId?: string };
+    };
+    assert.equal(healthData.identityStatus, "matched");
+    assert.equal(
+      healthData.mcpBuildIdentity?.protocolVersion,
+      healthData.daemonBuildIdentity?.protocolVersion,
+    );
+    assert.equal(
+      healthData.mcpBuildIdentity?.buildId,
+      healthData.daemonBuildIdentity?.buildId,
+    );
   } finally {
     await client.close();
     await server.close();
@@ -252,6 +274,7 @@ function integrationSpec(project: string): TaskSpec {
 async function seedSucceededTask(
   store: StateStore,
   home: string,
+  withAcceptedMainReview = true,
 ): Promise<{ task: TaskRecord; sourceDir: string }> {
   const sourceDir = path.join(home, "source");
   const taskHome = path.join(home, "state");
@@ -269,7 +292,7 @@ async function seedSucceededTask(
     path.join(paths.workspace, "readme.md"),
     "# hello\n\nChanged text.\n",
   );
-  await writeWorkspaceDiff(paths, []);
+  await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
 
   const task: TaskRecord = {
     id: taskId,
@@ -284,8 +307,85 @@ async function seedSucceededTask(
     updatedAt: new Date().toISOString(),
   };
   store.createTask(task);
+  const attempt = compAttempt(store, task.id);
+  const storedAttempt = store.getAttempt(attempt.id);
+  store.updateTask(task.id, { currentAttemptId: storedAttempt.id });
+  const verification: VerificationResult = {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [{
+      command: "true",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      durationMs: 1,
+      timedOut: false,
+    }],
+    diffPath: paths.diff,
+    sourceUnchanged: true,
+  };
+  store.addEvent(
+    task.id,
+    storedAttempt.id,
+    "verification.completed",
+    "Independent verification passed",
+    verification,
+  );
+  if (withAcceptedMainReview) {
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "MCP Integration fixture independently verified",
+      confirm: true,
+    });
+  }
   return { task: store.getTask(task.id), sourceDir };
 }
+
+test("MCP records Main Codex review but does not claim Integration authority", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-main-review-"));
+  const store = new StateStore(home);
+  const { task } = await seedSucceededTask(store, home, false);
+  store.close();
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tool = (await client.listTools()).tools
+      .find((candidate) => candidate.name === "forklight_main_review");
+    assert.equal(tool?.annotations?.readOnlyHint, false);
+    assert.equal(tool?.annotations?.destructiveHint, false);
+    assert.equal(tool?.annotations?.openWorldHint, false);
+
+    const result = await client.callTool({
+      name: "forklight_main_review",
+      arguments: {
+        taskId: task.id,
+        decision: "accept",
+        reason: "Independent verification and scoped Diff reviewed",
+        confirm: true,
+      },
+    });
+    assert.equal(
+      (result.structuredContent as { decision?: string }).decision,
+      "accept",
+    );
+    const content = Array.isArray(result.content) ? result.content : [];
+    const first = content[0] as { type?: string; text?: string } | undefined;
+    assert.match(
+      first?.type === "text" ? first.text ?? "" : "",
+      /Integration is still separately authorized/,
+    );
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
 
 test("MCP integration preflight persists audit receipt and is source-safe", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-intpf-"));
@@ -363,8 +463,21 @@ test("MCP integration apply requires confirm: true and mutates source", async ()
       arguments: { taskId: task.id, receiptId: receipt.id, confirm: true },
     });
     assert.equal(result.isError, undefined);
-    const apply = result.structuredContent as IntegrationResultRecord;
-    assert.equal(apply.status, "applied");
+    const apply = result.structuredContent as {
+      operationId: string;
+      status: string;
+    };
+    assert.equal(apply.status, "running");
+    const waited = await client.callTool({
+      name: "forklight_integration_wait",
+      arguments: { operationId: apply.operationId, timeoutMs: 5_000 },
+    });
+    const final = waited.structuredContent as {
+      status: string;
+      result: IntegrationResultRecord;
+    };
+    assert.equal(final.status, "completed");
+    assert.equal(final.result.status, "applied");
 
     // Source is mutated
     const after = await readFile(path.join(sourceDir, "readme.md"), "utf8");
@@ -395,9 +508,14 @@ test("MCP integration history returns receipts and results read-only", async () 
       arguments: { taskId: task.id },
     });
     const receipt = pf.structuredContent as IntegrationReceiptRecord;
-    await client.callTool({
+    const applied = await client.callTool({
       name: "forklight_integration_apply",
       arguments: { taskId: task.id, receiptId: receipt.id, confirm: true },
+    });
+    const operationId = (applied.structuredContent as { operationId: string }).operationId;
+    await client.callTool({
+      name: "forklight_integration_wait",
+      arguments: { operationId, timeoutMs: 5_000 },
     });
 
     const before = await readFile(path.join(sourceDir, "readme.md"), "utf8");
@@ -558,6 +676,12 @@ test("MCP submit uses effective defaults but explicit provider wins", async () =
         effort: "xhigh",
         maxBudgetUsd: 1.5,
         focusPaths: ["src"],
+        generatedPaths: ["**/.custom-cache/**"],
+        delivery: {
+          buildCommands: ["npm run build"],
+          activationCommands: ["forklight daemon restart"],
+          activationCheckCommands: ["forklight health --json"],
+        },
       },
     });
     assert.equal(submit.isError, undefined);
@@ -566,6 +690,17 @@ test("MCP submit uses effective defaults but explicit provider wins", async () =
     assert.equal(s.provider, "minimax");
     // Explicit effort wins over defaultEffort
     assert.equal(s.runtime, "claude-code");
+    const stored = await daemonRequest<TaskRecord>(
+      "status",
+      { taskId: String(s.taskId) },
+      home,
+    );
+    assert.deepEqual(stored.spec.workspace.generatedPaths, ["**/.custom-cache/**"]);
+    assert.deepEqual(stored.spec.delivery, {
+      buildCommands: ["npm run build"],
+      activationCommands: ["forklight daemon restart"],
+      activationCheckCommands: ["forklight health --json"],
+    });
   } finally {
     await client.close();
     await server.close();

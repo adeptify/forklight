@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { get, request } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -260,6 +260,43 @@ test("GET /tasks/:id returns bounded timeline from taskTimeline, no logs/diffs/p
   } finally { store.close(); }
 });
 
+test("GET /tasks/:id includes the canonical authority decision view", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-decision-"));
+  const store = new StateStore(home);
+  try {
+    const task = specTask(store, "decision-test");
+    store.addEvent(task.id, undefined, "worker.completed", "Worker reported completion", {
+      claim: { label: "unverified-claim", text: "All tests pass" },
+    });
+    store.addEvent(task.id, undefined, "verification.completed", "Verified", {
+      passed: true,
+      behaviorPassed: true,
+      policyPassed: true,
+      sourceCompatible: true,
+      commands: [],
+      diffPath: task.paths.diff,
+      sourceUnchanged: true,
+    });
+    const { server, url, token } = await serve(store);
+    const response = await httpGetAuth(`${url}/tasks/${task.id}`, token);
+    assert.equal(response.status, 200);
+    const decision = (response.body as {
+      decision: {
+        stage: string;
+        workerClaim: { label: string; text: string };
+        nextAction: string;
+      };
+    }).decision;
+    assert.equal(decision.stage, "awaiting-main-review");
+    assert.equal(decision.workerClaim.label, "unverified-claim");
+    assert.equal(decision.workerClaim.text, "All tests pass");
+    assert.equal(decision.nextAction, "Main Codex must review");
+    await server.stop();
+  } finally {
+    store.close();
+  }
+});
+
 test("GET /competitions and /stats are capped by boardListLimit", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "fl-cs-"));
   const store = new StateStore(home);
@@ -428,6 +465,16 @@ test("app.js contains no innerHTML, no onclick=, no .style., no em dash", async 
   assert.ok(!/—/.test(src), "app.js must not contain em dash character");
   // Not a synthetic stub
   assert.ok(/ForkLight Console/.test(src) || /ForkLight/.test(src), "app.js should be the real console");
+  for (const label of [
+    "Worker claim (unverified)",
+    "Independent verification",
+    "Main Codex review",
+    "User authorization",
+    "Integration and activation",
+    "Next action",
+  ]) {
+    assert.ok(src.includes(label), `decision drawer must include ${label}`);
+  }
   assert.ok(src.includes("providerVerification"), "console must show configured versus verified provider state");
   // No browser storage or cookie access
   assert.ok(!/localStorage|sessionStorage|document\.cookie|[^.]\bcookie\s*=/.test(src), "app.js must not use browser storage or cookies");

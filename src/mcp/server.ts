@@ -4,13 +4,24 @@ import { z } from "zod";
 import { forklightHome } from "../core/config.js";
 import type { ProviderModelSummary } from "../core/statistics.js";
 import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
-import type { AttemptRecord, EventRecord, TaskRecord } from "../core/types.js";
+import type {
+  AttemptRecord,
+  EventRecord,
+  TaskDecisionView,
+  TaskRecord,
+} from "../core/types.js";
 import { assessTaskQuality, parseTaskSpec } from "../core/task.js";
 import { type ProviderName } from "../core/providers.js";
 import { daemonRequest, ensureDaemon } from "../daemon/client.js";
 import type { ForkLightSettings, TaskPolicy } from "../core/settings.js";
 import { buildCompactInspection } from "../cli/supervision.js";
 import { withMcpExchangeReceipt } from "./exchange-receipts.js";
+import { buildTaskSummary } from "../core/task-summary.js";
+import {
+  compareBuildIdentity,
+  currentBuildIdentity,
+  isBuildIdentity,
+} from "../core/build-identity.js";
 
 const SERVER_INSTRUCTIONS =
   "ForkLight runs bounded external coding Workers through DeepSeek, Qwen, MiniMax, or GLM. Before submit, the main Codex agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, module inputs and outputs, call chain, scenarios, risks, and independent acceptance. Validate the contract first. Submit returns immediately. Prefer status sparingly; for supervision use compact inspect (summary=true, default) after the task is terminal rather than tight-loop full inspect. CLI wait observes event-sequence progress, not only status. The main Codex agent remains accountable for review and user approvals. Never call ForkLight a native Codex subagent, and never use it to commit or push.";
@@ -29,6 +40,12 @@ const scenarioContractSchema = z.object({
   when: z.string().min(1),
   then: z.string().min(1),
 });
+
+const deliverySpecSchema = z.object({
+  buildCommands: z.array(z.string().trim().min(1)).max(16).default([]),
+  activationCommands: z.array(z.string().trim().min(1)).max(16).default([]),
+  activationCheckCommands: z.array(z.string().trim().min(1)).max(16).default([]),
+}).strict();
 
 const taskInputSchema = z.object({
   project: z.string().min(1).describe("Absolute path to the source project"),
@@ -60,6 +77,8 @@ const taskInputSchema = z.object({
   maxBudgetUsd: z.number().positive().optional(),
   allowEdits: z.boolean().default(true),
   focusPaths: z.array(z.string().min(1)).min(1),
+  generatedPaths: z.array(z.string().min(1).max(240)).optional(),
+  delivery: deliverySpecSchema.optional(),
 });
 
 type TaskInput = z.infer<typeof taskInputSchema>;
@@ -84,7 +103,11 @@ function inlineTask(input: TaskInput, settings: ForkLightSettings): Record<strin
       effort: input.effort ?? settings.execution.defaultEffort,
       maxBudgetUsd: input.maxBudgetUsd ?? settings.execution.defaultMaxBudgetUsd,
     },
+    workspace: {
+      ...(input.generatedPaths === undefined ? {} : { generatedPaths: input.generatedPaths }),
+    },
     worker: { allowEdits: input.allowEdits, allowedCommands: [], focusPaths: input.focusPaths },
+    ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
     acceptance: input.acceptance,
   };
 }
@@ -99,23 +122,6 @@ function textAndData(data: unknown, summary?: string): {
   return {
     content: [{ type: "text", text: summary ?? JSON.stringify(data, null, 2) }],
     structuredContent,
-  };
-}
-
-function taskSummary(task: TaskRecord): Record<string, unknown> {
-  return {
-    taskId: task.id,
-    name: task.name,
-    status: task.status,
-    provider: task.spec.provider.name,
-    model: task.spec.provider.model,
-    runtime: task.spec.runtime.name,
-    sourcePath: task.sourcePath,
-    workspacePath: task.paths.workspace,
-    sessionId: task.sessionId,
-    error: task.error,
-    createdAt: task.createdAt,
-    updatedAt: task.updatedAt,
   };
 }
 
@@ -135,7 +141,26 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     },
     async () => {
       const health = await ensureDaemon(home);
-      return textAndData(health);
+      const clientBuildIdentity = currentBuildIdentity();
+      const daemonBuildIdentity = health.buildIdentity;
+      const comparison = isBuildIdentity(daemonBuildIdentity)
+        ? compareBuildIdentity(clientBuildIdentity, daemonBuildIdentity)
+        : { protocolCompatible: false, sameBuild: false };
+      return textAndData({
+        ...health,
+        mcpBuildIdentity: clientBuildIdentity,
+        daemonBuildIdentity,
+        identityStatus: comparison.sameBuild
+          ? "matched"
+          : comparison.protocolCompatible
+            ? "build-mismatch"
+            : "protocol-mismatch",
+        ...(
+          comparison.sameBuild
+            ? {}
+            : { identityAction: "Rebuild and restart ForkLight daemon and MCP before changes" }
+        ),
+      });
     },
   );
 
@@ -254,7 +279,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
             home,
           );
           submittedTaskId = task.id;
-          const summary = taskSummary(task);
+          const summary = buildTaskSummary(task);
           return textAndData(
             summary,
             `ForkLight task ${task.id} was queued for ${task.spec.provider.name}/${task.spec.provider.model}. Poll forklight_status with this task ID.`,
@@ -280,8 +305,14 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         taskId,
         invoke: async () => {
           await ensureDaemon(home);
-          const task = await daemonRequest<TaskRecord>("status", { taskId }, home);
-          return textAndData(taskSummary(task));
+          const [task, decision] = await Promise.all([
+            daemonRequest<TaskRecord>("status", { taskId }, home),
+            daemonRequest<TaskDecisionView>("task_decision", { taskId }, home),
+          ]);
+          return textAndData({
+            ...buildTaskSummary(task, decision),
+            decision,
+          });
         },
       });
     },
@@ -313,11 +344,13 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
             const task = result.task as TaskRecord;
             const attempts = result.attempts as AttemptRecord[];
             const events = result.events as EventRecord[];
+            const decision = result.decision as TaskDecisionView;
             const diff = typeof result.diff === "string" ? result.diff : undefined;
             const compact = buildCompactInspection({
               task,
               attempts,
               events,
+              decision,
               diff,
               eventLimit,
             });
@@ -344,25 +377,75 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       inputSchema: z.object({
         taskId: z.string().uuid(),
         feedback: z.string().min(1).optional(),
+        authorization: z.object({
+          additionalAttempts: z.literal(1),
+          maxBudgetUsd: z.number().positive().nullable(),
+          reason: z.string().trim().min(1).max(1000),
+          confirm: z.literal(true),
+        }).strict().optional(),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    async ({ taskId, feedback }) => {
+    async ({ taskId, feedback, authorization }) => {
       return withMcpExchangeReceipt({
         operation: "forklight_resume",
         home,
-        args: { taskId, ...(feedback === undefined ? {} : { feedback }) },
+        args: {
+          taskId,
+          ...(feedback === undefined ? {} : { feedback }),
+          ...(authorization === undefined ? {} : { authorization }),
+        },
         taskId,
         invoke: async () => {
           await ensureDaemon(home);
           const task = await daemonRequest<TaskRecord>(
             "resume",
-            { taskId, ...(feedback === undefined ? {} : { feedback }) },
+            {
+              taskId,
+              ...(feedback === undefined ? {} : { feedback }),
+              ...(authorization === undefined ? {} : { authorization }),
+            },
             home,
           );
           return textAndData(
-            taskSummary(task),
+            buildTaskSummary(task),
             `ForkLight task ${taskId} was queued for resume. Poll forklight_status.`,
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_review",
+    {
+      title: "Record Main Codex review",
+      description:
+        "Record an explicit Main Codex accept, revise, or reject judgment against the latest independent verification. This does not authorize source Integration.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        decision: z.enum(["accept", "revise", "reject"]),
+        reason: z.string().trim().min(1).max(1000),
+        confirm: z.literal(true),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, decision, reason }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_main_review",
+        home,
+        args: { taskId, decision, reasonLength: reason.length, confirm: true },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const review = await daemonRequest<Record<string, unknown>>(
+            "main_review",
+            { taskId, decision, reason, confirm: true },
+            home,
+          );
+          return textAndData(
+            review,
+            `Main Codex review recorded as ${decision}; source Integration is still separately authorized.`,
           );
         },
       });
@@ -389,7 +472,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         { ...(statuses === undefined ? {} : { statuses }), limit },
         home,
       );
-      const summaries = tasks.map(taskSummary);
+      const summaries = tasks.map((task) => buildTaskSummary(task));
       return {
         content: [{ type: "text", text: JSON.stringify(summaries, null, 2) }],
         structuredContent: { tasks: summaries },
@@ -567,6 +650,69 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
             home,
           );
           return textAndData(history);
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_integration_status",
+    {
+      title: "Read integration operation status",
+      description:
+        "Return the latest durable stage evidence and final result, when available, for an integration operation. Read-only.",
+      inputSchema: z.object({ operationId: z.string().uuid() }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ operationId }) => {
+      let taskId: string | undefined;
+      return withMcpExchangeReceipt({
+        operation: "forklight_integration_status",
+        home,
+        args: { operationId },
+        taskId: () => taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const view = await daemonRequest<Record<string, unknown>>(
+            "integration_status",
+            { operationId },
+            home,
+          );
+          if (typeof view.taskId === "string") taskId = view.taskId;
+          return textAndData(view);
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_integration_wait",
+    {
+      title: "Wait for an integration operation",
+      description:
+        "Wait up to timeoutMs for an integration operation. A timeout reports outcome-unknown while background work may continue; query status with the same operationId.",
+      inputSchema: z.object({
+        operationId: z.string().uuid(),
+        timeoutMs: z.number().int().min(1).max(3_600_000),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ operationId, timeoutMs }) => {
+      let taskId: string | undefined;
+      return withMcpExchangeReceipt({
+        operation: "forklight_integration_wait",
+        home,
+        args: { operationId, timeoutMs },
+        taskId: () => taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const view = await daemonRequest<Record<string, unknown>>(
+            "integration_wait",
+            { operationId, timeoutMs },
+            home,
+          );
+          if (typeof view.taskId === "string") taskId = view.taskId;
+          return textAndData(view);
         },
       });
     },

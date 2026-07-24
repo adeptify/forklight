@@ -337,6 +337,42 @@ test("null maxBudgetUsd = uncapped, positive = capped", async () => {
   } finally { store.close(); }
 });
 
+test("per-Attempt runtime budgets preserve explicit uncapped and legacy unknown", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "ec-attempt-budget-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("ab", "succeeded", 1.5));
+    store.createAttempt(makeAttempt("a1", "ab", 1, { runtimeBudgetUsd: 2 }));
+    store.createAttempt(makeAttempt("a2", "ab", 2, { runtimeBudgetUsd: null }));
+    store.createAttempt(makeAttempt("a3", "ab", 3));
+    const report = getTaskEconomicsReport(store, "ab");
+    assert.deepEqual(report.attemptRuntimeBudgets, [
+      {
+        attemptId: "a1",
+        ordinal: 1,
+        source: "attempt-snapshot",
+        maxBudgetUsd: 2,
+        label: "capped",
+      },
+      {
+        attemptId: "a2",
+        ordinal: 2,
+        source: "attempt-snapshot",
+        maxBudgetUsd: null,
+        label: "uncapped",
+      },
+      {
+        attemptId: "a3",
+        ordinal: 3,
+        source: "legacy-inherited-unknown",
+        label: "inherited/unknown",
+      },
+    ]);
+  } finally {
+    store.close();
+  }
+});
+
 // --- 9. Immutability -------------------------------------------------------
 
 test("report is deeply frozen and detached; top-level and nested mutation throws", async () => {
@@ -500,10 +536,6 @@ function withIdentity(base: TaskRecord, taskClass?: string,
   if (taskClass !== undefined) spec.taskClass = taskClass;
   if (directCodexProfileId !== undefined) spec.directCodexProfileId = directCodexProfileId;
   return { ...base, spec: spec as unknown as TaskRecord["spec"] };
-}
-
-function withTaskClass(base: TaskRecord, taskClass: string): TaskRecord {
-  return withIdentity(base, taskClass);
 }
 
 test("calibration selection: precedence, exact-pair match, identity-missing via facade", async () => {

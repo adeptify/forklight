@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { TaskRecord } from "../src/core/types.js";
+import type { AttemptRecord, TaskRecord } from "../src/core/types.js";
 import {
   allowedToolArguments,
   interruptedExitCode,
@@ -26,6 +26,7 @@ test("P2 Worker never receives Bash or web tools", () => {
   assert.match(permission.allowed, /Grep/);
   assert.match(permission.allowed, /Edit/);
   assert.match(permission.allowed, /Write/);
+  assert.match(permission.allowed, /mcp__forklight_checkpoint__run/);
 });
 
 test("an interrupted Worker never records a successful exit code", () => {
@@ -33,9 +34,59 @@ test("an interrupted Worker never records a successful exit code", () => {
   assert.equal(interruptedExitCode(143), 143);
 });
 
+test("checkpoint MCP configuration contains identity but no credential or command text", async () => {
+  const task = {
+    id: "task-1",
+    sourcePath: "/Users/example/original-project",
+    paths: {
+      root: "/tmp/forklight-home/runs/task-1",
+      workspace: "/tmp/forklight-home/runs/task-1/workspace",
+      claudeConfig: "/tmp/forklight-home/runs/task-1/claude-config",
+    },
+    spec: {
+      acceptance: { commands: ["npm test -- --secret-contract-text"] },
+      runtime: { executable: "claude" },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+    },
+  } as unknown as TaskRecord;
+  const attempt = { id: "attempt-1", taskId: task.id } as AttemptRecord;
+  const { checkpointLaunch } = await import("../src/core/checkpoint.js");
+  const workerModule = await import("../src/workers/claude.js");
+  const launch = checkpointLaunch(task, attempt);
+  const mcpConfig = (workerModule as unknown as {
+    checkpointMcpConfiguration: (task: TaskRecord, attempt: AttemptRecord) => string;
+  }).checkpointMcpConfiguration(task, attempt);
+
+  assert.deepEqual(Object.keys(launch.env).sort(), [
+    "FORKLIGHT_CHECKPOINT_ATTEMPT_ID",
+    "FORKLIGHT_CHECKPOINT_TASK_ID",
+    "FORKLIGHT_HOME",
+  ]);
+  assert.match(mcpConfig, /forklight_checkpoint/);
+  assert.match(mcpConfig, /task-1/);
+  assert.match(mcpConfig, /attempt-1/);
+  assert.doesNotMatch(mcpConfig, /api[-_]?key|auth[_-]?token/i);
+  assert.doesNotMatch(mcpConfig, /secret-contract-text|original-project|\.git/);
+  assert.doesNotMatch(mcpConfig, /GIT_DIR|GIT_INDEX_FILE|verifier-git/);
+
+  const { scrubCheckpointEnvironment } = await import("../src/checkpoint/server.js");
+  const environment = {
+    FORKLIGHT_HOME: "/tmp/forklight-home",
+    ANTHROPIC_AUTH_TOKEN: "secret",
+    OPENAI_API_KEY: "secret",
+    PATH: "/usr/bin",
+  };
+  scrubCheckpointEnvironment(environment);
+  assert.deepEqual(environment, {
+    FORKLIGHT_HOME: "/tmp/forklight-home",
+    PATH: "/usr/bin",
+  });
+});
+
 test("macOS Worker launch restricts writes to task-owned directories", { skip: process.platform !== "darwin" }, () => {
   const task = {
     paths: {
+      root: "/tmp/forklight-task/runs/task-1",
       workspace: "/tmp/forklight-task/workspace",
       claudeConfig: "/tmp/forklight-task/claude-config",
     },
@@ -51,5 +102,10 @@ test("macOS Worker launch restricts writes to task-owned directories", { skip: p
   assert.match(profile, /\(deny file-read\*/);
   assert.match(profile, /forklight-task\/workspace/);
   assert.match(profile, /forklight-task\/claude-config/);
+  assert.match(profile, /daemon\/protocol\.ts/);
+  assert.match(profile, /core\/build-identity\.ts/);
+  assert.match(profile, /forklight\.sock/);
+  assert.match(profile, /\(literal "\/Users\/[^"]+"\)/);
   assert.doesNotMatch(profile, /fixtures\/checkout/);
+  assert.doesNotMatch(profile, /verifier-git|GIT_DIR|GIT_INDEX_FILE/);
 });

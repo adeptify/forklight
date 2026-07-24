@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import path from "node:path";
 import type {
   AttemptOfficialCost,
+  AttemptExecutionOptions,
   AttemptRecord,
   AttemptTokenUsage,
   NormalizedWorkerEvent,
@@ -14,10 +15,16 @@ import { resolveAttemptOfficialCost } from "./attempt-economics.js";
 import { taskPaths } from "./config.js";
 import { loadTaskSpec } from "./task.js";
 import { cloneDefaults, type ExecutionSettings, type ProviderDefaultsSettings, type TaskPolicy } from "./settings.js";
+import { buildRemediationPacket, formatRemediationPacket } from "./remediation.js";
+import {
+  MAIN_REVIEW_REASON_MAX_LENGTH,
+  recordMainReview,
+} from "./main-review.js";
 import { StateStore } from "../state/store.js";
 import { assertWorkspaceExists, prepareWorkspace } from "../workspace/copy.js";
 import { runClaudeWorker } from "../workers/claude.js";
 import { verifyTask } from "./verifier.js";
+import { checkpointSatisfied } from "./checkpoint.js";
 
 export interface RunResult {
   task: TaskRecord;
@@ -27,23 +34,9 @@ export interface RunResult {
 
 export type ProgressListener = (event: NormalizedWorkerEvent) => void;
 
-function latestVerificationFeedback(store: StateStore, taskId: string): string | undefined {
-  const event = store
-    .listEvents(taskId)
-    .filter((candidate) => candidate.type === "verification.command.completed")
-    .at(-1);
-  if (!event || event.payload === null || typeof event.payload !== "object") return undefined;
-  const payload = event.payload as { command?: unknown; exitCode?: unknown; stdout?: unknown; stderr?: unknown };
-  const stdout = typeof payload.stdout === "string" ? payload.stdout.slice(-12_000) : "";
-  const stderr = typeof payload.stderr === "string" ? payload.stderr.slice(-6_000) : "";
-  return [
-    `Independent command: ${String(payload.command ?? "verification command")}`,
-    `Exit code: ${String(payload.exitCode ?? "not recorded")}`,
-    stdout ? `stdout:\n${stdout}` : "",
-    stderr ? `stderr:\n${stderr}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+function latestRemediationFeedback(store: StateStore, taskId: string): string | undefined {
+  const packet = buildRemediationPacket(store.listEvents(taskId));
+  return packet === undefined ? undefined : formatRemediationPacket(packet);
 }
 
 function timestamp(): string {
@@ -178,13 +171,15 @@ export async function executeAttempt(
   feedback?: string,
   execution?: ExecutionSettings,
   providerDefaults?: ProviderDefaultsSettings,
+  options?: AttemptExecutionOptions,
 ): Promise<RunResult> {
   await assertWorkspaceExists(task.paths);
   const exec = execution ?? cloneDefaults().execution;
   const ordinal = store.nextAttemptOrdinal(task.id);
-  if (ordinal > exec.maxAttempts) {
+  const maximumOrdinal = options?.maximumOrdinal ?? exec.maxAttempts;
+  if (ordinal > maximumOrdinal) {
     throw new Error(
-      `Task ${task.id} has reached maximum attempts (${exec.maxAttempts}); cannot start attempt ${ordinal}`,
+      `Task ${task.id} has reached maximum attempts (${maximumOrdinal}); cannot start attempt ${ordinal}`,
     );
   }
   const attemptId = randomUUID();
@@ -196,6 +191,9 @@ export async function executeAttempt(
     sessionId: task.sessionId,
     rawLogPath: path.join(task.paths.logs, `attempt-${ordinal}.jsonl`),
     startedAt: timestamp(),
+    runtimeBudgetUsd: options?.maxBudgetUsdOverride === undefined
+      ? task.spec.runtime.maxBudgetUsd
+      : options.maxBudgetUsdOverride,
   };
   store.createAttempt(attempt);
   store.setTaskStatus(task.id, "running", {
@@ -284,7 +282,15 @@ export async function executeAttempt(
   }
 
   const verification = await verifyTask(store, store.getTask(task.id), attemptId);
-  const finalStatus = verification.passed ? "succeeded" : "failed";
+  const checkpointPassed = checkpointSatisfied(
+    store.listEvents(task.id),
+    attemptId,
+    task.spec.acceptance.commands.length,
+  );
+  const finalStatus = verification.passed && checkpointPassed ? "succeeded" : "failed";
+  const failure = !checkpointPassed
+    ? "Required bounded checkpoint missing or failed"
+    : "Independent verification failed";
   const finishedAt = timestamp();
   store.updateAttempt(attemptId, {
     status: finalStatus,
@@ -295,14 +301,13 @@ export async function executeAttempt(
     ...(worker.turns === undefined ? {} : { turns: worker.turns }),
     ...(worker.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
     ...(worker.usage === undefined ? {} : { usage: worker.usage }),
-    ...(!verification.passed ? { error: "Independent verification failed" } : {}),
+    ...(finalStatus === "failed" ? { error: failure } : {}),
     officialCost: buildOfficialCost(task.spec.provider, worker.usage),
   });
   store.setTaskStatus(task.id, finalStatus, {
     finishedAt,
     workerPid: null,
-    ...(verification.passed ? { error: null } : {}),
-    ...(!verification.passed ? { error: "Independent verification failed" } : {}),
+    ...(finalStatus === "succeeded" ? { error: null } : { error: failure }),
   });
   return {
     task: store.getTask(task.id),
@@ -338,6 +343,7 @@ export async function resumeTask(
   feedback?: string,
   execution?: ExecutionSettings,
   providerDefaults?: ProviderDefaultsSettings,
+  options?: AttemptExecutionOptions,
 ): Promise<RunResult> {
   const task = store.getTask(taskId);
   if (task.status !== "interrupted" && task.status !== "failed") {
@@ -345,10 +351,11 @@ export async function resumeTask(
   }
   const exec = execution ?? cloneDefaults().execution;
   const attemptCount = store.listAttempts(taskId).length;
-  if (attemptCount >= exec.maxAttempts) {
-    throw new Error(`Task ${taskId} has reached maximum attempts (${exec.maxAttempts})`);
+  const maximumOrdinal = options?.maximumOrdinal ?? exec.maxAttempts;
+  if (attemptCount >= maximumOrdinal) {
+    throw new Error(`Task ${taskId} has reached maximum attempts (${maximumOrdinal})`);
   }
-  const verifierFeedback = latestVerificationFeedback(store, taskId);
+  const verifierFeedback = latestRemediationFeedback(store, taskId);
   const combinedFeedback = [
     verifierFeedback,
     feedback === undefined ? undefined : `Additional main Codex review:\n${feedback}`,
@@ -356,7 +363,7 @@ export async function resumeTask(
     .filter((item): item is string => item !== undefined)
     .join("\n\n");
   return executeAttempt(
-    store, task, true, onProgress, combinedFeedback || undefined, exec, providerDefaults,
+    store, task, true, onProgress, combinedFeedback || undefined, exec, providerDefaults, options,
   );
 }
 
@@ -388,7 +395,7 @@ export function reconcileTask(store: StateStore, taskId: string): TaskRecord {
  *  code units) of the trimmed feedback.  Bounded so the operator never
  *  accidentally forwards a full prompt, contract body, or other sensitive
  *  Task content through the correction channel. */
-export const REVISE_FEEDBACK_MAX_LENGTH = 4096;
+export const REVISE_FEEDBACK_MAX_LENGTH = MAIN_REVIEW_REASON_MAX_LENGTH;
 
 export type ReviseRejectionReason =
   | "not-succeeded"
@@ -485,14 +492,25 @@ export async function reviseTask(
   onProgress?: ProgressListener,
   execution?: ExecutionSettings,
   providerDefaults?: ProviderDefaultsSettings,
+  options?: AttemptExecutionOptions,
 ): Promise<RunResult> {
   const exec = execution ?? cloneDefaults().execution;
-  const check = checkReviseEligibility(store, taskId, feedback, exec.maxAttempts);
+  const check = checkReviseEligibility(
+    store,
+    taskId,
+    feedback,
+    options?.maximumOrdinal ?? exec.maxAttempts,
+  );
   if (!check.eligible) {
     throw new Error(check.reason !== undefined
       ? describeReviseRejection(check.reason)
       : "revise rejected");
   }
+  recordMainReview(store, taskId, {
+    decision: "revise",
+    reason: check.canonicalFeedback!,
+    confirm: true,
+  });
   // Transition to queued first, then re-read so the post-clearance record
   // is what executeAttempt sees; its `task.startedAt === undefined` branch
   // re-seeds startedAt with the new attempt's timestamp.
@@ -502,6 +520,6 @@ export async function reviseTask(
   // is what main Codex is correcting; canonical main-Codex feedback stands
   // alone as the correction instruction.
   return executeAttempt(
-    store, cleared, true, onProgress, check.canonicalFeedback, exec, providerDefaults,
+    store, cleared, true, onProgress, check.canonicalFeedback, exec, providerDefaults, options,
   );
 }

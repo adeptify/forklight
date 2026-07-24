@@ -31,7 +31,14 @@ export type EventType =
   | "verification.started"
   | "verification.command.completed"
   | "verification.completed"
+  | "checkpoint.started"
+  | "checkpoint.completed"
+  | "attempt.authorization.granted"
+  | "main-review.completed"
   | "integration.preflight.completed"
+  | "integration.operation.started"
+  | "integration.operation.recovered"
+  | "integration.stage.completed"
   | "integration.apply.started"
   | "integration.apply.completed"
   | "integration.rollback.completed"
@@ -52,6 +59,12 @@ export interface RuntimeSpec {
   executable: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   maxBudgetUsd: number | null;
+}
+
+export interface DeliverySpec {
+  buildCommands: string[];
+  activationCommands: string[];
+  activationCheckCommands: string[];
 }
 
 export interface TaskModuleContract {
@@ -93,12 +106,14 @@ interface SharedTaskSpec {
   runtime: RuntimeSpec;
   workspace: {
     exclude: string[];
+    generatedPaths?: string[];
   };
   worker: {
     allowEdits: boolean;
     allowedCommands: string[];
     focusPaths: string[];
   };
+  delivery?: DeliverySpec;
   taskClass?: string;
   /** Exact direct-Codex execution-profile identity selected by the operator.
    *  Must be a canonical profile id validated by the shared normalizer.
@@ -223,7 +238,47 @@ export interface AttemptRecord {
   error?: string;
   usage?: AttemptTokenUsage;
   runtimeCostEstimateUsd?: number;
+  /** Effective Claude runtime budget for this Attempt. Absent only on legacy Attempts. */
+  runtimeBudgetUsd?: number | null;
   officialCost?: AttemptOfficialCost;
+}
+
+export interface AttemptAuthorization {
+  additionalAttempts: 1;
+  maxBudgetUsd: number | null;
+  reason: string;
+  confirm: true;
+}
+
+export interface AttemptExecutionOptions {
+  maximumOrdinal: number;
+  maxBudgetUsdOverride?: number | null;
+  authorizationEventSequence?: number;
+}
+
+export type MainReviewDecisionKind = "accept" | "revise" | "reject";
+
+export interface MainReviewDecision {
+  decision: MainReviewDecisionKind;
+  reason: string;
+  attemptId: string;
+  verificationEventSequence: number;
+}
+
+export interface DeliveryLineage {
+  complete: boolean;
+  missingAttemptIds: string[];
+  attemptCount: number;
+  verifiedAttemptCount: number;
+  hopChurn: {
+    filesChanged: number;
+    changedLines: number;
+  };
+  combinedDeliveryDiff: {
+    filesChanged: number;
+    changedLines: number;
+  };
+  correctionAttemptIds: string[];
 }
 
 export interface ModelTokenUsage {
@@ -299,6 +354,8 @@ export interface VerificationResult {
   sourceCompatible: boolean;
   commands: VerificationCommandResult[];
   diffPath: string;
+  /** Classified patch evidence. Absent only on verification records written before Wave 2. */
+  patches?: WorkspacePatchReport;
   /** Full-tree source fingerprint equality (audit). Not a hard gate by itself. */
   sourceUnchanged: boolean;
   sourceCompatibility?: SourceCompatibilityResult;
@@ -316,6 +373,51 @@ export interface VerificationResult {
   /** Structured completion policy evaluation.
    *  Absent for legacy verification stored before this field was introduced. */
   completionPolicy?: CompletionPolicyCheck;
+}
+
+/** Derived retry guidance from the latest authoritative verification event. */
+export interface RemediationPacket {
+  verificationEventSequence: number;
+  passedChecks: string[];
+  failedCommands: VerificationCommandResult[];
+  policyFindings: string[];
+  sourceConflicts: string[];
+  mainReview?: {
+    decision: MainReviewDecisionKind;
+    reason: string;
+  };
+}
+
+/** Worker-authored completion text. It is never authoritative verification evidence. */
+export interface WorkerClaim {
+  label: "unverified-claim";
+  text: string;
+}
+
+export interface CheckpointRequest {
+  taskId: string;
+  attemptId: string;
+  commandIds?: string[];
+}
+
+export interface CheckpointReport {
+  authority: "non-authoritative-checkpoint";
+  attemptId: string;
+  commands: Array<VerificationCommandResult & { commandId: string }>;
+  patches: WorkspacePatchReport;
+}
+
+export interface PatchEvidence {
+  path: string;
+  filesChanged: number;
+  changedLines: number;
+  affectedPaths: string[];
+}
+
+export interface WorkspacePatchReport {
+  business: PatchEvidence;
+  generated: PatchEvidence;
+  integration: PatchEvidence;
 }
 
 export interface NormalizedWorkerEvent {
@@ -464,7 +566,78 @@ export interface IntegrationResultRecord {
   rollbackFailures?: string[];
   error?: string;
   appliedAt?: string;
+  stages?: IntegrationStageEvidence[];
   createdAt: string;
+}
+
+export type IntegrationStageName =
+  | "source-applied"
+  | "source-verified"
+  | "artifact-built"
+  | "runtime-activated";
+
+export interface IntegrationStageEvidence {
+  stage: IntegrationStageName;
+  status: "pending" | "passed" | "failed" | "not-applicable" | "outcome-unknown";
+  commands?: VerificationCommandResult[];
+  error?: string;
+}
+
+export interface IntegrationOperationView {
+  operationId: string;
+  taskId: string;
+  receiptId: string;
+  status: "running" | "completed" | "outcome-unknown";
+  stages: IntegrationStageEvidence[];
+  result?: IntegrationResultRecord;
+}
+
+export type DecisionStage =
+  | "queued"
+  | "worker-running"
+  | "machine-failed"
+  | "machine-verified"
+  | "awaiting-main-review"
+  | "revision-requested"
+  | "main-rejected"
+  | "ready-for-integration"
+  | "integrating"
+  | "applied-not-activated"
+  | "activated"
+  | "integration-failed"
+  | "unknown";
+
+export interface TaskDecisionView {
+  taskId: string;
+  stage: DecisionStage;
+  nextAction: string;
+  workerClaim?: WorkerClaim & {
+    provider: string;
+    model: string;
+  };
+  checkpoint?: CheckpointReport;
+  verification?: VerificationResult;
+  mainReview?: MainReviewDecision;
+  lineage: DeliveryLineage;
+  integration?: IntegrationOperationView;
+  progress: {
+    activity: "active" | "quiet" | "terminal";
+    latestEventSequence: number;
+    lastEventAt?: string;
+    latestAction?: string;
+  };
+}
+
+export interface ActivationHandoff {
+  version: 1;
+  operationId: string;
+  taskId: string;
+  receiptId: string;
+  home: string;
+  sourcePath: string;
+  timeoutMs: number;
+  activationCommands: string[];
+  activationCheckCommands: string[];
 }
 
 // --- Provider probe ---

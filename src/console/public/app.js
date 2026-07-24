@@ -216,6 +216,72 @@ function loadingDetail(msg){if(!S.detail)S.detailReturnFocus=document.activeElem
 function showDetail(frag){detailEl.hidden=false;detailEl.textContent="";detailEl.appendChild(frag);S.detail=true;var close=detailEl.querySelector(".detail-close");if(close)close.focus();}
 function closeBtn(){var b=h("button","detail-close","Close");b.addEventListener("click",hideDetail);return b;}
 
+function decisionRow(label,value,kind){
+  var row=h("div","decision-row"+(kind?" decision-"+kind:""));
+  row.appendChild(h("div","decision-label",label));
+  row.appendChild(h("div","decision-value",value===undefined||value===null?"Unavailable":String(value)));
+  return row;
+}
+function renderDecision(d){
+  var box=h("section","decision-panel");
+  box.appendChild(h("div","section-title","Next action"));
+  box.appendChild(decisionRow("Current stage",d&&d.stage,"stage"));
+  box.appendChild(decisionRow("Next action",d&&d.nextAction,"next"));
+
+  box.appendChild(h("div","section-title","Who wrote it"));
+  if(d&&d.workerClaim){
+    box.appendChild(decisionRow("Worker",d.workerClaim.provider+"/"+d.workerClaim.model));
+    box.appendChild(decisionRow("Worker claim (unverified)",d.workerClaim.text,"claim"));
+  }else box.appendChild(decisionRow("Worker claim (unverified)","Unavailable"));
+
+  box.appendChild(h("div","section-title","Independent verification"));
+  var v=d&&d.verification;
+  if(v){
+    box.appendChild(decisionRow("Overall",v.passed?"Passed":"Failed",v.passed?"passed":"failed"));
+    box.appendChild(decisionRow("Behavior",v.behaviorPassed?"Passed":"Failed"));
+    box.appendChild(decisionRow("Policy",v.policyPassed?"Passed":"Failed"));
+    box.appendChild(decisionRow("Source compatibility",v.sourceCompatible?"Passed":"Failed"));
+  }else box.appendChild(decisionRow("Evidence","Unavailable"));
+
+  box.appendChild(h("div","section-title","Main Codex review"));
+  var review=d&&d.mainReview;
+  if(review){
+    box.appendChild(decisionRow("Decision",review.decision,review.decision==="accept"?"passed":"failed"));
+    box.appendChild(decisionRow("Reason",review.reason));
+  }else box.appendChild(decisionRow("Decision","Not recorded"));
+
+  box.appendChild(h("div","section-title","User authorization"));
+  box.appendChild(decisionRow("Integration gate",d&&d.integration?"Explicit confirm gate was exercised":"Not exercised"));
+
+  box.appendChild(h("div","section-title","Integration and activation"));
+  if(d&&d.integration){
+    box.appendChild(decisionRow("Operation",d.integration.operationId));
+    box.appendChild(decisionRow("Operation status",d.integration.status));
+    (d.integration.stages||[]).forEach(function(s){
+      box.appendChild(decisionRow(s.stage,s.status,s.status==="passed"?"passed":(s.status==="failed"?"failed":"")));
+    });
+  }else box.appendChild(decisionRow("Integration","Not started"));
+
+  box.appendChild(h("div","section-title","Delivery lineage"));
+  var l=d&&d.lineage;
+  if(l){
+    box.appendChild(decisionRow("Attempts",l.attemptCount));
+    box.appendChild(decisionRow("Correction attempts",(l.correctionAttemptIds||[]).length));
+    box.appendChild(decisionRow("Combined delivery diff",(l.combinedDeliveryDiff&&l.combinedDeliveryDiff.filesChanged||0)+" files / "+(l.combinedDeliveryDiff&&l.combinedDeliveryDiff.changedLines||0)+" lines"));
+  }else box.appendChild(decisionRow("Lineage","Unavailable"));
+  return box;
+}
+
+function collapsedSection(title,node){
+  var details=document.createElement("details");
+  details.className="audit-details";
+  var summary=document.createElement("summary");
+  summary.textContent=title;
+  details.appendChild(summary);
+  details.appendChild(node);
+  return details;
+}
+
 /* --- Economics Evidence helpers (textContent-only) --- */
 function evRow(key,val){var r=h("div","ev-row");r.appendChild(h("span","ev-key",key));var v=h("span","ev-value");if(typeof val==="string")v.textContent=val;else if(val)v.appendChild(val);r.appendChild(v);return r;}
 function evRowMixed(key,parts){var r=h("div","ev-row");r.appendChild(h("span","ev-key",key));var v=h("span","ev-value");parts.forEach(function(p){if(p===null||p===undefined)return;if(typeof p==="string"||typeof p==="number")v.appendChild(document.createTextNode(String(p)));else v.appendChild(p);});r.appendChild(v);return r;}
@@ -262,12 +328,12 @@ function showTask(id){
       hd("div","",[h("span","dim","Session: "),h("span","mono truncate",t.sessionId||"")]),
     ]));
     if(t.error){var eb=h("div","error-box");eb.appendChild(h("strong","","Error: "));eb.appendChild(document.createTextNode(t.error));f.appendChild(eb);}
-    if(t.economics){var ee=renderEconomicsEvidence(t.economics);if(ee)f.appendChild(ee);}
+    f.appendChild(renderDecision(t.decision));
+    if(t.economics){var ee=renderEconomicsEvidence(t.economics);if(ee)f.appendChild(collapsedSection("Economics evidence",ee));}
     if(t.timeline&&t.timeline.length){
-      f.appendChild(h("div","section-title mb-4","Event Timeline ("+t.timeline.length+")"));
       var tl=h("div","timeline");t.timeline.forEach(function(e){
         var te=h("div","timeline-entry");te.appendChild(h("span","ts",fmtTm(e.timestamp)));te.appendChild(h("span","",e.type));te.appendChild(h("span","dim",e.summary));tl.appendChild(te);
-      });f.appendChild(tl);
+      });f.appendChild(collapsedSection("Event Timeline ("+t.timeline.length+")",tl));
     }
     var il=h("button","back-link mt-12","Integration History");il.addEventListener("click",function(){showIntegration(t.id);});
     f.appendChild(hd("div","mt-12",[il]));showDetail(f);

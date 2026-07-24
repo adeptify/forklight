@@ -7,23 +7,10 @@ import type {
 } from "./types.js";
 import type { StateStore } from "../state/store.js";
 import { runCaptured } from "./process.js";
-import {
-  assessSourceCompatibility,
-  parseAffectedPathsFromWorkspaceDiff,
-  writeWorkspaceDiff,
-} from "../workspace/copy.js";
-
-function measureDiff(diff: string): { filesChanged: number; changedLines: number } {
-  const lines = diff.split("\n");
-  return {
-    filesChanged: lines.filter((line) => line.startsWith("diff --git ")).length,
-    changedLines: lines.filter(
-      (line) =>
-        (line.startsWith("+") && !line.startsWith("+++")) ||
-        (line.startsWith("-") && !line.startsWith("---")),
-    ).length,
-  };
-}
+import { assessSourceCompatibility } from "../workspace/copy.js";
+import { createPathPolicy } from "../workspace/path-policy.js";
+import { writeWorkspacePatchReport } from "../workspace/patch.js";
+import { verifierProcessEnvironment } from "../workspace/verifier-git.js";
 
 function resolveNoChangeMode(spec: TaskRecord["spec"]): PolicyMode {
   return spec.completionPolicy?.noChangeMode ?? "hard";
@@ -111,10 +98,11 @@ export async function verifyTask(
   store.addEvent(task.id, attemptId, "verification.started", "Independent verification started");
 
   const commands: VerificationCommandResult[] = [];
+  const verifierEnvironment = await verifierProcessEnvironment(task);
   for (const command of task.spec.acceptance.commands) {
     const result = await runCaptured("/bin/zsh", ["-lc", command], {
       cwd: task.paths.workspace,
-      env: process.env,
+      env: verifierEnvironment,
     });
     const commandResult: VerificationCommandResult = {
       command,
@@ -132,13 +120,18 @@ export async function verifyTask(
       `${command} ${result.exitCode === 0 ? "passed" : `failed with exit ${result.exitCode}`}`,
       commandResult,
     );
-    if (result.exitCode !== 0) break;
   }
 
-  const diff = await writeWorkspaceDiff(task.paths, task.spec.workspace.exclude);
-  const diffMeasure = measureDiff(diff);
-  const affectedPaths = parseAffectedPathsFromWorkspaceDiff(diff);
-  const sourceAssessment = await assessSourceCompatibility(task.spec, task.paths, affectedPaths);
+  const patches = await writeWorkspacePatchReport(task.paths, createPathPolicy(task.spec));
+  const diffMeasure = {
+    filesChanged: patches.business.filesChanged,
+    changedLines: patches.business.changedLines,
+  };
+  const sourceAssessment = await assessSourceCompatibility(
+    task.spec,
+    task.paths,
+    patches.integration.affectedPaths,
+  );
 
   const changeBudgetMode = resolveChangeBudgetMode(task.spec);
   let changeBudget: VerificationResult["changeBudget"];
@@ -172,6 +165,7 @@ export async function verifyTask(
     sourceCompatible,
     commands,
     diffPath: task.paths.diff,
+    patches,
     sourceUnchanged: sourceAssessment.globalUnchanged,
     sourceCompatibility: {
       compatible: sourceAssessment.compatible,

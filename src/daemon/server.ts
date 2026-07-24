@@ -9,10 +9,17 @@ import { ConsoleServer } from "../console/server.js";
 import { daemonSocketPath } from "../core/config.js";
 import { SettingsService } from "../core/settings.js";
 import type { StatisticsFilter } from "../core/statistics.js";
-import type { TaskStatus } from "../core/types.js";
+import type { AttemptAuthorization, TaskStatus } from "../core/types.js";
 import { StateStore } from "../state/store.js";
 import { DaemonCoordinator } from "./coordinator.js";
 import type { DaemonRequest, DaemonResponse } from "./protocol.js";
+import { requiresMatchingBuildIdentity } from "./protocol.js";
+import {
+  compareBuildIdentity,
+  currentBuildIdentity,
+  isBuildIdentity,
+  type BuildIdentity,
+} from "../core/build-identity.js";
 
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -32,9 +39,89 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 
+function requiredBoundedString(value: unknown, label: string): string {
+  const result = requiredString(value, label);
+  if (result.length > 80) throw new Error(`${label} must be at most 80 characters`);
+  return result;
+}
+
 function requireArray(value: unknown, label: string): unknown[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
   return value;
+}
+
+function activationEvidence(value: unknown): import("../core/types.js").IntegrationStageEvidence {
+  const input = strictObject(value, "activation evidence");
+  const allowed = new Set(["stage", "status", "commands", "error"]);
+  const extra = Object.keys(input).filter((key) => !allowed.has(key));
+  if (extra.length > 0) {
+    throw new Error(`activation evidence contains unknown fields: ${extra.join(", ")}`);
+  }
+  if (input.stage !== "runtime-activated") {
+    throw new Error("activation evidence stage must be runtime-activated");
+  }
+  if (input.status !== "passed" && input.status !== "failed") {
+    throw new Error("activation evidence status must be passed or failed");
+  }
+  if (!Array.isArray(input.commands) && input.commands !== undefined) {
+    throw new Error("activation evidence commands must be an array");
+  }
+  const commands = (input.commands ?? []) as unknown[];
+  if (commands.length > 32) throw new Error("activation evidence has too many commands");
+  for (const command of commands) {
+    const record = strictObject(command, "activation command evidence");
+    if (
+      typeof record.command !== "string"
+      || record.command.length === 0
+      || record.command.length > 10_000
+      || !Number.isSafeInteger(record.exitCode)
+      || typeof record.stdout !== "string"
+      || typeof record.stderr !== "string"
+      || typeof record.durationMs !== "number"
+      || typeof record.timedOut !== "boolean"
+    ) {
+      throw new Error("activation command evidence is malformed");
+    }
+  }
+  const error = input.error;
+  if (error !== undefined && (typeof error !== "string" || error.length > 10_000)) {
+    throw new Error("activation evidence error must be at most 10000 characters");
+  }
+  return {
+    stage: "runtime-activated",
+    status: input.status,
+    ...(commands.length === 0
+      ? {}
+      : { commands: commands as import("../core/types.js").VerificationCommandResult[] }),
+    ...(typeof error === "string" ? { error } : {}),
+  };
+}
+
+function parseAttemptAuthorization(value: unknown): AttemptAuthorization | undefined {
+  if (value === undefined) return undefined;
+  const input = strictObject(value, "authorization");
+  const allowed = new Set(["additionalAttempts", "maxBudgetUsd", "reason", "confirm"]);
+  const extra = Object.keys(input).filter((key) => !allowed.has(key));
+  if (extra.length > 0) throw new Error(`authorization contains unknown fields: ${extra.join(", ")}`);
+  if (input.additionalAttempts !== 1) {
+    throw new Error("authorization.additionalAttempts must equal 1");
+  }
+  if (input.confirm !== true) throw new Error("authorization.confirm must be true");
+  const reason = requiredString(input.reason, "authorization.reason").trim();
+  if (reason.length > 1000) throw new Error("authorization.reason must be at most 1000 characters");
+  const maxBudgetUsd = input.maxBudgetUsd;
+  if (
+    maxBudgetUsd !== null
+    && (typeof maxBudgetUsd !== "number" || !Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0)
+  ) {
+    throw new Error("authorization.maxBudgetUsd must be null or a finite positive number");
+  }
+  return {
+    additionalAttempts: 1,
+    maxBudgetUsd,
+    reason,
+    confirm: true,
+  };
 }
 
 export class ForkLightDaemon {
@@ -44,6 +131,7 @@ export class ForkLightDaemon {
   private readonly socketPath: string;
   private server: net.Server | undefined = undefined;
   private consoleServer: ConsoleServer | undefined = undefined;
+  private readonly buildIdentity: BuildIdentity = currentBuildIdentity();
 
   constructor(
     private readonly home: string,
@@ -126,8 +214,30 @@ export class ForkLightDaemon {
     try {
       request = JSON.parse(line) as DaemonRequest;
       if (!request.id || !request.method) throw new Error("Malformed daemon request");
+      const comparison = isBuildIdentity(request.clientIdentity)
+        ? compareBuildIdentity(request.clientIdentity, this.buildIdentity)
+        : { protocolCompatible: false, sameBuild: false };
+      if (requiresMatchingBuildIdentity(request.method)) {
+        if (!comparison.protocolCompatible) {
+          throw new Error("ForkLight protocol mismatch; rebuild and restart before changes");
+        }
+        if (!comparison.sameBuild) {
+          throw new Error("ForkLight build mismatch; rebuild and restart before changes");
+        }
+      }
       const result = await this.dispatch(request);
-      return { id: request.id, ok: true, result };
+      const warning = comparison.protocolCompatible
+        ? comparison.sameBuild
+          ? undefined
+          : "ForkLight client/daemon build mismatch; rebuild and restart before changes"
+        : "ForkLight client/daemon protocol mismatch; rebuild and restart before changes";
+      return {
+        id: request.id,
+        ok: true,
+        result,
+        serverIdentity: this.buildIdentity,
+        ...(warning === undefined ? {} : { warning }),
+      };
     } catch (error) {
       const fallbackId = (() => {
         try {
@@ -140,6 +250,7 @@ export class ForkLightDaemon {
         id: fallbackId,
         ok: false,
         error: error instanceof Error ? error.message : String(error),
+        serverIdentity: this.buildIdentity,
       };
     }
   }
@@ -160,11 +271,41 @@ export class ForkLightDaemon {
         return this.coordinator.status(requiredString(params.taskId, "taskId"));
       case "inspect":
         return this.coordinator.inspect(requiredString(params.taskId, "taskId"));
+      case "task_decision":
+        return this.coordinator.taskDecision(requiredString(params.taskId, "taskId"));
+      case "checkpoint_run":
+        return this.coordinator.checkpoint({
+          taskId: requiredString(params.taskId, "taskId"),
+          attemptId: requiredString(params.attemptId, "attemptId"),
+          ...(params.commandIds === undefined
+            ? {}
+            : {
+                commandIds: requireArray(params.commandIds, "commandIds").map(
+                  (value, index) => requiredBoundedString(value, `commandIds[${index}]`),
+                ),
+              }),
+        });
       case "resume":
         return this.coordinator.resume(
           requiredString(params.taskId, "taskId"),
           typeof params.feedback === "string" && params.feedback.trim() ? params.feedback.trim() : undefined,
+          parseAttemptAuthorization(params.authorization),
         );
+      case "main_review": {
+        if (params.confirm !== true) throw new Error("main_review requires explicit confirm: true");
+        const decision = requiredString(params.decision, "decision");
+        if (decision !== "accept" && decision !== "revise" && decision !== "reject") {
+          throw new Error("decision must be accept, revise, or reject");
+        }
+        const reason = requiredString(params.reason, "reason").trim();
+        if (reason.length > 1000) throw new Error("reason must be at most 1000 characters");
+        return this.coordinator.mainReview(
+          requiredString(params.taskId, "taskId"),
+          decision,
+          reason,
+          true,
+        );
+      }
       case "revise": {
         // Non-string feedback is routed through the shared eligibility
         // boundary as an empty string so checkReviseEligibility produces
@@ -173,6 +314,7 @@ export class ForkLightDaemon {
         return this.coordinator.revise(
           requiredString(params.taskId, "taskId"),
           feedback,
+          parseAttemptAuthorization(params.authorization),
         );
       }
       case "list": {
@@ -222,11 +364,27 @@ export class ForkLightDaemon {
         if (params.confirm !== true) {
           throw new Error("integration_apply requires explicit confirm: true");
         }
-        return this.coordinator.integrationApply(
+        return this.coordinator.startIntegration(
           requiredString(params.taskId, "taskId"),
           requiredString(params.receiptId, "receiptId"),
         );
       }
+      case "integration_status":
+        return this.coordinator.integrationStatus(
+          requiredString(params.operationId, "operationId"),
+        );
+      case "integration_wait":
+        return this.coordinator.waitIntegration(
+          requiredString(params.operationId, "operationId"),
+          params.timeoutMs as number,
+        );
+      case "integration_activation_complete":
+        return this.coordinator.completeIntegrationActivation(
+          requiredString(params.operationId, "operationId"),
+          requiredString(params.taskId, "taskId"),
+          requiredString(params.receiptId, "receiptId"),
+          activationEvidence(params.evidence),
+        );
       case "integration_history":
         return this.coordinator.integrationHistory(requiredString(params.taskId, "taskId"));
       case "shutdown":

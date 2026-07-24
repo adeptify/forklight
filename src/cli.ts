@@ -17,10 +17,12 @@ import { createClaudeProbeRunner, providerProbeBatchFailed, realExecFile } from 
 import { providerReadiness } from "./core/providers.js";
 import type { ProviderModelSummary } from "./core/statistics.js";
 import type {
-  AttemptRecord, EventRecord, NormalizedWorkerEvent, TaskRecord,
+  AttemptAuthorization, AttemptRecord, EventRecord, NormalizedWorkerEvent, TaskRecord,
 } from "./core/types.js";
 import { loadWorkPlan } from "./core/plan.js";
 import { reconcileTask, resumeTask, reviseTask, runNewTask } from "./core/runner.js";
+import { authorizeExtraAttempt } from "./core/attempt-authorization.js";
+import { recordMainReview } from "./core/main-review.js";
 import { assessIntegrationFeasibility } from "./core/integration-feasibility.js";
 import { assessTaskQuality, loadTaskSpec } from "./core/task.js";
 import { createKeychainStore } from "./core/secrets.js";
@@ -43,6 +45,14 @@ import {
   type TaskProgressSnapshot,
 } from "./cli/supervision.js";
 import { getTaskTokenReport } from "./core/token-report.js";
+import { buildTaskSummary } from "./core/task-summary.js";
+import { buildTaskDecisionView } from "./core/task-decision-view.js";
+import {
+  compareBuildIdentity,
+  currentBuildIdentity,
+  isBuildIdentity,
+} from "./core/build-identity.js";
+import { daemonExchange } from "./daemon/client.js";
 
 function usage(): string {
   return `ForkLight 0.2
@@ -58,8 +68,9 @@ Usage:
   forklight status <task-id> [--json]
   forklight wait <task-id> --timeout-ms <positive integer> [--poll-ms <positive integer>] [--until change|terminal] [--json]
       # change = status/attempt/event-sequence/updatedAt cursor (not status-only)
-  forklight resume <task-id>
+  forklight resume <task-id> [--feedback <text>] [--authorize-extra --max-budget-usd <number|none> --reason <text> --confirm]
   forklight revise <task-id> --feedback <text>
+  forklight main-review <task-id> --decision <accept|revise|reject> --reason <text> --confirm
   forklight inspect <task-id> [--summary] [--events <nonnegative integer>] [--json]
       # prefer --summary for main-thread supervision; full inspect is for deep audit
   forklight list [--json]
@@ -69,6 +80,8 @@ Usage:
   forklight settings <get|set|apply|reset> [...]
   forklight integration preflight <task-id> [--json]
   forklight integration apply <task-id> --receipt <receipt-id> --confirm [--json]
+  forklight integration status <operation-id> [--json]
+  forklight integration wait <operation-id> --timeout-ms <positive integer> [--json]
   forklight integration history <task-id> [--json]
   forklight tokens <task-id> [--json]
   forklight direct-codex capture --usage <json-object> --metadata <json-object> [--json]
@@ -104,29 +117,11 @@ function printProgress(event: NormalizedWorkerEvent): void {
   if (line !== undefined) process.stdout.write(line);
 }
 
-function taskSummary(task: TaskRecord): Record<string, unknown> {
-  return {
-    id: task.id,
-    name: task.name,
-    status: task.status,
-    provider: task.spec.provider.name,
-    model: task.spec.provider.model,
-    runtime: task.spec.runtime.name,
-    source: task.sourcePath,
-    workspace: task.paths.workspace,
-    sessionId: task.sessionId,
-    createdAt: task.createdAt,
-    startedAt: task.startedAt,
-    finishedAt: task.finishedAt,
-    error: task.error,
-  };
-}
-
 /** Render the human status block (one `key: value` line per defined
  *  field) as a single exact string.  Returns the empty string when the
  *  task has no defined summary fields. */
 function humanStatusLines(task: TaskRecord): string {
-  const summary = taskSummary(task);
+  const summary = buildTaskSummary(task);
   const lines: string[] = [];
   for (const [key, value] of Object.entries(summary)) {
     if (value !== undefined) lines.push(`${key}: ${String(value)}`);
@@ -179,10 +174,32 @@ function humanIntegrationPreflightLines(receipt: Record<string, unknown>): strin
 /** Render the human integration apply block as a single exact string. */
 function humanIntegrationApplyLines(result: Record<string, unknown>): string {
   const lines: string[] = [];
+  if (result.operationId) lines.push(`operationId: ${result.operationId}`);
+  if (result.taskId) lines.push(`taskId: ${result.taskId}`);
   lines.push(`status: ${result.status}`);
   lines.push(`receiptId: ${result.receiptId}`);
   if (result.error) lines.push(`error: ${result.error}`);
   if (result.appliedAt) lines.push(`appliedAt: ${result.appliedAt}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function humanIntegrationOperationLines(view: Record<string, unknown>): string {
+  const lines = [
+    `operationId: ${view.operationId}`,
+    `taskId: ${view.taskId}`,
+    `status: ${view.status}`,
+    `receiptId: ${view.receiptId}`,
+  ];
+  const stages = Array.isArray(view.stages) ? view.stages : [];
+  if (stages.length > 0) {
+    lines.push("stages:");
+    for (const stage of stages) {
+      const value = stage as Record<string, unknown>;
+      lines.push(`  ${value.stage}: ${value.status}`);
+    }
+  }
+  const result = view.result as Record<string, unknown> | undefined;
+  if (result?.error) lines.push(`error: ${result.error}`);
   return `${lines.join("\n")}\n`;
 }
 
@@ -203,6 +220,37 @@ function humanIntegrationHistoryLines(history: {
 function option(arguments_: string[], flag: string): string | undefined {
   const index = arguments_.indexOf(flag);
   return index >= 0 ? arguments_[index + 1] : undefined;
+}
+
+function parseResumeAuthorization(arguments_: string[]): AttemptAuthorization | undefined {
+  const authFlags = ["--authorize-extra", "--max-budget-usd", "--reason", "--confirm"];
+  const hasAuthorizationFlag = arguments_.includes("--authorize-extra");
+  if (!hasAuthorizationFlag) {
+    if (authFlags.slice(1).some((flag) => arguments_.includes(flag))) {
+      throw new Error("resume authorization options require --authorize-extra");
+    }
+    return undefined;
+  }
+  const reason = required(option(arguments_, "--reason"), "authorization reason");
+  const rawBudget = required(option(arguments_, "--max-budget-usd"), "authorized max budget");
+  if (!arguments_.includes("--confirm")) {
+    throw new Error("resume extra-attempt authorization requires --confirm");
+  }
+  const maxBudgetUsd = rawBudget === "none" || rawBudget === "null"
+    ? null
+    : Number(rawBudget);
+  if (
+    maxBudgetUsd !== null
+    && (!Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0)
+  ) {
+    throw new Error("--max-budget-usd must be a positive number or none");
+  }
+  return {
+    additionalAttempts: 1,
+    maxBudgetUsd,
+    reason,
+    confirm: true,
+  };
 }
 
 interface DirectCodexCliOptions {
@@ -400,7 +448,7 @@ function printStatistics(summaries: ProviderModelSummary[]): void {
   }
 }
 
-function health(json: boolean): void {
+async function health(json: boolean): Promise<void> {
   let claudeVersion = "unavailable";
   try {
     claudeVersion = execFileSync("claude", ["--version"], { encoding: "utf8" }).trim();
@@ -411,12 +459,40 @@ function health(json: boolean): void {
   try {
     const settings = new SettingsService(store).get();
     const readiness = providerReadiness(settings.providerDefaults);
+    const clientBuildIdentity = currentBuildIdentity();
+    let daemonBuildIdentity: unknown;
+    let identityStatus = "daemon-unavailable";
+    let identityAction: string | undefined;
+    try {
+      const response = await daemonExchange("health");
+      daemonBuildIdentity = response.serverIdentity;
+      if (isBuildIdentity(response.serverIdentity)) {
+        const comparison = compareBuildIdentity(clientBuildIdentity, response.serverIdentity);
+        identityStatus = comparison.sameBuild
+          ? "matched"
+          : comparison.protocolCompatible
+            ? "build-mismatch"
+            : "protocol-mismatch";
+        if (!comparison.sameBuild) {
+          identityAction = "Rebuild and restart ForkLight daemon and MCP before changes";
+        }
+      } else {
+        identityStatus = "daemon-identity-unavailable";
+        identityAction = "Rebuild and restart ForkLight daemon and MCP before changes";
+      }
+    } catch {
+      // Local CLI health remains useful even when the daemon is not running.
+    }
     const result = {
       ok: claudeVersion !== "unavailable" && readiness.anyReady,
       node: process.version,
       claudeCode: claudeVersion,
       providers: readiness.providers,
       home: forklightHome(),
+      clientBuildIdentity,
+      ...(daemonBuildIdentity === undefined ? {} : { daemonBuildIdentity }),
+      identityStatus,
+      ...(identityAction === undefined ? {} : { identityAction }),
     };
     if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     else {
@@ -428,6 +504,10 @@ function health(json: boolean): void {
         );
       }
       process.stdout.write(`home: ${result.home}\n`);
+      process.stdout.write(
+        `identity: ${result.identityStatus} protocol=${clientBuildIdentity.protocolVersion} build=${clientBuildIdentity.buildId}\n`,
+      );
+      if (identityAction !== undefined) process.stdout.write(`identityAction: ${identityAction}\n`);
     }
   } finally {
     store.close();
@@ -495,7 +575,7 @@ async function main(): Promise<void> {
   }
   const json = rest.includes("--json") || positional === "--json";
   if (command === "health") {
-    health(json);
+    await health(json);
     return;
   }
 
@@ -773,7 +853,7 @@ async function main(): Promise<void> {
         submittedTaskId = task.id;
         return task;
       },
-      renderOutput: (task) => `taskId: ${task.id}\n${humanStatusLines(task)}`,
+      renderOutput: (task) => humanStatusLines(task),
     });
     process.stdout.write(output);
     return;
@@ -834,7 +914,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "integration") {
-    const subcommand = required(positional, "integration subcommand (preflight, apply, or history)");
+    const subcommand = required(positional, "integration subcommand (preflight, apply, status, wait, or history)");
     if (subcommand === "preflight") {
       const taskId = required(rest[0], "task id");
       const { output } = await withCliExchangeReceipt({
@@ -898,7 +978,47 @@ async function main(): Promise<void> {
       process.stdout.write(output);
       return;
     }
-    throw new Error(`Unknown integration subcommand: ${subcommand}. Use: preflight, apply, or history.`);
+    if (subcommand === "status" || subcommand === "wait") {
+      const operationId = required(rest[0], "operation id");
+      let taskId: string | undefined;
+      const timeoutRaw = option(rest, "--timeout-ms");
+      const timeoutMs = subcommand === "wait"
+        ? Number(required(timeoutRaw, "timeout (--timeout-ms)"))
+        : undefined;
+      if (
+        timeoutMs !== undefined
+        && (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 3_600_000)
+      ) {
+        throw new Error("Integration wait timeout must be an integer from 1 to 3600000");
+      }
+      const operation = subcommand === "wait"
+        ? "forklight_integration_wait" as const
+        : "forklight_integration_status" as const;
+      const method = subcommand === "wait"
+        ? "integration_wait" as const
+        : "integration_status" as const;
+      const { output } = await withCliExchangeReceipt({
+        operation,
+        home: forklightHome(),
+        args: { operationId, ...(timeoutMs === undefined ? {} : { timeoutMs }), json },
+        taskId: () => taskId,
+        invoke: async () => {
+          await ensureDaemon();
+          const view = await daemonRequest<Record<string, unknown>>(
+            method,
+            { operationId, ...(timeoutMs === undefined ? {} : { timeoutMs }) },
+          );
+          if (typeof view.taskId === "string") taskId = view.taskId;
+          return view;
+        },
+        renderOutput: (view) => json
+          ? `${JSON.stringify(view, null, 2)}\n`
+          : humanIntegrationOperationLines(view),
+      });
+      process.stdout.write(output);
+      return;
+    }
+    throw new Error(`Unknown integration subcommand: ${subcommand}. Use: preflight, apply, status, wait, or history.`);
   }
 
   if (command === "compete") {
@@ -1163,6 +1283,8 @@ async function main(): Promise<void> {
       const taskId = required(positional, "task id");
       const feedbackIndex = rest.indexOf("--feedback");
       const feedback = feedbackIndex === -1 ? undefined : required(rest[feedbackIndex + 1], "feedback text");
+      const authorization = parseResumeAuthorization(rest);
+      const resumeSettings = new SettingsService(store).get();
       // The daemon path writes "queued: <id>\n" and exits.  The local
       // fallback runs the worker and emits progress lines via
       // `printProgress`; those lines and the final human status block
@@ -1174,7 +1296,18 @@ async function main(): Promise<void> {
       const { output } = await withCliExchangeReceipt({
         operation: "forklight_resume",
         home: forklightHome(),
-        args: { taskId, ...(feedback === undefined ? {} : { feedback }) },
+        args: {
+          taskId,
+          ...(feedback === undefined ? {} : { feedback }),
+          ...(authorization === undefined ? {} : {
+            authorization: {
+              additionalAttempts: 1,
+              maxBudgetUsd: authorization.maxBudgetUsd,
+              reasonLength: authorization.reason.trim().length,
+              confirm: true,
+            },
+          }),
+        },
         taskId,
         invoke: async () => {
           try {
@@ -1182,14 +1315,24 @@ async function main(): Promise<void> {
             const task = await daemonRequest<TaskRecord>("resume", {
               taskId,
               ...(feedback === undefined ? {} : { feedback }),
+              ...(authorization === undefined ? {} : { authorization }),
             });
             renderedOutput = `queued: ${task.id}\n`;
             return task;
           } catch {
+            const executionOptions = authorization === undefined
+              ? undefined
+              : authorizeExtraAttempt(
+                  store,
+                  taskId,
+                  authorization,
+                  resumeSettings.execution.maxAttempts,
+                  resumeSettings.execution.maximumBudgetUsd,
+                );
             const result = await resumeTask(store, taskId, (event) => {
               const line = progressLine(event);
               if (line !== undefined) progressLines.push(line);
-            }, feedback);
+            }, feedback, resumeSettings.execution, resumeSettings.providerDefaults, executionOptions);
             const statusBlock = humanStatusLines(result.task);
             renderedOutput = `${progressLines.join("")}${statusBlock}`;
             if (result.task.status !== "succeeded") {
@@ -1203,6 +1346,43 @@ async function main(): Promise<void> {
       process.stdout.write(output);
       return;
     }
+    if (command === "main-review") {
+      const taskId = required(positional, "task id");
+      const decision = required(option(rest, "--decision"), "review decision");
+      if (decision !== "accept" && decision !== "revise" && decision !== "reject") {
+        throw new Error("main-review --decision must be accept, revise, or reject");
+      }
+      const reason = required(option(rest, "--reason"), "review reason");
+      if (!rest.includes("--confirm")) {
+        throw new Error("main-review requires --confirm");
+      }
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_main_review",
+        home: forklightHome(),
+        args: { taskId, decision, reasonLength: reason.trim().length, confirm: true },
+        taskId,
+        invoke: async () => {
+          try {
+            await ensureDaemon();
+            return daemonRequest<Record<string, unknown>>("main_review", {
+              taskId,
+              decision,
+              reason,
+              confirm: true,
+            });
+          } catch {
+            return recordMainReview(store, taskId, {
+              decision,
+              reason,
+              confirm: true,
+            });
+          }
+        },
+        renderOutput: (review) => `${JSON.stringify(review, null, 2)}\n`,
+      });
+      process.stdout.write(output);
+      return;
+    }
     if (command === "revise") {
       const taskId = required(positional, "task id");
       // The shared eligibility boundary (checkReviseEligibility) canonicalizes
@@ -1212,6 +1392,7 @@ async function main(): Promise<void> {
         throw new Error("revise requires --feedback\n\n" + usage());
       }
       const feedback = required(rest[feedbackIndex + 1], "feedback text");
+      const authorization = parseResumeAuthorization(rest);
       // Same exchange-receipt semantics as resume: daemon path renders
       // "queued: <id>\n"; local fallback accumulates progress lines plus
       // the final human status block.  Resolve persisted settings once so
@@ -1223,17 +1404,39 @@ async function main(): Promise<void> {
       const { output } = await withCliExchangeReceipt({
         operation: "forklight_revise",
         home: forklightHome(),
-        args: { taskId, feedbackLength: feedback.length },
+        args: {
+          taskId,
+          feedbackLength: feedback.length,
+          ...(authorization === undefined ? {} : {
+            authorization: {
+              additionalAttempts: 1,
+              maxBudgetUsd: authorization.maxBudgetUsd,
+              reasonLength: authorization.reason.trim().length,
+              confirm: true,
+            },
+          }),
+        },
         taskId,
         invoke: async () => {
           try {
             await ensureDaemon();
             const task = await daemonRequest<TaskRecord>("revise", {
-              taskId, feedback,
+              taskId,
+              feedback,
+              ...(authorization === undefined ? {} : { authorization }),
             });
             renderedOutput = `queued: ${task.id}\n`;
             return task;
           } catch {
+            const executionOptions = authorization === undefined
+              ? undefined
+              : authorizeExtraAttempt(
+                  store,
+                  taskId,
+                  authorization,
+                  reviseSettings.execution.maxAttempts,
+                  reviseSettings.execution.maximumBudgetUsd,
+                );
             const result = await reviseTask(
               store, taskId, feedback, (event) => {
                 const line = progressLine(event);
@@ -1241,6 +1444,7 @@ async function main(): Promise<void> {
               },
               reviseSettings.execution,
               reviseSettings.providerDefaults,
+              executionOptions,
             );
             const statusBlock = humanStatusLines(result.task);
             renderedOutput = `${progressLines.join("")}${statusBlock}`;
@@ -1264,7 +1468,7 @@ async function main(): Promise<void> {
         taskId,
         invoke: async () => reconcileTask(store, taskId),
         renderOutput: (task) => json
-          ? `${JSON.stringify(taskSummary(task), null, 2)}\n`
+          ? `${JSON.stringify(buildTaskSummary(task), null, 2)}\n`
           : humanStatusLines(task),
       });
       process.stdout.write(output);
@@ -1334,6 +1538,7 @@ async function main(): Promise<void> {
             const task = reconcileTask(store, taskId);
             const attempts = store.listAttempts(taskId);
             const events = store.listEvents(taskId);
+            const integrationResults = store.listIntegrationResults(taskId);
             let diff: string | undefined;
             try {
               diff = await readFile(task.paths.diff, "utf8");
@@ -1341,7 +1546,18 @@ async function main(): Promise<void> {
               // A diff does not exist until independent verification begins.
             }
             return buildCompactInspection({
-              task, attempts, events, diff, eventLimit: summaryOptions.eventLimit,
+              task,
+              attempts,
+              events,
+              integrationResults,
+              decision: buildTaskDecisionView({
+                task,
+                attempts,
+                events,
+                integrationResults,
+              }),
+              diff,
+              eventLimit: summaryOptions.eventLimit,
             });
           },
           renderOutput: (inspection) => summaryOptions.json
@@ -1383,9 +1599,11 @@ async function main(): Promise<void> {
       return;
     }
     if (command === "list") {
-      const tasks = store.listTasks().slice(0, 20).map(taskSummary);
+      const tasks = store.listTasks().slice(0, 20).map((task) => buildTaskSummary(task));
       if (json) process.stdout.write(`${JSON.stringify(tasks, null, 2)}\n`);
-      else for (const task of tasks) process.stdout.write(`${task.id} ${task.status} ${task.name}\n`);
+      else for (const task of tasks) {
+        process.stdout.write(`${task.taskId} ${task.status} ${task.name}\n`);
+      }
       return;
     }
     throw new Error(`Unknown command: ${command}\n\n${usage()}`);

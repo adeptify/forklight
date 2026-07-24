@@ -202,6 +202,7 @@ export class ConsoleServer {
           // coordinator is the single source of truth; the server does no
           // recomputation, currency conversion, or relabelling here.
           const economics = this.coordinator.taskEconomics(p.taskId!);
+          const decision = this.coordinator.taskDecision(p.taskId!);
           return {
             id: task.id,
             name: task.name,
@@ -215,6 +216,7 @@ export class ConsoleServer {
             startedAt: task.startedAt,
             finishedAt: task.finishedAt,
             error: task.error,
+            decision,
             timeline,
             economics,
           };

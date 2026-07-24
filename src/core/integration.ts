@@ -7,16 +7,26 @@ import type { StateStore } from "../state/store.js";
 import type {
   IntegrationReceiptRecord,
   IntegrationResultRecord,
+  IntegrationStageEvidence,
+  ActivationHandoff,
   TaskRecord,
   VerificationCommandResult,
 } from "./types.js";
 import { runCaptured } from "./process.js";
+import { verifierProcessEnvironment } from "../workspace/verifier-git.js";
+import { latestMainReview } from "./main-review.js";
 
 // --- Public type aliases ---
 
 export type PreflightReceipt = Omit<IntegrationReceiptRecord, "consumed">;
 export type IntegrationStatus = IntegrationResultRecord["status"];
 export type IntegrationResult = Omit<IntegrationResultRecord, "id" | "createdAt">;
+export type IntegrationExecutionResult = IntegrationResult | {
+  status: "activation-pending";
+  receiptId: string;
+  taskId: string;
+  handoff: Omit<ActivationHandoff, "home">;
+};
 
 // --- Error class ---
 
@@ -49,6 +59,61 @@ interface BackupRecord {
 
 function sha256(content: string | Buffer): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function recordStage(
+  store: StateStore,
+  taskId: string,
+  operationId: string,
+  receiptId: string,
+  stages: IntegrationStageEvidence[],
+  evidence: IntegrationStageEvidence,
+): void {
+  const existing = stages.findIndex((stage) => stage.stage === evidence.stage);
+  if (existing >= 0) stages[existing] = evidence;
+  else stages.push(evidence);
+  store.addEvent(
+    taskId,
+    undefined,
+    "integration.stage.completed",
+    `${evidence.stage}: ${evidence.status}`,
+    { operationId, receiptId, evidence },
+  );
+}
+
+async function runCommandList(
+  commands: string[],
+  cwd: string,
+  timeoutMs: number,
+): Promise<VerificationCommandResult[]> {
+  const results: VerificationCommandResult[] = [];
+  for (const command of commands) {
+    try {
+      const result = await runCaptured(
+        "/bin/zsh",
+        ["-lc", command],
+        { cwd, timeoutMs },
+      );
+      results.push({
+        command,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        durationMs: result.durationMs,
+        timedOut: result.timedOut,
+      });
+    } catch (error) {
+      results.push({
+        command,
+        exitCode: 1,
+        stdout: "",
+        stderr: error instanceof Error ? error.message : String(error),
+        durationMs: 0,
+        timedOut: false,
+      });
+    }
+  }
+  return results;
 }
 
 async function fileDigest(absPath: string): Promise<string> {
@@ -443,6 +508,18 @@ export async function preflightIntegration(
   if (task.status !== "succeeded") {
     reasons.push(`Task status is "${task.status}", must be "succeeded"`);
   }
+  const events = store.listEvents(taskId);
+  const latestVerification = events
+    .filter((event) => event.type === "verification.completed")
+    .at(-1);
+  const review = latestMainReview(events);
+  if (
+    review?.decision !== "accept"
+    || latestVerification === undefined
+    || review.verificationEventSequence !== latestVerification.sequence
+  ) {
+    reasons.push("Main Codex review acceptance is required");
+  }
 
   // 2. Read diff
   let diff: string;
@@ -593,14 +670,18 @@ export async function applyIntegration(
   taskId: string,
   receiptId: string,
   settings: IntegrationSettings,
-): Promise<IntegrationResult> {
+  operationId: string = randomUUID(),
+): Promise<IntegrationExecutionResult> {
   // 1. Load canonical TaskRecord from store — caller cannot substitute sourcePath
   const task = store.getTask(taskId);
+  const stages: IntegrationStageEvidence[] = [];
 
   // 2. Load canonical receipt from store
   const stored = store.getIntegrationReceipt(receiptId);
   if (!stored) {
-    return persistRejection(store, receiptId, task.id, "Receipt not found in store");
+    return persistRejection(
+      store, operationId, receiptId, task.id, "Receipt not found in store",
+    );
   }
 
   const { consumed, ...receipt } = stored;
@@ -608,22 +689,23 @@ export async function applyIntegration(
   if (receipt.taskId !== task.id) {
     return persistRejection(
       store,
+      operationId,
       receiptId,
       receipt.taskId,
       `Receipt belongs to task "${receipt.taskId}", not requested task "${task.id}"`,
     );
   }
   if (new Date(receipt.expiresAt) <= new Date()) {
-    return persistRejection(store, receiptId, task.id, "Receipt has expired");
+    return persistRejection(store, operationId, receiptId, task.id, "Receipt has expired");
   }
   if (consumed) {
     return persistRejection(
-      store, receiptId, task.id, "Receipt has already been consumed",
+      store, operationId, receiptId, task.id, "Receipt has already been consumed",
     );
   }
   if (receipt.rejectionReasons.length > 0) {
     return persistRejection(
-      store, receiptId, task.id,
+      store, operationId, receiptId, task.id,
       `Preflight did not pass: ${receipt.rejectionReasons.join("; ")}`,
     );
   }
@@ -633,12 +715,12 @@ export async function applyIntegration(
   try {
     diff = await readFile(task.paths.diff, "utf8");
   } catch {
-    return persistRejection(store, receiptId, task.id, "Diff file is missing");
+    return persistRejection(store, operationId, receiptId, task.id, "Diff file is missing");
   }
 
   if (sha256(diff) !== receipt.patchDigest) {
     return persistRejection(
-      store, receiptId, task.id, "Patch digest changed since preflight",
+      store, operationId, receiptId, task.id, "Patch digest changed since preflight",
     );
   }
 
@@ -650,17 +732,22 @@ export async function applyIntegration(
   } catch (error) {
     return persistRejection(
       store,
+      operationId,
       receiptId,
       task.id,
       error instanceof Error ? error.message : String(error),
     );
   }
   if (JSON.stringify(reparsedFiles) !== JSON.stringify(receipt.affectedFiles)) {
-    return persistRejection(store, receiptId, task.id, "Affected file set changed since preflight");
+    return persistRejection(
+      store, operationId, receiptId, task.id, "Affected file set changed since preflight",
+    );
   }
   for (const file of reparsedFiles) {
     const pathReason = await validateSourcePath(task.sourcePath, file);
-    if (pathReason) return persistRejection(store, receiptId, task.id, pathReason);
+    if (pathReason) {
+      return persistRejection(store, operationId, receiptId, task.id, pathReason);
+    }
   }
 
   // 4. Re-verify affected source files match receipt evidence
@@ -668,21 +755,23 @@ export async function applyIntegration(
     receipt.sourceEvidence,
   )) {
     const unsafe = detectUnsafePath(file);
-    if (unsafe) return persistRejection(store, receiptId, task.id, unsafe);
+    if (unsafe) {
+      return persistRejection(store, operationId, receiptId, task.id, unsafe);
+    }
 
     const absPath = path.join(task.sourcePath, file);
     try {
       const actual = await fileDigest(absPath);
       if (expectedDigest !== "absent" && actual !== expectedDigest) {
         return persistRejection(
-          store, receiptId, task.id,
+          store, operationId, receiptId, task.id,
           `Source file changed since preflight: ${file}`,
         );
       }
     } catch {
       if (expectedDigest !== "absent") {
         return persistRejection(
-          store, receiptId, task.id,
+          store, operationId, receiptId, task.id,
           `Cannot read source file for apply: ${file}`,
         );
       }
@@ -697,6 +786,7 @@ export async function applyIntegration(
   if (finalCheck.exitCode !== 0) {
     return persistRejection(
       store,
+      operationId,
       receiptId,
       task.id,
       `Patch no longer applies cleanly: ${finalCheck.stderr || finalCheck.stdout}`,
@@ -708,7 +798,7 @@ export async function applyIntegration(
     store.consumeIntegrationReceipt(receiptId);
   } catch (err) {
     return persistRejection(
-      store, receiptId, task.id,
+      store, operationId, receiptId, task.id,
       err instanceof Error ? err.message : String(err),
     );
   }
@@ -725,7 +815,7 @@ export async function applyIntegration(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const record = buildResultRecord(
-      receiptId, task.id, "rejected", bkpDir, undefined,
+      operationId, receiptId, task.id, "rejected", bkpDir, undefined,
       `Backup failed: ${msg}`,
     );
     store.saveIntegrationResult(record);
@@ -741,6 +831,7 @@ export async function applyIntegration(
     const actual = backup.existed ? backup.digest : "absent";
     if (expected !== actual) {
       const record = buildResultRecord(
+        operationId,
         receiptId,
         task.id,
         "rejected",
@@ -779,7 +870,7 @@ export async function applyIntegration(
       ? "retained-failure"
       : "rolled-back";
     const record = buildResultRecord(
-      receiptId, task.id, status, bkpDir, undefined, error,
+      operationId, receiptId, task.id, status, bkpDir, undefined, error,
     );
     if (rollbackFailures.length > 0) record.rollbackFailures = rollbackFailures;
     store.saveIntegrationResult(record);
@@ -791,6 +882,26 @@ export async function applyIntegration(
   }
 
   if (applyResult.exitCode !== 0) {
+    recordStage(
+      store,
+      task.id,
+      operationId,
+      receiptId,
+      stages,
+      {
+        stage: "source-applied",
+        status: "failed",
+        commands: [{
+          command: `git apply -p2 ${task.paths.diff}`,
+          exitCode: applyResult.exitCode,
+          stdout: applyResult.stdout,
+          stderr: applyResult.stderr,
+          durationMs: applyResult.durationMs,
+          timedOut: applyResult.timedOut,
+        }],
+        error: applyResult.stderr || applyResult.stdout || "Patch application failed",
+      },
+    );
     const rollbackFailures = await rollbackSource(
       task.sourcePath,
       backups,
@@ -805,7 +916,17 @@ export async function applyIntegration(
         : errorDetail;
 
     const status: IntegrationStatus = rollbackFailures.length > 0 ? "retained-failure" : "rolled-back";
-    const record = buildResultRecord(receiptId, task.id, status, bkpDir, undefined, fullError);
+    const record = buildResultRecord(
+      operationId,
+      receiptId,
+      task.id,
+      status,
+      bkpDir,
+      undefined,
+      fullError,
+      undefined,
+      stages,
+    );
     if (rollbackFailures.length > 0) record.rollbackFailures = rollbackFailures;
     store.saveIntegrationResult(record);
     store.addEvent(
@@ -819,6 +940,25 @@ export async function applyIntegration(
   const postApplyDigests = await fingerprintFiles(
     task.sourcePath,
     receipt.affectedFiles,
+  );
+  recordStage(
+    store,
+    task.id,
+    operationId,
+    receiptId,
+    stages,
+    {
+      stage: "source-applied",
+      status: "passed",
+      commands: [{
+        command: `git apply -p2 ${task.paths.diff}`,
+        exitCode: applyResult.exitCode,
+        stdout: applyResult.stdout,
+        stderr: applyResult.stderr,
+        durationMs: applyResult.durationMs,
+        timedOut: applyResult.timedOut,
+      }],
+    },
   );
 
   // 9. Copy patched source to isolated temp dir and verify there.  Any
@@ -834,13 +974,14 @@ export async function applyIntegration(
       task.sourcePath,
       task.spec.workspace.exclude,
     );
+    const verificationEnvironment = await verifierProcessEnvironment(task, verifyDir);
     for (const command of task.spec.acceptance.commands) {
       const result = await runCaptured(
         "/bin/zsh",
         ["-lc", command],
         {
           cwd: verifyDir,
-          env: process.env,
+          env: verificationEnvironment,
           timeoutMs: settings.verificationTimeoutMs,
         },
       );
@@ -854,10 +995,7 @@ export async function applyIntegration(
       };
       verificationCommands.push(cmdResult);
 
-      if (result.exitCode !== 0) {
-        verificationPassed = false;
-        break;
-      }
+      if (result.exitCode !== 0) verificationPassed = false;
     }
   } catch (err) {
     verificationPassed = false;
@@ -878,16 +1016,39 @@ export async function applyIntegration(
     postApplyDigests,
   );
 
+  const sourceVerificationEvidence: IntegrationStageEvidence = {
+    stage: "source-verified",
+    status: verificationPassed && concurrentChanged.length === 0 ? "passed" : "failed",
+    ...(verificationCommands.length === 0 ? {} : { commands: verificationCommands }),
+    ...(verificationError === undefined && concurrentChanged.length === 0
+      ? {}
+      : {
+          error: verificationError
+            ?? `Concurrent file edits detected: ${concurrentChanged.join(", ")}`,
+        }),
+  };
+  recordStage(
+    store,
+    task.id,
+    operationId,
+    receiptId,
+    stages,
+    sourceVerificationEvidence,
+  );
+
   if (concurrentChanged.length > 0) {
     const verificationSummary = verificationPassed
       ? "Source verification passed"
       : (verificationError ?? "Source verification failed");
     const record = buildResultRecord(
+      operationId,
       receiptId, task.id, "retained-failure", bkpDir,
       verificationCommands.length > 0 ? verificationCommands : undefined,
       `${verificationSummary}; concurrent file edits detected ` +
       `during verification: ${concurrentChanged.join(", ")}. ` +
       `Changes retained per safety policy.`,
+      undefined,
+      stages,
     );
     record.postApplyDigests = postApplyDigests;
     store.saveIntegrationResult(record);
@@ -900,13 +1061,99 @@ export async function applyIntegration(
   }
 
   if (verificationPassed) {
+    const buildCommands = task.spec.delivery?.buildCommands ?? [];
+    if (buildCommands.length === 0) {
+      recordStage(
+        store,
+        task.id,
+        operationId,
+        receiptId,
+        stages,
+        { stage: "artifact-built", status: "not-applicable" },
+      );
+    } else {
+      const buildResults = await runCommandList(
+        buildCommands,
+        task.sourcePath,
+        settings.verificationTimeoutMs,
+      );
+      const buildPassed = buildResults.every((result) => result.exitCode === 0);
+      recordStage(
+        store,
+        task.id,
+        operationId,
+        receiptId,
+        stages,
+        {
+          stage: "artifact-built",
+          status: buildPassed ? "passed" : "failed",
+          commands: buildResults,
+          ...(buildPassed ? {} : { error: "Artifact build failed; source changes retained" }),
+        },
+      );
+      if (!buildPassed) {
+        const record = buildResultRecord(
+          operationId,
+          receiptId,
+          task.id,
+          "retained-failure",
+          bkpDir,
+          verificationCommands.length > 0 ? verificationCommands : undefined,
+          "Artifact build failed; source changes retained",
+          undefined,
+          stages,
+        );
+        record.postApplyDigests = postApplyDigests;
+        store.saveIntegrationResult(record);
+        store.addEvent(
+          task.id,
+          undefined,
+          "integration.apply.completed",
+          "Integration source verified but artifact build failed (retained)",
+          record,
+        );
+        return stripResultMeta(record);
+      }
+    }
+
+    const activationDeclared =
+      (task.spec.delivery?.activationCommands.length ?? 0) > 0
+      || (task.spec.delivery?.activationCheckCommands.length ?? 0) > 0;
+    if (activationDeclared) {
+      return {
+        status: "activation-pending",
+        receiptId,
+        taskId: task.id,
+        handoff: {
+          version: 1,
+          operationId,
+          taskId: task.id,
+          receiptId,
+          sourcePath: task.sourcePath,
+          timeoutMs: settings.verificationTimeoutMs,
+          activationCommands: task.spec.delivery?.activationCommands ?? [],
+          activationCheckCommands: task.spec.delivery?.activationCheckCommands ?? [],
+        },
+      };
+    } else {
+      recordStage(
+        store,
+        task.id,
+        operationId,
+        receiptId,
+        stages,
+        { stage: "runtime-activated", status: "not-applicable" },
+      );
+    }
     await pruneBackups(task.paths.root, settings.backupRetentionCount);
 
     const record = buildResultRecord(
+      operationId,
       receiptId, task.id, "applied", bkpDir,
       verificationCommands.length > 0 ? verificationCommands : undefined,
       undefined,
       new Date().toISOString(),
+      stages,
     );
     record.postApplyDigests = postApplyDigests;
     store.saveIntegrationResult(record);
@@ -939,9 +1186,12 @@ export async function applyIntegration(
     }
 
     const record = buildResultRecord(
+      operationId,
       receiptId, task.id, status, bkpDir,
       verificationCommands.length > 0 ? verificationCommands : undefined,
       error,
+      undefined,
+      stages,
     );
     record.postApplyDigests = postApplyDigests;
     if (rollbackFailures.length > 0) record.rollbackFailures = rollbackFailures;
@@ -955,9 +1205,12 @@ export async function applyIntegration(
 
   // autoRollback disabled — retain failed state
   const record = buildResultRecord(
+    operationId,
     receiptId, task.id, "retained-failure", bkpDir,
     verificationCommands.length > 0 ? verificationCommands : undefined,
     `${failureReason}; changes retained per settings`,
+    undefined,
+    stages,
   );
   record.postApplyDigests = postApplyDigests;
   store.saveIntegrationResult(record);
@@ -972,6 +1225,7 @@ export async function applyIntegration(
 
 function persistRejection(
   store: StateStore,
+  operationId: string,
   receiptId: string,
   taskId: string,
   error: string,
@@ -981,7 +1235,7 @@ function persistRejection(
   if (stored) {
     const canonicalTaskId = stored.taskId;
     const record: IntegrationResultRecord = {
-      id: randomUUID(),
+      id: operationId,
       receiptId,
       taskId: canonicalTaskId,
       status: "rejected",
@@ -999,6 +1253,7 @@ function persistRejection(
 }
 
 function buildResultRecord(
+  operationId: string,
   receiptId: string,
   taskId: string,
   status: IntegrationStatus,
@@ -1006,9 +1261,10 @@ function buildResultRecord(
   verificationCommands: VerificationCommandResult[] | undefined,
   error: string | undefined,
   appliedAt?: string,
+  stages?: IntegrationStageEvidence[],
 ): IntegrationResultRecord {
   return {
-    id: randomUUID(),
+    id: operationId,
     receiptId,
     taskId,
     status,
@@ -1018,6 +1274,7 @@ function buildResultRecord(
       : { verificationCommands }),
     ...(error === undefined ? {} : { error }),
     ...(appliedAt === undefined ? {} : { appliedAt }),
+    ...(stages === undefined ? {} : { stages }),
     createdAt: new Date().toISOString(),
   };
 }
