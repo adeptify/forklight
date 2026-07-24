@@ -550,10 +550,11 @@
 
 ### FL-D70：占位符检查把正常领域词 `unknown` 误判为未完成合同
 
-- 状态：真实 Task YAML 通过改写措辞绕过；验证器语义未修复。
-- 证据：合同中描述“unknown/nonexistent Task”这一正常错误场景时，validator 仅凭 `unknown` 文本命中占位符规则并拒绝整份 Task，而不是检查结构化未填字段。
+- 状态：已修复（验证器语义）。占位符检查已拆分为 hard gate 与 soft warning。
+- 证据：合同中描述”unknown/nonexistent Task”这一正常错误场景时，validator 仅凭 `unknown` 文本命中占位符规则并拒绝整份 Task，而不是检查结构化未填字段。
 - 影响：硬性字符串规则会迫使主 Agent 改写准确表达，增加合同 Token 和认知成本，也会使不同语言/领域词产生随机误报。
 - 候选改进：占位符 hard gate 只识别明确模板标记与空结构字段；普通自然语言命中降为可解释 warning，允许 Task 级 override 并记录原因。结构完整性与措辞启发式必须分开分类。
+- 落地：`src/core/task.ts` 的 `assessTaskQuality` 现按字段扫描；hard gate 仅匹配模板 sentinel（`{{...}}`、`___`、`???`、全大写 `TODO|TBD|FIXME`），自然语言词（`unknown`、小写 `todo/tbd/fixme`、`待定/暂不清楚/以后再说`）降级为带字段位置的 `QualityReport.warnings`，不阻断提交。CLI/MCP validate 自动透出 warning。覆盖测试见 `tests/task.test.ts`。
 
 ### FL-D71：Daemon 经济性读路径已用 DeepSeek Pro 一次完成并真实激活
 
@@ -849,10 +850,11 @@
 
 ### FL-D112：正常词 `unknown` 再次触发占位符 hard gate
 
-- 状态：合同改用 `unrecognized` 才通过；这是 FL-D70 的重复证据，验证器语义仍未修复。
-- 证据：任务合同描述“unknown completion evidence”这一正常兼容场景时，quality gate 仅因字符串 `unknown` 拒绝 100/100 结构化合同。改写同义词后结构完全不变即通过。
+- 状态：已修复（与 FL-D70 同一改动）。这是 FL-D70 的重复证据，验证器语义现已修复。
+- 证据：任务合同描述”unknown completion evidence”这一正常兼容场景时，quality gate 仅因字符串 `unknown` 拒绝 100/100 结构化合同。改写同义词后结构完全不变即通过。
 - 影响：语言启发式伪装成结构 hard gate，迫使主 Agent增加改写和合同 Token，并会系统性误报错误处理、兼容性和多语言任务。
 - 候选改进：只对空字段、明确模板 sentinel 和未替换变量做 hard fail；自然语言词命中最多是 warning，并提供具体字段位置与 task-level acknowledgment。
+- 落地：见 FL-D70。`unknown` 现为 soft warning（带 `field`/`term`/`excerpt`），不再 hard-reject 结构完整的合同；warning 即为可记录、不阻断的 task 级 acknowledgment。回归测试覆盖 “unknown completion evidence” 场景。
 
 ### FL-D113：Integration 前台十秒超时再次与后台成功冲突
 

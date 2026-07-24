@@ -11,6 +11,7 @@ import type {
   DeliverySpec,
   QualityCheck,
   QualityReport,
+  QualityWarning,
   TaskContract,
   TaskModuleContract,
   PolicyMode,
@@ -184,6 +185,80 @@ function qualityCheck(id: string, label: string, passed: boolean, detail: string
   return { id, label, passed, detail };
 }
 
+/**
+ * Hard placeholder sentinels: unambiguous "left unfilled" markers. Case
+ * sensitive, so all-caps `TODO`/`TBD`/`FIXME` still trip the gate while the
+ * lowercase words `todo`/`tbd`/`fixme` in prose fall through to the wording
+ * warning. Template braces, underscore fills, and `???` are structural
+ * placeholders, not natural language.
+ */
+const PLACEHOLDER_SENTINEL = /\b(?:TODO|TBD|FIXME)\b|\{\{[^}]+\}\}|_{3,}|\?{3,}/;
+
+/**
+ * Soft wording heuristic: natural-language uncertainty terms that may be
+ * legitimate domain wording (error handling, compatibility notes, the word
+ * `unknown`). These never hard-fail; they surface as field-located warnings
+ * for human review. See FL-D70 / FL-D112.
+ */
+const PLACEHOLDER_WORDING = /\b(?:unknown|todo|tbd|fixme)\b|待定|暂不清楚|以后再说/i;
+
+interface ContractStringField {
+  field: string;
+  text: string;
+}
+
+function collectContractStringFields(value: unknown, prefix: string, out: ContractStringField[]): void {
+  if (typeof value === "string") {
+    if (value.length > 0) out.push({ field: prefix, text: value });
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectContractStringFields(item, `${prefix}[${index}]`, out));
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, val] of Object.entries(value)) {
+      collectContractStringFields(val, prefix ? `${prefix}.${key}` : key, out);
+    }
+  }
+}
+
+function boundedExcerpt(text: string, match: RegExpMatchArray): string {
+  const start = match.index ?? 0;
+  const end = start + match[0].length;
+  const lo = Math.max(0, start - 20);
+  const hi = Math.min(text.length, end + 20);
+  const lead = lo > 0 ? "…" : "";
+  const trail = hi < text.length ? "…" : "";
+  return `${lead}${text.slice(lo, hi).trim()}${trail}`;
+}
+
+interface PlaceholderScan {
+  sentinelFields: string[];
+  warnings: QualityWarning[];
+}
+
+function scanPlaceholders(fields: ContractStringField[]): PlaceholderScan {
+  const sentinelFields: string[] = [];
+  const warnings: QualityWarning[] = [];
+  for (const field of fields) {
+    const sentinel = field.text.match(PLACEHOLDER_SENTINEL);
+    if (sentinel) {
+      sentinelFields.push(field.field);
+      continue;
+    }
+    const wording = field.text.match(PLACEHOLDER_WORDING);
+    if (wording) {
+      warnings.push({
+        field: field.field,
+        term: wording[0],
+        excerpt: boundedExcerpt(field.text, wording),
+      });
+    }
+  }
+  return { sentinelFields, warnings };
+}
+
 export function assessTaskQuality(spec: TaskSpec, quality?: ContractQualitySettings): QualityReport {
   if (spec.version === 1) {
     const issue = "Legacy version 1 task has no structured execution contract";
@@ -192,6 +267,7 @@ export function assessTaskQuality(spec: TaskSpec, quality?: ContractQualitySetti
       score: 0,
       checks: [qualityCheck("contract-version", "Structured contract", false, issue)],
       issues: [issue],
+      warnings: [],
     };
   }
 
@@ -207,8 +283,12 @@ export function assessTaskQuality(spec: TaskSpec, quality?: ContractQualitySetti
         module.boundaries.length > 0,
     );
   const scenarioNames = new Set(contract.scenarios.map((scenario) => scenario.name.toLowerCase()));
-  const serialized = JSON.stringify({ contract, acceptance: spec.acceptance });
-  const hasPlaceholder = /\b(?:todo|tbd|fixme|unknown)\b|待定|暂不清楚|以后再说/i.test(serialized);
+  const stringFields: ContractStringField[] = [];
+  collectContractStringFields({ contract, acceptance: spec.acceptance }, "", stringFields);
+  const placeholderScan = scanPlaceholders(stringFields);
+  const placeholderDetail = placeholderScan.sentinelFields.length === 0
+    ? "Remove TODO, TBD, FIXME, or template variables before submitting"
+    : `Remove template placeholders in: ${placeholderScan.sentinelFields.join(", ")}`;
   const checks = [
     qualityCheck(
       "outcome",
@@ -267,8 +347,8 @@ export function assessTaskQuality(spec: TaskSpec, quality?: ContractQualitySetti
     qualityCheck(
       "placeholders",
       "No unresolved placeholders",
-      !hasPlaceholder,
-      "Remove TODO, TBD, unknown, or equivalent unresolved decisions",
+      placeholderScan.sentinelFields.length === 0,
+      placeholderDetail,
     ),
     qualityCheck(
       "change-budget",
@@ -290,6 +370,7 @@ export function assessTaskQuality(spec: TaskSpec, quality?: ContractQualitySetti
     score: Math.round((passedCount / checks.length) * 100),
     checks,
     issues,
+    warnings: placeholderScan.warnings,
   };
 }
 

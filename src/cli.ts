@@ -719,6 +719,12 @@ async function main(): Promise<void> {
         for (const check of report.checks) {
           process.stdout.write(`${check.passed ? "✓" : "✗"} ${check.label} — ${check.detail}\n`);
         }
+        if (report.warnings.length > 0) {
+          process.stdout.write(`Wording warnings (${report.warnings.length}):\n`);
+          for (const warning of report.warnings) {
+            process.stdout.write(`  ⚠ ${warning.field}: "${warning.term}" - ${warning.excerpt}\n`);
+          }
+        }
         if (integration.applicable) {
           process.stdout.write(
             `Integration feasibility: ${integration.integratable ? "OK" : "WARN — executable but may not be integratable"}\n`,

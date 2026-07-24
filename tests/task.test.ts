@@ -9,7 +9,9 @@ import { attemptRuntimeBudget, budgetArguments } from "../src/workers/claude.js"
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "../src/core/settings.js";
 import type {
   AttemptRecord,
+  ContractTaskSpec,
   EventRecord,
+  QualityReport,
   TaskRecord,
   VerificationCommandResult,
   VerificationResult,
@@ -349,6 +351,82 @@ test("configured quality limits appear in diagnostic detail strings", () => {
   assert.match(issueText, /at most 6 files/);
   assert.match(issueText, /500 added\/deleted lines/);
   assert.match(issueText, /one to 4 files/);
+});
+
+// --- placeholder hard gate vs wording warning (FL-D70 / FL-D112) ---
+
+function assessWithContract(contractOverrides: Record<string, unknown>): QualityReport {
+  const base = contractSpec();
+  const spec = parseTaskSpec(
+    { ...base, contract: { ...(base.contract as Record<string, unknown>), ...contractOverrides } },
+    process.cwd(),
+  );
+  return assessTaskQuality(spec);
+}
+
+test("clean contract passes with no wording warnings", () => {
+  const report = assessWithContract({});
+  assert.equal(report.passed, true);
+  assert.equal(report.warnings.length, 0);
+});
+
+test("natural-language 'unknown' is a non-blocking warning with field location (FL-D70)", () => {
+  // A contract that legitimately describes an "unknown Task" error scenario must
+  // not be hard-rejected merely for containing the word "unknown".
+  const report = assessWithContract({ context: ["Handles unknown Task errors gracefully"] });
+  assert.equal(report.passed, true);
+  const warning = report.warnings.find((w) => w.term.toLowerCase() === "unknown");
+  assert.ok(warning, "expected an 'unknown' wording warning");
+  assert.equal(warning!.field, "contract.context[0]");
+  assert.match(warning!.excerpt, /unknown/i);
+  const placeholder = report.checks.find((c) => c.id === "placeholders");
+  assert.ok(placeholder?.passed, "placeholders hard gate must not trip on the word 'unknown'");
+});
+
+test("'unknown completion evidence' passes structurally (FL-D112)", () => {
+  const report = assessWithContract({ risks: ["Downgrade path for unknown completion evidence"] });
+  assert.equal(report.passed, true);
+  assert.ok(report.warnings.some((w) => w.term.toLowerCase() === "unknown"));
+});
+
+test("template sentinel {{...}} hard-fails at parse time and names the field", () => {
+  assert.throws(
+    () => assessWithContract({ outcome: "Replace {{owner}} with the real owner name here" }),
+    /Remove template placeholders in: contract\.outcome/,
+  );
+});
+
+test("assessTaskQuality marks a sentinel field as a hard failure, not a warning", () => {
+  const clean = parseTaskSpec(contractSpec(), process.cwd()) as ContractTaskSpec;
+  const spec: ContractTaskSpec = {
+    ...clean,
+    contract: { ...clean.contract, outcome: "Replace {{owner}} with the real owner name here" },
+  };
+  const report = assessTaskQuality(spec);
+  assert.equal(report.passed, false);
+  const placeholder = report.checks.find((c) => c.id === "placeholders");
+  assert.equal(placeholder?.passed, false);
+  assert.match(placeholder!.detail, /contract\.outcome/);
+  assert.ok(
+    !report.warnings.some((w) => w.field === "contract.outcome"),
+    "a sentinel field should not also produce a wording warning",
+  );
+});
+
+test("all-caps TODO is a hard sentinel at parse time; lowercase 'todo' is only a warning", () => {
+  assert.throws(
+    () => assessWithContract({ context: ["Remember the TODO marker from the template"] }),
+    /Remove template placeholders in: contract\.context\[0\]/,
+  );
+  const lower = assessWithContract({ context: ["Add a todo list feature to the sidebar"] });
+  assert.equal(lower.passed, true);
+  assert.ok(lower.warnings.some((w) => w.term.toLowerCase() === "todo"));
+});
+
+test("Chinese uncertainty phrase '待定' is a warning, not a hard gate", () => {
+  const report = assessWithContract({ risks: ["处理待定状态下的回退逻辑"] });
+  assert.equal(report.passed, true);
+  assert.ok(report.warnings.some((w) => w.term === "待定"));
 });
 
 test("loadTaskSpec threads quality settings through to rejection", async () => {

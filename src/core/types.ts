@@ -155,11 +155,25 @@ export interface QualityCheck {
   detail: string;
 }
 
+/**
+ * A non-blocking wording heuristic hit. Placeholder detection separates
+ * structural template sentinels (hard fail) from natural-language terms that
+ * may be legitimate domain wording (soft warning with a field location). See
+ * FL-D70 / FL-D112: the word `unknown` must not hard-reject a structured
+ * contract.
+ */
+export interface QualityWarning {
+  field: string;
+  term: string;
+  excerpt: string;
+}
+
 export interface QualityReport {
   passed: boolean;
   score: number;
   checks: QualityCheck[];
   issues: string[];
+  warnings: QualityWarning[];
 }
 
 export interface TaskPaths {

@@ -170,5 +170,6 @@ git diff --check
   `per-request-usage-required`。
 - Provider cached probe 的历史 failed 状态不会因 Keychain 已配置而自动改写。
 - FL-D70 / FL-D112 的自然语言 placeholder 误伤未纳入本次 lean-core Goal，
-  仍在 backlog。
+  当时仍在 backlog；已于 2026-07-25 后续迭代修复（hard sentinel 与 soft wording
+  拆分，详见 `forklight-dogfood-log.md` 对应条目）。
 - 本次真实 Dogfood 不能外推为所有 Provider、模型、仓库和任务类型均已验证。
