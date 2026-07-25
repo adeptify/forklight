@@ -55,6 +55,7 @@
 
 ### FL-D02：领域枚举词触发占位符误报
 
+- 状态：**已关闭（2026-07-25）**。占位符 hard/soft 拆分（见 FL-D70 / FL-D112）；`unknown` 等自然语言词降为带字段位置的 soft warning，不再 hard-reject 结构完整的合同。
 - 证据：合同使用英文 `unknown` 描述 `legacy_unknown` 语义时，`forklight validate` 得分 92/100，并判定存在未决占位符；改写后得到 100/100。
 - 影响：合法领域术语会导致合同无法提交。
 - 候选改进：占位符检测只匹配独立占位表达或允许反引号内的领域标识；报告命中位置。
@@ -152,7 +153,7 @@
 
 ### FL-D16：失败事件中出现 `subtype: success`
 
-- 状态：已复现。
+- 状态：**已关闭（partial）**（2026-07-25）。normalizer terminalError + auth `failureCategory` 已统一终态分类（见 §2 K 与 FL-D15）；信封 subtype 仍保留在 payload 作审计，不再驱动分类。
 - 证据：终态 `inspect` 同时记录 `worker.failed`，但该事件 payload 的 `subtype` 为 `success`；同一 Attempt 的最终 status、exit code 和 resultText 均明确表示鉴权失败。
 - 影响：依赖事件流的控制台、统计或自动恢复策略可能把失败误分类；用户也难以判断这是 Worker 正常返回了一份失败报告，还是运行时真正失败。
 - 候选改进：归一化 Worker 结果时令 event type、subtype、exit code 与 task status 使用同一终态分类；为鉴权失败增加回归测试。
@@ -218,7 +219,7 @@
 
 ### FL-D25：失败任务缺少“一眼看懂”的阶段结果与部分产物
 
-- 状态：已复现。
+- 状态：**已关闭（partial）**（2026-07-25）。Decision View 已提供 stage/nextAction/workerClaim/verification/lineage/integration 分栏，`inspect --summary` 合并展示（见 §2 E）；固定五段式 + budget delta 的终态摘要属 product-vision。
 - 证据：`forklight inspect` 的原始事件能推断 Worker 已运行、Verifier/Acceptance 未开始、Diff 为空、预算超支且无 result event，但顶层摘要没有把这些状态合并展示，也没有把中断前的部分分析整理成可恢复产物。
 - 影响：用户只能阅读长事件流才能判断“源码有没有变、审查做到哪里、测试有没有跑、是否值得续跑”；已经付费产生的调查信息难以复用。
 - 候选改进：终态摘要固定显示 Worker、Synthesis、Acceptance、Diff、Integration 五段状态，以及预算差额；中断时保存脱敏的 partial findings，明确标记为“未完成、未验证”，供用户决定缩小范围、拆任务或授权 Resume。
@@ -407,7 +408,7 @@
 
 ### FL-D51：运行中状态缺少可验证的阶段心跳
 
-- 状态：多次长 Attempt 中观察到，尚未实现。
+- 状态：**已关闭（核心）**（2026-07-25）。进展可见性由 latest-event activity（FL-D83）提供，`status`/`wait` 显示 `lastEventAt` + `activity`；bounded heartbeat（log delta/PID 活性/watchdog 剩余窗口）属 product-vision（见 §2 E）。
 - 证据：Worker 进程和 raw log 持续增长时，Task `updatedAt` 可长时间不变；现有 status 只显示 `running`，不能说明最近一次有效动作、当前阶段、日志是否增长、是否在 Provider 重试或是否接近 no-progress watchdog。
 - 影响：用户会怀疑“界面显示运行中但其实卡住”，主调度也只能读取 PID 和原始日志做人工判断。长任务和 3–5 并发时，这会放大错误取消和无效等待。
 - 候选改进：持久化 bounded progress heartbeat：最近规范化事件、事件时间、log byte/line delta、Worker PID 活性、当前阶段、Provider retry、距 watchdog 的剩余窗口。心跳是可观察证据，不应因为模型耗时较长就自动判失败；no-progress hard/warn 行为必须可配置。
@@ -453,7 +454,7 @@
 
 ### FL-D57：`running` 状态无法区分模型推进、Provider 等待和真正卡死
 
-- 状态：在 MiniMax-M3 三轮 MCP 收据任务中再次复现；本轮只能由主 Codex读取 PID、raw log 大小和修改时间人工确认。
+- 状态：**已关闭（核心）**（2026-07-25）。`status`/`wait` 现显示 `lastEventAt` + `activity`（active/quiet/terminal，FL-D83），可区分近期有活动与静默；Provider-wait 与 stuck 的更细 sub-state 及中途重试计数属 product-vision（见 §2 E）。
 - 证据：任务 `54190ea6-1819-404a-bfcb-c693e4d9d1f0` 的 Attempt 1 持续约 34 分 44 秒，中间多次出现约 3–4 分钟 Provider 返回间隔，但进程仍存活且随后继续编辑；Task `updatedAt` 长时间停留在较早时间，Console 只显示 `running`。Attempt 3 运行期间 raw log 从 27KB 持续增长到 726KB，最终正常转入 `verifying` 并成功。
 - 影响：长等待会被用户误认为卡死，也可能被 no-progress 规则错误判为模型失败；反过来，只有进程存活也不能证明任务有有效进展。
 - 候选改进：把 `worker_action`、`provider_wait`、`verifying`、`no_progress` 分成可观察阶段，并保存最近事件时间、日志增量、PID 状态和距 watchdog 的时间。Provider 等待不计模型能力失败；等待超时的 hard/warn 行为与阈值可配置。
@@ -745,7 +746,7 @@
 
 ### FL-D97：`wait --until change` 没有观察事件流，活跃 Worker 会被显示成超时
 
-- 状态：通过反复 inspect 旁路观察；监督语义尚未修复。
+- 状态：**已关闭（2026-07-25）**。cursor 已含 `latestEventSequence`，`wait --until change` 观察事件流而非只看 `updatedAt`（见 §2 E 与 2026-07-25 对账；`tests/cli-supervision.test.ts` 覆盖 event 增而 status 不变 => changed）。残留 coarseness（effective-action vs narration、`stalled` 态）归入 product-vision。
 - 证据：Worker 在 12:47-13:01 持续写文件并产生 event sequence 51-196，但 `wait --until change` 的 30 秒窗口多次返回 timeout，因为它只比较 Task `updatedAt`；事件插入不会更新该字段。进程和事件均正常，用户界面却容易理解为卡住。
 - 影响：长程任务的“有进展、正在思考、真正停滞”无法可靠区分，主线程被迫频繁 inspect，增加轮询和上下文开销。
 - 候选改进：change cursor 应由 `task.updatedAt + latestEventSequence + attempt status/stage` 组成；wait 返回最后有效动作、距今时间和 typed `active | quiet | stalled`，Console 使用同一读模型而不是自行猜测。
@@ -838,14 +839,14 @@
 
 ### FL-D110：并行 dogfood 的无关合入触发全局 `sourceUnchanged=false`
 
-- 状态：本轮通过逐文件 baseline identity 检查安全合入；全局 source fingerprint 仍需产品化修正。
+- 状态：**已关闭（核心）**（2026-07-25）。全局 `sourceUnchanged` hard 门已改为 affected-path gate（见 §2 F），无重叠变化不再误杀；全局 fingerprint 仅作审计。
 - 证据：Outcome-policy Worker 运行期间，主 Codex安全合入了 Console auth 的五个文件。两组生产文件没有重叠，但 Task 的全项目 fingerprint 因外部变化变为 false，后续 verifier 必然拒绝；这重复了此前并行任务的同类假失败。
 - 影响：并发度设置为 4，却用全项目不变作为成功硬门，等于让无关任务互相制造失败；失败率、Token 与费用统计都会被调度器自身污染。
 - 候选改进：保留原始全局 snapshot 作为审计，真正的兼容 hard gate改为 affected paths + dependency closure 的三方 digest；无重叠变化记录 warning，有语义依赖或同文件变化才暂停合并。
 
 ### FL-D111：`wait --until change` 再次把有事件的 Worker 显示成 timeout
 
-- 状态：通过 inspect 旁路监督；这是 FL-D97 的重复证据，尚未修复。
+- 状态：**已关闭（2026-07-25）**。与 FL-D97 同属 wait 事件流修复，现已观察事件 sequence；重复证据，原根因已修（见 §2 E）。
 - 证据：DeepSeek 三轮执行时 Worker event sequence 持续增长，但 Task `updatedAt` 在阶段内不变，`wait --until change` 因只比较 Task timestamp 而超时。主线程不得不读取更大的 inspect 结果确认进度。
 - 影响：用户会把正常执行误解为卡死；主 Codex增加轮询与 exchange Token，反而侵蚀 ForkLight 的主线程节约。
 - 候选改进：统一 progress cursor 为 `task.updatedAt + latestEventSequence + attempt/status/stage`，返回 `active | quiet | stalled`、最后有效动作与距今时间；CLI、MCP、Console 共享同一紧凑读模型。
@@ -860,7 +861,7 @@
 
 ### FL-D113：Integration 前台十秒超时再次与后台成功冲突
 
-- 状态：Console auth Integration 已由 durable history 证明 applied；这是 FL-D99 的重复证据，异步 operation receipt 仍未实现。
+- 状态：**已关闭（2026-07-25）**。异步 operation + `outcome-unknown` 已实现（见 §2 H 与 2026-07-25 对账）；前台超时不再伪造失败，可凭 operationId 恢复查询。
 - 证据：receipt `31879544-6745-4b81-bf88-16653f3da06b` apply 的 CLI 前台超时，但 daemon 后台继续验证并保存 result `68c1de10-e3c7-45d7-82cd-46e8b611c2f4`，状态为 applied，focused 70/70、full 637/637。
 - 影响：用户可能重复 apply 已消费 receipt，或把成功合入误判为失败；这是控制面表达错误，不是 Integration 行为失败。
 - 候选改进：apply 立即返回 operation id，单独 wait/status；同步超时必须返回 `outcome-unknown` 与查询入口。Console 展示 queued/applying/verifying/applied/rolled-back/retained-failure，并把 activation 作为下一阶段。
