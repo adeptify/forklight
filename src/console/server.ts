@@ -6,36 +6,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import type { DaemonCoordinator } from "../daemon/coordinator.js";
 import type { ConsoleSettings } from "../core/settings.js";
+import { MIME, SECURITY_HEADERS, safeJson } from "../server-http.js";
 
 const LOOPBACK = "127.0.0.1";
 const TOKEN_BYTES = 32;
 const TOKEN_HEADER = "x-forklight-console-token";
-
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".json": "application/json",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".ico": "image/x-icon",
-};
-
-const SECURITY_HEADERS: Record<string, string> = {
-  "Cache-Control": "no-store",
-  "X-Content-Type-Options": "nosniff",
-  "X-Frame-Options": "DENY",
-  "Content-Security-Policy":
-    "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
-};
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '{"error":"JSON serialization failed"}';
-  }
-}
 
 function redactKeychain(value: unknown): unknown {
   if (value === null || value === undefined) return value;

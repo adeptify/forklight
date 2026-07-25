@@ -79,3 +79,11 @@ button.primary:disabled{background:var(--border);border-color:var(--border);colo
   button{padding:8px 12px}
   #fl-steps li{padding:5px 8px;font-size:11px}
 }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -9,37 +9,12 @@ import type { ProbeEvidence } from "../core/types.js";
 import type { DaemonMethod } from "../daemon/protocol.js";
 import type { SetupService } from "./service.js";
 import type { SetupProviderSelection } from "./types.js";
+import { MIME, SECURITY_HEADERS, safeJson } from "../server-http.js";
 
 const LOOPBACK = "127.0.0.1";
 const MAX_BODY_BYTES = 10_240; // 10 KB limit
 const TOKEN_BYTES = 32;
 const TOKEN_HEADER = "x-forklight-setup-token";
-
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".json": "application/json",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".ico": "image/x-icon",
-};
-
-const SECURITY_HEADERS: Record<string, string> = {
-  "Cache-Control": "no-store",
-  "X-Content-Type-Options": "nosniff",
-  "X-Frame-Options": "DENY",
-  "Content-Security-Policy":
-    "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
-};
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '{"error":"Serialization failed"}';
-  }
-}
 
 export interface SetupServerDeps {
   service: SetupService;
