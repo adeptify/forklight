@@ -1,6 +1,6 @@
 # ForkLight Project Status
 
-Last updated: 2026-07-25 (multi-wave dogfood close-out)
+Last updated: 2026-07-25 (multi-wave dogfood close-out + engineering cleanup)
 
 ## Product boundary
 
@@ -37,6 +37,30 @@ progress, quality, summary, and budget each have one implementation.
 Verification split, change-budget modes, checkpoint, async Integration four
 stages, build identity, Main Review binding, delivery lineage, source
 affected-path gates, event-aware wait — see dogfood root-cause reconciliation.
+
+### Engineering cleanup pass (2026-07-25)
+
+Audit-driven (repo-wide grep verification) redundancy and boundary cleanup,
+all behind the standard gates (759 tests, strict `tsc --noUnusedLocals`,
+`git diff --check`):
+
+- Dropped ~20 dead exports (module-local types/helpers with zero importers),
+  dead Console/Setup CSS and the orphan `th()` helper, and a redundant
+  `failureCategory` spread in `forklight_status`.
+- Deduplicated the Worker `terminal` usage fields (4x -> `terminalFields`),
+  `expandHome` (task + plan -> `parse-helpers`), the competition `TERMINAL` set
+  (-> shared `isTerminalTaskStatus`), and the loopback HTTP layer
+  (`MIME` / `SECURITY_HEADERS` / `safeJson` -> `src/server-http.ts`, fixing the
+  divergent `safeJson` error string).
+- Consistency: daemon `direct_codex_*` handlers use the normalized `params`;
+  `forklight_direct_codex_inbox` `structuredContent` uses a named `{ samples }`
+  key like every other list tool.
+- UI/a11y polish: `prefers-reduced-motion`, `::selection`, thin dark
+  scrollbars (Console + Setup). The Console already carried `:focus-visible`
+  outlines, transitions, empty/loading states, and responsive breakpoints.
+- Stale FL-D status lines (D02/D16/D25/D51/D57/D97/D111/D110/D113/D115)
+  synced to the §2 / 2026-07-25 disposition; D115 confirmed implemented
+  (Stats renders `failureDistribution` taxonomy).
 
 ## Validation
 

@@ -876,7 +876,7 @@
 
 ### FL-D115：Console 的 Provider 成功率仍把不同失败原因压成一个数字
 
-- 状态：页面已真实验收；分类统计尚未实现，当前百分比只能作为原始 Task 终态计数。
+- 状态：**已关闭（2026-07-25）**。Stats 面板已在 success rate 旁渲染 `failureDistribution` taxonomy（`src/core/statistics.ts` `classifyFailure` + `failureDistribution`；Console `app.js` 渲染为分类 pill badges），不再把不同失败原因压成一个数字。
 - 证据：重启后的 Console Stats 显示 DeepSeek Pro `23%`、DeepSeek Pro[1M] `62%`、MiniMax M3 `42%` success，但同一批历史已明确包含 fixture 错误、Diff policy、全局 source fingerprint、沙箱 capability、Provider stream、主审纠正和真实实现错误。Task `854530d6-...` 顶层为 failed，但最终经主审修正后 666/666；Task `490edb79-...` 顶层仍是 succeeded，但实际为 error terminal + 零交付。
 - 影响：用户看到“失败率高”会自然判断模型能力差，而当前统计同时包含 ForkLight 限制、合同估算、验收夹具和历史分类 bug；模型路由若直接消费该比例会形成错误的负反馈。
 - 候选改进：Provider/Model 面板先显示 outcome taxonomy 和样本量，再显示 raw terminal rate；至少拆分 `behavior`、`provider/runtime`、`environment/capability`、`fixture/verifier-contract`、`policy`、`source-compatibility`、`main-review` 与 `correction-success`。只有同任务类型、同分类、带时间衰减的行为证据进入柔性模型评分，任何 aggregate rate 都不得成为永久禁用 hard gate。
