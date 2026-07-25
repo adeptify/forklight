@@ -83,7 +83,7 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "direct_codex_publication_preview",
 ]);
 
-export function isMutatingDaemonMethod(method: DaemonMethod): boolean {
+function isMutatingDaemonMethod(method: DaemonMethod): boolean {
   return !READ_ONLY_METHODS.has(method);
 }
 

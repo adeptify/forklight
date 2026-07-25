@@ -19,9 +19,9 @@ import { latestMainReview } from "./main-review.js";
 // --- Public type aliases ---
 
 export type PreflightReceipt = Omit<IntegrationReceiptRecord, "consumed">;
-export type IntegrationStatus = IntegrationResultRecord["status"];
+type IntegrationStatus = IntegrationResultRecord["status"];
 export type IntegrationResult = Omit<IntegrationResultRecord, "id" | "createdAt">;
-export type IntegrationExecutionResult = IntegrationResult | {
+type IntegrationExecutionResult = IntegrationResult | {
   status: "activation-pending";
   receiptId: string;
   taskId: string;

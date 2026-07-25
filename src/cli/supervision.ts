@@ -220,7 +220,7 @@ export function parseInspectSummaryOptions(
   return { summary: true, eventLimit: eventLimit ?? defaultEventLimit, json };
 }
 
-export function compactTaskSummary(task: TaskRecord): CompactTaskSummary {
+function compactTaskSummary(task: TaskRecord): CompactTaskSummary {
   return {
     id: task.id,
     name: task.name,
@@ -253,7 +253,7 @@ export function progressCursorKey(cursor: ProgressCursor): string {
   ].join("\u0001");
 }
 
-export function buildWaitProgressSummary(
+function buildWaitProgressSummary(
   snapshot: TaskProgressSnapshot,
   nowMs: number,
   quietAfterMs: number,

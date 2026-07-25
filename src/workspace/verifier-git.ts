@@ -3,7 +3,7 @@ import type { TaskPaths, TaskRecord } from "../core/types.js";
 import { verifierGitPaths } from "../core/config.js";
 import { runCaptured } from "../core/process.js";
 
-export interface VerifierGitEnvironment {
+interface VerifierGitEnvironment {
   gitDir: string;
   indexFile: string;
   env: NodeJS.ProcessEnv;
@@ -24,7 +24,7 @@ async function runGit(
   return result.stdout.trim();
 }
 
-export async function prepareVerifierGitEnvironment(
+async function prepareVerifierGitEnvironment(
   paths: TaskPaths,
   workTree: string,
 ): Promise<VerifierGitEnvironment> {

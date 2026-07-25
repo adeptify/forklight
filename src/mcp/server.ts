@@ -351,9 +351,6 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
           ]);
           return textAndData({
             ...buildTaskSummary(task, decision.progress, decision.failureCategory),
-            ...(decision.failureCategory === undefined
-              ? {}
-              : { failureCategory: decision.failureCategory }),
             decision,
           });
         },
@@ -1035,7 +1032,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         { taskClass, directCodexProfileId },
         home,
       );
-      return textAndData(items);
+      return { content: [{ type: "text", text: JSON.stringify(items, null, 2) }], structuredContent: { samples: items } };
     },
   );
 

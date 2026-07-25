@@ -10,6 +10,7 @@ import { buildTaskRecord } from "./runner.js";
 import { taskPaths } from "./config.js";
 import { isProviderName, providerNames } from "./providers.js";
 import { isoTimestamp as timestamp } from "./time.js";
+import { isTerminalTaskStatus } from "./task-progress.js";
 import type {
   CompetitionCandidateRecord,
   CompetitionCandidateScore,
@@ -21,7 +22,6 @@ import type {
   RankingPolicy,
   StagedTaskRegistration,
   TaskSpec,
-  TaskStatus,
   VerificationResult,
 } from "./types.js";
 
@@ -65,8 +65,6 @@ interface CandidateMetrics {
   /** Resolved completion policy check — may be derived from legacy evidence. */
   completionPolicy: CompletionPolicyCheck | undefined;
 }
-
-const TERMINAL = new Set<TaskStatus>(["succeeded", "failed", "interrupted"]);
 
 export function rankingPolicy(
   override: RankingPolicyOverride = {},
@@ -132,7 +130,7 @@ function completeTotal(
 function metrics(input: CompetitionCandidateInput): CandidateMetrics {
   const { task, verification } = input.evidence;
   let reason: string | undefined;
-  if (!TERMINAL.has(task.status)) reason = `Candidate task is still ${task.status}`;
+  if (!isTerminalTaskStatus(task.status)) reason = `Candidate task is still ${task.status}`;
   else if (!verification) reason = "Independent verification evidence is missing";
   else if (!verification.passed) reason = verificationFailure(verification);
   else if (task.status !== "succeeded") reason = `Candidate task ended as ${task.status}`;
@@ -337,7 +335,7 @@ export function scoreCandidates(
       || b.totalScore - a.totalScore
       || a.candidateId.localeCompare(b.candidateId));
   const ranked = scores.filter((candidate) => candidate.eligible);
-  const complete = measured.every((candidate) => TERMINAL.has(candidate.candidate.evidence.task.status));
+  const complete = measured.every((candidate) => isTerminalTaskStatus(candidate.candidate.evidence.task.status));
   const tied = ranked.length > 1
     && Math.abs(ranked[0]!.totalScore - ranked[1]!.totalScore) < effectivePolicy.tieThreshold;
   const winner = complete && !tied ? ranked[0] : undefined;
@@ -391,7 +389,7 @@ export class CompetitionService {
     policy: RankingPolicy,
   ): CompetitionEvaluationRecord {
     const candidates = this.readCandidates(competitionId);
-    if (candidates.some(({ evidence }) => !TERMINAL.has(evidence.task.status))) {
+    if (candidates.some(({ evidence }) => !isTerminalTaskStatus(evidence.task.status))) {
       throw new Error("Competition cannot be scored until every candidate is terminal");
     }
     const createdAt = timestamp();
@@ -409,7 +407,7 @@ export class CompetitionService {
     policy: RankingPolicy,
   ): CompetitionEvaluationRecord {
     const candidates = this.readCandidates(competitionId);
-    if (candidates.some(({ evidence }) => !TERMINAL.has(evidence.task.status))) {
+    if (candidates.some(({ evidence }) => !isTerminalTaskStatus(evidence.task.status))) {
       throw new Error("Competition cannot be scored until every candidate is terminal");
     }
     const createdAt = timestamp();
@@ -442,7 +440,7 @@ export class CompetitionService {
   }
 }
 
-export interface CompetitionScorer {
+interface CompetitionScorer {
   scoreWithPolicy(
     competitionId: string,
     policy: RankingPolicy,
@@ -684,7 +682,7 @@ export class CompetitionCoordinator {
     const candidateRecords = this.store.getCompetitionCandidates(competitionId);
     const terminal = candidateRecords.every((candidate) => {
       const task = this.store.getTask(candidate.taskId);
-      return TERMINAL.has(task.status);
+      return isTerminalTaskStatus(task.status);
     });
     if (!terminal) return undefined;
 

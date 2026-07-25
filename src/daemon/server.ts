@@ -448,11 +448,11 @@ export class ForkLightDaemon {
       case "direct_codex_inbox":
         return this.coordinator.directCodexInbox(params.taskClass, params.directCodexProfileId);
       case "direct_codex_review":
-        return this.coordinator.directCodexReview(request.params ?? {});
+        return this.coordinator.directCodexReview(params);
       case "direct_codex_publication_preview":
-        return this.coordinator.directCodexPublicationPreview(request.params ?? {});
+        return this.coordinator.directCodexPublicationPreview(params);
       case "direct_codex_publication_register":
-        return this.coordinator.directCodexPublicationRegister(request.params ?? {});
+        return this.coordinator.directCodexPublicationRegister(params);
       default:
         throw new Error(`Unknown daemon method: ${String(request.method)}`);
     }

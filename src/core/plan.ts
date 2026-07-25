@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import {
+  expandHome,
   requireNonEmptyString,
   requireObject,
   requireStringArray,
@@ -33,12 +33,6 @@ export interface WorkPlanReport {
   score: number;
   issues: string[];
   plan: WorkPlan;
-}
-
-function expandHome(input: string): string {
-  if (input === "~") return homedir();
-  if (input.startsWith("~/")) return path.join(homedir(), input.slice(2));
-  return input;
 }
 
 const object = requireObject;

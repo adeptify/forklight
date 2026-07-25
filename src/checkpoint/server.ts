@@ -18,7 +18,7 @@ export function scrubCheckpointEnvironment(environment: NodeJS.ProcessEnv): void
   }
 }
 
-export function createCheckpointMcpServer(
+function createCheckpointMcpServer(
   home = requiredEnv("FORKLIGHT_HOME"),
   taskId = requiredEnv("FORKLIGHT_CHECKPOINT_TASK_ID"),
   attemptId = requiredEnv("FORKLIGHT_CHECKPOINT_ATTEMPT_ID"),

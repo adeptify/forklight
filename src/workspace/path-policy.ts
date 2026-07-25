@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { TaskPaths, TaskSpec } from "../core/types.js";
 
-export const DEFAULT_GENERATED_PATTERNS = [
+const DEFAULT_GENERATED_PATTERNS = [
   "**/__pycache__/**",
   "**/.pytest_cache/**",
   "**/.ruff_cache/**",

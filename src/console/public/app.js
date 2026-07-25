@@ -4,7 +4,6 @@ var $$ = function(s){ return document.querySelectorAll(s); };
 function h(tag, cls, text){ var e = document.createElement(tag); if(cls) e.className = cls; if(text !== undefined) e.textContent = text; return e; }
 function hd(tag, cls, kids){ var e = document.createElement(tag); if(cls) e.className = cls; if(kids) kids.forEach(function(k){ if(k) e.appendChild(k); }); return e; }
 function td(cls, text){ return h("td", cls, text); }
-function th(cls, text){ return h("th", cls, text); }
 function badge(s){
   var m = {
     "succeeded":"badge-ok","completed":"badge-ok","done":"badge-ok",

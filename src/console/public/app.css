@@ -12,7 +12,6 @@
   --text-2: #a8b3c7;
   --dim: #7d8aa3;
   --accent: #7c9cff;
-  --accent-2: #a78bfa;
   --accent-soft: rgba(124, 156, 255, 0.14);
   --green: #3dd68c;
   --green-soft: rgba(61, 214, 140, 0.14);
@@ -22,7 +21,6 @@
   --red-soft: rgba(255, 107, 122, 0.14);
   --radius: 16px;
   --radius-sm: 10px;
-  --radius-xs: 8px;
   --shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
   --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.28);
   --sidebar: 248px;
@@ -195,20 +193,14 @@ button:focus-visible,
   margin: 22px 0 12px;
 }
 .section-title:first-child { margin-top: 0; }
-.page-intro {
-  display: flex; justify-content: space-between; align-items: flex-end; gap: 16px;
-  margin-bottom: 18px;
-}
-.page-intro p { color: var(--text-2); font-size: 13.5px; max-width: 52ch; }
 
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width: 0; }
-.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; min-width: 0; }
 .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; min-width: 0; }
 @media (max-width: 1100px) {
   .grid-4 { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 900px) {
-  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  .grid-2, .grid-4 { grid-template-columns: 1fr; }
 }
 
 /* Metric hero cards */
@@ -483,7 +475,6 @@ tr.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: -
 .mt-4 { margin-top: 4px; }
 .mt-8 { margin-top: 8px; }
 .mt-12 { margin-top: 12px; }
-.fs10 { font-size: 10px; }
 .fs11 { font-size: 11px; }
 .fs12 { font-size: 12px; }
 .error-box {

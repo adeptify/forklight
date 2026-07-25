@@ -54,9 +54,7 @@ label input,label select{margin-top:4px}
 details{border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px;margin-bottom:12px;background:var(--surface)}
 details>summary{cursor:pointer;font-size:12px;color:var(--dim)}
 details[open]>summary{margin-bottom:8px;color:var(--text)}
-.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 @media (max-width:520px){
-  .grid-2{grid-template-columns:1fr}
   #fl-steps{display:grid;grid-template-columns:1fr 1fr;overflow:visible}
   #fl-steps li{white-space:normal;min-width:0}
   .actions{display:grid;grid-template-columns:1fr}

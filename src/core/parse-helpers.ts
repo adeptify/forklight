@@ -3,6 +3,16 @@
  * Keeps label-prefixed errors identical across producers.
  */
 
+import { homedir } from "node:os";
+import path from "node:path";
+
+/** Expand a leading `~` to the user's home directory; leave other paths unchanged. */
+export function expandHome(input: string): string {
+  if (input === "~") return homedir();
+  if (input.startsWith("~/")) return path.join(homedir(), input.slice(2));
+  return input;
+}
+
 export function requireObject(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);

@@ -15,7 +15,7 @@ import { readProviderKey } from "../core/secrets.js";
 import { ClaudeEventNormalizer } from "../events/normalize.js";
 import { cloneDefaults, type ExecutionSettings, type ProviderDefaultSettings } from "../core/settings.js";
 
-export interface WorkerExecutionResult {
+interface WorkerExecutionResult {
   status: "succeeded" | "failed" | "interrupted";
   exitCode: number;
   resultText?: string;
@@ -26,17 +26,29 @@ export interface WorkerExecutionResult {
   runtimeCostEstimateUsd?: number;
 }
 
-export interface WorkerRunHooks {
+interface WorkerRunHooks {
   onSpawn?: (child: ChildProcess) => void;
   onEvent?: (event: NormalizedWorkerEvent) => void;
   wasInterrupted?: () => boolean;
   feedback?: string;
 }
 
-export interface WorkerLaunch {
+interface WorkerLaunch {
   command: string;
   args: string[];
   isolation: "macos-sandbox" | "runtime-permissions";
+}
+
+/** Spread the optional terminal usage/cost fields, omitting any that are undefined. */
+function terminalFields(terminal: NormalizedWorkerEvent["terminal"] | undefined) {
+  if (terminal === undefined) return {} as Record<string, never>;
+  return {
+    ...(terminal.resultText === undefined ? {} : { resultText: terminal.resultText }),
+    ...(terminal.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
+    ...(terminal.turns === undefined ? {} : { turns: terminal.turns }),
+    ...(terminal.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
+    ...(terminal.usage === undefined ? {} : { usage: terminal.usage }),
+  };
 }
 
 export function allowedToolArguments(task: TaskRecord): {
@@ -425,11 +437,7 @@ export async function runClaudeWorker(
     return {
       status: "failed",
       exitCode: interruptedExitCode(outcome.code),
-      ...(terminal?.resultText === undefined ? {} : { resultText: terminal.resultText }),
-      ...(terminal?.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
-      ...(terminal?.turns === undefined ? {} : { turns: terminal.turns }),
-      ...(terminal?.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
-      ...(terminal?.usage === undefined ? {} : { usage: terminal.usage }),
+      ...terminalFields(terminal),
       error: "No effective implementation progress detected within the configured interval; worker was terminated by the progress watchdog",
     };
   }
@@ -442,11 +450,7 @@ export async function runClaudeWorker(
     return {
       status: "interrupted",
       exitCode: interruptedExitCode(outcome.code),
-      ...(terminal?.resultText === undefined ? {} : { resultText: terminal.resultText }),
-      ...(terminal?.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
-      ...(terminal?.turns === undefined ? {} : { turns: terminal.turns }),
-      ...(terminal?.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
-      ...(terminal?.usage === undefined ? {} : { usage: terminal.usage }),
+      ...terminalFields(terminal),
       error: "Worker execution interrupted",
     };
   }
@@ -464,11 +468,7 @@ export async function runClaudeWorker(
     return {
       status: "failed",
       exitCode: outcome.code,
-      ...(terminal?.resultText === undefined ? {} : { resultText: terminal.resultText }),
-      ...(terminal?.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
-      ...(terminal?.turns === undefined ? {} : { turns: terminal.turns }),
-      ...(terminal?.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
-      ...(terminal?.usage === undefined ? {} : { usage: terminal.usage }),
+      ...terminalFields(terminal),
       error: resolveWorkerFailure(terminal, stderr),
     };
   }
@@ -476,10 +476,6 @@ export async function runClaudeWorker(
   return {
     status: "succeeded",
     exitCode: outcome.code,
-    ...(terminal.resultText === undefined ? {} : { resultText: terminal.resultText }),
-    ...(terminal.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
-    ...(terminal.turns === undefined ? {} : { turns: terminal.turns }),
-    ...(terminal.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
-    ...(terminal.usage === undefined ? {} : { usage: terminal.usage }),
+    ...terminalFields(terminal),
   };
 }

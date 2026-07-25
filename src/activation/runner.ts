@@ -29,7 +29,7 @@ function commandList(value: unknown, label: string): string[] {
   return value as string[];
 }
 
-export function parseActivationHandoff(value: unknown): ActivationHandoff {
+function parseActivationHandoff(value: unknown): ActivationHandoff {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Activation handoff must be an object");
   }
@@ -175,7 +175,7 @@ export async function runActivation(
   };
 }
 
-export function activationLaunchArguments(moduleUrl: string, handoffPath: string): {
+function activationLaunchArguments(moduleUrl: string, handoffPath: string): {
   executable: string;
   args: string[];
 } {

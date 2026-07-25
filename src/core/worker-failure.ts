@@ -16,7 +16,7 @@ const CATEGORIES = new Set<WorkerFailureCategory>([
   "runtime",
 ]);
 
-export function isWorkerFailureCategory(value: unknown): value is WorkerFailureCategory {
+function isWorkerFailureCategory(value: unknown): value is WorkerFailureCategory {
   return typeof value === "string" && CATEGORIES.has(value as WorkerFailureCategory);
 }
 

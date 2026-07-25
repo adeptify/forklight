@@ -33,7 +33,7 @@ function cloneAndFreeze<T>(value: T): T {
 // ---------------------------------------------------------------------------
 
 export type PricingCurrency = "USD" | "CNY";
-export type PricingRouteId = string;
+type PricingRouteId = string;
 
 export interface PricingRateTier {
   /** `null` is the base tier; a numeric tier applies only when request input exceeds it. */

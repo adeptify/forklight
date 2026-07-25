@@ -1,11 +1,11 @@
 import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { isProviderName, providerDefinition, providerNames } from "./providers.js";
 import { normalizeDirectCodexProfileId } from "./direct-codex-calibration.js";
 import {
+  expandHome,
   requireNonEmptyString,
   requireObject,
   requireStringArray,
@@ -113,12 +113,6 @@ function positiveInteger(value: unknown, label: string): number {
     throw new Error(`${label} must be a positive integer`);
   }
   return value;
-}
-
-function expandHome(input: string): string {
-  if (input === "~") return homedir();
-  if (input.startsWith("~/")) return path.join(homedir(), input.slice(2));
-  return input;
 }
 
 function parseModules(value: unknown): TaskModuleContract[] {

@@ -202,7 +202,7 @@ export async function prepareWorkspace(
   return { ...sourceManifest, linkedDependencies };
 }
 
-export interface SourceCompatibilityAssessment {
+interface SourceCompatibilityAssessment {
   globalUnchanged: boolean;
   compatible: boolean;
   affectedPaths: string[];

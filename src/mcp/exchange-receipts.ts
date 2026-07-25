@@ -15,16 +15,14 @@ import {
   type TaskIdSource,
 } from "../core/exchange-capture.js";
 
-export type TaskScopedMcpOperation =
+type TaskScopedMcpOperation =
   | "forklight_submit" | "forklight_status" | "forklight_wait" | "forklight_inspect" | "forklight_resume"
   | "forklight_integration_preflight" | "forklight_integration_apply"
   | "forklight_integration_status" | "forklight_integration_wait"
   | "forklight_integration_history" | "forklight_main_review"
   | "forklight_direct_codex_capture";
 
-export type { TaskIdSource };
-
-export interface WithMcpExchangeReceiptParams<T> {
+interface WithMcpExchangeReceiptParams<T> {
   readonly operation: TaskScopedMcpOperation;
   readonly home: string;
   readonly args: unknown;

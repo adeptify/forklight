@@ -78,7 +78,7 @@ function tx(r: unknown): string {
   return ((r as { content: Array<{ text: string }> }).content[0]!).text;
 }
 function vs(r: unknown): Record<string, unknown>[] {
-  return (sc(r) as { value: Record<string, unknown>[] }).value;
+  return (sc(r) as { samples: Record<string, unknown>[] }).samples;
 }
 
 // --- Tests ------------------------------------------------------------------
