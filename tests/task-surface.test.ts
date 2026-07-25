@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { projectTaskSurface } from "../src/core/task-summary.js";
-import { failureCategoryFromEvents } from "../src/core/worker-failure.js";
+import {
+  failureCategoryForTask,
+  failureCategoryFromEvents,
+} from "../src/core/worker-failure.js";
 import { buildTaskDecisionView } from "../src/core/task-decision-view.js";
+import { buildStatusProgress } from "../src/core/task-progress.js";
 import type { AttemptRecord, EventRecord, TaskRecord, TaskStatus } from "../src/core/types.js";
 import { StateStore } from "../src/state/store.js";
 import { DaemonCoordinator } from "../src/daemon/coordinator.js";
@@ -202,6 +206,87 @@ test("listTaskSurfaces returns progress for store-backed running tasks", async (
   assert.ok(row.progress);
   assert.equal(row.progress!.latestEventSequence, 2);
   assert.equal(row.progress!.latestAction, "edited board.ts");
+  assert.equal(row.progress!.lastEventType, "worker.tool.completed");
   assert.ok(row.progress!.activity === "active" || row.progress!.activity === "quiet");
   store.close();
+});
+
+const dualAuthFailedEvents = (): EventRecord[] => [
+  {
+    id: 1,
+    taskId: "task-hist",
+    attemptId: "attempt-1",
+    sequence: 3,
+    timestamp: TS,
+    type: "worker.failed",
+    summary: "Worker failed: authentication/provider credentials rejected",
+    payload: { failureCategory: "authentication" },
+  },
+  {
+    id: 2,
+    taskId: "task-hist",
+    attemptId: "attempt-1",
+    sequence: 4,
+    timestamp: TS,
+    type: "worker.failed",
+    summary: "Worker execution failed",
+  },
+];
+
+test("Decision View omits failureCategory on succeeded task with historical worker.failed", () => {
+  const events = dualAuthFailedEvents();
+  events.push({
+    id: 3,
+    taskId: "task-hist",
+    attemptId: "attempt-2",
+    sequence: 5,
+    timestamp: TS,
+    type: "worker.completed",
+    summary: "Worker reported completion",
+  });
+  assert.equal(failureCategoryFromEvents(events), "authentication");
+  assert.equal(failureCategoryForTask("succeeded", events), undefined);
+  assert.equal(failureCategoryForTask("running", events), undefined);
+  assert.equal(failureCategoryForTask("queued", events), undefined);
+  const view = buildTaskDecisionView({
+    task: makeTask("task-hist", "succeeded"),
+    attempts: [],
+    events,
+    integrationResults: [],
+    nowMs: Date.parse(TS),
+  });
+  assert.equal(view.failureCategory, undefined);
+  assert.equal(view.progress.activity, "terminal");
+  assert.equal(view.progress.lastEventType, "worker.completed");
+});
+
+test("Decision View omits failureCategory on running task with historical worker.failed", () => {
+  const events = dualAuthFailedEvents();
+  const view = buildTaskDecisionView({
+    task: makeTask("task-hist", "running"),
+    attempts: [],
+    events,
+    integrationResults: [],
+    nowMs: Date.parse(TS),
+  });
+  assert.equal(view.failureCategory, undefined);
+  assert.equal(failureCategoryForTask("failed", events), "authentication");
+  assert.equal(failureCategoryForTask("interrupted", events), "authentication");
+});
+
+test("buildStatusProgress exposes real lastEventType for wait reconstruction", () => {
+  const progress = buildStatusProgress(
+    makeTask("t-type", "running"),
+    {
+      sequence: 7,
+      timestamp: TS,
+      type: "worker.tool.completed",
+      summary: "edited file.ts",
+    },
+    Date.parse(TS) + 1_000,
+  );
+  assert.equal(progress.lastEventType, "worker.tool.completed");
+  assert.equal(progress.lastEventAt, TS);
+  assert.equal(progress.latestAction, "edited file.ts");
+  assert.notEqual(progress.lastEventType, "progress");
 });

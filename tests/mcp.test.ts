@@ -1197,6 +1197,9 @@ test("MCP wait returns terminal without requiring full inspect", async () => {
     const progress = body.progress as Record<string, unknown>;
     assert.ok(progress);
     assert.equal(progress.activity, "terminal");
+    // Real store event type, not a synthetic "progress" label from wait reconstruction.
+    assert.equal(progress.lastEventType, "task.created");
+    assert.notEqual(progress.lastEventType, "progress");
   } finally {
     await client.close();
     await server.close();

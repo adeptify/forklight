@@ -54,6 +54,7 @@ export function buildStatusProgress(
     latestEventSequence: latestEvent?.sequence ?? 0,
     ...(latestEvent === undefined ? {} : { lastEventAt: latestEvent.timestamp }),
     ...(latestEvent === undefined ? {} : { latestAction: latestEvent.summary }),
+    ...(latestEvent === undefined ? {} : { lastEventType: String(latestEvent.type) }),
   };
 }
 

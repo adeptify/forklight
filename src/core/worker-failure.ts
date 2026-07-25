@@ -44,3 +44,16 @@ export function failureCategoryFromEvents(
   }
   return undefined;
 }
+
+/**
+ * Project failureCategory for status surfaces (CLI list/status, listTaskSurfaces,
+ * Decision View / MCP status). Only failed|interrupted tasks expose a category;
+ * historical worker.failed rows on succeeded/running/queued must not leak.
+ */
+export function failureCategoryForTask(
+  status: string,
+  events: readonly { type: string; sequence?: number; payload?: unknown }[],
+): WorkerFailureCategory | undefined {
+  if (status !== "failed" && status !== "interrupted") return undefined;
+  return failureCategoryFromEvents(events);
+}

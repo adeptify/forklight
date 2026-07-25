@@ -16,7 +16,7 @@ import type {
   VerificationResult,
   WorkerClaim,
 } from "./types.js";
-import { failureCategoryFromEvents } from "./worker-failure.js";
+import { failureCategoryForTask } from "./worker-failure.js";
 
 const WORKER_CLAIM_PREVIEW_MAX_CHARS = 360;
 const WORKER_CLAIM_TRUNCATION_MARKER =
@@ -323,7 +323,9 @@ export function buildTaskDecisionView(input: {
     input.nowMs ?? Date.now(),
     input.quietAfterMs ?? DEFAULT_QUIET_AFTER_MS,
   );
-  const failureCategory = failureCategoryFromEvents(orderedEvents);
+  // Same gate as CLI list / listTaskSurfaces: do not leak historical categories
+  // onto succeeded, running, or queued tasks after revise/resume.
+  const failureCategory = failureCategoryForTask(input.task.status, orderedEvents);
   return {
     taskId: input.task.id,
     ...decision,

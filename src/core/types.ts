@@ -639,8 +639,10 @@ export interface TaskDecisionView {
     latestEventSequence: number;
     lastEventAt?: string;
     latestAction?: string;
+    /** Real store event type for the latest event (not a synthetic label). */
+    lastEventType?: string;
   };
-  /** Latest Worker terminal failure class when recorded (auth/budget/runtime). */
+  /** Latest Worker terminal failure class when task is failed|interrupted. */
   failureCategory?: "authentication" | "budget" | "runtime";
 }
 

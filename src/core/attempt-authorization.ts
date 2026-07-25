@@ -1,5 +1,6 @@
 import type { StateStore } from "../state/store.js";
 import { cloneDefaults } from "./settings.js";
+import { isTerminalTaskStatus } from "./task-progress.js";
 import type {
   AttemptAuthorization,
   AttemptExecutionOptions,
@@ -9,9 +10,7 @@ import type {
 const REASON_MAX_LENGTH = 1000;
 
 function eligibleStatus(task: TaskRecord): boolean {
-  return task.status === "failed"
-    || task.status === "interrupted"
-    || task.status === "succeeded";
+  return isTerminalTaskStatus(task.status);
 }
 
 export function authorizeExtraAttempt(

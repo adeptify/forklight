@@ -385,12 +385,15 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
               daemonRequest<TaskRecord>("status", { taskId }, home),
               daemonRequest<TaskDecisionView>("task_decision", { taskId }, home),
             ]);
+            // Rebuild latest-event meta from Decision View progress (real store type,
+            // never a synthetic "progress" label) so wait lastEventType is truthful.
             const latestEvent = decision.progress.lastEventAt === undefined
+              || decision.progress.lastEventType === undefined
               ? undefined
               : {
                 sequence: decision.progress.latestEventSequence,
                 timestamp: decision.progress.lastEventAt,
-                type: "progress",
+                type: decision.progress.lastEventType,
                 summary: decision.progress.latestAction ?? "",
               };
             return {

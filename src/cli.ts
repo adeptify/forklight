@@ -51,7 +51,7 @@ import { getTaskTokenReport } from "./core/token-report.js";
 import { buildTaskSummary, projectTaskSurface } from "./core/task-summary.js";
 import { buildTaskDecisionView } from "./core/task-decision-view.js";
 import {
-  failureCategoryFromEvents,
+  failureCategoryForTask,
   type WorkerFailureCategory,
 } from "./core/worker-failure.js";
 import {
@@ -139,6 +139,7 @@ function humanStatusLines(
     if (key === "progress" && typeof value === "object" && value !== null) {
       const p = value as TaskDecisionView["progress"];
       if (p.lastEventAt !== undefined) lines.push(`lastEventAt: ${p.lastEventAt}`);
+      if (p.lastEventType !== undefined) lines.push(`lastEventType: ${p.lastEventType}`);
       lines.push(`activity: ${p.activity}`);
       lines.push(`latestEventSequence: ${String(p.latestEventSequence)}`);
       if (p.latestAction !== undefined) lines.push(`latestAction: ${p.latestAction}`);
@@ -149,8 +150,10 @@ function humanStatusLines(
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
 
-function printHumanStatus(task: TaskRecord): void {
-  process.stdout.write(humanStatusLines(task));
+function printHumanStatus(task: TaskRecord, events: EventRecord[] = []): void {
+  process.stdout.write(
+    humanStatusLines(task, undefined, failureCategoryForTask(task.status, events)),
+  );
 }
 
 /** Render the human inspect block as a single exact string. */
@@ -158,7 +161,11 @@ function humanInspectLines(
   task: TaskRecord, attempts: AttemptRecord[], events: EventRecord[], diff: string,
 ): string {
   const lines: string[] = [];
-  const statusBody = humanStatusLines(task);
+  const statusBody = humanStatusLines(
+    task,
+    undefined,
+    failureCategoryForTask(task.status, events),
+  );
   if (statusBody.length > 0) lines.push(statusBody.replace(/\n$/, ""));
   lines.push(`attempts: ${attempts.length}`);
   for (const attempt of attempts) {
@@ -1301,7 +1308,7 @@ async function main(): Promise<void> {
         (task) => process.stdout.write(`taskId: ${task.id}\n`),
         policy,
       );
-      printHumanStatus(result.task);
+      printHumanStatus(result.task, store.listEvents(result.task.id));
       if (result.task.status !== "succeeded") process.exitCode = result.task.status === "interrupted" ? 130 : 1;
       return;
     }
@@ -1359,7 +1366,11 @@ async function main(): Promise<void> {
               const line = progressLine(event);
               if (line !== undefined) progressLines.push(line);
             }, feedback, resumeSettings.execution, resumeSettings.providerDefaults, executionOptions);
-            const statusBlock = humanStatusLines(result.task);
+            const statusBlock = humanStatusLines(
+              result.task,
+              undefined,
+              failureCategoryForTask(result.task.status, store.listEvents(result.task.id)),
+            );
             renderedOutput = `${progressLines.join("")}${statusBlock}`;
             if (result.task.status !== "succeeded") {
               process.exitCode = result.task.status === "interrupted" ? 130 : 1;
@@ -1472,7 +1483,11 @@ async function main(): Promise<void> {
               reviseSettings.providerDefaults,
               executionOptions,
             );
-            const statusBlock = humanStatusLines(result.task);
+            const statusBlock = humanStatusLines(
+              result.task,
+              undefined,
+              failureCategoryForTask(result.task.status, store.listEvents(result.task.id)),
+            );
             renderedOutput = `${progressLines.join("")}${statusBlock}`;
             if (result.task.status !== "succeeded") {
               process.exitCode = result.task.status === "interrupted" ? 130 : 1;
@@ -1496,9 +1511,10 @@ async function main(): Promise<void> {
         invoke: async () => {
           const task = reconcileTask(store, taskId);
           const latestEvent = toLatestEventMeta(store.latestEventMeta(taskId));
-          const failureCategory = task.status === "failed" || task.status === "interrupted"
-            ? failureCategoryFromEvents(store.listEvents(taskId))
-            : undefined;
+          const failureCategory = failureCategoryForTask(
+            task.status,
+            store.listEvents(taskId),
+          );
           const summary = projectTaskSurface(task, {
             ...(latestEvent === undefined ? {} : { latestEvent }),
             ...(failureCategory === undefined ? {} : { failureCategory }),
@@ -1634,9 +1650,10 @@ async function main(): Promise<void> {
       const nowMs = Date.now();
       const tasks = store.listTasks().slice(0, 20).map((task) => {
         const latestEvent = toLatestEventMeta(store.latestEventMeta(task.id));
-        const failureCategory = task.status === "failed" || task.status === "interrupted"
-          ? failureCategoryFromEvents(store.listEvents(task.id))
-          : undefined;
+        const failureCategory = failureCategoryForTask(
+          task.status,
+          store.listEvents(task.id),
+        );
         return projectTaskSurface(task, {
           ...(latestEvent === undefined ? {} : { latestEvent }),
           ...(failureCategory === undefined ? {} : { failureCategory }),

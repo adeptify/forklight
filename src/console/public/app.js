@@ -6,8 +6,8 @@ function hd(tag, cls, kids){ var e = document.createElement(tag); if(cls) e.clas
 function td(cls, text){ return h("td", cls, text); }
 function badge(s){
   var m = {
-    "succeeded":"badge-ok","completed":"badge-ok","done":"badge-ok",
-    "running":"badge-info","active":"badge-info","preparing":"badge-warn","verifying":"badge-warn","working":"badge-info",
+    "succeeded":"badge-ok","completed":"badge-ok",
+    "running":"badge-info","active":"badge-info","preparing":"badge-warn","verifying":"badge-warn",
     "queued":"badge-dim","waiting":"badge-dim","pending":"badge-dim",
     "blocked":"badge-err","failed":"badge-err","interrupted":"badge-err"
   };
@@ -282,8 +282,8 @@ function kanbanCard(t){
   var meta = h("div", "kanban-card-meta");
   meta.appendChild(badge(t.status));
   var p = t.progress;
+  // Activity as plain text only - do not double-badge with a fake running/completed status.
   if(p && p.activity){
-    meta.appendChild(badge(p.activity === "active" ? "running" : (p.activity === "terminal" ? "completed" : "queued")));
     meta.appendChild(document.createTextNode(p.activity));
   }
   if(t.failureCategory){

@@ -1,4 +1,5 @@
 import type { StateStore } from "../state/store.js";
+import { isTerminalTaskStatus } from "./task-progress.js";
 import type {
   AttemptRecord,
   AttemptStatus,
@@ -193,8 +194,6 @@ export function classifyFailure(input: ClassifyFailureInput): FailureClassificat
   );
 }
 
-const TERMINAL_STATUSES = new Set<TaskStatus>(["succeeded", "failed", "interrupted"]);
-
 function millisecondsBetween(start?: string, finish?: string): number | undefined {
   if (!start || !finish) return undefined;
   const duration = Date.parse(finish) - Date.parse(start);
@@ -313,7 +312,7 @@ export function computeStatistics(
   const since = filter.since === undefined ? undefined : Date.parse(filter.since);
   const until = filter.until === undefined ? undefined : Date.parse(filter.until);
   const filtered = history.filter(({ task }) =>
-    TERMINAL_STATUSES.has(task.status)
+    isTerminalTaskStatus(task.status)
     && (filter.providerName === undefined || task.spec.provider.name === filter.providerName)
     && (filter.modelName === undefined || task.spec.provider.model === filter.modelName)
     && (since === undefined || Date.parse(task.createdAt) >= since)
@@ -373,7 +372,7 @@ export class StatisticsService {
 
   summarize(filter: StatisticsFilter = {}): ProviderModelSummary[] {
     const history = this.store.listTasks()
-      .filter((task) => TERMINAL_STATUSES.has(task.status))
+      .filter((task) => isTerminalTaskStatus(task.status))
       .map((task): TaskEvidence => {
         const events = this.store.listEvents(task.id);
         const verification = verificationFrom(events);

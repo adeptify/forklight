@@ -99,8 +99,8 @@ import {
 } from "../core/integration-operation.js";
 import { buildTaskDecisionView } from "../core/task-decision-view.js";
 import { projectTaskSurface, type SafeTaskSummary } from "../core/task-summary.js";
-import { toLatestEventMeta } from "../core/task-progress.js";
-import { failureCategoryFromEvents } from "../core/worker-failure.js";
+import { isTerminalTaskStatus, toLatestEventMeta } from "../core/task-progress.js";
+import { failureCategoryForTask } from "../core/worker-failure.js";
 import {
   launchActivationRunner,
   writeActivationHandoff,
@@ -295,8 +295,7 @@ export class DaemonCoordinator {
       };
     });
     const terminal = candidates.filter(
-      (c) => typeof c.taskStatus === "string"
-        && (["succeeded", "failed", "interrupted"] as string[]).includes(c.taskStatus),
+      (c) => typeof c.taskStatus === "string" && isTerminalTaskStatus(c.taskStatus as TaskStatus),
     );
     const progress = { terminal: terminal.length, total: candidates.length };
 
@@ -361,8 +360,7 @@ export class DaemonCoordinator {
     return records.map((competition) => {
       const candidates = this.store.getCompetitionCandidates(competition.id);
       const terminal = candidates.filter((record) =>
-        (["succeeded", "failed", "interrupted"] as string[])
-          .includes(this.store.getTask(record.taskId).status));
+        isTerminalTaskStatus(this.store.getTask(record.taskId).status));
       return {
         id: competition.id,
         name: competition.name,
@@ -592,17 +590,17 @@ export class DaemonCoordinator {
   }
 
   /**
-   * List Task surfaces with latest-event progress (and failureCategory when
-   * terminal). Shared by MCP list and Console Board data.
+   * List Task surfaces with latest-event progress (and failureCategory only
+   * for failed|interrupted). Shared by MCP list and Console Board data.
    */
   listTaskSurfaces(statuses?: TaskStatus[], limit = 20): SafeTaskSummary[] {
     const nowMs = Date.now();
     return this.list(statuses, limit).map((task) => {
       const latestEvent = toLatestEventMeta(this.store.latestEventMeta(task.id));
-      const needsCategory = task.status === "failed" || task.status === "interrupted";
-      const failureCategory = needsCategory
-        ? failureCategoryFromEvents(this.store.listEvents(task.id))
-        : undefined;
+      const failureCategory = failureCategoryForTask(
+        task.status,
+        this.store.listEvents(task.id),
+      );
       return projectTaskSurface(task, {
         ...(latestEvent === undefined ? {} : { latestEvent }),
         ...(failureCategory === undefined ? {} : { failureCategory }),

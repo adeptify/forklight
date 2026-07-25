@@ -499,6 +499,12 @@ test("app.js contains no innerHTML, no onclick=, no .style., no em dash", async 
     assert.ok(src.includes(label), `decision drawer must include ${label}`);
   }
   assert.ok(src.includes("providerVerification"), "console must show configured versus verified provider state");
+  // Kanban: status badge only - do not map activity onto a second status-like badge.
+  assert.ok(src.includes("function kanbanCard"), "kanban cards must exist");
+  assert.ok(
+    !/badge\(p\.activity\s*===\s*["']active["']\s*\?\s*["']running["']/.test(src),
+    "kanban must not double-badge activity as a fake running/completed status",
+  );
   // No browser storage or cookie access
   assert.ok(!/localStorage|sessionStorage|document\.cookie|[^.]\bcookie\s*=/.test(src), "app.js must not use browser storage or cookies");
   // Authenticated fetch and token lifecycle
