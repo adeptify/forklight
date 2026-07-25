@@ -260,9 +260,31 @@ export class ProviderProbeService {
 
   /** Execute a probe for one provider and persist safe evidence. */
   async probeProvider(name: ProviderName): Promise<ProbeEvidence> {
-    const policy = this.probePolicy();
     const defaults = this.settings.get().providerDefaults[name];
     const config = resolveProvider(name, {}, defaults);
+
+    // xAI is for Grok Build only — keychain existence, never Claude/Anthropic probe.
+    if (name === "xai") {
+      const keyOk = this.keychainExists(config.keychainService);
+      const evidence: ProbeEvidence = {
+        provider: name,
+        model: config.model,
+        endpointOrigin: endpointOrigin(config.endpoint),
+        status: keyOk ? "verified" : "failed",
+        latencyMs: 0,
+        timestamp: new Date(this.now()).toISOString(),
+        ...(keyOk
+          ? {}
+          : {
+              failureCategory: "authentication" as const,
+              failureSummary: "xAI keychain entry missing (used with runtime grok-build)",
+            }),
+      };
+      this.store.saveProbeEvidence(evidence);
+      return evidence;
+    }
+
+    const policy = this.probePolicy();
     const apiKey = this.readKeychain(config.keychainService);
 
     const outcome = await this.runProbe(config, apiKey, policy);

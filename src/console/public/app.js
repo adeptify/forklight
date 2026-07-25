@@ -289,7 +289,9 @@ function kanbanCard(t){
   if(t.failureCategory){
     meta.appendChild(h("span", "badge badge-err", t.failureCategory));
   }
-  meta.appendChild(document.createTextNode((t.provider || "?") + " / " + (t.model || "?")));
+  meta.appendChild(document.createTextNode(
+    (t.runtime ? t.runtime + " · " : "") + (t.provider || "?") + " / " + (t.model || "?")
+  ));
   meta.appendChild(document.createTextNode(fmtSince(t.createdAt)));
   cardEl.appendChild(meta);
   if(p && p.latestAction){
@@ -617,7 +619,7 @@ function renderDecision(d){
     box.appendChild(decisionRow("Evidence", "Unavailable"));
   }
 
-  box.appendChild(h("div", "section-title", "Main Codex review"));
+  box.appendChild(h("div", "section-title", "Main agent review"));
   var review = d && d.mainReview;
   if(review){
     box.appendChild(decisionRow("Decision", review.decision, review.decision === "accept" ? "passed" : "failed"));

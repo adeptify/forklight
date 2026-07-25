@@ -76,7 +76,7 @@ forklight console stop
 
 The console serves: plan boards, task statuses, provider verification state,
 competition results, statistics, and one canonical decision view. Task details
-show who wrote the change, who verified it, Main Codex's decision and reason,
+show who wrote the change, who verified it, the Main agent's decision and reason,
 whether the explicit Integration gate was exercised, the four delivery stages,
 and what happens next. All endpoints are read-only; no mutation is possible
 through the UI.
@@ -103,7 +103,7 @@ before the Task can report success. However, the checkpoint does **not**
 authorize Integration — ForkLight still reruns every acceptance command
 independently and stores the official verification result. The checkpoint is a
 Worker feedback loop that surfaces early pass/fail evidence, not a substitute
-for ForkLight's independent verification gate or Main Codex review.
+for ForkLight's independent verification gate or Main agent review.
 
 ### 4. Multi-model competition
 
@@ -150,7 +150,7 @@ This dry-run step validates: patch format, affected file limits, source
 fingerprint match against the task baseline, and clean applicability.
 It persists an audit receipt but **never mutates source**.
 
-Preflight also requires a Main Codex `accept` decision bound to the latest
+Preflight also requires a Main agent `accept` decision bound to the latest
 passing independent verification.
 
 **To apply** — this starts an asynchronous source mutation:

@@ -290,7 +290,7 @@ test("GET /tasks/:id includes the canonical authority decision view", async () =
     assert.equal(decision.stage, "awaiting-main-review");
     assert.equal(decision.workerClaim.label, "unverified-claim");
     assert.equal(decision.workerClaim.text, "All tests pass");
-    assert.equal(decision.nextAction, "Main Codex must review");
+    assert.equal(decision.nextAction, "Main agent must review");
     await server.stop();
   } finally {
     store.close();
@@ -491,7 +491,7 @@ test("app.js contains no innerHTML, no onclick=, no .style., no em dash", async 
   for (const label of [
     "Worker claim (unverified)",
     "Independent verification",
-    "Main Codex review",
+    "Main agent review",
     "User authorization",
     "Integration and activation",
     "Next action",

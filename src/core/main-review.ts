@@ -98,7 +98,7 @@ export function recordMainReview(
     taskId,
     attempt.id,
     "main-review.completed",
-    `Main Codex review: ${input.decision}`,
+    `Main agent review: ${input.decision}`,
     decision,
   );
   return decision;

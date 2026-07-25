@@ -1,5 +1,6 @@
 import type { PricingUnavailableReason } from "./pricing.js";
 import type { QuotedCost, UnavailableCost } from "./pricing-calculator.js";
+import type { RuntimeName } from "./runtime-names.js";
 
 export type TaskStatus =
   | "queued"
@@ -33,6 +34,7 @@ export type EventType =
   | "verification.completed"
   | "checkpoint.started"
   | "checkpoint.completed"
+  | "checkpoint.skipped"
   | "attempt.authorization.granted"
   | "main-review.completed"
   | "integration.preflight.completed"
@@ -45,7 +47,7 @@ export type EventType =
   | "task.revise.requested";
 
 export interface ProviderSpec {
-  name: "deepseek" | "qwen" | "minimax" | "glm";
+  name: "deepseek" | "qwen" | "minimax" | "glm" | "xai";
   model: string;
   endpoint?: string;
   /** Explicit billing route — never forwarded to Worker environment or persisted as a credential. */
@@ -55,7 +57,7 @@ export interface ProviderSpec {
 }
 
 export interface RuntimeSpec {
-  name: "claude-code";
+  name: RuntimeName;
   executable: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   maxBudgetUsd: number | null;

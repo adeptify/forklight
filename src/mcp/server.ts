@@ -32,9 +32,10 @@ import {
   currentBuildIdentity,
   isBuildIdentity,
 } from "../core/build-identity.js";
+import { SUPPORTED_RUNTIME_NAMES, type RuntimeName } from "../core/runtime-names.js";
 
 const SERVER_INSTRUCTIONS =
-  "ForkLight runs bounded external coding Workers through DeepSeek, Qwen, MiniMax, or GLM. Before submit, the main Codex agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, module inputs and outputs, call chain, scenarios, risks, and independent acceptance. Validate the contract first. Submit returns immediately. Prefer forklight_wait (event-sequence or terminal) for supervision instead of tight-loop status/inspect. Use forklight_list for progress-aware board summaries (activity/lastEventAt). Compact inspect (summary=true) is for post-terminal review. Status may include failureCategory authentication|budget|runtime. The main Codex agent remains accountable for review and user approvals. Never call ForkLight a native Codex subagent, and never use it to commit or push.";
+  "ForkLight runs bounded external coding Workers (runtimes: claude-code default, optional grok-build with provider xai). The Main agent may be Claude Code, Grok Build, OpenCode, Codex, or a human using CLI/Console — not Codex-only. Before submit, the Main agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, modules, call chain, scenarios, risks, and independent acceptance. Validate first. Submit returns immediately. Prefer forklight_wait over tight-loop status. Use forklight_list for progress-aware boards. Status may include failureCategory authentication|budget|runtime. Worker runtime is chosen by task.runtime (or defaultRuntime), independent of which Main client is connected. Record taskId for continuity across Main sessions. The Main agent remains accountable for review and user approvals. Never call ForkLight a native subagent of the Main product, and never use it to commit or push.";
 
 const moduleContractSchema = z.object({
   name: z.string().min(1),
@@ -80,10 +81,13 @@ const taskInputSchema = z.object({
     criteria: z.array(z.string().min(1)).min(1),
     commands: z.array(z.string().min(1)).min(1),
   }),
-  provider: z.enum(["deepseek", "qwen", "minimax", "glm"]).optional(),
+  provider: z.enum(["deepseek", "qwen", "minimax", "glm", "xai"]).optional(),
   model: z.string().min(1).optional(),
   endpoint: z.string().url().optional(),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+  // Worker runtime (claude-code | grok-build). Omit → settings.execution.defaultRuntime.
+  runtime: z.enum(SUPPORTED_RUNTIME_NAMES).optional(),
+  runtimeExecutable: z.string().min(1).optional(),
   // FL-D92: null = unlimited (no --max-budget-usd). Omit to inherit effective default.
   // Must not use z.number().positive().optional() alone — that rejects null and forced
   // callers to invent a positive cap when defaultMaxBudgetUsd is null.
@@ -111,6 +115,10 @@ export function inlineTask(
 ): Record<string, unknown> {
   const providerName = (input.provider ?? settings.execution.defaultProvider) as ProviderName;
   const providerDef = settings.providerDefaults[providerName];
+  const runtimeName = (input.runtime
+    ?? settings.execution.defaultRuntime
+    ?? "claude-code") as RuntimeName;
+  const defaultExecutable = runtimeName === "grok-build" ? "grok" : "claude";
   return {
     version: 2,
     name: input.name,
@@ -123,8 +131,8 @@ export function inlineTask(
       ...(input.endpoint === undefined ? {} : { endpoint: input.endpoint }),
     },
     runtime: {
-      name: "claude-code",
-      executable: "claude",
+      name: runtimeName,
+      executable: input.runtimeExecutable ?? defaultExecutable,
       effort: input.effort ?? settings.execution.defaultEffort,
       maxBudgetUsd: budget.maxBudgetUsd,
     },
@@ -517,9 +525,9 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
   server.registerTool(
     "forklight_main_review",
     {
-      title: "Record Main Codex review",
+      title: "Record Main agent review",
       description:
-        "Record an explicit Main Codex accept, revise, or reject judgment against the latest independent verification. This does not authorize source Integration.",
+        "Record an explicit Main agent accept, revise, or reject judgment against the latest independent verification. This does not authorize source Integration.",
       inputSchema: z.object({
         taskId: z.string().uuid(),
         decision: z.enum(["accept", "revise", "reject"]),
@@ -543,7 +551,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
           );
           return textAndData(
             review,
-            `Main Codex review recorded as ${decision}; source Integration is still separately authorized.`,
+            `Main agent review recorded as ${decision}; source Integration is still separately authorized.`,
           );
         },
       });
@@ -696,7 +704,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Apply reviewed integration to source",
       description:
-        "EXPLICITLY apply a reviewed and approved integration to source. REQUIRES a prior passing preflight receipt. This MUTATES source files — never call this without explicit Main Codex approval. The confirm parameter must be true.",
+        "EXPLICITLY apply a reviewed and approved integration to source. REQUIRES a prior passing preflight receipt. This MUTATES source files — never call this without explicit Main agent / user approval. The confirm parameter must be true.",
       inputSchema: z.object({
         taskId: z.string().uuid(),
         receiptId: z.string().uuid(),
@@ -824,7 +832,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         "Submit a Task Contract with multiple candidate models. Runs each candidate in an isolated workspace from a single canonical snapshot. Returns the competition ID immediately; poll forklight_competition_status for progress.",
       inputSchema: taskInputSchema.extend({
         candidates: z.array(z.object({
-          providerName: z.enum(["deepseek", "qwen", "minimax", "glm"]),
+          providerName: z.enum(["deepseek", "qwen", "minimax", "glm", "xai"]),
           modelName: z.string().min(1),
           // Per-candidate override: null = unlimited for that candidate (FL-D92 parity).
           maxBudgetUsd: z.number().positive().nullable().optional(),
@@ -912,7 +920,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       description:
         "Return cached provider verification status (verified, failed, stale, or unverified). This is a safe, read-only operation — it never triggers a probe, incurs no cost, and reveals no secrets.",
       inputSchema: z.object({
-        provider: z.enum(["deepseek", "qwen", "minimax", "glm"]).optional().describe(
+        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "xai"]).optional().describe(
           "Optional provider name. Omit to return status for all configured providers.",
         ),
       }),
@@ -934,7 +942,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       description:
         "Run an EXPLICIT live probe against one or all configured providers. This is a MUTATING, potentially billable operation: every request uses the current configured budget, timeout, cache lifetime, and concurrency limits, then persists only safe evidence.",
       inputSchema: z.object({
-        provider: z.enum(["deepseek", "qwen", "minimax", "glm"]).optional().describe(
+        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "xai"]).optional().describe(
           "Optional provider name. Omit to probe all configured providers with bounded concurrency.",
         ),
       }),

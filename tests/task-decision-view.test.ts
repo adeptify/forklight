@@ -131,7 +131,7 @@ test("decision authority matrix keeps Worker success text unverified", () => {
       task: task("succeeded"),
       events: [claim, event(2, "verification.completed", verification(true))],
       stage: "awaiting-main-review",
-      nextAction: "Main Codex must review",
+      nextAction: "Main agent must review",
     },
     {
       name: "review accepted",
@@ -316,7 +316,7 @@ test("a review of an older verification never governs a newer Attempt", () => {
   });
   assert.equal(view.mainReview, undefined);
   assert.equal(view.stage, "awaiting-main-review");
-  assert.equal(view.nextAction, "Main Codex must review");
+  assert.equal(view.nextAction, "Main agent must review");
 });
 
 // --- Decision View progress uses latest-event activity (FL-D83) ---

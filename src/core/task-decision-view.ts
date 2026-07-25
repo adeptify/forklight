@@ -217,7 +217,7 @@ function stageAndAction(input: {
   if (input.review?.decision === "revise") {
     return {
       stage: "revision-requested",
-      nextAction: "Resume with the Main Codex review reason",
+      nextAction: "Resume with the Main agent review reason",
     };
   }
   if (input.review?.decision === "reject") {
@@ -241,7 +241,7 @@ function stageAndAction(input: {
     }
     return {
       stage: "awaiting-main-review",
-      nextAction: "Main Codex must review",
+      nextAction: "Main agent must review",
     };
   }
   if (

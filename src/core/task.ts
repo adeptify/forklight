@@ -5,6 +5,12 @@ import YAML from "yaml";
 import { isProviderName, providerDefinition, providerNames } from "./providers.js";
 import { normalizeDirectCodexProfileId } from "./direct-codex-calibration.js";
 import {
+  assertProviderRuntimePair,
+  isRuntimeName,
+  supportedRuntimeNamesList,
+  type RuntimeName,
+} from "./runtime-names.js";
+import {
   expandHome,
   requireNonEmptyString,
   requireObject,
@@ -397,10 +403,15 @@ export function parseTaskSpec(
     throw new Error(`Unsupported provider: ${providerName}. Supported providers: ${providerNames().join(", ")}`);
   }
   const providerDef = providerDefinition(providerName, policy?.providerDefaults);
-  const runtimeName = stringValue(runtime.name, "task.runtime.name", "claude-code");
-  if (runtimeName !== "claude-code") {
-    throw new Error(`ForkLight currently supports runtime.name=claude-code, received ${runtimeName}`);
+  const defaultRuntime = execSettings.defaultRuntime ?? "claude-code";
+  const runtimeNameRaw = stringValue(runtime.name, "task.runtime.name", defaultRuntime);
+  if (!isRuntimeName(runtimeNameRaw)) {
+    throw new Error(
+      `Unsupported runtime.name=${runtimeNameRaw}. Supported: ${supportedRuntimeNamesList()}`,
+    );
   }
+  const runtimeName: RuntimeName = runtimeNameRaw;
+  assertProviderRuntimePair(providerName, runtimeName);
   const effort = stringValue(runtime.effort, "task.runtime.effort", execSettings.defaultEffort);
   if (!["low", "medium", "high", "xhigh", "max"].includes(effort)) {
     throw new Error("task.runtime.effort must be low, medium, high, xhigh, or max");
@@ -477,8 +488,12 @@ export function parseTaskSpec(
         : { pricingRoute: stringValue(provider.pricingRoute, "task.provider.pricingRoute") }),
     },
     runtime: {
-      name: "claude-code" as const,
-      executable: stringValue(runtime.executable, "task.runtime.executable", "claude"),
+      name: runtimeName,
+      executable: stringValue(
+        runtime.executable,
+        "task.runtime.executable",
+        runtimeName === "grok-build" ? "grok" : "claude",
+      ),
       effort: effort as "low" | "medium" | "high" | "xhigh" | "max",
       maxBudgetUsd,
     },
@@ -548,7 +563,8 @@ function hardBoundaries(): string[] {
   ];
 }
 
-function toolProtocol(focusPaths: string[]): string[] {
+/** Claude Code tool protocol lines (Worker appendix). */
+export function claudeToolProtocolLines(focusPaths: string[]): string[] {
   return [
     "First read .forklight/workspace-context.md; it contains the complete snapshot file index.",
     ...(focusPaths.length === 0
@@ -564,18 +580,35 @@ function toolProtocol(focusPaths: string[]): string[] {
   ];
 }
 
+/** Neutral tool protocol when a non-CC runtime supplies no CC-specific names. */
+export function neutralToolProtocolLines(focusPaths: string[]): string[] {
+  return [
+    "First read .forklight/workspace-context.md; it contains the complete snapshot file index.",
+    ...(focusPaths.length === 0
+      ? []
+      : [
+          `Inspect these agreed entry points first: ${focusPaths.join(", ")}.`,
+          "Inspect outside the focus paths only when a referenced symbol or failing evidence requires it.",
+        ]),
+    "Use only the file-read, search, and file-edit tools permitted by this Worker runtime.",
+    "Do not use unrestricted shell, web browsing, or nested agents unless the runtime policy explicitly allows them.",
+    "If a tool call fails, correct the tool or path instead of weakening the agreed module boundaries.",
+  ];
+}
+
 function feedbackSection(feedback?: string): string[] {
   return feedback
     ? [
         "",
-        "Correction feedback from independent verification or main Codex review:",
+        "Correction feedback from independent verification or main agent review:",
         feedback,
         "Address this evidence directly before reporting completion again.",
       ]
     : [];
 }
 
-function checkpointProtocolSection(acceptanceCommands: string[]): string[] {
+/** Claude Code checkpoint MCP protocol lines (Worker appendix). */
+export function claudeCheckpointProtocolLines(acceptanceCommands: string[]): string[] {
   const ids = acceptanceCommands.map((_, i) => `acceptance-${i + 1}`);
   return [
     "",
@@ -601,7 +634,7 @@ function buildLegacyPrompt(
     `Goal: ${spec.goal}`,
     "",
     "Tool protocol:",
-    ...toolProtocol(spec.worker.focusPaths).map((instruction) => `- ${instruction}`),
+    ...claudeToolProtocolLines(spec.worker.focusPaths).map((instruction) => `- ${instruction}`),
     "",
     "Hard boundaries:",
     ...hardBoundaries().map((boundary) => `- ${boundary}`),
@@ -609,14 +642,32 @@ function buildLegacyPrompt(
     "",
     "Acceptance commands ForkLight will run after you finish:",
     ...spec.acceptance.commands.map((command) => `- ${command}`),
-    ...checkpointProtocolSection(spec.acceptance.commands),
+    ...claudeCheckpointProtocolLines(spec.acceptance.commands),
     ...feedbackSection(feedback),
   ];
   return lines.join("\n");
 }
 
-export function buildWorkerPrompt(spec: TaskSpec, resuming: boolean, feedback?: string): string {
+export interface WorkerPromptAppendices {
+  /** Tool protocol body lines (without the "Tool protocol:" header). */
+  toolLines?: string[];
+  /** Checkpoint section lines including blank first line if non-empty. */
+  checkpointLines?: string[];
+}
+
+export function buildWorkerPrompt(
+  spec: TaskSpec,
+  resuming: boolean,
+  feedback?: string,
+  appendices?: WorkerPromptAppendices,
+): string {
   if (spec.version === 1) return buildLegacyPrompt(spec, resuming, feedback);
+  // Default appendices stay Claude-compatible for direct callers; adapters pass explicit lines.
+  const toolLines = appendices?.toolLines
+    ?? claudeToolProtocolLines(spec.worker.focusPaths);
+  const checkpointLines = appendices?.checkpointLines !== undefined
+    ? appendices.checkpointLines
+    : claudeCheckpointProtocolLines(spec.acceptance.commands);
   const lines = [
     resuming
       ? "Resume the previously interrupted task using the agreed execution contract."
@@ -626,7 +677,10 @@ export function buildWorkerPrompt(spec: TaskSpec, resuming: boolean, feedback?: 
     `Observable outcome: ${spec.contract.outcome}`,
     "",
     "Tool protocol:",
-    ...toolProtocol(spec.worker.focusPaths).map((instruction) => `- ${instruction}`),
+    ...toolLines.map((instruction) =>
+      instruction.startsWith("- ") || instruction.startsWith("  ")
+        ? instruction
+        : `- ${instruction}`),
     "",
     "Context:",
     ...spec.contract.context.map((item) => `- ${item}`),
@@ -686,7 +740,7 @@ export function buildWorkerPrompt(spec: TaskSpec, resuming: boolean, feedback?: 
     "",
     "Independent acceptance commands:",
     ...spec.acceptance.commands.map((command) => `- ${command}`),
-    ...checkpointProtocolSection(spec.acceptance.commands),
+    ...checkpointLines,
     ...feedbackSection(feedback),
     "",
     "Return a concise summary containing: files changed, contract behavior delivered, verification evidence, and remaining risks.",

@@ -518,7 +518,7 @@ export async function preflightIntegration(
     || latestVerification === undefined
     || review.verificationEventSequence !== latestVerification.sequence
   ) {
-    reasons.push("Main Codex review acceptance is required");
+    reasons.push("Main agent review acceptance is required");
   }
 
   // 2. Read diff

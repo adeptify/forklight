@@ -237,7 +237,7 @@ test("passing machine verification cannot preflight without current Main Codex a
   try {
     const { task } = await buildSucceededTask(store, ["true"], false);
     const rejected = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
-    assert.ok(rejected.rejectionReasons.includes("Main Codex review acceptance is required"));
+    assert.ok(rejected.rejectionReasons.includes("Main agent review acceptance is required"));
 
     recordMainReview(store, task.id, {
       decision: "accept",

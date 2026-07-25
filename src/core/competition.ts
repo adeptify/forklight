@@ -11,6 +11,7 @@ import { taskPaths } from "./config.js";
 import { isProviderName, providerNames } from "./providers.js";
 import { isoTimestamp as timestamp } from "./time.js";
 import { isTerminalTaskStatus } from "./task-progress.js";
+import { assertProviderRuntimePair } from "./runtime-names.js";
 import type {
   CompetitionCandidateRecord,
   CompetitionCandidateScore,
@@ -456,6 +457,7 @@ function cloneSpec(
 ): TaskSpec {
   const cloned = structuredClone(original);
   const name = override.providerName as TaskSpec["provider"]["name"];
+  assertProviderRuntimePair(name, original.runtime.name);
   const providerDef = providerDefaults[name];
   cloned.provider.name = name;
   cloned.provider.model = override.modelName;

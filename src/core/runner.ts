@@ -23,9 +23,9 @@ import {
 import { isoTimestamp as timestamp } from "./time.js";
 import { StateStore } from "../state/store.js";
 import { assertWorkspaceExists, prepareWorkspace } from "../workspace/copy.js";
-import { runClaudeWorker } from "../workers/claude.js";
 import { verifyTask } from "./verifier.js";
 import { checkpointSatisfied } from "./checkpoint.js";
+import { getWorkerAdapter } from "../workers/registry.js";
 
 export interface RunResult {
   task: TaskRecord;
@@ -205,12 +205,33 @@ export async function executeAttempt(
   try {
     try {
       const pd = providerDefaults?.[task.spec.provider.name];
-      worker = await runClaudeWorker(store, store.getTask(task.id), attempt, resuming, {
-        onSpawn: forwarding.setChild,
-        ...(onProgress === undefined ? {} : { onEvent: onProgress }),
-        wasInterrupted: forwarding.wasInterrupted,
-        ...(feedback === undefined ? {} : { feedback }),
-      }, exec, pd);
+      const adapter = getWorkerAdapter(task.spec.runtime.name);
+      // KD14: fail closed when the selected runtime doctor is not ok (even if
+      // global health.ok is true because Claude is present).
+      const doctorResult = adapter.doctor();
+      const doctor = doctorResult instanceof Promise ? await doctorResult : doctorResult;
+      if (!doctor.ok) {
+        const detail = doctor.issues.length > 0
+          ? doctor.issues.join("; ")
+          : `${adapter.displayName} is not ready`;
+        throw new Error(
+          `Worker runtime ${adapter.name} doctor failed: ${detail}`,
+        );
+      }
+      worker = await adapter.run({
+        store,
+        task: store.getTask(task.id),
+        attempt,
+        resuming,
+        hooks: {
+          onSpawn: forwarding.setChild,
+          ...(onProgress === undefined ? {} : { onEvent: onProgress }),
+          wasInterrupted: forwarding.wasInterrupted,
+          ...(feedback === undefined ? {} : { feedback }),
+        },
+        execution: exec,
+        ...(pd === undefined ? {} : { providerDefaults: pd }),
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const failedAt = timestamp();
@@ -279,11 +300,25 @@ export async function executeAttempt(
   }
 
   const verification = await verifyTask(store, store.getTask(task.id), attemptId);
-  const checkpointPassed = checkpointSatisfied(
-    store.listEvents(task.id),
-    attemptId,
-    task.spec.acceptance.commands.length,
-  );
+  const adapter = getWorkerAdapter(task.spec.runtime.name);
+  const checkpointCap = adapter.capabilities().checkpoint;
+  let checkpointPassed: boolean;
+  if (checkpointCap === "unsupported") {
+    store.addEvent(
+      task.id,
+      attemptId,
+      "checkpoint.skipped",
+      "Checkpoint skipped: runtime does not support ForkLight checkpoint MCP",
+      { reason: "runtime-unsupported", runtime: task.spec.runtime.name },
+    );
+    checkpointPassed = true;
+  } else {
+    checkpointPassed = checkpointSatisfied(
+      store.listEvents(task.id),
+      attemptId,
+      task.spec.acceptance.commands.length,
+    );
+  }
   const finalStatus = verification.passed && checkpointPassed ? "succeeded" : "failed";
   const failure = !checkpointPassed
     ? "Required bounded checkpoint missing or failed"
@@ -355,7 +390,7 @@ export async function resumeTask(
   const verifierFeedback = latestRemediationFeedback(store, taskId);
   const combinedFeedback = [
     verifierFeedback,
-    feedback === undefined ? undefined : `Additional main Codex review:\n${feedback}`,
+    feedback === undefined ? undefined : `Additional main agent review:\n${feedback}`,
   ]
     .filter((item): item is string => item !== undefined)
     .join("\n\n");
@@ -514,7 +549,7 @@ export async function reviseTask(
   prepareReviseTask(store, taskId);
   const cleared = store.getTask(taskId);
   // Verifier feedback is intentionally NOT combined — the previous attempt
-  // is what main Codex is correcting; canonical main-Codex feedback stands
+  // is what the Main agent is correcting; canonical main-agent feedback stands
   // alone as the correction instruction.
   return executeAttempt(
     store, cleared, true, onProgress, check.canonicalFeedback, exec, providerDefaults, options,

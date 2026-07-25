@@ -29,8 +29,9 @@ Governs Worker runtime behavior and cost ceilings.
 | --- | --- | --- |
 | `maxConcurrency` | 2 | Maximum Workers the daemon runs simultaneously |
 | `noProgressTimeoutMs` | 1,800,000 | Watchdog timeout when no effective implementation progress is seen |
-| `defaultEffort` | `high` | Default Claude Code effort level (`low`, `medium`, `high`, `xhigh`, `max`) |
+| `defaultEffort` | `high` | Default Worker effort level (`low`, `medium`, `high`, `xhigh`, `max`) |
 | `defaultProvider` | `deepseek` | Default provider when a task omits one |
+| `defaultRuntime` | `claude-code` | Default **Worker** runtime (`claude-code`, `grok-build`). Independent of which Main client (Claude Code / Grok / OpenCode / Codex) is connected. Must pair with provider (`grok-build` requires `xai`). |
 | `defaultMaxBudgetUsd` | 0.50 | Per-task spend limit when the task omits one |
 | `maximumBudgetUsd` | 20 | Hard cap — no single-task budget may exceed this value |
 | `maxAttempts` | 3 | Maximum attempts per task before the daemon refuses resume |

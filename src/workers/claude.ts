@@ -1,37 +1,34 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createWriteStream, realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import type { AttemptRecord, AttemptTokenUsage, NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
+import type { AttemptRecord, NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
 import type { StateStore } from "../state/store.js";
 import { daemonSocketPath } from "../core/config.js";
-import { buildWorkerPrompt } from "../core/task.js";
+import {
+  buildWorkerPrompt,
+  claudeCheckpointProtocolLines,
+  claudeToolProtocolLines,
+} from "../core/task.js";
 import { checkpointLaunch } from "../core/checkpoint.js";
 import { providerEnvironment, resolveProvider } from "../core/providers.js";
 import { readProviderKey } from "../core/secrets.js";
 import { ClaudeEventNormalizer } from "../events/normalize.js";
 import { cloneDefaults, type ExecutionSettings, type ProviderDefaultSettings } from "../core/settings.js";
+import type {
+  RuntimeSpecView,
+  WorkerAdapter,
+  WorkerCapabilityMatrix,
+  WorkerDoctorResult,
+  WorkerExecutionResult,
+  WorkerRunContext,
+  WorkerRunHooks,
+} from "./types.js";
 
-interface WorkerExecutionResult {
-  status: "succeeded" | "failed" | "interrupted";
-  exitCode: number;
-  resultText?: string;
-  costUsd?: number;
-  turns?: number;
-  error?: string;
-  usage?: AttemptTokenUsage;
-  runtimeCostEstimateUsd?: number;
-}
-
-interface WorkerRunHooks {
-  onSpawn?: (child: ChildProcess) => void;
-  onEvent?: (event: NormalizedWorkerEvent) => void;
-  wasInterrupted?: () => boolean;
-  feedback?: string;
-}
+export type { WorkerExecutionResult, WorkerRunHooks } from "./types.js";
 
 interface WorkerLaunch {
   command: string;
@@ -357,7 +354,11 @@ export async function runClaudeWorker(
     watchdogTimer = timeout;
   };
 
-  const prompt = buildWorkerPrompt(task.spec, resuming, hooks.feedback);
+  const adapter = new ClaudeCodeAdapter();
+  const prompt = buildWorkerPrompt(task.spec, resuming, hooks.feedback, {
+    toolLines: adapter.toolProtocolAppendix(task),
+    checkpointLines: adapter.checkpointProtocolAppendix(task),
+  });
   await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {
     mode: 0o600,
   });
@@ -478,4 +479,77 @@ export async function runClaudeWorker(
     exitCode: outcome.code,
     ...terminalFields(terminal),
   };
+}
+
+const CLAUDE_CAPABILITIES: WorkerCapabilityMatrix = {
+  budgetFlag: "supported",
+  checkpoint: "supported",
+  isolation: "supported",
+  toolsPolicy: "supported",
+  effortMapping: "supported",
+  costUsageFidelity: "partial",
+  sessionResume: "supported",
+  streamingEvents: "supported",
+  progressHeartbeat: "tool-lifecycle",
+};
+
+/** Claude Code WorkerAdapter — thin wrap around runClaudeWorker. */
+export class ClaudeCodeAdapter implements WorkerAdapter {
+  readonly name = "claude-code" as const;
+  readonly displayName = "Claude Code";
+  readonly defaultExecutable = "claude";
+
+  capabilities(): WorkerCapabilityMatrix {
+    return { ...CLAUDE_CAPABILITIES };
+  }
+
+  doctor(): WorkerDoctorResult {
+    const issues: string[] = [];
+    let version: string | undefined;
+    let ok = false;
+    try {
+      version = execFileSync(this.defaultExecutable, ["--version"], { encoding: "utf8" }).trim();
+      ok = version.length > 0;
+    } catch {
+      issues.push("claude executable not found or failed --version");
+    }
+    return {
+      runtime: this.name,
+      ok,
+      executable: this.defaultExecutable,
+      ...(version === undefined ? {} : { version }),
+      issues,
+      capabilities: this.capabilities(),
+    };
+  }
+
+  validateSpec(runtime: RuntimeSpecView): void {
+    if (runtime.name !== "claude-code") {
+      throw new Error(`ClaudeCodeAdapter cannot validate runtime ${runtime.name}`);
+    }
+  }
+
+  effortArgs(effort: RuntimeSpecView["effort"]): string[] {
+    return ["--effort", effort];
+  }
+
+  toolProtocolAppendix(task: TaskRecord): string[] {
+    return claudeToolProtocolLines(task.spec.worker.focusPaths);
+  }
+
+  checkpointProtocolAppendix(task: TaskRecord): string[] {
+    return claudeCheckpointProtocolLines(task.spec.acceptance.commands);
+  }
+
+  run(ctx: WorkerRunContext): Promise<WorkerExecutionResult> {
+    return runClaudeWorker(
+      ctx.store,
+      ctx.task,
+      ctx.attempt,
+      ctx.resuming,
+      ctx.hooks ?? {},
+      ctx.execution,
+      ctx.providerDefaults,
+    );
+  }
 }

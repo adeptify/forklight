@@ -486,6 +486,19 @@ async function health(json: boolean): Promise<void> {
   try {
     const settings = new SettingsService(store).get();
     const readiness = providerReadiness(settings.providerDefaults);
+    const { listWorkerAdapters } = await import("./workers/registry.js");
+    const runtimes: Record<string, unknown> = {};
+    for (const adapter of listWorkerAdapters()) {
+      const doctor = adapter.doctor();
+      if (doctor instanceof Promise) continue;
+      runtimes[adapter.name] = {
+        ok: doctor.ok,
+        displayName: adapter.displayName,
+        executable: doctor.executable,
+        ...(doctor.version === undefined ? {} : { version: doctor.version }),
+        issues: doctor.issues,
+      };
+    }
     const clientBuildIdentity = currentBuildIdentity();
     let daemonBuildIdentity: unknown;
     let identityStatus = "daemon-unavailable";
@@ -511,9 +524,12 @@ async function health(json: boolean): Promise<void> {
       // Local CLI health remains useful even when the daemon is not running.
     }
     const result = {
+      // Transition: ok still requires Claude + any provider (daemon submit can still pick Grok when doctor ok).
       ok: claudeVersion !== "unavailable" && readiness.anyReady,
       node: process.version,
       claudeCode: claudeVersion,
+      runtimes,
+      defaultRuntime: settings.execution.defaultRuntime,
       providers: readiness.providers,
       home: forklightHome(),
       clientBuildIdentity,
@@ -524,6 +540,14 @@ async function health(json: boolean): Promise<void> {
     if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     else {
       process.stdout.write(`ok: ${result.ok}\nnode: ${result.node}\nclaudeCode: ${result.claudeCode}\n`);
+      process.stdout.write(`defaultRuntime: ${result.defaultRuntime}\n`);
+      process.stdout.write("runtimes:\n");
+      for (const [name, runtime] of Object.entries(result.runtimes)) {
+        const r = runtime as { ok?: boolean; displayName?: string; issues?: string[] };
+        process.stdout.write(
+          `  ${name}: ${r.ok ? "ok" : "unavailable"}${r.displayName ? ` (${r.displayName})` : ""}\n`,
+        );
+      }
       process.stdout.write("providers:\n");
       for (const [name, provider] of Object.entries(result.providers)) {
         process.stdout.write(

@@ -58,6 +58,7 @@ import {
 import { loadTaskSpec, parseTaskSpec } from "../core/task.js";
 import { isoTimestamp as timestamp, sleepMs as sleep } from "../core/time.js";
 import { providerReadiness } from "../core/providers.js";
+import { listWorkerAdapters } from "../workers/registry.js";
 import {
   resolveReadiness,
   type DependencyDecision,
@@ -173,7 +174,7 @@ function looksLikeWorker(pid: number): boolean {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    return /(?:claude|sandbox-exec)/i.test(command);
+    return /(?:claude|grok|sandbox-exec)/i.test(command);
   } catch {
     return false;
   }
@@ -212,10 +213,36 @@ export class DaemonCoordinator {
     const effectiveSettings = this.settings.get();
     const readiness = providerReadiness(effectiveSettings.providerDefaults);
     const verification = this.safeVerificationSnapshot();
+    const runtimes: Record<string, unknown> = {};
+    for (const adapter of listWorkerAdapters()) {
+      const doctorResult = adapter.doctor();
+      // Built-ins are sync; Promise would be a custom adapter contract change.
+      if (doctorResult instanceof Promise) {
+        runtimes[adapter.name] = {
+          ok: false,
+          displayName: adapter.displayName,
+          executable: adapter.defaultExecutable,
+          issues: ["async doctor not supported in health snapshot"],
+          capabilities: adapter.capabilities(),
+        };
+        continue;
+      }
+      runtimes[adapter.name] = {
+        ok: doctorResult.ok,
+        displayName: adapter.displayName,
+        executable: doctorResult.executable,
+        ...(doctorResult.version === undefined ? {} : { version: doctorResult.version }),
+        issues: doctorResult.issues,
+        capabilities: doctorResult.capabilities,
+      };
+    }
     return {
+      // Transition: ok still requires Claude for daemon liveness + any provider.
       ok: claudeCode !== "unavailable" && readiness.anyReady,
       pid: process.pid,
       claudeCode,
+      runtimes,
+      defaultRuntime: effectiveSettings.execution.defaultRuntime,
       providers: readiness.providers,
       providerVerification: verification,
       maxConcurrency: this.maxConcurrencyOverride ?? effectiveSettings.execution.maxConcurrency,

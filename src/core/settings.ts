@@ -1,5 +1,11 @@
 import type { StateStore } from "../state/store.js";
 import type { PolicyMode } from "./types.js";
+import {
+  assertProviderRuntimePair,
+  isRuntimeName,
+  supportedRuntimeNamesList,
+  type RuntimeName,
+} from "./runtime-names.js";
 
 // --- Versioned settings contract ---
 
@@ -23,7 +29,9 @@ export interface ExecutionSettings {
   maxConcurrency: number;
   noProgressTimeoutMs: number;
   defaultEffort: EffortLevel;
-  defaultProvider: "deepseek" | "qwen" | "minimax" | "glm";
+  defaultProvider: "deepseek" | "qwen" | "minimax" | "glm" | "xai";
+  /** Default Worker runtime when Task YAML/MCP omits runtime.name. */
+  defaultRuntime: RuntimeName;
   defaultMaxBudgetUsd: number | null;
   maximumBudgetUsd: number;
   maxAttempts: number;
@@ -89,6 +97,7 @@ export interface ProviderDefaultsSettings {
   qwen: ProviderDefaultSettings;
   minimax: ProviderDefaultSettings;
   glm: ProviderDefaultSettings;
+  xai: ProviderDefaultSettings;
 }
 
 export interface ForkLightSettings {
@@ -137,6 +146,7 @@ const DEFAULTS: ForkLightSettings = {
     noProgressTimeoutMs: 1_800_000,
     defaultEffort: "high" as EffortLevel,
     defaultProvider: "deepseek",
+    defaultRuntime: "claude-code",
     defaultMaxBudgetUsd: 0.5,
     maximumBudgetUsd: 20,
     maxAttempts: 3,
@@ -196,6 +206,12 @@ const DEFAULTS: ForkLightSettings = {
       defaultKeychainService: "forklight.qwen.api-key",
       requestTimeoutMs: 3_000_000,
     },
+    xai: {
+      defaultModel: "grok-4.5",
+      defaultEndpoint: "https://api.x.ai/v1",
+      defaultKeychainService: "forklight.xai.api-key",
+      requestTimeoutMs: 3_000_000,
+    },
   },
   probe: {
     probeTimeoutMs: 30_000,
@@ -216,7 +232,7 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
   completionPolicy: ["noChangeMode", "changeBudgetMode"],
   execution: [
     "maxConcurrency", "noProgressTimeoutMs", "defaultEffort",
-    "defaultProvider", "defaultMaxBudgetUsd", "maximumBudgetUsd",
+    "defaultProvider", "defaultRuntime", "defaultMaxBudgetUsd", "maximumBudgetUsd",
     "maxAttempts", "workerStopGraceMs",
   ],
   competition: [
@@ -227,7 +243,7 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
     "verificationTimeoutMs", "reviewReceiptTtlMs", "backupRetentionCount", "autoRollback",
   ],
   console: ["loopbackPort", "refreshIntervalMs", "boardListLimit", "taskListLimit", "eventListLimit"],
-  providerDefaults: ["deepseek", "qwen", "minimax", "glm"],
+  providerDefaults: ["deepseek", "qwen", "minimax", "glm", "xai"],
   probe: ["probeTimeoutMs", "maxBudgetUsd", "cacheLifetimeMs", "maxProbeConcurrency"],
 };
 
@@ -243,7 +259,7 @@ const PROVIDER_DEFAULT_FIELDS: readonly string[] = [
 ];
 
 const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"]);
-const VALID_PROVIDER_NAMES = new Set<string>(["deepseek", "qwen", "minimax", "glm"]);
+const VALID_PROVIDER_NAMES = new Set<string>(["deepseek", "qwen", "minimax", "glm", "xai"]);
 const VALID_POLICY_MODES = new Set<string>(["hard", "warn", "score", "off"]);
 
 // Rejects credential-bearing field names.  `defaultKeychainService` names a
@@ -385,6 +401,21 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
     typeof ex.defaultProvider === "string" && VALID_PROVIDER_NAMES.has(ex.defaultProvider),
     `execution.defaultProvider must be one of ${[...VALID_PROVIDER_NAMES].join(", ")}`,
   );
+  // defaultRuntime: omit → claude-code (legacy settings files)
+  if (ex.defaultRuntime === undefined) {
+    ex.defaultRuntime = "claude-code";
+  }
+  assert(
+    typeof ex.defaultRuntime === "string" && isRuntimeName(ex.defaultRuntime),
+    `execution.defaultRuntime must be one of ${supportedRuntimeNamesList()}`,
+  );
+  try {
+    assertProviderRuntimePair(String(ex.defaultProvider), String(ex.defaultRuntime));
+  } catch (error) {
+    throw new SettingsValidationError(
+      error instanceof Error ? error.message : String(error),
+    );
+  }
   assertNonNegativeNumberOrNull(ex.defaultMaxBudgetUsd, "execution.defaultMaxBudgetUsd");
   assertNonNegativeNumber(ex.maximumBudgetUsd, "execution.maximumBudgetUsd");
   if (ex.defaultMaxBudgetUsd !== null) {

@@ -11,8 +11,8 @@ import {
 import { cloneDefaults, type ProviderDefaultSettings } from "../src/core/settings.js";
 import { parseTaskSpec } from "../src/core/task.js";
 
-test("provider registry exposes Claude Code-compatible defaults", () => {
-  assert.deepEqual(providerNames(), ["deepseek", "qwen", "minimax", "glm"]);
+test("provider registry exposes Claude Code-compatible defaults plus xai", () => {
+  assert.deepEqual(providerNames(), ["deepseek", "qwen", "minimax", "glm", "xai"]);
   assert.deepEqual(
     providerNames().map((name) => {
       const definition = providerDefinition(name);
@@ -23,6 +23,7 @@ test("provider registry exposes Claude Code-compatible defaults", () => {
       ["qwen", "qwen3.7-plus", "https://dashscope.aliyuncs.com/apps/anthropic"],
       ["minimax", "MiniMax-M3", "https://api.minimax.io/anthropic"],
       ["glm", "glm-5.2", "https://dashscope.aliyuncs.com/apps/anthropic"],
+      ["xai", "grok-4.5", "https://api.x.ai/v1"],
     ],
   );
 });
@@ -41,12 +42,17 @@ test("DeepSeek providerVariants lists Flash and Pro families, not only the defau
 
 test("task parsing stores provider metadata but never credential values", () => {
   for (const name of providerNames()) {
+    // xai pairs only with grok-build; Anthropic-compat providers use claude-code.
+    const runtime = name === "xai"
+      ? { name: "grok-build", executable: "grok", effort: "high", maxBudgetUsd: 0.1 }
+      : { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: 0.1 };
     const spec = parseTaskSpec(
       {
         version: 1,
         name: `${name} task`,
         project: ".",
         provider: { name },
+        runtime,
         goal: "Exercise provider selection",
         acceptance: { commands: ["true"] },
       },
@@ -59,6 +65,10 @@ test("task parsing stores provider metadata but never credential values", () => 
     assert.equal("apiKey" in spec.provider, false);
     assert.equal("credential" in spec.provider, false);
   }
+  assert.throws(
+    () => providerEnvironment(resolveProvider("xai"), "k"),
+    /does not support xai/,
+  );
 });
 
 test("runtime environment is assembled only from normalized metadata and a transient key", () => {

@@ -6,7 +6,7 @@ import {
   type ProviderDefaultsSettings,
 } from "./settings.js";
 
-export type ProviderName = "deepseek" | "qwen" | "minimax" | "glm";
+export type ProviderName = "deepseek" | "qwen" | "minimax" | "glm" | "xai";
 
 export interface ProviderDefinition {
   name: ProviderName;
@@ -35,7 +35,7 @@ export interface ProviderVariant {
   recommended?: boolean;
 }
 
-const PROVIDER_NAMES: ProviderName[] = ["deepseek", "qwen", "minimax", "glm"];
+const PROVIDER_NAMES: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "xai"];
 
 export function isProviderName(value: string): value is ProviderName {
   return PROVIDER_NAMES.includes(value as ProviderName);
@@ -82,6 +82,11 @@ export function providerEnvironment(
   apiKey: string,
   baseEnvironment: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
+  if (config.name === "xai") {
+    throw new Error(
+      "providerEnvironment does not support xai; GrokBuildAdapter builds its own env (XAI_API_KEY + GROK_HOME)",
+    );
+  }
   const environment: NodeJS.ProcessEnv = {
     ...baseEnvironment,
     ANTHROPIC_BASE_URL: config.endpoint,
@@ -105,6 +110,7 @@ export function providerLabel(name: ProviderName): string {
     case "qwen": return "Qwen via Alibaba Model Studio";
     case "minimax": return "MiniMax";
     case "glm": return "GLM via Alibaba Model Studio";
+    case "xai": return "xAI";
   }
 }
 
@@ -119,6 +125,16 @@ export function providerVariants(
   defaults: ProviderDefaultsSettings = cloneDefaults().providerDefaults,
 ): ProviderVariant[] {
   const current = providerDefinition(name, defaults);
+  if (name === "xai") {
+    return [{
+      id: "default",
+      label: "xAI (Grok Build)",
+      description: "Used with runtime grok-build. Keychain-only readiness; not Anthropic-compatible.",
+      endpoint: current.defaultEndpoint,
+      models: [current.defaultModel, "grok-4", "grok-3"],
+      recommended: true,
+    }];
+  }
   if (name === "minimax") {
     return [
       {

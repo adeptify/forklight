@@ -142,6 +142,7 @@ export class ConsoleServer {
               status: t.status,
               provider: t.provider,
               model: t.model,
+              runtime: t.runtime,
               createdAt: t.createdAt,
               startedAt: t.startedAt,
               finishedAt: t.finishedAt,

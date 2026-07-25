@@ -129,7 +129,7 @@ export function formatRemediationPacket(packet: RemediationPacket): string {
   }
   if (packet.mainReview !== undefined) {
     sections.push(
-      `Main Codex review: ${packet.mainReview.decision}\nReason: ${packet.mainReview.reason}`,
+      `Main agent review: ${packet.mainReview.decision}\nReason: ${packet.mainReview.reason}`,
     );
   }
 
