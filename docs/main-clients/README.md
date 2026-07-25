@@ -4,7 +4,7 @@ ForkLight has two planes:
 
 | Plane | Who | How |
 | --- | --- | --- |
-| **Main** | Claude Code, Grok Build, OpenCode, Codex, or a human | Calls MCP / CLI / Console |
+| **Main** | Claude Code, Grok Build, OpenCode, Codex, or a human | Calls MCP / CLI / Hub |
 | **Worker** | `claude-code`, `grok-build`, … | Spawned by ForkLight per Task |
 
 **Main session ≠ Worker sandbox session.** Continuity across Main chats is **`taskId`** plus the same `FORKLIGHT_HOME`.

@@ -75,23 +75,12 @@ When green, open a new Main session and submit work via MCP or CLI
 
 Task **submit** stays CLI/MCP-first; Hub is configure + supervise + observability.
 
-The old standalone `forklight console` page is retired (daemon APIs remain for compatibility).
-
-First-run guided setup is still available:
-
-```bash
-forklight setup
-```
-
-Setup checks local prerequisites, lets you choose the Provider plan or region
-and model, verifies the API key with one explicitly confirmed billable request,
-stores a successful key in macOS Keychain, installs the bundled Codex plugin,
-and starts the local daemon and read-only console. Hub is the long-lived control
-surface after that.
-
-Both pages bind only to `127.0.0.1`. The token is carried in the URL fragment and
+Hub binds only to `127.0.0.1`. The token is carried in the URL fragment and
 removed from the visible URL after the page loads. Provider keys are never written
 into Main client config files — only forklight MCP command paths are.
+
+Standalone `forklight console` and `forklight setup` UIs were removed; use
+`forklight hub` only.
 
 For a terminal-only prerequisite report that does not call a Provider or change
 settings:
@@ -107,13 +96,12 @@ Update from the repository with the same global install command:
 
 ```bash
 npm install -g github:adeptify/forklight
-forklight setup
+forklight hub
 ```
 
 To remove the executable, first stop local processes and then uninstall it:
 
 ```bash
-forklight console stop
 forklight daemon stop
 npm uninstall -g forklight
 ```
@@ -177,12 +165,10 @@ forklight settings set <path> <value>                     # partial update
 forklight settings apply <file.yaml>                      # bulk update
 forklight settings reset                                  # restore defaults
 
-forklight console start | status | stop                   # read-only loopback UI
 forklight daemon start | status | stop                    # daemon lifecycle
 forklight providers status [<name>] [--json]              # cached, no cost
 forklight providers probe [<name>] [--json]               # explicit probe ★
-forklight setup [--no-open] [--port <port>]               # visual first-run guide
-forklight hub [--no-open] [--port <port>]                 # reusable settings + Main install UI
+forklight hub [--no-open] [--port <port>]                 # only control-center UI (configure + operate)
 forklight doctor [--json]                                 # read-only prerequisites
 ```
 
@@ -245,8 +231,7 @@ The MCP server (`src/mcp/server.ts`) exposes these tools over stdio:
   and system temporary storage.
 - Workers cannot run shell commands, browse the web, commit, push, create pull
   requests, or modify Git remotes.
-- The visual console is read-only, bound to loopback only, and never exposes
-  credential values.
+- Hub binds to loopback only and never exposes credential values.
 - Integration apply is the sole path that mutates source. It requires a
   passing preflight receipt, explicit confirmation, and verifies every
   fingerprint before proceeding.

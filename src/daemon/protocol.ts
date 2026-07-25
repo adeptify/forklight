@@ -30,9 +30,6 @@ export type DaemonMethod =
   | "competition_status"
   | "competition_compare"
   | "competition_list"
-  | "console_start"
-  | "console_status"
-  | "console_stop"
   | "provider_status"
   | "provider_probe"
   | "task_economics"
@@ -76,7 +73,6 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "competition_status",
   "competition_compare",
   "competition_list",
-  "console_status",
   "provider_status",
   "task_economics",
   "direct_codex_inbox",

@@ -1,11 +1,8 @@
-import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, unlink } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import { ConsoleServer } from "../console/server.js";
 import { daemonSocketPath } from "../core/config.js";
 import { SettingsService } from "../core/settings.js";
 import type { StatisticsFilter } from "../core/statistics.js";
@@ -130,11 +127,10 @@ export class ForkLightDaemon {
   private readonly coordinator: DaemonCoordinator;
   private readonly socketPath: string;
   private server: net.Server | undefined = undefined;
-  private consoleServer: ConsoleServer | undefined = undefined;
   private readonly buildIdentity: BuildIdentity = currentBuildIdentity();
 
   constructor(
-    private readonly home: string,
+    home: string,
     maxConcurrency?: number,
   ) {
     this.store = new StateStore(home);
@@ -167,7 +163,6 @@ export class ForkLightDaemon {
   }
 
   async close(): Promise<void> {
-    await this.stopConsole();
     await this.coordinator.shutdown();
     if (this.server) {
       await new Promise<void>((resolve) => this.server?.close(() => resolve()));
@@ -178,35 +173,6 @@ export class ForkLightDaemon {
       // Socket may already be gone.
     }
     this.store.close();
-  }
-
-  private async startConsole(): Promise<Record<string, unknown>> {
-    const settings = this.settingsService.get();
-    if (this.consoleServer?.isRunning()) {
-      const launchUrl = `http://127.0.0.1:${this.consoleServer.getPort()}#${this.consoleServer.getToken()}`;
-      return { running: true, port: this.consoleServer.getPort(), loopback: "127.0.0.1", launchUrl };
-    }
-    const distConsole = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "console", "public");
-    const staticRoot = existsSync(path.join(distConsole, "index.html")) ? distConsole : path.join(this.home, "console");
-    this.consoleServer = new ConsoleServer(this.coordinator, settings.console, staticRoot);
-    const port = await this.consoleServer.start();
-    const launchUrl = `http://127.0.0.1:${port}#${this.consoleServer.getToken()}`;
-    return { running: true, port, loopback: "127.0.0.1", launchUrl };
-  }
-
-  private async stopConsole(): Promise<Record<string, unknown>> {
-    if (this.consoleServer) {
-      await this.consoleServer.stop();
-      this.consoleServer = undefined;
-    }
-    return { running: false };
-  }
-
-  private consoleStatus(): Record<string, unknown> {
-    if (this.consoleServer?.isRunning()) {
-      return { running: true, port: this.consoleServer.getPort(), loopback: "127.0.0.1", authentication: "required" };
-    }
-    return { running: false };
   }
 
   private async handleLine(line: string): Promise<DaemonResponse> {
@@ -423,12 +389,6 @@ export class ForkLightDaemon {
         const statusParam = typeof params.status === "string" ? params.status : undefined;
         return this.coordinator.competitionList(statusParam);
       }
-      case "console_start":
-        return this.startConsole();
-      case "console_status":
-        return this.consoleStatus();
-      case "console_stop":
-        return this.stopConsole();
       case "provider_status": {
         const providerName = typeof params.provider === "string" && params.provider.trim()
           ? params.provider.trim()

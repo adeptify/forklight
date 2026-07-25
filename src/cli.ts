@@ -13,7 +13,7 @@ import type {
 import type { DirectCodexSampleReview } from "./core/direct-codex-review.js";
 import type { DirectCodexInboxItem } from "./core/direct-codex-workflow-service.js";
 import { forklightHome } from "./core/config.js";
-import { createClaudeProbeRunner, providerProbeBatchFailed, realExecFile } from "./core/provider-probe.js";
+import { providerProbeBatchFailed } from "./core/provider-probe.js";
 import { providerReadiness } from "./core/providers.js";
 import type { ProviderModelSummary } from "./core/statistics.js";
 import type {
@@ -36,7 +36,6 @@ import {
 } from "./daemon/client.js";
 import type { DaemonMethod } from "./daemon/protocol.js";
 import { createSystemInspector, SetupService } from "./setup/service.js";
-import { SetupServer } from "./setup/server.js";
 import { HubServer } from "./hub/server.js";
 import { StateStore } from "./state/store.js";
 import { withCliExchangeReceipt, humanTokenReportLines } from "./cli/exchange-receipts.js";
@@ -107,12 +106,10 @@ Usage:
   forklight competition status <id> [--json]
   forklight competition list [--json]
   forklight competition compare <id> [--json] [--weights <json>]
-  forklight console <start|status|stop>
   forklight providers status [<name>] [--json]
   forklight providers probe [<name>] [--json]
-  forklight setup [--no-open] [--port <port>]
   forklight hub [--no-open] [--port <port>]
-      # starts backend daemon + Hub UI (one-shot stack)
+      # starts backend daemon + Hub UI (only control-center UI)
   forklight doctor [--json]
 `;
 }
@@ -422,20 +419,6 @@ function humanDirectCodexRegistrationLines(result: DirectCodexRegistrationResult
     `confidence: ${calibration.confidence}`,
     `createdAt: ${calibration.createdAt}`,
   ].join("\n") + "\n";
-}
-
-function findSetupAssets(): string {
-  const dist = path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "setup", "public",
-  );
-  if (existsSync(path.join(dist, "index.html"))) return dist;
-  const src = path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "..", "..", "src", "setup", "public",
-  );
-  if (existsSync(path.join(src, "index.html"))) return src;
-  throw new Error("Setup assets not found. Run the build step first.");
 }
 
 function findHubAssets(): string {
@@ -1168,29 +1151,10 @@ async function main(): Promise<void> {
     throw new Error(`Unknown competition subcommand: ${subcommand}. Use: status, list, or compare.`);
   }
 
-  if (command === "console") {
-    const operation = required(positional, "console operation (start, status, or stop)");
-    process.stdout.write(
-      "Note: the standalone Console UI is retired. Use `forklight hub` for setup + full operate views.\n",
+  if (command === "console" || command === "setup") {
+    throw new Error(
+      `The standalone ${command} UI was removed. Use: forklight hub\n\n${usage()}`,
     );
-    await ensureDaemon();
-    if (operation === "start") {
-      const result = await daemonRequest<Record<string, unknown>>("console_start");
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      process.stdout.write("That URL only shows a retirement notice. Prefer: forklight hub\n");
-      return;
-    }
-    if (operation === "status") {
-      const result = await daemonRequest<Record<string, unknown>>("console_status");
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return;
-    }
-    if (operation === "stop") {
-      const result = await daemonRequest<Record<string, unknown>>("console_stop");
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return;
-    }
-    throw new Error(`Unknown console operation: ${operation}. Use: start, status, or stop.`);
   }
 
   if (command === "providers") {
@@ -1253,92 +1217,6 @@ async function main(): Promise<void> {
     } finally {
       store.close();
     }
-    return;
-  }
-
-  if (command === "setup") {
-    const setupOptions = [positional, ...rest].filter(
-      (value): value is string => value !== undefined,
-    );
-    const noOpen = setupOptions.includes("--no-open");
-    const portFlag = option(setupOptions, "--port");
-    const port = portFlag !== undefined ? parseInt(portFlag, 10) : 0;
-    if (portFlag !== undefined && (!Number.isFinite(port) || port < 0 || port > 65535)) {
-      throw new Error("--port must be a valid port number (0-65535)");
-    }
-
-    const inspector = createSystemInspector();
-    const store = new StateStore(forklightHome());
-    const settings = new SettingsService(store);
-    const keychain = createKeychainStore();
-    const service = new SetupService(settings, keychain, inspector);
-    const runProbe = createClaudeProbeRunner(realExecFile());
-    const staticRoot = findSetupAssets();
-
-    const server = new SetupServer({
-      service,
-      staticRoot,
-      port,
-      runProbe,
-      probePolicy: () => ({ ...settings.get().probe }),
-      installPlugin: () => {
-        const root = findPackageRoot();
-        try {
-          execFileSync("codex", ["plugin", "marketplace", "add", root], { stdio: "pipe" });
-        } catch {
-          // An already-configured Adeptify marketplace is expected on repeat setup.
-        }
-        execFileSync("codex", ["plugin", "add", "forklight@adeptify"], { stdio: "pipe" });
-      },
-      ensureDaemon: () => ensureDaemon(),
-      daemonRequest: <T = unknown>(method: DaemonMethod, params?: Record<string, unknown>) =>
-        daemonRequest<T>(method, params ?? {}),
-      saveProbeEvidence: (evidence) => store.saveProbeEvidence(evidence),
-    });
-
-    let startedPort: number;
-    try {
-      startedPort = await server.start();
-    } catch (error) {
-      store.close();
-      throw new Error(
-        `Setup server could not start: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    const token = server.getToken();
-    const url = `http://127.0.0.1:${startedPort}/#${encodeURIComponent(token)}`;
-
-    if (!noOpen && process.platform === "darwin") {
-      try {
-        execFileSync("open", [url], { stdio: "ignore" });
-        process.stdout.write(`Setup opened in browser. If it did not open, visit:\n${url}\n`);
-      } catch {
-        process.stdout.write(`Open this URL to continue setup:\n${url}\n`);
-      }
-    } else {
-      process.stdout.write(`Open this URL to continue setup:\n${url}\n`);
-    }
-
-    const requestStop = (): void => { void server.stop(); };
-    process.once("SIGINT", requestStop);
-    process.once("SIGTERM", requestStop);
-    try {
-      // Keep the process alive until setup finishes or the user cancels it.
-      await new Promise<void>((resolve) => {
-        const check = setInterval(() => {
-          if (!server.isRunning()) {
-            clearInterval(check);
-            resolve();
-          }
-        }, 250);
-      });
-    } finally {
-      process.removeListener("SIGINT", requestStop);
-      process.removeListener("SIGTERM", requestStop);
-      await server.stop();
-      store.close();
-    }
-    process.stdout.write("Setup server stopped.\n");
     return;
   }
 

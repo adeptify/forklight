@@ -67,12 +67,12 @@ Governs the safety review and apply of a task's diff back to its source project.
 
 ### console
 
-Governs the read-only loopback UI.
+UI list/poll limits used by Hub (historical section name; not a separate product).
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `loopbackPort` | 0 | Port for the console HTTP server (0 = OS-assigned) |
-| `refreshIntervalMs` | 1000 | UI polling interval |
+| `loopbackPort` | 0 | Reserved; Hub binds its own loopback port |
+| `refreshIntervalMs` | 1000 | Hub polling interval |
 | `boardListLimit` | 50 | Maximum plan boards returned by list endpoints (≤ 100) |
 | `taskListLimit` | 20 | Maximum tasks returned by list endpoints (≤ 100) |
 | `eventListLimit` | 50 | Maximum events per task timeline (≤ 100) |
@@ -142,12 +142,10 @@ Settings changes do NOT retroactively affect tasks that were already created.
 
 These are fixed by the implementation and cannot be changed through settings:
 
-- **Loopback binding**: The console HTTP server always binds `127.0.0.1`.
-  External network access to the console is impossible.
-- **Read-only console**: The console server accepts only `GET` and `HEAD`
-  requests. No mutation is possible through the UI.
-- **Keychain redaction**: The console's `/settings` endpoint recursively
-  strips every key whose name matches `keychain` before serialization.
+- **Loopback binding**: Hub always binds `127.0.0.1`. External network access is impossible.
+- **Auth + confirm gates**: Hub requires a session token; billable or irreversible
+  actions need an explicit confirm in the UI.
+- **Keychain redaction**: Hub settings views never emit fields matching `keychain`.
   Credential values are never exposed to the browser.
 - **Credential-field rejection**: Settings patches containing any field name
   matching `/api[_-]?key|secret|token|password|credential|auth[_-]?token/i`

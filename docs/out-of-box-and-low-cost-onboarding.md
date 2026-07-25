@@ -399,16 +399,12 @@ cd /path/to/forklight && npm install && npm run check && npm link
 # 或全局
 npm install -g github:adeptify/forklight
 
-# 一站式控制中心（Home / Board / Connect / Settings）
+# 一站式控制中心（配置 + 看板 + 监督；唯一 UI 入口）
 forklight hub
 # 仅打印 URL：forklight hub --no-open
-
-# 深度 Console（看板详情、plans、compete、insights）仍可用：
-forklight console start
-# 或从 Hub → Board →「Open deep Console」
 ```
 
-Hub 与 Console 共用 Multica 风格暗色壳层；**可写设置 + Main 安装 + 任务看板**在 Hub，**深度审计看板**在 Console。
+Hub 是唯一浏览器控制面：Models / Workers / Main 安装 / Daemon / Board / Plans / Compete / Insights。
 
 ### 14.2 15 分钟剧本（对照 UI）
 

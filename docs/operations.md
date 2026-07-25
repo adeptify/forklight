@@ -19,7 +19,7 @@ Codex Agent (intent, review, approval)
     │  (subprocess)                                  │  prepares workspace,
     │                                                │  spawns Worker
     │                                                │
-    └─ Console ◄────────── ConsoleServer             ├─ Verifier
+    └─ Hub UI  ◄────────── HubServer                 ├─ Verifier
        (read-only HTTP)   (loopback 127.0.0.1)       │  runs acceptance
                                                       │  commands
                                                       │
@@ -66,20 +66,17 @@ forklight list
 forklight stats                    # query per-provider/model outcomes
 ```
 
-The read-only console provides a browser UI:
+The Hub control center provides the browser UI (configure + operate):
 
 ```bash
-forklight console start            # starts loopback HTTP server
-forklight console status
-forklight console stop
+forklight hub                      # starts daemon + Hub on 127.0.0.1
 ```
 
-The console serves: plan boards, task statuses, provider verification state,
-competition results, statistics, and one canonical decision view. Task details
-show who wrote the change, who verified it, the Main agent's decision and reason,
-whether the explicit Integration gate was exercised, the four delivery stages,
-and what happens next. All endpoints are read-only; no mutation is possible
-through the UI.
+Hub serves: model/worker configuration, Main install (Plugin/MCP/Skill),
+daemon lifecycle, plan boards, task statuses, provider verification, competition
+results, statistics, and task decision views. Supervise mutations (resume,
+revise, main review, integration apply, provider probe) require explicit confirm
+where billable or irreversible.
 
 ### 3. Inspect results
 
@@ -243,7 +240,7 @@ mutation bypass.
 | Provider status | `forklight providers status` | **No** — cached, read-only |
 | Settings read | `forklight settings get` | **No** |
 | Settings write | `forklight settings set` | **No** |
-| Console | `forklight console start` | **No** |
+| Hub UI | `forklight hub` | **No** for browse; supervise actions need confirm |
 | Integration preflight | `forklight integration preflight` | **No** |
 | Integration status/wait/history | `forklight integration status` | **No** |
 | Health check | `forklight health` | **No** |
@@ -286,5 +283,5 @@ npm run smoke
 ```
 
 It creates an isolated temporary home, starts the daemon, reads and writes
-settings, exercises the console lifecycle and read-only endpoints, reads
-cached provider evidence without probing, and performs safe shutdown.
+settings, reads cached provider evidence without probing, and performs safe
+shutdown (Hub UI is covered by hub-* tests separately).
