@@ -475,7 +475,8 @@ test("GET /tasks includes progress surface for Board/Kanban", async () => {
 });
 
 test("app.js contains no innerHTML, no onclick=, no .style., no em dash", async () => {
-  const srcFile = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "console", "public", "app.js");
+  // Full operate UI moved into Hub Control Center; Console static shell is retired.
+  const srcFile = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "hub", "public", "app.js");
   const src = await readFile(srcFile, "utf8");
   // No .innerHTML assignment for API data
   assert.ok(!/\.innerHTML\s*=/.test(src), "app.js must not use .innerHTML assignment");
@@ -487,7 +488,7 @@ test("app.js contains no innerHTML, no onclick=, no .style., no em dash", async 
   // No em dash character (U+2014)
   assert.ok(!/—/.test(src), "app.js must not contain em dash character");
   // Not a synthetic stub
-  assert.ok(/ForkLight Console/.test(src) || /ForkLight/.test(src), "app.js should be the real console");
+  assert.ok(/ForkLight/.test(src), "app.js should be the real Control Center UI");
   for (const label of [
     "Worker claim (unverified)",
     "Independent verification",
@@ -498,17 +499,24 @@ test("app.js contains no innerHTML, no onclick=, no .style., no em dash", async 
   ]) {
     assert.ok(src.includes(label), `decision drawer must include ${label}`);
   }
-  assert.ok(src.includes("providerVerification"), "console must show configured versus verified provider state");
+  assert.ok(src.includes("providerVerification"), "UI must show configured versus verified provider state");
   // Kanban: status badge only - do not map activity onto a second status-like badge.
   assert.ok(src.includes("function kanbanCard"), "kanban cards must exist");
   assert.ok(
     !/badge\(p\.activity\s*===\s*["']active["']\s*\?\s*["']running["']/.test(src),
     "kanban must not double-badge activity as a fake running/completed status",
   );
-  // No browser storage or cookie access
-  assert.ok(!/localStorage|sessionStorage|document\.cookie|[^.]\bcookie\s*=/.test(src), "app.js must not use browser storage or cookies");
-  // Authenticated fetch and token lifecycle
-  assert.ok(src.includes("X-ForkLight-Console-Token"), "all data fetches must carry the auth header");
+  // No cookie access; localStorage only for non-secret theme preference (fl-theme)
+  assert.ok(!/sessionStorage|document\.cookie|[^.]\bcookie\s*=/.test(src), "app.js must not use cookies or sessionStorage");
+  const storageStripped = src
+    .replace(/localStorage\.getItem\(\s*["']fl-theme["']\s*\)/g, "/*theme*/")
+    .replace(/localStorage\.setItem\(\s*["']fl-theme["']\s*,/g, "/*theme*/");
+  assert.ok(
+    !/localStorage/.test(storageStripped),
+    "app.js may only use localStorage for the fl-theme preference key",
+  );
+  // Authenticated fetch and token lifecycle (Hub token header)
+  assert.ok(src.includes("X-ForkLight-Hub-Token"), "all data fetches must carry the Hub auth header");
   assert.ok(src.includes("readToken"), "token must be read from URL fragment");
   assert.ok(src.includes("replaceState"), "fragment must be erased after reading");
   assert.ok(src.includes("token.length!==43"), "only a full 32-byte base64url token may start polling");
@@ -516,7 +524,7 @@ test("app.js contains no innerHTML, no onclick=, no .style., no em dash", async 
   assert.ok(!src.includes("?token="), "token must never appear in query parameters");
 });
 
-test("GET / serves real console assets from source tree", async () => {
+test("GET / serves retired console notice from source tree", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "fl-src-"));
   const store = new StateStore(home);
   try {
@@ -532,17 +540,13 @@ test("GET / serves real console assets from source tree", async () => {
     assert.equal(r.status, 200);
     const html = r.body as string;
     assert.ok(html.includes("<!DOCTYPE html>"));
-    assert.ok(html.includes("ForkLight Console"));
-    assert.ok(html.includes('id="fl-detail" hidden role="dialog" aria-label="Details"'), "details use an accessible dialog landmark");
-    // No forms or mutation controls
+    assert.ok(/retired|moved|forklight hub/i.test(html), "Console shell must point users to Hub");
+    // No forms or mutation controls on the retired page
     assert.ok(!/<form\b/i.test(html), "HTML must not contain forms");
 
     r = await httpGet(`${url}/app.js`);
     assert.equal(r.status, 200);
     assert.equal(r.headers["content-type"], "application/javascript; charset=utf-8");
-    const js = r.body as string;
-    assert.ok(js.includes("textContent"), "JS must use textContent");
-    assert.ok(js.includes("addEventListener"), "JS must use addEventListener for click handling");
 
     r = await httpGet(`${url}/app.css`);
     assert.equal(r.status, 200);
@@ -550,6 +554,14 @@ test("GET / serves real console assets from source tree", async () => {
 
     await server.stop();
   } finally { store.close(); }
+});
+
+test("Hub Control Center serves full operate UI assets", async () => {
+  const htmlPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "hub", "public", "index.html");
+  const html = await readFile(htmlPath, "utf8");
+  assert.ok(html.includes("<!DOCTYPE html>"));
+  assert.ok(html.includes('id="fl-detail" hidden role="dialog" aria-label="Details"'), "details use an accessible dialog landmark");
+  assert.ok(html.includes('data-tab="model"') && html.includes('data-tab="tasks"'), "setup + operate nav present");
 });
 
 test("daemon console lifecycle serves HTML when assets are present", async () => {
@@ -852,7 +864,8 @@ test("economics direct-Codex savings: stays unavailable when compatible calibrat
 });
 
 test("app.js Economics renderer truthful labels (offloaded, counterfactual, not-yet-measurable, no grand-total); responsive CSS", async () => {
-  const baseDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "console", "public");
+  // Economics + operate UI live under Hub after Console shell retirement.
+  const baseDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "hub", "public");
   const src = await readFile(path.join(baseDir, "app.js"), "utf8");
   const css = await readFile(path.join(baseDir, "app.css"), "utf8");
 

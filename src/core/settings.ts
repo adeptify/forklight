@@ -6,6 +6,16 @@ import {
   supportedRuntimeNamesList,
   type RuntimeName,
 } from "./runtime-names.js";
+import {
+  defaultWorkerProfiles,
+  validateWorkerProfilesSettings,
+  type WorkerProfilesSettings,
+} from "./worker-profiles.js";
+import {
+  defaultModelCatalog,
+  validateModelCatalogSettings,
+  type ModelCatalogSettings,
+} from "./model-catalog.js";
 
 // --- Versioned settings contract ---
 
@@ -110,6 +120,10 @@ export interface ForkLightSettings {
   console: ConsoleSettings;
   providerDefaults: ProviderDefaultsSettings;
   probe: ProbeSettings;
+  /** Named model configs Workers can select. */
+  modelCatalog: ModelCatalogSettings;
+  /** Named Worker profiles (runtime + modelConfigId + per-worker limits). */
+  workerProfiles: WorkerProfilesSettings;
 }
 
 /** One immutable snapshot of the settings sections that govern task creation.
@@ -120,6 +134,9 @@ export interface TaskPolicy {
   execution: ExecutionSettings;
   providerDefaults: ProviderDefaultsSettings;
   completionPolicy: CompletionPolicySettings;
+  /** Optional for older test fixtures; omitted → derived from execution + providerDefaults. */
+  workerProfiles?: WorkerProfilesSettings;
+  modelCatalog?: ModelCatalogSettings;
 }
 
 // --- Built-in defaults matching current behavior ---
@@ -219,6 +236,47 @@ const DEFAULTS: ForkLightSettings = {
     cacheLifetimeMs: 300_000,
     maxProbeConcurrency: 2,
   },
+  modelCatalog: {
+    models: [
+      {
+        id: "deepseek-flash",
+        label: "DeepSeek Flash",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        endpoint: "https://api.deepseek.com/anthropic",
+      },
+      {
+        id: "qwen-plus",
+        label: "Qwen Plus",
+        provider: "qwen",
+        model: "qwen3.7-plus",
+        endpoint: "https://dashscope.aliyuncs.com/apps/anthropic",
+      },
+      {
+        id: "xai-grok",
+        label: "xAI Grok",
+        provider: "xai",
+        model: "grok-4.5",
+        endpoint: "https://api.x.ai/v1",
+      },
+    ],
+  },
+  workerProfiles: {
+    defaultProfileId: "default",
+    profiles: [
+      {
+        id: "default",
+        label: "Default Worker",
+        runtime: "claude-code",
+        modelConfigId: "deepseek-flash",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        endpoint: "https://api.deepseek.com/anthropic",
+        effort: "high",
+        // maxBudgetUsd omitted → inherit execution.defaultMaxBudgetUsd (FL-D92)
+      },
+    ],
+  },
 };
 
 // --- Known field names — anything outside this set is rejected ---
@@ -245,6 +303,9 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
   console: ["loopbackPort", "refreshIntervalMs", "boardListLimit", "taskListLimit", "eventListLimit"],
   providerDefaults: ["deepseek", "qwen", "minimax", "glm", "xai"],
   probe: ["probeTimeoutMs", "maxBudgetUsd", "cacheLifetimeMs", "maxProbeConcurrency"],
+  // array-body sections use custom validation, not deepMerge field lists
+  modelCatalog: ["models"],
+  workerProfiles: ["defaultProfileId", "profiles"],
 };
 
 const TOP_LEVEL_KEYS = Object.keys(KNOWN_SECTIONS);
@@ -510,6 +571,33 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
   assertPositiveInteger(pr.maxProbeConcurrency, "probe.maxProbeConcurrency");
   assert(pr.maxProbeConcurrency <= 8, "probe.maxProbeConcurrency must not exceed 8");
 
+  // --- modelCatalog (optional on legacy docs → synthesized in merge/get) ---
+  if (doc.modelCatalog !== undefined) {
+    try {
+      doc.modelCatalog = validateModelCatalogSettings(doc.modelCatalog, "modelCatalog");
+    } catch (error) {
+      throw new SettingsValidationError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  // --- workerProfiles (optional on legacy docs → synthesized in merge/get) ---
+  if (doc.workerProfiles !== undefined) {
+    try {
+      const catalog = doc.modelCatalog as ModelCatalogSettings | undefined;
+      doc.workerProfiles = validateWorkerProfilesSettings(
+        doc.workerProfiles,
+        "workerProfiles",
+        catalog,
+      );
+    } catch (error) {
+      throw new SettingsValidationError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   return doc as unknown as ForkLightSettings;
 }
 
@@ -569,6 +657,24 @@ function mergeSettings(
           : (current.providerDefaults[pn as keyof ProviderDefaultsSettings] as unknown) as Record<string, unknown>;
       }
       base[section] = mergedProvs;
+    } else if (section === "modelCatalog") {
+      try {
+        base[section] = validateModelCatalogSettings(obj, "modelCatalog");
+      } catch (error) {
+        throw new SettingsValidationError(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    } else if (section === "workerProfiles") {
+      // Replace whole section when patching (profiles is an array, not field-mergeable).
+      try {
+        const catalog = (base.modelCatalog ?? current.modelCatalog) as ModelCatalogSettings | undefined;
+        base[section] = validateWorkerProfilesSettings(obj, "workerProfiles", catalog);
+      } catch (error) {
+        throw new SettingsValidationError(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
     } else {
       base[section] = deepMerge(
         base[section] as Record<string, unknown>,
@@ -578,7 +684,23 @@ function mergeSettings(
     }
   }
 
-  return base as unknown as ForkLightSettings;
+  // Legacy installs without catalogs gain derived defaults.
+  const asSettings = base as unknown as ForkLightSettings;
+  if (asSettings.modelCatalog === undefined) {
+    asSettings.modelCatalog = defaultModelCatalog(
+      asSettings.providerDefaults,
+      asSettings.execution.defaultProvider,
+    );
+  }
+  if (asSettings.workerProfiles === undefined) {
+    asSettings.workerProfiles = defaultWorkerProfiles(
+      asSettings.execution,
+      asSettings.providerDefaults,
+      asSettings.modelCatalog,
+    );
+  }
+
+  return asSettings;
 }
 
 // --- Defensive copy helpers ---
@@ -644,6 +766,26 @@ export class SettingsService {
             const pp = validateSection(obj[pn], `providerDefaults.${pn}.`);
             assertNoUnknownFields(pp, PROVIDER_DEFAULT_FIELDS, `providerDefaults.${pn}.`);
           }
+        }
+      } else if (section === "modelCatalog") {
+        try {
+          validateModelCatalogSettings(obj, "modelCatalog");
+        } catch (error) {
+          throw new SettingsValidationError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      } else if (section === "workerProfiles") {
+        try {
+          // Catalog may be in the same patch or already effective.
+          const catalog = ("modelCatalog" in patch
+            ? validateModelCatalogSettings(patch.modelCatalog, "modelCatalog")
+            : this.get().modelCatalog);
+          validateWorkerProfilesSettings(obj, "workerProfiles", catalog);
+        } catch (error) {
+          throw new SettingsValidationError(
+            error instanceof Error ? error.message : String(error),
+          );
         }
       } else {
         assertNoUnknownFields(obj, KNOWN_SECTIONS[section]!, `${section}.`);

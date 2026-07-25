@@ -129,6 +129,58 @@ export async function ensureDaemon(home = forklightHome()): Promise<Record<strin
   );
 }
 
+/** Probe daemon without starting it (for Hub status / control). */
+export async function probeDaemon(home = forklightHome()): Promise<{
+  running: boolean;
+  health?: Record<string, unknown>;
+  error?: string;
+}> {
+  try {
+    const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    return { running: true, health };
+  } catch (error) {
+    return {
+      running: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/** Request graceful daemon shutdown. No-op error if already down. */
+export async function stopDaemon(home = forklightHome()): Promise<{
+  stopped: boolean;
+  result?: Record<string, unknown>;
+  message: string;
+}> {
+  try {
+    const result = await daemonRequest<Record<string, unknown>>("shutdown", {}, home);
+    return {
+      stopped: true,
+      result,
+      message: "Daemon shutdown requested",
+    };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    // Treat "not running" as success for control UX.
+    if (/ECONNREFUSED|ENOENT|connect|not running|timed out/i.test(msg)) {
+      return { stopped: true, message: "Daemon was not running" };
+    }
+    throw error;
+  }
+}
+
+/** Stop (if up) then ensureDaemon. */
+export async function restartDaemon(home = forklightHome()): Promise<Record<string, unknown>> {
+  try {
+    await stopDaemon(home);
+  } catch {
+    /* continue to start */
+  }
+  // Allow socket cleanup after shutdown.
+  await sleep(250);
+  return ensureDaemon(home);
+}
+
 export function daemonLaunchArguments(moduleUrl: string): {
   executable: string;
   args: string[];

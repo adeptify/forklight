@@ -27,10 +27,17 @@ import { assessIntegrationFeasibility } from "./core/integration-feasibility.js"
 import { assessTaskQuality, loadTaskSpec } from "./core/task.js";
 import { createKeychainStore } from "./core/secrets.js";
 import { SettingsService, type TaskPolicy } from "./core/settings.js";
-import { daemonRequest, ensureDaemon } from "./daemon/client.js";
+import {
+  daemonRequest,
+  ensureDaemon,
+  probeDaemon,
+  restartDaemon,
+  stopDaemon,
+} from "./daemon/client.js";
 import type { DaemonMethod } from "./daemon/protocol.js";
 import { createSystemInspector, SetupService } from "./setup/service.js";
 import { SetupServer } from "./setup/server.js";
+import { HubServer } from "./hub/server.js";
 import { StateStore } from "./state/store.js";
 import { withCliExchangeReceipt, humanTokenReportLines } from "./cli/exchange-receipts.js";
 import {
@@ -104,6 +111,8 @@ Usage:
   forklight providers status [<name>] [--json]
   forklight providers probe [<name>] [--json]
   forklight setup [--no-open] [--port <port>]
+  forklight hub [--no-open] [--port <port>]
+      # starts backend daemon + Hub UI (one-shot stack)
   forklight doctor [--json]
 `;
 }
@@ -427,6 +436,20 @@ function findSetupAssets(): string {
   );
   if (existsSync(path.join(src, "index.html"))) return src;
   throw new Error("Setup assets not found. Run the build step first.");
+}
+
+function findHubAssets(): string {
+  const dist = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "hub", "public",
+  );
+  if (existsSync(path.join(dist, "index.html"))) return dist;
+  const src = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..", "..", "src", "hub", "public",
+  );
+  if (existsSync(path.join(src, "index.html"))) return src;
+  throw new Error("Hub assets not found. Run the build step first.");
 }
 
 function findPackageRoot(): string {
@@ -1147,10 +1170,14 @@ async function main(): Promise<void> {
 
   if (command === "console") {
     const operation = required(positional, "console operation (start, status, or stop)");
+    process.stdout.write(
+      "Note: the standalone Console UI is retired. Use `forklight hub` for setup + full operate views.\n",
+    );
     await ensureDaemon();
     if (operation === "start") {
       const result = await daemonRequest<Record<string, unknown>>("console_start");
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      process.stdout.write("That URL only shows a retirement notice. Prefer: forklight hub\n");
       return;
     }
     if (operation === "status") {
@@ -1312,6 +1339,114 @@ async function main(): Promise<void> {
       store.close();
     }
     process.stdout.write("Setup server stopped.\n");
+    return;
+  }
+
+  if (command === "hub") {
+    const hubOptions = [positional, ...rest].filter(
+      (value): value is string => value !== undefined,
+    );
+    const noOpen = hubOptions.includes("--no-open");
+    const portFlag = option(hubOptions, "--port");
+    const port = portFlag !== undefined ? parseInt(portFlag, 10) : 0;
+    if (portFlag !== undefined && (!Number.isFinite(port) || port < 0 || port > 65535)) {
+      throw new Error("--port must be a valid port number (0-65535)");
+    }
+
+    // One-shot stack: backend (daemon) + frontend (Hub UI).
+    process.stdout.write("Starting ForkLight stack (daemon + hub)...\n");
+    let daemonHealth: Record<string, unknown> | undefined;
+    try {
+      daemonHealth = await ensureDaemon() as Record<string, unknown>;
+      process.stdout.write("  [backend] daemon: up\n");
+    } catch (error) {
+      process.stdout.write(
+        `  [backend] daemon: failed - ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      process.stdout.write(
+        "  Hub UI will still start; operate views need a healthy daemon.\n",
+      );
+    }
+
+    const inspector = createSystemInspector();
+    const store = new StateStore(forklightHome());
+    const settings = new SettingsService(store);
+    const keychain = createKeychainStore();
+    const setup = new SetupService(settings, keychain, inspector);
+    const staticRoot = findHubAssets();
+    let packageRoot: string | undefined;
+    try {
+      packageRoot = findPackageRoot();
+    } catch {
+      packageRoot = undefined;
+    }
+
+    const server = new HubServer({
+      settings,
+      setup,
+      keychain,
+      staticRoot,
+      account: () => inspector.account(),
+      port,
+      ...(packageRoot === undefined ? {} : { packageRoot }),
+      ensureDaemon: async () => {
+        const result = await ensureDaemon();
+        return result as Record<string, unknown>;
+      },
+      probeDaemon: () => probeDaemon(),
+      stopDaemon: () => stopDaemon(),
+      restartDaemon: () => restartDaemon(),
+      daemonRequest: <T = unknown>(method: DaemonMethod, params?: Record<string, unknown>) =>
+        daemonRequest<T>(method, params ?? {}),
+    });
+
+    let startedPort: number;
+    try {
+      startedPort = await server.start();
+    } catch (error) {
+      store.close();
+      throw new Error(
+        `Hub server could not start: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const token = server.getToken();
+    const url = `http://127.0.0.1:${startedPort}/#${encodeURIComponent(token)}`;
+    process.stdout.write(`  [frontend] hub UI: http://127.0.0.1:${startedPort}/\n`);
+    if (daemonHealth && daemonHealth.ok === false) {
+      process.stdout.write("  note: daemon health reported ok=false\n");
+    }
+
+    if (!noOpen && process.platform === "darwin") {
+      try {
+        execFileSync("open", [url], { stdio: "ignore" });
+        process.stdout.write(`ForkLight Hub opened in browser. If it did not open, visit:\n${url}\n`);
+      } catch {
+        process.stdout.write(`Open this URL for ForkLight Hub:\n${url}\n`);
+      }
+    } else {
+      process.stdout.write(`Open this URL for ForkLight Hub:\n${url}\n`);
+    }
+    process.stdout.write("Stack stays running until you press Ctrl+C (stops Hub UI; daemon keeps running).\n");
+
+    const requestStop = (): void => { void server.stop(); };
+    process.once("SIGINT", requestStop);
+    process.once("SIGTERM", requestStop);
+    try {
+      await new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (!server.isRunning()) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 250);
+      });
+    } finally {
+      process.removeListener("SIGINT", requestStop);
+      process.removeListener("SIGTERM", requestStop);
+      await server.stop();
+      store.close();
+    }
+    process.stdout.write("Hub server stopped.\n");
     return;
   }
 

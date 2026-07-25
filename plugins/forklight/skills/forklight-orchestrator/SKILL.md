@@ -36,8 +36,9 @@ Use `forklight_list` to recover taskIds after a new Main session.
 
 ## Worker selection
 
-- Default Worker often `claude-code`.
-- Optional `runtime: grok-build` requires `provider: xai`.
+- Prefer a named **workerProfileId** from ForkLight settings (Hub → Worker profiles) when the user or task policy names one.
+- Or set `runtime` / `provider` / `model` explicitly on submit.
+- Default profile often uses `claude-code` + a cheap model; `grok-build` requires `provider: xai`.
 - Do not assume Main product equals Worker runtime.
 
 ## Acceptance standard

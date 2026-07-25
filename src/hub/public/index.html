@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>ForkLight</title>
+<link rel="stylesheet" href="app.css">
+<script>
+/* Apply theme before paint to avoid flash. No secrets. */
+(function () {
+  try {
+    var stored = localStorage.getItem("fl-theme");
+    var theme = stored === "dark" || stored === "light"
+      ? stored
+      : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  } catch (_) {
+    document.documentElement.setAttribute("data-theme", "light");
+  }
+})();
+</script>
+</head>
+<body>
+<a class="skip" href="#main" data-i18n="skip">跳到主要内容</a>
+<div class="shell">
+  <aside class="sidebar" aria-label="Primary">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">FL</div>
+      <div class="brand-text">
+        <div class="brand-name">ForkLight</div>
+        <div class="brand-sub" data-i18n="brandSub">控制中心</div>
+      </div>
+    </div>
+
+    <div class="nav-group-label" data-i18n="navConfigure">配置</div>
+    <nav id="fl-tabs" class="nav" aria-label="Sections">
+      <button type="button" data-tab="model" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">1</span>
+        <span class="nav-label" data-i18n="navModels">模型</span>
+      </button>
+      <button type="button" data-tab="worker" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">2</span>
+        <span class="nav-label" data-i18n="navWorkers">Worker</span>
+      </button>
+      <button type="button" data-tab="mains" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">3</span>
+        <span class="nav-label" data-i18n="navMain">Main</span>
+      </button>
+
+      <div class="nav-group-label" data-i18n="navOperate">运行</div>
+      <button type="button" data-tab="overview" class="nav-item active">
+        <span class="nav-icon" aria-hidden="true">&#9672;</span>
+        <span class="nav-label" data-i18n="navOverview">总览</span>
+      </button>
+      <button type="button" data-tab="tasks" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">&#9638;</span>
+        <span class="nav-label" data-i18n="navBoard">看板</span>
+      </button>
+      <button type="button" data-tab="plans" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">&#9783;</span>
+        <span class="nav-label" data-i18n="navPlans">计划</span>
+      </button>
+      <button type="button" data-tab="competitions" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">&#9733;</span>
+        <span class="nav-label" data-i18n="navCompete">竞赛</span>
+      </button>
+      <button type="button" data-tab="stats" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">&#9641;</span>
+        <span class="nav-label" data-i18n="navInsights">洞察</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="theme-switch" role="group" aria-label="Theme">
+        <span class="theme-label" data-i18n="theme">主题</span>
+        <button type="button" class="theme-btn" data-theme-set="light" id="fl-theme-light">Light</button>
+        <button type="button" class="theme-btn" data-theme-set="dark" id="fl-theme-dark">Dark</button>
+      </div>
+      <div class="lang-switch" role="group" aria-label="Language">
+        <span class="lang-label" data-i18n="lang">语言</span>
+        <button type="button" class="lang-btn" data-lang="zh" id="fl-lang-zh">中文</button>
+        <button type="button" class="lang-btn" data-lang="en" id="fl-lang-en">EN</button>
+      </div>
+      <div id="fl-status-bar" class="conn-pill" aria-live="polite"></div>
+    </div>
+  </aside>
+
+  <div class="workspace">
+    <header class="topbar">
+      <div class="topbar-copy">
+        <h1 id="fl-page-title" class="page-title">总览</h1>
+        <p id="fl-page-sub" class="page-sub">当前运行状态与需要你关注的事项</p>
+      </div>
+      <div id="fl-top-meta" class="top-meta"></div>
+    </header>
+    <main id="main" class="content" tabindex="-1">
+      <div id="fl-toast" class="toast" hidden role="status"></div>
+      <div id="fl-flash-error" class="error-box" hidden role="alert"></div>
+      <section id="fl-view" class="view" aria-live="polite"></section>
+    </main>
+    <footer id="fl-footer" class="footer"></footer>
+  </div>
+</div>
+<section id="fl-detail" hidden role="dialog" aria-label="Details"></section>
+<div id="fl-scrim" class="scrim" hidden aria-hidden="true"></div>
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -42,21 +42,56 @@ Or install a downloaded release tarball:
 npm install -g ./forklight-0.2.0.tgz
 ```
 
-Then launch the visual first-run guide:
+## Quick start (out of the box)
+
+One command starts the **backend daemon** and the **Hub control UI**:
+
+```bash
+forklight hub
+```
+
+Hub stays open until you press Ctrl+C (stops Hub UI; daemon keeps running until
+`forklight daemon stop`). Configure in the browser — no hand-editing of Main
+client configs or settings JSON for the happy path:
+
+1. **Models** - Provider, model id, optional endpoint; API key stored in Keychain only
+2. **Workers** - pick a model + runtime (`claude-code` / `grok-build`) and per-worker limits
+3. **Main** - install **Plugin** (Codex), **MCP**, and/or **Skill** per client (independent)
+4. Confirm **Daemon** is up on Overview (Start / Stop / Restart from the Stack card)
+
+Overview shows a readiness checklist (Models → Workers → Main channel → Daemon).
+When green, open a new Main session and submit work via MCP or CLI
+(`forklight submit` / plan tools). Keys never leave Keychain.
+
+### Operate from Hub (same daemon as CLI)
+
+| Area | Hub actions |
+|------|-------------|
+| Daemon | Start, stop, restart, live health (pid, queue, identity) |
+| Tasks | Resume, revise, main review (confirm), integration preflight / apply (confirm), history |
+| Providers | Status + **explicit** billable probe (confirm required) |
+| Compete | Status detail + compare/evaluate |
+| Board / Plans / Insights | Live operate views (read + supervise) |
+
+Task **submit** stays CLI/MCP-first; Hub is configure + supervise + observability.
+
+The old standalone `forklight console` page is retired (daemon APIs remain for compatibility).
+
+First-run guided setup is still available:
 
 ```bash
 forklight setup
 ```
 
-The guide checks the local prerequisites, lets you choose the Provider plan or
-region and model, verifies the API key with one explicitly confirmed billable
-request, stores a successful key in macOS Keychain, installs the bundled Codex
-plugin, and starts the local daemon and read-only console. Open a new Codex task
-after plugin installation so Codex discovers the ForkLight skill and MCP tools.
+Setup checks local prerequisites, lets you choose the Provider plan or region
+and model, verifies the API key with one explicitly confirmed billable request,
+stores a successful key in macOS Keychain, installs the bundled Codex plugin,
+and starts the local daemon and read-only console. Hub is the long-lived control
+surface after that.
 
-The setup page binds only to `127.0.0.1` and stops after setup finishes. Its
-one-time token is carried in the URL fragment and removed from the visible URL
-after the page loads. Provider keys are saved only after a successful probe.
+Both pages bind only to `127.0.0.1`. The token is carried in the URL fragment and
+removed from the visible URL after the page loads. Provider keys are never written
+into Main client config files — only forklight MCP command paths are.
 
 For a terminal-only prerequisite report that does not call a Provider or change
 settings:
@@ -147,6 +182,7 @@ forklight daemon start | status | stop                    # daemon lifecycle
 forklight providers status [<name>] [--json]              # cached, no cost
 forklight providers probe [<name>] [--json]               # explicit probe ★
 forklight setup [--no-open] [--port <port>]               # visual first-run guide
+forklight hub [--no-open] [--port <port>]                 # reusable settings + Main install UI
 forklight doctor [--json]                                 # read-only prerequisites
 ```
 

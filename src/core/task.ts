@@ -10,6 +10,7 @@ import {
   supportedRuntimeNamesList,
   type RuntimeName,
 } from "./runtime-names.js";
+import { resolveWorkerSelection } from "./worker-profiles.js";
 import {
   expandHome,
   requireNonEmptyString,
@@ -394,16 +395,78 @@ export function parseTaskSpec(
   const project = path.resolve(baseDirectory, expandHome(projectInput));
 
   const execSettings = policy?.execution ?? cloneDefaults().execution;
+  const providerDefaults = policy?.providerDefaults ?? cloneDefaults().providerDefaults;
+  // Named profiles: only auto-apply the default profile when the policy
+  // explicitly carries workerProfiles (runtime settings). Legacy fixtures that
+  // only override providerDefaults keep the previous defaultProvider/model path.
+  const workerProfiles = policy?.workerProfiles;
+  const modelCatalog = policy?.modelCatalog ?? cloneDefaults().modelCatalog;
+  let profileDefaults: {
+    provider?: string;
+    runtime?: string;
+    model?: string;
+    endpoint?: string;
+    effort?: string;
+    maxBudgetUsd?: number | null;
+  } = {};
+  const profileIdRaw = root.workerProfileId;
+  if (profileIdRaw !== undefined) {
+    if (typeof profileIdRaw !== "string" || profileIdRaw.trim() === "") {
+      throw new Error("task.workerProfileId must be a non-empty string when supplied");
+    }
+    const profilesForId = workerProfiles ?? cloneDefaults().workerProfiles;
+    const resolved = resolveWorkerSelection(
+      { workerProfileId: profileIdRaw.trim() },
+      {
+        execution: execSettings,
+        providerDefaults,
+        workerProfiles: profilesForId,
+        modelCatalog,
+      },
+    );
+    profileDefaults = {
+      provider: resolved.provider,
+      runtime: resolved.runtime,
+      model: resolved.model,
+      endpoint: resolved.endpoint,
+      effort: resolved.effort,
+      maxBudgetUsd: resolved.maxBudgetUsd,
+    };
+  } else if (
+    workerProfiles !== undefined
+    && provider.name === undefined
+    && runtime.name === undefined
+  ) {
+    const resolved = resolveWorkerSelection(
+      {},
+      {
+        execution: execSettings,
+        providerDefaults,
+        workerProfiles,
+        ...(policy?.modelCatalog === undefined
+          ? {}
+          : { modelCatalog: policy.modelCatalog }),
+      },
+    );
+    profileDefaults = {
+      provider: resolved.provider,
+      runtime: resolved.runtime,
+      model: resolved.model,
+      endpoint: resolved.endpoint,
+      effort: resolved.effort,
+      maxBudgetUsd: resolved.maxBudgetUsd,
+    };
+  }
   const providerName = stringValue(
     provider.name,
     "task.provider.name",
-    execSettings.defaultProvider,
+    profileDefaults.provider ?? execSettings.defaultProvider,
   );
   if (!isProviderName(providerName)) {
     throw new Error(`Unsupported provider: ${providerName}. Supported providers: ${providerNames().join(", ")}`);
   }
-  const providerDef = providerDefinition(providerName, policy?.providerDefaults);
-  const defaultRuntime = execSettings.defaultRuntime ?? "claude-code";
+  const providerDef = providerDefinition(providerName, providerDefaults);
+  const defaultRuntime = profileDefaults.runtime ?? execSettings.defaultRuntime ?? "claude-code";
   const runtimeNameRaw = stringValue(runtime.name, "task.runtime.name", defaultRuntime);
   if (!isRuntimeName(runtimeNameRaw)) {
     throw new Error(
@@ -412,14 +475,23 @@ export function parseTaskSpec(
   }
   const runtimeName: RuntimeName = runtimeNameRaw;
   assertProviderRuntimePair(providerName, runtimeName);
-  const effort = stringValue(runtime.effort, "task.runtime.effort", execSettings.defaultEffort);
+  const effort = stringValue(
+    runtime.effort,
+    "task.runtime.effort",
+    profileDefaults.effort ?? execSettings.defaultEffort,
+  );
   if (!["low", "medium", "high", "xhigh", "max"].includes(effort)) {
     throw new Error("task.runtime.effort must be low, medium, high, xhigh, or max");
   }
   const maxBudgetUsd = (() => {
     const raw = runtime.maxBudgetUsd;
     if (raw === null) return null;
-    if (raw === undefined) return execSettings.defaultMaxBudgetUsd;
+    // Worker-granular budget when profile selected and task omits runtime.maxBudgetUsd
+    if (raw === undefined) {
+      return profileDefaults.maxBudgetUsd !== undefined
+        ? profileDefaults.maxBudgetUsd
+        : execSettings.defaultMaxBudgetUsd;
+    }
     if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
       throw new Error("task.runtime.maxBudgetUsd must be a positive number or null");
     }
@@ -471,10 +543,14 @@ export function parseTaskSpec(
     project,
     provider: {
       name: providerName,
-      model: stringValue(provider.model, "task.provider.model", providerDef.defaultModel),
+      model: stringValue(
+        provider.model,
+        "task.provider.model",
+        profileDefaults.model ?? providerDef.defaultModel,
+      ),
       endpoint: provider.endpoint !== undefined
         ? stringValue(provider.endpoint, "task.provider.endpoint")
-        : providerDef.defaultEndpoint,
+        : (profileDefaults.endpoint ?? providerDef.defaultEndpoint),
       keychainService: stringValue(
         provider.keychainService,
         "task.provider.keychainService",

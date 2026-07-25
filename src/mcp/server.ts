@@ -16,7 +16,6 @@ import {
 } from "../core/budget.js";
 import { assessIntegrationFeasibility } from "../core/integration-feasibility.js";
 import { assessTaskQuality, parseTaskSpec } from "../core/task.js";
-import { type ProviderName } from "../core/providers.js";
 import { daemonRequest, ensureDaemon } from "../daemon/client.js";
 import type { ForkLightSettings, TaskPolicy } from "../core/settings.js";
 import {
@@ -32,7 +31,8 @@ import {
   currentBuildIdentity,
   isBuildIdentity,
 } from "../core/build-identity.js";
-import { SUPPORTED_RUNTIME_NAMES, type RuntimeName } from "../core/runtime-names.js";
+import { SUPPORTED_RUNTIME_NAMES } from "../core/runtime-names.js";
+import { resolveWorkerSelection } from "../core/worker-profiles.js";
 
 const SERVER_INSTRUCTIONS =
   "ForkLight runs bounded external coding Workers (runtimes: claude-code default, optional grok-build with provider xai). The Main agent may be Claude Code, Grok Build, OpenCode, Codex, or a human using CLI/Console — not Codex-only. Before submit, the Main agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, modules, call chain, scenarios, risks, and independent acceptance. Validate first. Submit returns immediately. Prefer forklight_wait over tight-loop status. Use forklight_list for progress-aware boards. Status may include failureCategory authentication|budget|runtime. Worker runtime is chosen by task.runtime (or defaultRuntime), independent of which Main client is connected. Record taskId for continuity across Main sessions. The Main agent remains accountable for review and user approvals. Never call ForkLight a native subagent of the Main product, and never use it to commit or push.";
@@ -85,9 +85,11 @@ const taskInputSchema = z.object({
   model: z.string().min(1).optional(),
   endpoint: z.string().url().optional(),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
-  // Worker runtime (claude-code | grok-build). Omit → settings.execution.defaultRuntime.
+  // Worker runtime (claude-code | grok-build). Omit → default worker profile / defaultRuntime.
   runtime: z.enum(SUPPORTED_RUNTIME_NAMES).optional(),
   runtimeExecutable: z.string().min(1).optional(),
+  /** Named Worker profile id from settings.workerProfiles (overrides defaults). */
+  workerProfileId: z.string().min(1).max(64).optional(),
   // FL-D92: null = unlimited (no --max-budget-usd). Omit to inherit effective default.
   // Must not use z.number().positive().optional() alone — that rejects null and forced
   // callers to invent a positive cap when defaultMaxBudgetUsd is null.
@@ -108,33 +110,51 @@ type TaskInput = z.infer<typeof taskInputSchema>;
 export function inlineTask(
   input: TaskInput,
   settings: ForkLightSettings,
-  budget: MaxBudgetResolution = resolveMaxBudgetUsd(
+  _budget: MaxBudgetResolution = resolveMaxBudgetUsd(
     input.maxBudgetUsd,
     settings.execution.defaultMaxBudgetUsd,
   ),
 ): Record<string, unknown> {
-  const providerName = (input.provider ?? settings.execution.defaultProvider) as ProviderName;
-  const providerDef = settings.providerDefaults[providerName];
-  const runtimeName = (input.runtime
-    ?? settings.execution.defaultRuntime
-    ?? "claude-code") as RuntimeName;
-  const defaultExecutable = runtimeName === "grok-build" ? "grok" : "claude";
+  const resolved = resolveWorkerSelection(
+    {
+      ...(input.workerProfileId === undefined ? {} : { workerProfileId: input.workerProfileId }),
+      ...(input.provider === undefined ? {} : { provider: input.provider }),
+      ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.endpoint === undefined ? {} : { endpoint: input.endpoint }),
+      ...(input.effort === undefined ? {} : { effort: input.effort }),
+      ...(input.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: input.maxBudgetUsd }),
+    },
+    {
+      execution: settings.execution,
+      providerDefaults: settings.providerDefaults,
+      workerProfiles: settings.workerProfiles,
+      modelCatalog: settings.modelCatalog,
+    },
+  );
+  // Explicit MCP maxBudgetUsd wins; else worker profile budget; else settings default (via resolve).
+  const effectiveBudget = resolveMaxBudgetUsd(
+    input.maxBudgetUsd !== undefined ? input.maxBudgetUsd : resolved.maxBudgetUsd,
+    settings.execution.defaultMaxBudgetUsd,
+  );
+  const defaultExecutable = resolved.runtime === "grok-build" ? "grok" : "claude";
   return {
     version: 2,
     name: input.name,
     project: input.project,
     contract: input.contract,
+    ...(resolved.profileId === undefined ? {} : { workerProfileId: resolved.profileId }),
     provider: {
-      name: providerName,
-      model: input.model ?? providerDef.defaultModel,
-      keychainService: providerDef.defaultKeychainService,
-      ...(input.endpoint === undefined ? {} : { endpoint: input.endpoint }),
+      name: resolved.provider,
+      model: resolved.model,
+      keychainService: resolved.keychainService,
+      endpoint: resolved.endpoint,
     },
     runtime: {
-      name: runtimeName,
+      name: resolved.runtime,
       executable: input.runtimeExecutable ?? defaultExecutable,
-      effort: input.effort ?? settings.execution.defaultEffort,
-      maxBudgetUsd: budget.maxBudgetUsd,
+      effort: resolved.effort,
+      maxBudgetUsd: effectiveBudget.maxBudgetUsd,
     },
     workspace: {
       ...(input.generatedPaths === undefined ? {} : { generatedPaths: input.generatedPaths }),
@@ -214,6 +234,8 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         execution: settings.execution,
         providerDefaults: settings.providerDefaults,
         completionPolicy: settings.completionPolicy,
+        workerProfiles: settings.workerProfiles,
+        modelCatalog: settings.modelCatalog,
       };
       const budget = resolveMaxBudgetUsd(
         input.maxBudgetUsd,

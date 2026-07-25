@@ -156,6 +156,8 @@ function taskPolicy(settings: ForkLightSettings): TaskPolicy {
     execution: settings.execution,
     providerDefaults: settings.providerDefaults,
     completionPolicy: settings.completionPolicy,
+    workerProfiles: settings.workerProfiles,
+    modelCatalog: settings.modelCatalog,
   };
 }
 
