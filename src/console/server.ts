@@ -159,17 +159,20 @@ export class ConsoleServer {
       case "/tasks":
         return {
           params: {},
+          // Board/Kanban uses the same progress surface as CLI/MCP list (FL-D83).
           handler: () =>
-            this.coordinator.list(undefined, this.settings.taskListLimit).map((t) => ({
-              id: t.id,
+            this.coordinator.listTaskSurfaces(undefined, this.settings.taskListLimit).map((t) => ({
+              id: t.taskId,
               name: t.name,
               status: t.status,
-              provider: t.spec.provider.name,
-              model: t.spec.provider.model,
+              provider: t.provider,
+              model: t.model,
               createdAt: t.createdAt,
               startedAt: t.startedAt,
               finishedAt: t.finishedAt,
               error: t.error,
+              progress: t.progress,
+              ...(t.failureCategory === undefined ? {} : { failureCategory: t.failureCategory }),
             })),
         };
       case "/competitions":

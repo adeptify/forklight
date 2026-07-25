@@ -2,6 +2,11 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+import {
+  requireNonEmptyString,
+  requireObject,
+  requireStringArray,
+} from "./parse-helpers.js";
 import { assessTaskQuality, loadTaskSpec } from "./task.js";
 import type { TaskPolicy } from "./settings.js";
 import type { ContractTaskSpec, QualityReport } from "./types.js";
@@ -36,27 +41,9 @@ function expandHome(input: string): string {
   return input;
 }
 
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function stringValue(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${label} must be a non-empty string`);
-  }
-  return value.trim();
-}
-
-function stringArray(value: unknown, label: string): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
-    throw new Error(`${label} must be an array of non-empty strings`);
-  }
-  return value.map((item) => (item as string).trim());
-}
+const object = requireObject;
+const stringValue = requireNonEmptyString;
+const stringArray = requireStringArray;
 
 function dependencyWaves(ids: string[], dependencies: Map<string, string[]>): string[][] {
   const remaining = new Set(ids);

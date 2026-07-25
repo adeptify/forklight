@@ -16,7 +16,7 @@ import {
 } from "../core/exchange-capture.js";
 
 export type TaskScopedMcpOperation =
-  | "forklight_submit" | "forklight_status" | "forklight_inspect" | "forklight_resume"
+  | "forklight_submit" | "forklight_status" | "forklight_wait" | "forklight_inspect" | "forklight_resume"
   | "forklight_integration_preflight" | "forklight_integration_apply"
   | "forklight_integration_status" | "forklight_integration_wait"
   | "forklight_integration_history" | "forklight_main_review"

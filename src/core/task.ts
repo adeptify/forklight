@@ -5,6 +5,11 @@ import path from "node:path";
 import YAML from "yaml";
 import { isProviderName, providerDefinition, providerNames } from "./providers.js";
 import { normalizeDirectCodexProfileId } from "./direct-codex-calibration.js";
+import {
+  requireNonEmptyString,
+  requireObject,
+  requireStringArray,
+} from "./parse-helpers.js";
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "./settings.js";
 import type {
   ContractTaskSpec,
@@ -55,28 +60,9 @@ function generatedPathPatterns(value: unknown): string[] | undefined {
   return [...new Set(patterns)];
 }
 
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function stringValue(value: unknown, label: string, fallback?: string): string {
-  if (value === undefined && fallback !== undefined) return fallback;
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${label} must be a non-empty string`);
-  }
-  return value.trim();
-}
-
-function stringArray(value: unknown, label: string, fallback: string[] = []): string[] {
-  if (value === undefined) return [...fallback];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
-    throw new Error(`${label} must be an array of non-empty strings`);
-  }
-  return value.map((item) => (item as string).trim());
-}
+const object = requireObject;
+const stringValue = requireNonEmptyString;
+const stringArray = requireStringArray;
 
 function objectArray(value: unknown, label: string): Record<string, unknown>[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);

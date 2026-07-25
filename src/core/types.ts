@@ -640,6 +640,8 @@ export interface TaskDecisionView {
     lastEventAt?: string;
     latestAction?: string;
   };
+  /** Latest Worker terminal failure class when recorded (auth/budget/runtime). */
+  failureCategory?: "authentication" | "budget" | "runtime";
 }
 
 export interface ActivationHandoff {

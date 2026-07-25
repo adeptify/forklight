@@ -178,12 +178,22 @@ export function providerVariants(
       },
     ];
   }
+  // FL-D18: list official DeepSeek Claude-compatible models, not only the current default.
+  // Default remains recommended when it matches; all listed models stay selectable.
+  const deepseekModels = [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-pro[1m]",
+  ];
+  if (!deepseekModels.includes(current.defaultModel)) {
+    deepseekModels.unshift(current.defaultModel);
+  }
   return [{
     id: "default",
     label: "DeepSeek API",
-    description: "Direct Anthropic-compatible DeepSeek endpoint.",
+    description: "Direct Anthropic-compatible DeepSeek endpoint (Flash and Pro families).",
     endpoint: current.defaultEndpoint,
-    models: [current.defaultModel],
+    models: deepseekModels,
     recommended: true,
   }];
 }

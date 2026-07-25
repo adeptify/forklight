@@ -16,6 +16,7 @@ import type {
   VerificationResult,
   WorkerClaim,
 } from "./types.js";
+import { failureCategoryFromEvents } from "./worker-failure.js";
 
 const WORKER_CLAIM_PREVIEW_MAX_CHARS = 360;
 const WORKER_CLAIM_TRUNCATION_MARKER =
@@ -322,6 +323,7 @@ export function buildTaskDecisionView(input: {
     input.nowMs ?? Date.now(),
     input.quietAfterMs ?? DEFAULT_QUIET_AFTER_MS,
   );
+  const failureCategory = failureCategoryFromEvents(orderedEvents);
   return {
     taskId: input.task.id,
     ...decision,
@@ -332,5 +334,6 @@ export function buildTaskDecisionView(input: {
     lineage: buildDeliveryLineage(input.attempts, orderedEvents),
     ...(integration === undefined ? {} : { integration }),
     progress,
+    ...(failureCategory === undefined ? {} : { failureCategory }),
   };
 }

@@ -10,13 +10,23 @@ import type {
   TaskDecisionView,
   TaskRecord,
 } from "../core/types.js";
+import {
+  resolveMaxBudgetUsd,
+  type MaxBudgetResolution,
+} from "../core/budget.js";
+import { assessIntegrationFeasibility } from "../core/integration-feasibility.js";
 import { assessTaskQuality, parseTaskSpec } from "../core/task.js";
 import { type ProviderName } from "../core/providers.js";
 import { daemonRequest, ensureDaemon } from "../daemon/client.js";
 import type { ForkLightSettings, TaskPolicy } from "../core/settings.js";
-import { buildCompactInspection } from "../cli/supervision.js";
+import {
+  buildCompactInspection,
+  buildProgressCursor,
+  waitForTask,
+  type TaskProgressSnapshot,
+} from "../cli/supervision.js";
 import { withMcpExchangeReceipt } from "./exchange-receipts.js";
-import { buildTaskSummary } from "../core/task-summary.js";
+import { buildTaskSummary, type SafeTaskSummary } from "../core/task-summary.js";
 import {
   compareBuildIdentity,
   currentBuildIdentity,
@@ -24,7 +34,7 @@ import {
 } from "../core/build-identity.js";
 
 const SERVER_INSTRUCTIONS =
-  "ForkLight runs bounded external coding Workers through DeepSeek, Qwen, MiniMax, or GLM. Before submit, the main Codex agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, module inputs and outputs, call chain, scenarios, risks, and independent acceptance. Validate the contract first. Submit returns immediately. Prefer status sparingly; for supervision use compact inspect (summary=true, default) after the task is terminal rather than tight-loop full inspect. CLI wait observes event-sequence progress, not only status. The main Codex agent remains accountable for review and user approvals. Never call ForkLight a native Codex subagent, and never use it to commit or push.";
+  "ForkLight runs bounded external coding Workers through DeepSeek, Qwen, MiniMax, or GLM. Before submit, the main Codex agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, module inputs and outputs, call chain, scenarios, risks, and independent acceptance. Validate the contract first. Submit returns immediately. Prefer forklight_wait (event-sequence or terminal) for supervision instead of tight-loop status/inspect. Use forklight_list for progress-aware board summaries (activity/lastEventAt). Compact inspect (summary=true) is for post-terminal review. Status may include failureCategory authentication|budget|runtime. The main Codex agent remains accountable for review and user approvals. Never call ForkLight a native Codex subagent, and never use it to commit or push.";
 
 const moduleContractSchema = z.object({
   name: z.string().min(1),
@@ -74,7 +84,10 @@ const taskInputSchema = z.object({
   model: z.string().min(1).optional(),
   endpoint: z.string().url().optional(),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
-  maxBudgetUsd: z.number().positive().optional(),
+  // FL-D92: null = unlimited (no --max-budget-usd). Omit to inherit effective default.
+  // Must not use z.number().positive().optional() alone — that rejects null and forced
+  // callers to invent a positive cap when defaultMaxBudgetUsd is null.
+  maxBudgetUsd: z.number().positive().nullable().optional(),
   allowEdits: z.boolean().default(true),
   focusPaths: z.array(z.string().min(1)).min(1),
   generatedPaths: z.array(z.string().min(1).max(240)).optional(),
@@ -83,7 +96,19 @@ const taskInputSchema = z.object({
 
 type TaskInput = z.infer<typeof taskInputSchema>;
 
-function inlineTask(input: TaskInput, settings: ForkLightSettings): Record<string, unknown> {
+/**
+ * Build the YAML-shaped task document MCP submit/validate feed into parseTaskSpec.
+ * Optional pre-resolved `budget` avoids double resolve on validate (FL-D92).
+ * Exported for unit tests of the real MCP budget adapter.
+ */
+export function inlineTask(
+  input: TaskInput,
+  settings: ForkLightSettings,
+  budget: MaxBudgetResolution = resolveMaxBudgetUsd(
+    input.maxBudgetUsd,
+    settings.execution.defaultMaxBudgetUsd,
+  ),
+): Record<string, unknown> {
   const providerName = (input.provider ?? settings.execution.defaultProvider) as ProviderName;
   const providerDef = settings.providerDefaults[providerName];
   return {
@@ -101,7 +126,7 @@ function inlineTask(input: TaskInput, settings: ForkLightSettings): Record<strin
       name: "claude-code",
       executable: "claude",
       effort: input.effort ?? settings.execution.defaultEffort,
-      maxBudgetUsd: input.maxBudgetUsd ?? settings.execution.defaultMaxBudgetUsd,
+      maxBudgetUsd: budget.maxBudgetUsd,
     },
     workspace: {
       ...(input.generatedPaths === undefined ? {} : { generatedPaths: input.generatedPaths }),
@@ -182,13 +207,28 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         providerDefaults: settings.providerDefaults,
         completionPolicy: settings.completionPolicy,
       };
-      const spec = parseTaskSpec(
-        inlineTask(input, settings),
-        input.project,
-        policy,
+      const budget = resolveMaxBudgetUsd(
+        input.maxBudgetUsd,
+        settings.execution.defaultMaxBudgetUsd,
       );
+      const inline = inlineTask(input, settings, budget);
+      const spec = parseTaskSpec(inline, input.project, policy);
       const report = assessTaskQuality(spec, settings.contractQuality);
-      return textAndData(report);
+      // FL-D10 parity with CLI validate: surface Task budget vs Integration limit.
+      const integrationFeasibility = assessIntegrationFeasibility(
+        spec,
+        settings.integration,
+      );
+      return textAndData({
+        ...report,
+        budget: {
+          maxBudgetUsd: budget.maxBudgetUsd,
+          source: budget.source,
+          generatesRuntimeFlag: budget.generatesRuntimeFlag,
+        },
+        resolvedRuntimeMaxBudgetUsd: spec.runtime.maxBudgetUsd,
+        integrationFeasibility,
+      });
     },
   );
 
@@ -310,9 +350,67 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
             daemonRequest<TaskDecisionView>("task_decision", { taskId }, home),
           ]);
           return textAndData({
-            ...buildTaskSummary(task, decision.progress),
+            ...buildTaskSummary(task, decision.progress, decision.failureCategory),
+            ...(decision.failureCategory === undefined
+              ? {}
+              : { failureCategory: decision.failureCategory }),
             decision,
           });
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_wait",
+    {
+      title: "Wait for Task progress",
+      description:
+        "Block until a Task terminal state or event-sequence change (same semantics as CLI wait). Prefer this over polling status/inspect. until=change fires when status, latestEventSequence, attempt, or updatedAt cursor advances; until=terminal waits for succeeded/failed/interrupted.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        timeoutMs: z.number().int().positive().max(600_000).default(60_000),
+        pollMs: z.number().int().positive().max(60_000).default(1_000),
+        until: z.enum(["change", "terminal"]).default("terminal"),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ taskId, timeoutMs, pollMs, until }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_wait",
+        home,
+        args: { taskId, timeoutMs, pollMs, until },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const readProgress = async (): Promise<TaskProgressSnapshot> => {
+            const [task, decision] = await Promise.all([
+              daemonRequest<TaskRecord>("status", { taskId }, home),
+              daemonRequest<TaskDecisionView>("task_decision", { taskId }, home),
+            ]);
+            const latestEvent = decision.progress.lastEventAt === undefined
+              ? undefined
+              : {
+                sequence: decision.progress.latestEventSequence,
+                timestamp: decision.progress.lastEventAt,
+                type: "progress",
+                summary: decision.progress.latestAction ?? "",
+              };
+            return {
+              task,
+              cursor: buildProgressCursor(task, latestEvent),
+              ...(latestEvent === undefined ? {} : { latestEvent }),
+            };
+          };
+          const result = await waitForTask(
+            { timeoutMs, pollMs, until },
+            {
+              readProgress,
+              sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+              now: () => Date.now(),
+            },
+          );
+          return textAndData(result);
         },
       });
     },
@@ -456,7 +554,8 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     "forklight_list",
     {
       title: "List ForkLight tasks",
-      description: "List recent ForkLight tasks and their current status.",
+      description:
+        "List recent ForkLight tasks with latest-event progress (activity, lastEventAt, latestAction) and optional failureCategory. Prefer this over status-only polling for board-style supervision.",
       inputSchema: z.object({
         statuses: z
           .array(z.enum(["queued", "preparing", "running", "verifying", "succeeded", "failed", "interrupted"]))
@@ -467,12 +566,11 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     },
     async ({ statuses, limit }) => {
       await ensureDaemon(home);
-      const tasks = await daemonRequest<TaskRecord[]>(
-        "list",
+      const summaries = await daemonRequest<SafeTaskSummary[]>(
+        "list_summaries",
         { ...(statuses === undefined ? {} : { statuses }), limit },
         home,
       );
-      const summaries = tasks.map((task) => buildTaskSummary(task));
       return {
         content: [{ type: "text", text: JSON.stringify(summaries, null, 2) }],
         structuredContent: { tasks: summaries },
@@ -728,7 +826,8 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         candidates: z.array(z.object({
           providerName: z.enum(["deepseek", "qwen", "minimax", "glm"]),
           modelName: z.string().min(1),
-          maxBudgetUsd: z.number().positive().optional(),
+          // Per-candidate override: null = unlimited for that candidate (FL-D92 parity).
+          maxBudgetUsd: z.number().positive().nullable().optional(),
         })).min(1),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },

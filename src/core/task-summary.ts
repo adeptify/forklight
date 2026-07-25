@@ -1,4 +1,10 @@
+import {
+  buildStatusProgress,
+  DEFAULT_QUIET_AFTER_MS,
+  type LatestEventMeta,
+} from "./task-progress.js";
 import type { TaskDecisionView, TaskRecord } from "./types.js";
+import type { WorkerFailureCategory } from "./worker-failure.js";
 
 export interface SafeTaskSummary {
   taskId: string;
@@ -16,6 +22,8 @@ export interface SafeTaskSummary {
   finishedAt?: string;
   error?: string;
   progress?: TaskDecisionView["progress"];
+  /** Present when a Worker terminal failure was classified (auth/budget/runtime). */
+  failureCategory?: WorkerFailureCategory;
 }
 
 /**
@@ -28,6 +36,7 @@ export interface SafeTaskSummary {
 export function buildTaskSummary(
   task: TaskRecord,
   progress?: TaskDecisionView["progress"],
+  failureCategory?: WorkerFailureCategory,
 ): SafeTaskSummary {
   return {
     taskId: task.id,
@@ -45,5 +54,28 @@ export function buildTaskSummary(
     ...(task.finishedAt === undefined ? {} : { finishedAt: task.finishedAt }),
     ...(task.error === undefined ? {} : { error: task.error }),
     ...(progress === undefined ? {} : { progress }),
+    ...(failureCategory === undefined ? {} : { failureCategory }),
   };
+}
+
+/**
+ * One-shot list/status projection: progress from latest-event meta + optional
+ * failureCategory. Shared by CLI list, MCP list, and Console /tasks.
+ */
+export function projectTaskSurface(
+  task: TaskRecord,
+  options: {
+    latestEvent?: LatestEventMeta;
+    failureCategory?: WorkerFailureCategory;
+    nowMs?: number;
+    quietAfterMs?: number;
+  } = {},
+): SafeTaskSummary {
+  const progress = buildStatusProgress(
+    task,
+    options.latestEvent,
+    options.nowMs ?? Date.now(),
+    options.quietAfterMs ?? DEFAULT_QUIET_AFTER_MS,
+  );
+  return buildTaskSummary(task, progress, options.failureCategory);
 }

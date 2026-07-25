@@ -8,22 +8,61 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header id="fl-header">
-  <div id="fl-status-bar"></div>
-  <nav id="fl-tabs">
-    <button data-tab="overview" class="active">Overview</button>
-    <button data-tab="plans">Plans</button>
-    <button data-tab="tasks">Tasks</button>
-    <button data-tab="competitions">Competitions</button>
-    <button data-tab="stats">Stats</button>
-    <button data-tab="settings">Settings</button>
-  </nav>
-</header>
-<main>
-  <section id="fl-view"></section>
-  <section id="fl-detail" hidden role="dialog" aria-label="Details"></section>
-</main>
-<footer id="fl-footer"></footer>
+<div class="shell">
+  <aside class="sidebar" aria-label="Primary">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">FL</div>
+      <div class="brand-text">
+        <div class="brand-name">ForkLight</div>
+        <div class="brand-sub">Console</div>
+      </div>
+    </div>
+    <nav id="fl-tabs" class="nav" aria-label="Sections">
+      <button type="button" data-tab="overview" class="nav-item active">
+        <span class="nav-icon" aria-hidden="true">&#9672;</span>
+        <span class="nav-label">Home</span>
+      </button>
+      <button type="button" data-tab="tasks" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">&#9638;</span>
+        <span class="nav-label">Board</span>
+      </button>
+      <button type="button" data-tab="plans" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">&#9783;</span>
+        <span class="nav-label">Plans</span>
+      </button>
+      <button type="button" data-tab="competitions" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">&#9733;</span>
+        <span class="nav-label">Compete</span>
+      </button>
+      <button type="button" data-tab="stats" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">&#9641;</span>
+        <span class="nav-label">Insights</span>
+      </button>
+      <button type="button" data-tab="settings" class="nav-item">
+        <span class="nav-icon" aria-hidden="true">&#9881;</span>
+        <span class="nav-label">Settings</span>
+      </button>
+    </nav>
+    <div class="sidebar-foot">
+      <div id="fl-status-bar" class="conn-pill" aria-live="polite"></div>
+    </div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar">
+      <div class="topbar-copy">
+        <h1 id="fl-page-title" class="page-title">Home</h1>
+        <p id="fl-page-sub" class="page-sub">Live view of Workers, plans, and outcomes</p>
+      </div>
+      <div id="fl-top-meta" class="top-meta"></div>
+    </header>
+    <main class="content">
+      <section id="fl-view" class="view" aria-live="polite"></section>
+    </main>
+    <footer id="fl-footer" class="footer"></footer>
+  </div>
+</div>
+<section id="fl-detail" hidden role="dialog" aria-label="Details"></section>
+<div id="fl-scrim" class="scrim" hidden aria-hidden="true"></div>
 <script src="app.js"></script>
 </body>
 </html>

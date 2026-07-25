@@ -9,6 +9,7 @@ import { buildManifest, prepareWorkspace } from "../workspace/copy.js";
 import { buildTaskRecord } from "./runner.js";
 import { taskPaths } from "./config.js";
 import { isProviderName, providerNames } from "./providers.js";
+import { isoTimestamp as timestamp } from "./time.js";
 import type {
   CompetitionCandidateRecord,
   CompetitionCandidateScore,
@@ -41,7 +42,8 @@ export type RankingPolicyOverride = Partial<Record<RankingFactor, number>>;
 export interface CandidateOverride {
   providerName: string;
   modelName: string;
-  maxBudgetUsd?: number;
+  /** Positive finite cap, or null for unlimited (no Claude budget flag). */
+  maxBudgetUsd?: number | null;
 }
 
 export interface CompetitionCandidateInput {
@@ -392,7 +394,7 @@ export class CompetitionService {
     if (candidates.some(({ evidence }) => !TERMINAL.has(evidence.task.status))) {
       throw new Error("Competition cannot be scored until every candidate is terminal");
     }
-    const createdAt = new Date().toISOString();
+    const createdAt = timestamp();
     const evaluation = scoreCandidates(competitionId, candidates, policy, {
       evaluationId: randomUUID(),
       createdAt,
@@ -410,7 +412,7 @@ export class CompetitionService {
     if (candidates.some(({ evidence }) => !TERMINAL.has(evidence.task.status))) {
       throw new Error("Competition cannot be scored until every candidate is terminal");
     }
-    const createdAt = new Date().toISOString();
+    const createdAt = timestamp();
     return scoreCandidates(competitionId, candidates, policy, {
       evaluationId: randomUUID(),
       createdAt,
@@ -448,10 +450,6 @@ export interface CompetitionScorer {
 }
 
 // --- Competition coordinator ---
-
-function timestamp(): string {
-  return new Date().toISOString();
-}
 
 function cloneSpec(
   original: TaskSpec,
@@ -509,9 +507,9 @@ function validateCandidates(
     }
     seen.add(key);
 
-    if (candidate.maxBudgetUsd !== undefined) {
+    if (candidate.maxBudgetUsd !== undefined && candidate.maxBudgetUsd !== null) {
       if (!Number.isFinite(candidate.maxBudgetUsd) || candidate.maxBudgetUsd <= 0) {
-        throw new Error(`Candidate maxBudgetUsd must be positive, got ${candidate.maxBudgetUsd}`);
+        throw new Error(`Candidate maxBudgetUsd must be positive or null, got ${candidate.maxBudgetUsd}`);
       }
       if (candidate.maxBudgetUsd > settings.execution.maximumBudgetUsd) {
         throw new Error(

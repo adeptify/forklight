@@ -72,6 +72,7 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_status",
         "forklight_submit",
         "forklight_validate",
+        "forklight_wait",
       ],
     );
     const health = await client.callTool({ name: "forklight_health", arguments: {} });
@@ -223,15 +224,18 @@ test("completed competition compare + status: zero-weight evidence, override eph
     assert.equal(dur.weight, 0); // speed-neutral default
     assert.ok(typeof dur.evidence === "string" && dur.evidence.length > 0); // evidence present
 
-    // Compare with override: ephemeral, uses override weights
+    // Compare with override: ephemeral, uses override weights (FL-D114 kind label)
     const cmp = (await client.callTool({ name: "forklight_competition_compare", arguments: { competitionId: "cd", rankingWeights: { duration: 0.8 } } })).structuredContent as Record<string, unknown>;
+    assert.equal(cmp.evaluationKind, "ephemeral-preview");
     const cmpEv = cmp.evaluation as Record<string, unknown>;
     const cmpPol = cmpEv.policy as Record<string, unknown>;
     assert.equal((cmpPol.weights as Record<string, number>).duration, 0.8);
     assert.equal(cmpPol.tieThreshold, 0.25);
 
-    // Default compare returns stored evaluation
+    // Default compare returns stored evaluation and labels it (FL-D114).
     const defCmp = (await client.callTool({ name: "forklight_competition_compare", arguments: { competitionId: "cd" } })).structuredContent as Record<string, unknown>;
+    assert.equal(defCmp.evaluationKind, "stored");
+    assert.match(String(defCmp.note ?? ""), /Historical evaluation|stored/i);
     assert.equal((defCmp.evaluation as Record<string, unknown>).id, ev.id);
 
     // Read-only: evaluation count unchanged after all reads
@@ -919,4 +923,303 @@ test("MCP statistics exposes filtered local evidence and explicit sample sizes",
     await server.close();
     await daemon.close();
   }
+});
+
+// --- FL-D92: MCP null unlimited budget ---
+
+function toolErrorText(result: unknown): string {
+  if (result === null || typeof result !== "object") return String(result);
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content) || content.length === 0) return JSON.stringify(result);
+  const first = content[0] as { text?: unknown };
+  return typeof first?.text === "string" ? first.text : JSON.stringify(result);
+}
+
+function qualityContractArgs(project: string, overrides: Record<string, unknown> = {}) {
+  return {
+    project,
+    name: "budget-null-test",
+    contract: {
+      outcome: "Prove MCP accepts null unlimited budget",
+      context: ["Default may be null; explicit null must stay unlimited"],
+      inScope: ["runtime.maxBudgetUsd"],
+      outOfScope: ["Provider billing"],
+      executionSteps: ["Validate then submit"],
+      deliverables: ["Task with null budget"],
+      modules: [{
+        name: "budget-adapter",
+        responsibility: "Map MCP budget field to runtime maxBudgetUsd",
+        consumes: ["MCP input"],
+        produces: ["Task runtime"],
+        boundaries: ["No invented positive cap"],
+      }],
+      callChain: ["MCP validate -> parseTaskSpec", "parseTaskSpec -> Worker runtime"],
+      scenarios: [
+        { name: "explicit-null", given: "maxBudgetUsd is null", when: "validate", then: "unlimited" },
+        { name: "inherit-null", given: "field omitted and default null", when: "validate", then: "unlimited" },
+      ],
+      risks: ["Collapsing null via nullish coalescing"],
+      changeBudget: { maxFiles: 3, maxDiffLines: 100 },
+    },
+    acceptance: { criteria: ["Budget resolved correctly"], commands: ["true"] },
+    focusPaths: ["src"],
+    ...overrides,
+  };
+}
+
+test("MCP validate accepts explicit null maxBudgetUsd as unlimited (FL-D92)", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-budget-null-"));
+  const store = new StateStore(home);
+  const { SettingsService } = await import("../src/core/settings.js");
+  new SettingsService(store).update({ execution: { defaultMaxBudgetUsd: 0.5 } });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(home, { maxBudgetUsd: null }),
+    });
+    assert.equal(result.isError, undefined, toolErrorText(result));
+    const body = result.structuredContent as Record<string, unknown>;
+    assert.equal(body.passed, true);
+    assert.equal(body.resolvedRuntimeMaxBudgetUsd, null);
+    const budget = body.budget as Record<string, unknown>;
+    assert.equal(budget.maxBudgetUsd, null);
+    assert.equal(budget.source, "explicit-null");
+    assert.equal(budget.generatesRuntimeFlag, false);
+    // FL-D10: MCP validate exposes integration feasibility like CLI.
+    const feasibility = body.integrationFeasibility as Record<string, unknown>;
+    assert.equal(typeof feasibility.integratable, "boolean");
+    assert.equal(feasibility.applicable, true);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP validate inherits null default when maxBudgetUsd is omitted (FL-D92)", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-budget-inherit-"));
+  const store = new StateStore(home);
+  const { SettingsService } = await import("../src/core/settings.js");
+  new SettingsService(store).update({ execution: { defaultMaxBudgetUsd: null } });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const args = qualityContractArgs(home);
+    // Ensure the field is truly omitted, not null.
+    assert.equal("maxBudgetUsd" in args, false);
+    const result = await client.callTool({
+      name: "forklight_validate",
+      arguments: args,
+    });
+    assert.equal(result.isError, undefined, toolErrorText(result));
+    const body = result.structuredContent as Record<string, unknown>;
+    assert.equal(body.passed, true);
+    assert.equal(body.resolvedRuntimeMaxBudgetUsd, null);
+    const budget = body.budget as Record<string, unknown>;
+    assert.equal(budget.source, "inherited-null");
+    assert.equal(budget.generatesRuntimeFlag, false);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP submit persists explicit null runtime budget (FL-D92)", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-budget-submit-"));
+  const store = new StateStore(home);
+  const { SettingsService } = await import("../src/core/settings.js");
+  // Finite default would wrongly win if inlineTask used `??` with explicit null.
+  new SettingsService(store).update({ execution: { defaultMaxBudgetUsd: 0.75 } });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const submit = await client.callTool({
+      name: "forklight_submit",
+      arguments: qualityContractArgs(home, {
+        maxBudgetUsd: null,
+        provider: "deepseek",
+      }),
+    });
+    assert.equal(submit.isError, undefined, toolErrorText(submit));
+    const s = submit.structuredContent as Record<string, unknown>;
+    const taskId = String(s.taskId);
+    const stored = await daemonRequest<TaskRecord>("status", { taskId }, home);
+    assert.equal(stored.spec.runtime.maxBudgetUsd, null);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP list_summaries path returns progress on forklight_list", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-list-"));
+  const store = new StateStore(home);
+  const taskId = randomUUID();
+  const frozenAt = "2026-07-25T11:00:00.000Z";
+  // Use a terminal status so daemon recovery does not rewrite the Task mid-test.
+  store.createTask({
+    id: taskId,
+    name: "list-progress",
+    status: "succeeded",
+    sourcePath: path.join(home, "src"),
+    taskFile: path.join(home, "task.yaml"),
+    spec: {
+      version: 1,
+      name: "list-progress",
+      project: path.join(home, "src"),
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.deepseek.api-key" },
+      runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+      goal: "list",
+      constraints: [],
+      acceptance: { commands: ["true"] },
+    },
+    paths: {
+      root: path.join(home, "task"),
+      baseline: path.join(home, "baseline"),
+      workspace: path.join(home, "workspace"),
+      logs: path.join(home, "logs"),
+      claudeConfig: path.join(home, "claude"),
+      diff: path.join(home, "diff.patch"),
+    },
+    sessionId: "s1",
+    createdAt: frozenAt,
+    updatedAt: frozenAt,
+    finishedAt: frozenAt,
+  });
+  store.addEvent(taskId, undefined, "task.created", "queued");
+  store.addEvent(taskId, undefined, "worker.tool.completed", "edited list.ts");
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const listed = await client.callTool({ name: "forklight_list", arguments: { limit: 10 } });
+    assert.equal(listed.isError, undefined);
+    const body = listed.structuredContent as { tasks?: Array<Record<string, unknown>> };
+    assert.ok(Array.isArray(body.tasks) && body.tasks.length >= 1);
+    const row = body.tasks.find((t) => t.taskId === taskId);
+    assert.ok(row, "listed row should include the seeded task");
+    const progress = row!.progress as Record<string, unknown>;
+    assert.ok(progress, "list must carry progress (not status-only)");
+    assert.equal(progress.activity, "terminal");
+    assert.equal(progress.latestAction, "edited list.ts");
+    assert.ok(Number(progress.latestEventSequence) >= 1);
+    assert.equal(typeof progress.lastEventAt, "string");
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP wait returns terminal without requiring full inspect", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-wait-"));
+  const store = new StateStore(home);
+  const taskId = randomUUID();
+  const frozenAt = "2026-07-25T11:00:00.000Z";
+  store.createTask({
+    id: taskId,
+    name: "wait-terminal",
+    status: "succeeded",
+    sourcePath: path.join(home, "src"),
+    taskFile: path.join(home, "task.yaml"),
+    spec: {
+      version: 1,
+      name: "wait-terminal",
+      project: path.join(home, "src"),
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.deepseek.api-key" },
+      runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+      goal: "wait",
+      constraints: [],
+      acceptance: { commands: ["true"] },
+    },
+    paths: {
+      root: path.join(home, "task"),
+      baseline: path.join(home, "baseline"),
+      workspace: path.join(home, "workspace"),
+      logs: path.join(home, "logs"),
+      claudeConfig: path.join(home, "claude"),
+      diff: path.join(home, "diff.patch"),
+    },
+    sessionId: "s1",
+    createdAt: frozenAt,
+    updatedAt: frozenAt,
+    finishedAt: frozenAt,
+  });
+  store.addEvent(taskId, undefined, "task.created", "queued");
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const waited = await client.callTool({
+      name: "forklight_wait",
+      arguments: { taskId, timeoutMs: 5_000, pollMs: 200, until: "terminal" },
+    });
+    assert.equal(waited.isError, undefined, toolErrorText(waited));
+    const body = waited.structuredContent as Record<string, unknown>;
+    assert.equal(body.outcome, "terminal");
+    assert.equal(typeof body.pollCount, "number");
+    const progress = body.progress as Record<string, unknown>;
+    assert.ok(progress);
+    assert.equal(progress.activity, "terminal");
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("inlineTask + parseTaskSpec keep explicit null against finite default (FL-D92)", async () => {
+  const { inlineTask } = await import("../src/mcp/server.js");
+  const { cloneDefaults } = await import("../src/core/settings.js");
+  const settings = structuredClone(cloneDefaults());
+  settings.execution.defaultMaxBudgetUsd = 0.5;
+  const inline = inlineTask(
+    qualityContractArgs("/project", { maxBudgetUsd: null }) as Parameters<typeof inlineTask>[0],
+    settings,
+  );
+  assert.equal((inline.runtime as { maxBudgetUsd: unknown }).maxBudgetUsd, null);
+  const { parseTaskSpec } = await import("../src/core/task.js");
+  const spec = parseTaskSpec(inline, "/project", {
+    contractQuality: settings.contractQuality,
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    completionPolicy: settings.completionPolicy,
+  });
+  assert.equal(spec.runtime.maxBudgetUsd, null);
 });

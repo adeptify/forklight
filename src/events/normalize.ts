@@ -137,17 +137,42 @@ export class ClaudeEventNormalizer {
         && (subtype === "error_max_budget_usd"
           || subtype.includes("max_budget")
           || subtype.includes("max-budget"));
+      // FL-D15 / FL-D16: classify auth vs generic failure so status/inspect surfaces
+      // the real blocker (e.g. 401 authentication_failed) instead of opaque "failure".
+      const authFailed = (() => {
+        const blob = [
+          typeof subtype === "string" ? subtype : "",
+          typeof resultText === "string" ? resultText : "",
+          typeof stopReason === "string" ? stopReason : "",
+        ].join(" ").toLowerCase();
+        return (
+          blob.includes("authentication_failed")
+          || blob.includes("authentication failed")
+          || /\b401\b/.test(blob)
+          || blob.includes("invalid api key")
+          || blob.includes("unauthorized")
+        );
+      })();
       const summary = terminalError
         ? (budgetExceeded
             ? (typeof costUsd === "number"
                 ? `Worker stopped: max budget exceeded (runtime estimate $${costUsd.toFixed(6)})`
                 : "Worker stopped: max budget exceeded")
+            : authFailed
+              ? "Worker failed: authentication/provider credentials rejected"
             : stopReason === "error" && !isError
               ? "Worker terminated with error stop reason"
               : subtype !== undefined && !isError
                 ? "Worker reported an error terminal subtype"
                 : "Worker reported failure")
         : "Worker reported completion";
+      const failureCategory = budgetExceeded
+        ? "budget"
+        : authFailed
+          ? "authentication"
+          : terminalError
+            ? "runtime"
+            : undefined;
       const claim: WorkerClaim | undefined = !terminalError && resultText !== undefined
         ? { label: "unverified-claim", text: truncate(resultText, 2_000) }
         : undefined;
@@ -165,7 +190,7 @@ export class ClaudeEventNormalizer {
             ...(costUsd === undefined ? {} : { costUsd }),
             ...(turns === undefined ? {} : { turns }),
             ...(usage === undefined ? {} : { usage }),
-            ...(budgetExceeded ? { failureCategory: "budget" } : {}),
+            ...(failureCategory === undefined ? {} : { failureCategory }),
           },
           terminal: {
             isError: terminalError,

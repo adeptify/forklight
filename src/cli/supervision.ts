@@ -11,20 +11,23 @@ import { buildDeliveryLineage } from "../core/delivery-lineage.js";
 import { buildTaskDecisionView } from "../core/task-decision-view.js";
 import {
   classifyActivity,
+  DEFAULT_QUIET_AFTER_MS,
+  isTerminalTaskStatus,
   type LatestEventMeta,
   type ProgressActivity,
 } from "../core/task-progress.js";
 
+// Re-export progress primitives so wait/status tests can import one module;
+// implementations live only in core/task-progress.ts.
 export {
   buildStatusProgress,
   classifyActivity,
   DEFAULT_QUIET_AFTER_MS,
+  isTerminalTaskStatus,
   toLatestEventMeta,
   type LatestEventMeta,
   type ProgressActivity,
 } from "../core/task-progress.js";
-
-const TERMINAL_STATUSES = new Set<TaskStatus>(["succeeded", "failed", "interrupted"]);
 
 export type WaitUntil = "change" | "terminal";
 export type WaitOutcome = "changed" | "terminal" | "timeout";
@@ -291,7 +294,7 @@ export async function waitForTask(
 ): Promise<WaitResult> {
   assertInteger(policy.timeoutMs, "timeoutMs", false);
   assertInteger(policy.pollMs, "pollMs", false);
-  const quietAfterMs = policy.quietAfterMs ?? 30_000;
+  const quietAfterMs = policy.quietAfterMs ?? DEFAULT_QUIET_AFTER_MS;
   assertInteger(quietAfterMs, "quietAfterMs", false);
   const startedAt = dependencies.now();
   const initial = await dependencies.readProgress();
@@ -299,7 +302,7 @@ export async function waitForTask(
   let pollCount = 0;
   const initialKey = progressCursorKey(initial.cursor);
 
-  if (TERMINAL_STATUSES.has(initial.task.status)) {
+  if (isTerminalTaskStatus(initial.task.status)) {
     return waitResult("terminal", startedAt, pollCount, initial, dependencies.now, quietAfterMs);
   }
 
@@ -311,7 +314,7 @@ export async function waitForTask(
     await dependencies.sleep(Math.min(policy.pollMs, policy.timeoutMs - elapsedMs));
     latest = await dependencies.readProgress();
     pollCount += 1;
-    if (TERMINAL_STATUSES.has(latest.task.status)) {
+    if (isTerminalTaskStatus(latest.task.status)) {
       return waitResult("terminal", startedAt, pollCount, latest, dependencies.now, quietAfterMs);
     }
     if (policy.until === "change" && progressCursorKey(latest.cursor) !== initialKey) {
@@ -458,7 +461,7 @@ export function buildCompactInspection(input: {
     ...(latestMeta === undefined ? {} : { latestEvent: latestMeta }),
   };
   const nowMs = input.nowMs ?? Date.now();
-  const quietAfterMs = input.quietAfterMs ?? 30_000;
+  const quietAfterMs = input.quietAfterMs ?? DEFAULT_QUIET_AFTER_MS;
   return {
     task: compactTaskSummary(input.task),
     progress: buildWaitProgressSummary(snapshot, nowMs, quietAfterMs),

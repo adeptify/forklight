@@ -11,16 +11,13 @@ import {
   isBuildIdentity,
   type BuildIdentity,
 } from "../core/build-identity.js";
+import { sleepMs as sleep } from "../core/time.js";
 import {
   requiresMatchingBuildIdentity,
   type DaemonMethod,
   type DaemonRequest,
   type DaemonResponse,
 } from "./protocol.js";
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
 
 export function daemonExchange(
   method: DaemonMethod,

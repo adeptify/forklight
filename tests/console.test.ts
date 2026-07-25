@@ -451,6 +451,29 @@ test("settings read at server start, double-start idempotent", async () => {
   } finally { store.close(); }
 });
 
+test("GET /tasks includes progress surface for Board/Kanban", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-tasks-progress-"));
+  const store = new StateStore(home);
+  try {
+    const task = specTask(store, "board-progress");
+    store.updateTask(task.id, { status: "running" });
+    store.addEvent(task.id, undefined, "worker.tool.completed", "edited console.ts");
+    const { server, url, token } = await serve(store);
+    const r = await httpGetAuth(`${url}/tasks`, token);
+    assert.equal(r.status, 200);
+    const body = r.body as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(body) && body.length >= 1);
+    const row = body.find((t) => t.id === task.id) ?? body[0]!;
+    assert.ok(row.progress && typeof row.progress === "object");
+    const progress = row.progress as Record<string, unknown>;
+    assert.equal(typeof progress.activity, "string");
+    assert.equal(progress.latestAction, "edited console.ts");
+    await server.stop();
+  } finally {
+    store.close();
+  }
+});
+
 test("app.js contains no innerHTML, no onclick=, no .style., no em dash", async () => {
   const srcFile = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "console", "public", "app.js");
   const src = await readFile(srcFile, "utf8");

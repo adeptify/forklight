@@ -36,19 +36,24 @@ import { withCliExchangeReceipt, humanTokenReportLines } from "./cli/exchange-re
 import {
   buildCompactInspection,
   buildProgressCursor,
-  buildStatusProgress,
-  DEFAULT_QUIET_AFTER_MS,
   humanCompactInspectionLines,
   humanWaitLines,
   parseInspectSummaryOptions,
   parseWaitOptions,
-  toLatestEventMeta,
   waitForTask,
   type TaskProgressSnapshot,
 } from "./cli/supervision.js";
+import {
+  DEFAULT_QUIET_AFTER_MS,
+  toLatestEventMeta,
+} from "./core/task-progress.js";
 import { getTaskTokenReport } from "./core/token-report.js";
-import { buildTaskSummary } from "./core/task-summary.js";
+import { buildTaskSummary, projectTaskSurface } from "./core/task-summary.js";
 import { buildTaskDecisionView } from "./core/task-decision-view.js";
+import {
+  failureCategoryFromEvents,
+  type WorkerFailureCategory,
+} from "./core/worker-failure.js";
 import {
   compareBuildIdentity,
   currentBuildIdentity,
@@ -122,8 +127,12 @@ function printProgress(event: NormalizedWorkerEvent): void {
 /** Render the human status block (one `key: value` line per defined
  *  field) as a single exact string.  Returns the empty string when the
  *  task has no defined summary fields. */
-function humanStatusLines(task: TaskRecord, progress?: TaskDecisionView["progress"]): string {
-  const summary = buildTaskSummary(task, progress);
+function humanStatusLines(
+  task: TaskRecord,
+  progress?: TaskDecisionView["progress"],
+  failureCategory?: WorkerFailureCategory,
+): string {
+  const summary = buildTaskSummary(task, progress, failureCategory);
   const lines: string[] = [];
   for (const [key, value] of Object.entries(summary)) {
     if (value === undefined) continue;
@@ -564,7 +573,7 @@ function printProviderProbe(result: Record<string, unknown>): void {
   for (const [name, outcome] of Object.entries(result)) {
     const o = outcome as Record<string, unknown>;
     if (o.error) {
-      process.stdout.write(`${name}: probe error — ${o.error}\n`);
+      process.stdout.write(`${name}: probe error - ${o.error}\n`);
     } else {
       process.stdout.write(
         `${name}: ${o.status} model=${o.model} latency=${o.latencyMs}ms endpoint=${o.endpointOrigin}\n`,
@@ -1487,12 +1496,20 @@ async function main(): Promise<void> {
         invoke: async () => {
           const task = reconcileTask(store, taskId);
           const latestEvent = toLatestEventMeta(store.latestEventMeta(taskId));
-          const progress = buildStatusProgress(task, latestEvent, Date.now(), quietAfterMs);
-          return { task, progress };
+          const failureCategory = task.status === "failed" || task.status === "interrupted"
+            ? failureCategoryFromEvents(store.listEvents(taskId))
+            : undefined;
+          const summary = projectTaskSurface(task, {
+            ...(latestEvent === undefined ? {} : { latestEvent }),
+            ...(failureCategory === undefined ? {} : { failureCategory }),
+            nowMs: Date.now(),
+            quietAfterMs,
+          });
+          return { task, summary };
         },
-        renderOutput: ({ task, progress }) => json
-          ? `${JSON.stringify(buildTaskSummary(task, progress), null, 2)}\n`
-          : humanStatusLines(task, progress),
+        renderOutput: ({ task, summary }) => json
+          ? `${JSON.stringify(summary, null, 2)}\n`
+          : humanStatusLines(task, summary.progress, summary.failureCategory),
       });
       process.stdout.write(output);
       return;
@@ -1617,16 +1634,24 @@ async function main(): Promise<void> {
       const nowMs = Date.now();
       const tasks = store.listTasks().slice(0, 20).map((task) => {
         const latestEvent = toLatestEventMeta(store.latestEventMeta(task.id));
-        const progress = buildStatusProgress(task, latestEvent, nowMs, DEFAULT_QUIET_AFTER_MS);
-        return buildTaskSummary(task, progress);
+        const failureCategory = task.status === "failed" || task.status === "interrupted"
+          ? failureCategoryFromEvents(store.listEvents(task.id))
+          : undefined;
+        return projectTaskSurface(task, {
+          ...(latestEvent === undefined ? {} : { latestEvent }),
+          ...(failureCategory === undefined ? {} : { failureCategory }),
+          nowMs,
+          quietAfterMs: DEFAULT_QUIET_AFTER_MS,
+        });
       });
       if (json) process.stdout.write(`${JSON.stringify(tasks, null, 2)}\n`);
       else for (const task of tasks) {
         const activity = task.progress?.activity ?? "";
+        const cat = task.failureCategory ? ` ${task.failureCategory}` : "";
         process.stdout.write(
           activity
-            ? `${task.taskId} ${task.status} ${activity} ${task.name}\n`
-            : `${task.taskId} ${task.status} ${task.name}\n`,
+            ? `${task.taskId} ${task.status} ${activity}${cat} ${task.name}\n`
+            : `${task.taskId} ${task.status}${cat} ${task.name}\n`,
         );
       }
       return;

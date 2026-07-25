@@ -56,6 +56,7 @@ import {
   type RankingPolicyOverride,
 } from "../core/competition.js";
 import { loadTaskSpec, parseTaskSpec } from "../core/task.js";
+import { isoTimestamp as timestamp, sleepMs as sleep } from "../core/time.js";
 import { providerReadiness } from "../core/providers.js";
 import {
   resolveReadiness,
@@ -97,6 +98,9 @@ import {
   type IntegrationOperationContext,
 } from "../core/integration-operation.js";
 import { buildTaskDecisionView } from "../core/task-decision-view.js";
+import { projectTaskSurface, type SafeTaskSummary } from "../core/task-summary.js";
+import { toLatestEventMeta } from "../core/task-progress.js";
+import { failureCategoryFromEvents } from "../core/worker-failure.js";
 import {
   launchActivationRunner,
   writeActivationHandoff,
@@ -145,10 +149,6 @@ export async function probeProvidersBounded(
   return ordered;
 }
 
-function timestamp(): string {
-  return new Date().toISOString();
-}
-
 function taskPolicy(settings: ForkLightSettings): TaskPolicy {
   return {
     contractQuality: settings.contractQuality,
@@ -156,10 +156,6 @@ function taskPolicy(settings: ForkLightSettings): TaskPolicy {
     providerDefaults: settings.providerDefaults,
     completionPolicy: settings.completionPolicy,
   };
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function processExists(pid: number): boolean {
@@ -319,14 +315,27 @@ export class DaemonCoordinator {
   ): Record<string, unknown> {
     const competition = this.store.getCompetition(competitionId);
     if (override === undefined) {
-      // Default: return the stored latest evaluation if it exists
+      // Default: return the stored latest evaluation if it exists (FL-D114: label vs preview).
       const evals = this.store.listCompetitionEvaluations(competitionId);
-      if (evals.length > 0) return { evaluation: evals[evals.length - 1] };
+      if (evals.length > 0) {
+        return {
+          evaluation: evals[evals.length - 1],
+          evaluationKind: "stored",
+          note:
+            "Historical evaluation recorded when candidates finished. "
+            + "Pass rankingWeights for an ephemeral current-policy preview that is not persisted.",
+        };
+      }
 
       // No stored evaluation — compute a pure preview with the immutable creation-time policy
       const policy = competition.rankingPolicy;
       const service = new CompetitionService(this.store);
-      return { evaluation: service.previewScore(competitionId, policy) };
+      return {
+        evaluation: service.previewScore(competitionId, policy),
+        evaluationKind: "ephemeral-preview",
+        note:
+          "No stored evaluation yet; this is a pure preview with the competition creation-time policy.",
+      };
     }
     // Override: ephemeral pure preview — never persists
     const effectiveCompetition = this.settings.get().competition;
@@ -336,7 +345,13 @@ export class DaemonCoordinator {
       tieThreshold: competition.rankingPolicy.tieThreshold,
     });
     const service = new CompetitionService(this.store);
-    return { evaluation: service.previewScore(competitionId, policy) };
+    return {
+      evaluation: service.previewScore(competitionId, policy),
+      evaluationKind: "ephemeral-preview",
+      note:
+        "Override weights produce an ephemeral what-if score; nothing is persisted. "
+        + "Omit rankingWeights to read the stored historical evaluation when available.",
+    };
   }
 
   competitionList(status?: string): Record<string, unknown>[] {
@@ -574,6 +589,26 @@ export class DaemonCoordinator {
 
   list(statuses?: TaskStatus[], limit = 20): TaskRecord[] {
     return this.store.listTasks(statuses).slice(0, Math.max(1, Math.min(limit, 100)));
+  }
+
+  /**
+   * List Task surfaces with latest-event progress (and failureCategory when
+   * terminal). Shared by MCP list and Console Board data.
+   */
+  listTaskSurfaces(statuses?: TaskStatus[], limit = 20): SafeTaskSummary[] {
+    const nowMs = Date.now();
+    return this.list(statuses, limit).map((task) => {
+      const latestEvent = toLatestEventMeta(this.store.latestEventMeta(task.id));
+      const needsCategory = task.status === "failed" || task.status === "interrupted";
+      const failureCategory = needsCategory
+        ? failureCategoryFromEvents(this.store.listEvents(task.id))
+        : undefined;
+      return projectTaskSurface(task, {
+        ...(latestEvent === undefined ? {} : { latestEvent }),
+        ...(failureCategory === undefined ? {} : { failureCategory }),
+        nowMs,
+      });
+    });
   }
 
   getPlanBoard(planId: string): PlanBoard {
@@ -854,9 +889,9 @@ export class DaemonCoordinator {
       stages,
       ...(verificationCommands === undefined ? {} : { verificationCommands }),
       ...(evidence.status === "passed"
-        ? { appliedAt: new Date().toISOString() }
+        ? { appliedAt: timestamp() }
         : { error: evidence.error ?? "Runtime activation failed; source changes retained" }),
-      createdAt: new Date().toISOString(),
+      createdAt: timestamp(),
     };
     this.store.saveIntegrationResult(record);
     this.store.addEvent(

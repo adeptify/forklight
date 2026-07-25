@@ -10,6 +10,7 @@ export type DaemonMethod =
   | "main_review"
   | "revise"
   | "list"
+  | "list_summaries"
   | "plan_submit_file"
   | "plan_board"
   | "plan_board_overview"
@@ -64,6 +65,7 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "inspect",
   "task_decision",
   "list",
+  "list_summaries",
   "plan_board",
   "plan_board_overview",
   "statistics",

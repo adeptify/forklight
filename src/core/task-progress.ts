@@ -7,6 +7,11 @@ const TERMINAL_STATUSES = new Set<TaskStatus>(["succeeded", "failed", "interrupt
 
 export type ProgressActivity = "active" | "quiet" | "terminal";
 
+/** True when Task status will never receive further Worker progress. */
+export function isTerminalTaskStatus(status: TaskStatus): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
+
 /** O(1) latest-event cursor fields used by status/wait without loading full payloads. */
 export interface LatestEventMeta {
   sequence: number;
@@ -26,7 +31,7 @@ export function classifyActivity(
   nowMs: number,
   quietAfterMs: number,
 ): ProgressActivity {
-  if (TERMINAL_STATUSES.has(task.status)) return "terminal";
+  if (isTerminalTaskStatus(task.status)) return "terminal";
   if (latestEvent === undefined) return "quiet";
   const eventMs = Date.parse(latestEvent.timestamp);
   if (!Number.isFinite(eventMs)) return "quiet";
@@ -54,7 +59,7 @@ export function buildStatusProgress(
 
 /** Map store.latestEventMeta rows into the progress cursor shape. */
 export function toLatestEventMeta(
-  meta: Pick<{ sequence: number; timestamp: string; type: string; summary: string }, "sequence" | "timestamp" | "type" | "summary"> | undefined,
+  meta: Pick<LatestEventMeta, "sequence" | "timestamp" | "type" | "summary"> | undefined,
 ): LatestEventMeta | undefined {
   if (meta === undefined) return undefined;
   return {

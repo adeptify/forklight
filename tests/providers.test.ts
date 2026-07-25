@@ -5,6 +5,7 @@ import {
   providerEnvironment,
   providerNames,
   providerReadiness,
+  providerVariants,
   resolveProvider,
 } from "../src/core/providers.js";
 import { cloneDefaults, type ProviderDefaultSettings } from "../src/core/settings.js";
@@ -24,6 +25,18 @@ test("provider registry exposes Claude Code-compatible defaults", () => {
       ["glm", "glm-5.2", "https://dashscope.aliyuncs.com/apps/anthropic"],
     ],
   );
+});
+
+test("DeepSeek providerVariants lists Flash and Pro families, not only the default (FL-D18)", () => {
+  const variants = providerVariants("deepseek");
+  assert.equal(variants.length, 1);
+  const models = variants[0]!.models;
+  assert.ok(models.includes("deepseek-v4-flash"), "flash must be listed");
+  assert.ok(models.includes("deepseek-v4-pro"), "pro must be listed");
+  assert.ok(models.includes("deepseek-v4-pro[1m]"), "pro 1m must be listed");
+  // Default model still appears (and is not the sole entry).
+  assert.ok(models.includes(providerDefinition("deepseek").defaultModel));
+  assert.ok(models.length >= 3);
 });
 
 test("task parsing stores provider metadata but never credential values", () => {

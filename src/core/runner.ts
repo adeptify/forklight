@@ -20,6 +20,7 @@ import {
   MAIN_REVIEW_REASON_MAX_LENGTH,
   recordMainReview,
 } from "./main-review.js";
+import { isoTimestamp as timestamp } from "./time.js";
 import { StateStore } from "../state/store.js";
 import { assertWorkspaceExists, prepareWorkspace } from "../workspace/copy.js";
 import { runClaudeWorker } from "../workers/claude.js";
@@ -37,10 +38,6 @@ export type ProgressListener = (event: NormalizedWorkerEvent) => void;
 function latestRemediationFeedback(store: StateStore, taskId: string): string | undefined {
   const packet = buildRemediationPacket(store.listEvents(taskId));
   return packet === undefined ? undefined : formatRemediationPacket(packet);
-}
-
-function timestamp(): string {
-  return new Date().toISOString();
 }
 
 function buildOfficialCost(provider: ProviderSpec, usage?: AttemptTokenUsage): AttemptOfficialCost {

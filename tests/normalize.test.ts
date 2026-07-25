@@ -184,6 +184,26 @@ test("resolveWorkerFailure prefers budget diagnostic over generic no-result word
   );
 });
 
+test("authentication failures get a distinct summary and failureCategory (FL-D15/D16)", () => {
+  const normalizer = new ClaudeEventNormalizer();
+  // Misleading subtype "success" with auth error text (FL-D16 envelope quirk).
+  const events = normalizer.parseLine(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    result: "API Error: 401 authentication_failed after 10 retries",
+    total_cost_usd: 0,
+    num_turns: 0,
+  }));
+  assert.equal(events[0]?.type, "worker.failed");
+  assert.match(events[0]?.summary ?? "", /authentication/i);
+  assert.equal(
+    (events[0]?.payload as { failureCategory?: string } | undefined)?.failureCategory,
+    "authentication",
+  );
+  assert.match(events[0]?.terminal?.failureReason ?? "", /authentication/i);
+});
+
 test("rejects malformed usage counters and leaves usage absent", () => {
   const normalizer = new ClaudeEventNormalizer();
   const result = (usage: unknown) =>

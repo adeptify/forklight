@@ -23,6 +23,7 @@ import type {
 import { normalizeDirectCodexPairedSample, normalizeDirectCodexProfileId, normalizeDirectCodexProfilePublication, type DirectCodexPairedSample, type DirectCodexProfilePublication } from "../core/direct-codex-calibration.js";
 import { normalizeDirectCodexSampleReview, type DirectCodexSampleReview } from "../core/direct-codex-review.js";
 import { normalizeDirectCodexCalibrationRecord, normalizeOrchestrationExchangeReceipt, type DirectCodexCalibrationRecord, type OrchestrationExchangeReceipt } from "../core/token-efficiency.js";
+import { isoTimestamp as now } from "../core/time.js";
 
 type TaskRecordPatch = Omit<Partial<TaskRecord>, "error" | "finishedAt" | "workerPid" | "currentAttemptId" | "startedAt"> & {
   error?: string | null;
@@ -31,10 +32,6 @@ type TaskRecordPatch = Omit<Partial<TaskRecord>, "error" | "finishedAt" | "worke
   currentAttemptId?: string | null;
   startedAt?: string | null;
 };
-
-function now(): string {
-  return new Date().toISOString();
-}
 
 function parseRecord<T>(value: unknown, label: string): T {
   if (typeof value !== "string") throw new Error(`Invalid ${label} record in state database`);

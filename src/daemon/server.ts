@@ -324,6 +324,13 @@ export class ForkLightDaemon {
         const limit = typeof params.limit === "number" ? params.limit : 20;
         return this.coordinator.list(statuses, limit);
       }
+      case "list_summaries": {
+        const statuses = Array.isArray(params.statuses)
+          ? params.statuses.filter((value): value is TaskStatus => typeof value === "string")
+          : undefined;
+        const limit = typeof params.limit === "number" ? params.limit : 20;
+        return this.coordinator.listTaskSurfaces(statuses, limit);
+      }
       case "plan_submit_file":
         return this.coordinator.submitPlanFile(requiredString(params.planFile, "planFile"));
       case "plan_board":
