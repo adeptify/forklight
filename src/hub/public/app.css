@@ -2128,118 +2128,147 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
 }
 
 /* ── Adaptation panel (Hub Task detail) ──
- * Labels must wrap as normal phrases. Never force CJK to one glyph per line
- * (avoid minmax(0,1fr) + word-break:break-word on the flex label itself). */
+ * Root cause of one-glyph-per-line: .form-card input { width:100% } stretched
+ * checkboxes inside a 2-column grid, leaving ~0px for label text.
+ * Layout is stacked blocks only; checkboxes are width:auto. */
 .adaptation-panel {
   margin-top: var(--gap);
-  min-width: 0;
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
-.adaptation-panel.form-card .adapt-fields,
 .adaptation-panel .adapt-fields {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   border: var(--border);
   border-radius: var(--radius);
   background: var(--paper);
   margin-top: var(--gap-sm);
-  min-width: 0;
-  width: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 .adaptation-panel .adapt-row {
   display: block;
-  padding: 10px 12px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
   border-bottom: var(--border);
-  min-width: 0;
 }
 .adaptation-panel .adapt-row:last-child { border-bottom: 0; }
-.adaptation-panel .adapt-row-main {
-  display: grid;
-  grid-template-columns: minmax(14rem, 1.5fr) minmax(11rem, 1fr);
-  gap: 10px 16px;
-  align-items: start;
-  min-width: 0;
+.adaptation-panel .adapt-field-name {
+  display: block;
   width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: normal;
+  writing-mode: horizontal-tb;
 }
-/* Override .form-card label { display:block } so checkbox + text stay in a row. */
-.adaptation-panel.form-card .adapt-enable,
-.adaptation-panel .adapt-enable {
+.adaptation-panel .adapt-field-controls {
   display: flex;
   flex-direction: row;
-  flex-wrap: nowrap;
-  align-items: flex-start;
-  gap: 8px;
-  margin-bottom: 0;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
   width: 100%;
+  box-sizing: border-box;
+}
+/* Kill .form-card label { display:block } and input { width:100% } for checkboxes. */
+.adaptation-panel.form-card label.adapt-enable,
+.adaptation-panel label.adapt-enable {
+  display: inline-flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  align-items: center;
+  gap: 8px;
+  margin: 0 !important;
+  width: auto !important;
   max-width: 100%;
-  min-width: 0;
-  font-size: 12.5px;
-  line-height: 1.45;
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.4;
   color: var(--ink);
-  font-weight: 600;
   cursor: pointer;
   user-select: none;
-  white-space: normal;
-  overflow-wrap: break-word;
-  word-break: normal;
+  white-space: nowrap;
+  writing-mode: horizontal-tb;
 }
+.adaptation-panel.form-card input.adapt-checkbox[type="checkbox"],
+.adaptation-panel input.adapt-checkbox[type="checkbox"],
+.adaptation-panel.form-card .adapt-enable input[type="checkbox"],
 .adaptation-panel .adapt-enable input[type="checkbox"] {
-  margin: 3px 0 0;
-  flex: 0 0 auto;
-  width: 14px;
-  height: 14px;
+  display: inline-block !important;
+  width: 16px !important;
+  height: 16px !important;
+  min-width: 16px !important;
+  max-width: 16px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  flex: 0 0 16px !important;
+  vertical-align: middle;
+  accent-color: var(--hi);
 }
 .adaptation-panel .adapt-enable-text {
-  flex: 1 1 auto;
-  min-width: 8rem;
-  max-width: 100%;
-  white-space: normal;
-  overflow-wrap: break-word;
-  word-break: normal;
-  line-height: 1.45;
+  display: inline !important;
+  white-space: nowrap;
+  writing-mode: horizontal-tb;
 }
 .adaptation-panel.form-card .adapt-value,
 .adaptation-panel .adapt-value {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 0;
-  min-width: 0;
-  width: 100%;
-  font-size: 11.5px;
-  color: var(--muted);
-  font-weight: 600;
+  display: block !important;
+  flex: 1 1 220px;
+  min-width: 180px;
+  max-width: 100%;
+  width: auto !important;
+  margin: 0 !important;
+  box-sizing: border-box;
 }
 .adaptation-panel .adapt-value-label {
   display: block;
+  margin: 0 0 4px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 650;
+  line-height: 1.3;
+  white-space: normal;
 }
+.adaptation-panel.form-card .adapt-input,
+.adaptation-panel .adapt-input,
 .adaptation-panel.form-card .adapt-value input,
 .adaptation-panel.form-card .adapt-value select,
 .adaptation-panel .adapt-value input,
 .adaptation-panel .adapt-value select {
-  display: block;
+  display: block !important;
   box-sizing: border-box;
-  width: 100%;
+  width: 100% !important;
   max-width: 100%;
   min-width: 0;
-  margin-top: 0;
+  margin: 0 !important;
   background: var(--bg);
   border: var(--border);
   border-radius: var(--radius-sm);
-  padding: 7px 10px;
+  padding: 8px 10px;
   color: var(--ink);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
+  line-height: 1.35;
 }
 .adaptation-panel .adapt-value input:disabled,
-.adaptation-panel .adapt-value select:disabled { opacity: 0.45; }
+.adaptation-panel .adapt-value select:disabled,
+.adaptation-panel .adapt-input:disabled {
+  opacity: 0.5;
+}
 .adaptation-panel .adapt-value input:focus-visible,
-.adaptation-panel .adapt-value select:focus-visible {
+.adaptation-panel .adapt-value select:focus-visible,
+.adaptation-panel .adapt-input:focus-visible {
   outline: none;
   border-color: color-mix(in srgb, var(--hi) 50%, var(--line2));
   box-shadow: 0 0 0 2px var(--hi-soft);
@@ -2247,42 +2276,30 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
 }
 .adaptation-panel.form-card .adapt-reason,
 .adaptation-panel .adapt-reason {
-  display: block;
-  font-size: 11.5px;
-  color: var(--muted);
-  font-weight: 600;
-  margin-top: var(--gap-sm);
-  min-width: 0;
-  width: 100%;
-}
-.adaptation-panel .adapt-reason select {
-  display: block;
-  box-sizing: border-box;
+  display: block !important;
   width: 100%;
   max-width: 100%;
-  margin-top: 4px;
-  background: var(--bg);
-  border: var(--border);
-  border-radius: var(--radius-sm);
-  padding: 7px 10px;
-  color: var(--ink);
-  font: inherit;
-  font-size: 12.5px;
+  box-sizing: border-box;
+  margin-top: var(--gap);
+  margin-bottom: 0 !important;
 }
 .adapt-cap { margin-top: 6px; }
-.adapt-preview-panel { margin-top: var(--gap-sm); min-width: 0; }
+.adapt-preview-panel { margin-top: var(--gap-sm); min-width: 0; width: 100%; }
 .adapt-preview { font-size: 11px; }
 .adapt-status-ok { color: var(--green); }
 .adapt-status-warn { color: var(--yellow); }
 .adapt-status-err { color: var(--red); }
 .adapt-status-dim { color: var(--muted); }
 @media (max-width: 768px) {
-  .adaptation-panel .adapt-row-main { grid-template-columns: 1fr; }
-  .adaptation-panel .adapt-enable-text { min-width: 0; }
+  .adaptation-panel .adapt-field-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .adaptation-panel .adapt-value {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
   .adapt-preview-panel { font-size: 10.5px; }
-  /* Keep the changed-field value visible on narrow viewports; hide source
-     and enforcement columns. The global .preview-table nth-child(2) hide
-     would otherwise erase our value column. */
   .adapt-preview-panel .preview-table th:nth-child(3),
   .adapt-preview-panel .preview-table td:nth-child(3),
   .adapt-preview-panel .preview-table th:nth-child(4),

@@ -4397,43 +4397,47 @@ function renderAdaptationPanel(task){
   };
   var fieldsBox = h("div", "adapt-fields");
   ADAPT_FIELDS.forEach(function(def){
+    // Vertical card per field. Avoid side-by-side grids: .form-card input{width:100%}
+    // was stretching checkboxes and crushing label text into one glyph per line.
     var row = h("div", "adapt-row");
-    var main = h("div", "adapt-row-main");
-    var enable = h("input", "");
+    row.setAttribute("data-adapt-field", def.field);
+    row.appendChild(h("div", "adapt-field-name", adaptFieldLabel(def.field)));
+
+    var controls = h("div", "adapt-field-controls");
+    var enable = document.createElement("input");
     enable.type = "checkbox";
+    enable.className = "adapt-checkbox";
     enable.setAttribute("data-adapt-enable", def.field);
-    // Text lives in its own flex child so long zh/en labels wrap as phrases,
-    // not one character per line when the grid cell shrinks.
+    enable.setAttribute("aria-label", t("taskAdaptEnable") + " " + adaptFieldLabel(def.field));
     var enableLab = h("label", "adapt-enable", "");
     enableLab.appendChild(enable);
-    var enableText = h("span", "adapt-enable-text",
-      t("taskAdaptEnable") + " · " + adaptFieldLabel(def.field));
-    enableLab.appendChild(enableText);
-    main.appendChild(enableLab);
-    var valLab = h("label", "adapt-value", "");
-    valLab.appendChild(h("span", "adapt-value-label", t("taskAdaptValue")));
+    enableLab.appendChild(h("span", "adapt-enable-text", t("taskAdaptEnable")));
+    controls.appendChild(enableLab);
+
+    var valWrap = h("div", "adapt-value");
+    valWrap.appendChild(h("div", "adapt-value-label", t("taskAdaptValue")));
     var inputEl;
     if(def.mode === "mode"){
       inputEl = buildPolicyModeSelect(null);
     } else {
-      inputEl = h("input", "");
+      inputEl = document.createElement("input");
       inputEl.type = "number";
       inputEl.step = "1";
       inputEl.min = String(def.min || 0);
       inputEl.placeholder = def.mode === "nullable-int" ? t("workersBlankUnlimited") : t("workersBlankInherit");
     }
+    inputEl.className = (inputEl.className ? inputEl.className + " " : "") + "adapt-input";
     inputEl.setAttribute("data-adapt-value", def.field);
     inputEl.disabled = true;
     var current = adaptSnapshotValue(snapshot, def.field);
     if(current !== undefined && current !== null){
-      if(def.mode === "mode") inputEl.value = String(current);
-      else inputEl.value = String(current);
+      inputEl.value = String(current);
     } else {
       inputEl.value = "";
     }
-    valLab.appendChild(inputEl);
-    main.appendChild(valLab);
-    row.appendChild(main);
+    valWrap.appendChild(inputEl);
+    controls.appendChild(valWrap);
+    row.appendChild(controls);
     fieldsBox.appendChild(row);
     state.values[def.field] = inputEl.value;
     enable.addEventListener("change", function(){
@@ -4453,8 +4457,10 @@ function renderAdaptationPanel(task){
   card.appendChild(policyModeNote());
   card.appendChild(fieldsBox);
 
-  var reasonLab = h("label", "adapt-reason", t("taskAdaptReason"));
-  var reasonSel = h("select", "");
+  var reasonWrap = h("div", "adapt-reason");
+  reasonWrap.appendChild(h("div", "adapt-value-label", t("taskAdaptReason")));
+  var reasonSel = document.createElement("select");
+  reasonSel.className = "adapt-input";
   ADAPT_REASONS.forEach(function(r){
     var o = document.createElement("option");
     o.value = r;
@@ -4462,8 +4468,8 @@ function renderAdaptationPanel(task){
     reasonSel.appendChild(o);
   });
   reasonSel.value = state.reason;
-  reasonLab.appendChild(reasonSel);
-  card.appendChild(reasonLab);
+  reasonWrap.appendChild(reasonSel);
+  card.appendChild(reasonWrap);
   reasonSel.addEventListener("change", function(){
     state.reason = reasonSel.value;
     onAdaptFormChange();

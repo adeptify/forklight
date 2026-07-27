@@ -539,20 +539,20 @@ test("Hub Task detail carries the bounded adaptation panel and bridges to the da
   assert.ok(src.includes("successor-already-created"), "successor-already-created reason covered");
   // Children Task id link / echo is part of the panel success row.
   assert.ok(src.includes("taskAdaptChildLabel"), "child Task id label");
-  // CSS: readable label layout (not one glyph per line) + responsive stack.
+  // CSS: stacked field cards; checkboxes must not inherit form-card width:100%.
   assert.ok(css.includes(".adaptation-panel"), "adaptation panel CSS");
   assert.ok(css.includes(".adapt-fields"), "adapt-fields CSS");
   assert.ok(css.includes(".adapt-row"), "adapt-row CSS");
-  assert.ok(css.includes(".adapt-row-main"), "adapt-row main grid ships");
-  assert.ok(css.includes(".adapt-enable-text"), "label text is its own flex child");
-  assert.ok(css.includes("word-break: normal"), "CJK labels do not force per-glyph breaks");
+  assert.ok(css.includes(".adapt-field-name"), "field title is a full-width block");
+  assert.ok(css.includes(".adapt-field-controls"), "controls row for enable + value");
+  assert.ok(css.includes("input.adapt-checkbox"), "checkbox class is specially sized");
+  assert.ok(css.includes("width: 16px !important"), "checkbox width is forced auto-size");
+  assert.ok(css.includes("writing-mode: horizontal-tb"), "labels stay horizontal");
   assert.ok(css.includes(".adapt-preview-panel"), "adapt-preview CSS");
-  assert.ok(src.includes("adapt-enable-text"), "enable label text uses dedicated span");
-  assert.match(
-    css,
-    /@media\s*\(\s*max-width\s*:\s*768px\s*\)\s*\{[\s\S]*?\.adapt-row-main\s*\{\s*grid-template-columns\s*:\s*1fr/i,
-    "adapt-row-main collapses to one column on narrow viewports",
-  );
+  assert.ok(src.includes("adapt-field-name"), "field name is rendered separately from checkbox");
+  assert.ok(src.includes("adapt-checkbox"), "checkbox uses dedicated class");
+  assert.ok(src.includes("adapt-field-controls"), "controls wrapper is rendered");
+  assert.ok(!src.includes("adapt-row-main"), "old crushing two-column row is gone");
   // i18n copy: both languages carry the bounded reason labels and stopped hints.
   for (const key of [
     "taskAdapt",
