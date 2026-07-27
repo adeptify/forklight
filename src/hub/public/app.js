@@ -6295,33 +6295,328 @@ function renderPreflightResult(result){
   return card;
 }
 
+/* Human-readable labels for durable timeline event types. Raw type codes stay
+ * available only inside technical disclosures. */
+function timelineEventLabel(type){
+  var map = {
+    "task.created": "tlTaskCreated",
+    "task.queued": "tlTaskQueued",
+    "workspace.preparation.stage": "tlPrepStage",
+    "workspace.prepared": "tlPrepDone",
+    "attempt.started": "tlAttemptStarted",
+    "attempt.completed": "tlAttemptCompleted",
+    "worker.started": "tlWorkerStarted",
+    "worker.completed": "tlWorkerCompleted",
+    "worker.failed": "tlWorkerFailed",
+    "worker.tool.completed": "tlWorkerTool",
+    "verification.started": "tlVerifStarted",
+    "verification.completed": "tlVerifCompleted",
+    "verification.command.completed": "tlVerifCommand",
+    "main-review.completed": "tlMainReview",
+    "checkpoint.completed": "tlCheckpoint",
+    "checkpoint.skipped": "tlCheckpointSkip",
+    "integration.preflight.completed": "tlPreflight",
+    "integration.apply.completed": "tlIntegrate",
+    "attempt.authorization.granted": "tlAuthGrant",
+    "candidate.reverification.completed": "tlReverify",
+    "remediation.check.completed": "tlRemediation"
+  };
+  var key = map[String(type || "")];
+  return key ? t(key) : t("tlOther");
+}
+function reportCard(title, hint, bodyNodes, role){
+  var card = h("div", "task-report-card");
+  if(role) card.setAttribute("data-fl-role", role);
+  var head = h("div", "task-report-card-head");
+  head.appendChild(h("div", "task-report-card-title", title));
+  card.appendChild(head);
+  if(hint) card.appendChild(h("div", "task-report-card-hint", hint));
+  (bodyNodes || []).forEach(function(node){ if(node) card.appendChild(node); });
+  return card;
+}
+function reportBlock(label, value, prominent){
+  if(value === undefined || value === null || value === "") return null;
+  var block = h("div", "task-report-block");
+  if(label) block.appendChild(h("div", "task-report-label", label));
+  block.appendChild(h("div", "task-report-value" + (prominent ? " prominent" : ""), String(value)));
+  return block;
+}
+function reportList(label, items, asFiles){
+  var listItems = Array.isArray(items) ? items.filter(function(item){ return item !== undefined && item !== null && String(item).length; }) : [];
+  var block = h("div", "task-report-block");
+  if(label) block.appendChild(h("div", "task-report-label", label));
+  if(!listItems.length){
+    block.appendChild(h("div", "task-report-empty", t("taskReportEmpty")));
+    return block;
+  }
+  var list = h("ul", "task-report-list" + (asFiles ? " files" : ""));
+  listItems.slice(0, 40).forEach(function(item){
+    list.appendChild(h("li", "", String(item)));
+  });
+  if(listItems.length > 40){
+    block.appendChild(list);
+    block.appendChild(h("div", "task-report-empty", t("storyMoreItems", { count: String(listItems.length - 40) })));
+    return block;
+  }
+  block.appendChild(list);
+  return block;
+}
+/* Primary Task workbench: open sections for instruction, process, result,
+ * artifacts, checks, and next action. Avoids burying the facts users need. */
+function renderTaskWorkbench(task){
+  var j = task.journey || {};
+  var a = j.assignment || {};
+  var we = j.workerExecution || {};
+  var iv = j.independentVerification || {};
+  var fd = j.finalDelivery || {};
+  var cause = j.cause || {};
+  var next = j.nextAction || {};
+  var presentation = taskStoryPresentation(task);
+  var shell = h("div", "task-report-grid");
+  shell.setAttribute("data-fl-role", "task-workbench");
+
+  var hero = h("div", "task-report-hero");
+  hero.setAttribute("data-fl-role", "task-story-current-result");
+  hero.appendChild(h("div", "task-report-hero-title", task.name || t("taskUntitled")));
+  var meta = h("div", "task-report-hero-meta");
+  meta.appendChild(badge(task.status));
+  var finalBadge = finalDeliveryBadge(task);
+  if(finalBadge) meta.appendChild(finalBadge);
+  if(cause.failureCategory){
+    meta.appendChild(h("span", "badge badge-err", failureCategoryLabel(cause.failureCategory)));
+  }
+  meta.appendChild(h("span", "dim fs12", taskProgressSummary(task)));
+  hero.appendChild(meta);
+  var nextBox = h("div", "task-report-next");
+  nextBox.appendChild(h("div", "task-report-next-label", t("taskReportNextLabel")));
+  nextBox.appendChild(h("div", "task-report-next-body",
+    nextActionLabel(next.label || "investigate")));
+  hero.appendChild(nextBox);
+  if(cause.why || cause.what){
+    var whyText = hasVerifiedFinalDelivery(task)
+      ? t("journeyCauseWhyRepaired")
+      : resolveCauseWhy(cause.what, cause.why, cause.failureCategory);
+    if(whyText){
+      hero.appendChild(reportBlock(t("taskReportWhyLabel"), whyText, false));
+    }
+  }
+  shell.appendChild(hero);
+
+  // 1) What the Worker was asked to do (contract = instruction; no raw system prompt)
+  var instrNodes = [];
+  var goalText = a.presentation && a.presentation.summary
+    ? a.presentation.summary
+    : (a.outcome || a.goal || "");
+  if(goalText){
+    instrNodes.push(reportBlock(
+      a.presentation && a.presentation.summary ? t("storyInputMainAuthoredLabel") : t("taskReportGoalLabel"),
+      goalText,
+      true
+    ));
+  } else {
+    instrNodes.push(h("div", "task-report-empty", t("storyInputMissing")));
+  }
+  if(a.inScope && a.inScope.length) instrNodes.push(reportList(t("taskReportInScope"), a.inScope, false));
+  if(a.outOfScope && a.outOfScope.length) instrNodes.push(reportList(t("taskReportOutOfScope"), a.outOfScope, false));
+  if(a.executionSteps && a.executionSteps.length) instrNodes.push(reportList(t("taskReportSteps"), a.executionSteps, false));
+  if(a.deliverables && a.deliverables.length) instrNodes.push(reportList(t("storyInputDeliverablesLabel"), a.deliverables, false));
+  if(a.focusPaths && a.focusPaths.length) instrNodes.push(reportList(t("taskReportFocus"), a.focusPaths, true));
+  if(a.acceptanceCriteria && a.acceptanceCriteria.length){
+    instrNodes.push(reportList(t("taskReportAcceptCriteria"), a.acceptanceCriteria, false));
+  }
+  if(a.acceptanceCommands && a.acceptanceCommands.length){
+    instrNodes.push(reportList(t("taskReportAcceptChecks"), a.acceptanceCommands, false));
+  }
+  if(a.constraints && a.constraints.length){
+    instrNodes.push(reportList(t("taskReportConstraints"), a.constraints, false));
+  }
+  shell.appendChild(reportCard(
+    t("taskReportInstrTitle"),
+    t("taskReportInstrHint"),
+    instrNodes,
+    "task-story-step-main-input"
+  ));
+
+  // 2) Process: attempts + human timeline
+  var processNodes = [];
+  processNodes.push(reportBlock(
+    t("storyWorkerUsedLabel"),
+    t("journeyWorkerIdentitySentence", {
+      provider: providerDisplayName(we.provider),
+      model: we.model || "?",
+      runtime: runtimeDisplayName(we.runtime)
+    }),
+    false
+  ));
+  var attemptBox = h("div", "task-report-process");
+  attemptBox.setAttribute("data-fl-role", "task-story-step-worker-process");
+  if(we.attempts && we.attempts.length){
+    we.attempts.forEach(function(att){
+      var line = h("div", "task-report-attempt");
+      var turns = att.turns === undefined ? "" : t("journeyTurns", { count: String(att.turns) });
+      var exit = att.exitCode === undefined || att.exitCode === 0
+        ? "" : t("journeyExitCode", { code: String(att.exitCode) });
+      line.appendChild(h("div", "", t("journeyAttemptLabel", { ordinal: String(att.ordinal) })
+        + " · " + attemptStateLabel(att.status)
+        + (turns ? " · " + turns : "")
+        + (exit ? " · " + exit : "")));
+      if(att.startedAt || att.finishedAt){
+        line.appendChild(h("div", "dim fs11",
+          (att.startedAt ? t("journeyStartedAt", { time: fmtTm(att.startedAt) }) : "")
+          + (att.finishedAt ? " · " + t("journeyFinishedAt", { time: fmtTm(att.finishedAt) }) : "")
+        ));
+      }
+      attemptBox.appendChild(line);
+    });
+  } else {
+    attemptBox.appendChild(h("div", "task-report-empty", t("journeyNoAttempts")));
+  }
+  processNodes.push(attemptBox);
+  if(task.timeline && task.timeline.length){
+    var tl = h("div", "timeline");
+    tl.setAttribute("data-fl-role", "task-process-timeline");
+    // Show latest activity first for scanning.
+    task.timeline.slice().reverse().slice(0, 40).forEach(function(e){
+      var te = h("div", "timeline-entry");
+      te.appendChild(h("span", "ts", fmtTm(e.timestamp)));
+      te.appendChild(h("span", "tl-kind", timelineEventLabel(e.type)));
+      te.appendChild(h("span", "tl-summary", boundedDiagnostic(e.summary || "")));
+      tl.appendChild(te);
+    });
+    var tlWrap = h("div", "task-report-block");
+    tlWrap.appendChild(h("div", "task-report-label", t("taskReportTimelineLabel")));
+    tlWrap.appendChild(tl);
+    processNodes.push(tlWrap);
+  } else {
+    processNodes.push(h("div", "task-report-empty", t("taskReportTimelineEmpty")));
+  }
+  shell.appendChild(reportCard(
+    t("taskReportProcessTitle"),
+    t("taskReportProcessHint"),
+    processNodes,
+    "task-report-process"
+  ));
+
+  // 3) Worker result claim - open, not buried
+  var resultNodes = [];
+  var claimStep = presentation.steps.find(function(s){ return s.id === "worker-output"; });
+  if(we.workerClaim && we.workerClaim.text){
+    resultNodes.push(reportBlock(t("storyWorkerClaimLabel"), we.workerClaim.text, true));
+    resultNodes.push(h("div", "task-report-empty", t("taskReportClaimNotProof")));
+  } else {
+    resultNodes.push(h("div", "task-report-empty", t("journeyNoWorkerClaim")));
+  }
+  if(claimStep && claimStep.bodyKey){
+    resultNodes.push(h("div", "summary-line dim", t(claimStep.bodyKey, claimStep.params || {})));
+  }
+  shell.appendChild(reportCard(
+    t("taskReportResultTitle"),
+    t("taskReportResultHint"),
+    resultNodes,
+    "task-story-step-worker-output"
+  ));
+
+  // 4) Artifacts / changed files - open
+  var files = Array.isArray(we.changedFilePaths) ? we.changedFilePaths : [];
+  shell.appendChild(reportCard(
+    t("taskReportArtifactsTitle"),
+    t("taskReportArtifactsHint", { count: String(files.length) }),
+    [reportList(null, files, true)],
+    "task-report-artifacts"
+  ));
+
+  // 5) Independent checks
+  var checkNodes = [];
+  if(iv && iv.available){
+    var conclusion = iv.conclusion === "passed"
+      ? t("journeyVerifPassed")
+      : t("journeyVerifFailedCount", {
+          failed: String(iv.failedCount || 0), total: String(iv.totalCount || 0)
+        });
+    checkNodes.push(reportBlock(t("taskReportCheckConclusion"), conclusion, true));
+    if(iv.checks && iv.checks.length){
+      var rows = h("div", "task-report-process");
+      iv.checks.forEach(function(chk){
+        var row = h("div", "task-report-attempt");
+        row.setAttribute("data-fl-role", "verification-check");
+        row.appendChild(h("span", "badge " + (chk.passed ? "badge-ok" : "badge-err"),
+          chk.passed ? t("journeyCheckPassed") : t("journeyCheckFailed")));
+        row.appendChild(document.createTextNode("  " + readableVerificationCheckLabel(chk.label)));
+        rows.appendChild(row);
+      });
+      checkNodes.push(rows);
+    }
+  } else {
+    checkNodes.push(h("div", "task-report-empty", t("journeyVerifUnavailable")));
+  }
+  shell.appendChild(reportCard(
+    t("taskReportChecksTitle"),
+    t("taskReportChecksHint"),
+    checkNodes,
+    "task-story-step-main-check"
+  ));
+
+  // 6) Final handling
+  var finalNodes = [];
+  if(fd.mainReview){
+    finalNodes.push(reportBlock(
+      t("taskReportMainDecision"),
+      reviewDecisionLabel(fd.mainReview.decision)
+        + (fd.mainReview.reason ? " - " + fd.mainReview.reason : ""),
+      true
+    ));
+  }
+  if(fd.remediationDisposition){
+    finalNodes.push(reportBlock(t("taskReportFinalDelivery"), t("journeyRemediationDelivered"), false));
+  }
+  if(fd.integration){
+    finalNodes.push(reportBlock(
+      t("taskReportIntegration"),
+      integrationStateLabel(fd.integration.status),
+      false
+    ));
+  }
+  if(!finalNodes.length){
+    finalNodes.push(h("div", "task-report-empty", t("journeyDeliveryNone")));
+  }
+  shell.appendChild(reportCard(
+    t("taskReportFinalTitle"),
+    t("taskReportFinalHint"),
+    finalNodes,
+    "task-story-step-final-result"
+  ));
+
+  return shell;
+}
+
 function showTask(id){
   loadingDetail(t("taskDetailLoading"));
   fetchJSON("/api/ops/tasks/" + encodeURIComponent(id)).then(function(task){
     var f = fr();
-    f.appendChild(closeBtn());
-    f.appendChild(cardHead(task.name, "", badge(task.status)));
+    var shell = h("div", "detail-shell");
+    var top = h("div", "detail-topbar");
+    var back = closeBtn();
+    back.textContent = t("taskReportBack");
+    top.appendChild(back);
+    top.appendChild(h("div", "dim fs12", t("taskReportBreadcrumb")));
+    shell.appendChild(top);
 
-    // --- Collaboration story first; full evidence stays available on demand. ---
-    f.appendChild(renderTaskStory(task));
+    // Open workbench first: instruction → process → result → artifacts → checks.
+    shell.appendChild(renderTaskWorkbench(task));
+
     var reuseJourney = renderCandidateReuse(task);
-    if(reuseJourney) f.appendChild(reuseJourney);
+    if(reuseJourney) shell.appendChild(reuseJourney);
     var reverifyJourney = renderCandidateReverification(task);
-    if(reverifyJourney) f.appendChild(reverifyJourney);
-    var journeyEvidence = renderTaskJourney(task);
-    f.appendChild(journeyDisclosure(t("storyEvidenceDetails"), journeyEvidence));
+    if(reverifyJourney) shell.appendChild(reverifyJourney);
 
-    // --- Task delivery plan: expected four-stage plan and actual stage evidence.
-    // Always placed after the readable journey and before manual actions, so
-    // the user understands the four stages before Integration is opened. ---
-    f.appendChild(renderTaskDeliveryPlan(task));
+    // Compact story strip kept for fixture/test contract and quick scan.
+    shell.appendChild(renderTaskStory(task));
 
-    // --- Direct Main Token savings setup: after the readable journey,
-    // before manual operations or technical details. ---
-    f.appendChild(renderCalibrationCard(task));
+    // Delivery plan after the readable report.
+    shell.appendChild(renderTaskDeliveryPlan(task));
+    shell.appendChild(renderCalibrationCard(task));
 
-    // --- Manual actions: preserved in full, but secondary to the readable
-    // journey. Users expand this only when the stated next action requires it. ---
+    // Manual actions remain available but secondary.
     var manualActionsBody = h("div", "task-manual-actions");
     manualActionsBody.appendChild(h("div", "summary-line dim mb-8", t("taskManualActionsHint")));
 
@@ -6599,10 +6894,13 @@ function showTask(id){
 
     // Bounded adaptation panel
     manualActionsBody.appendChild(renderAdaptationPanel(task));
-    f.appendChild(journeyDisclosure(t("taskManualActions"), manualActionsBody));
+    shell.appendChild(journeyDisclosure(t("taskManualActions"), manualActionsBody));
 
-    // Closed technical details: IDs, source path, session, runtime, timeline,
-    // decision detail and economics are preserved verbatim, never rewritten.
+    // Secondary full evidence (older dense journey) stays closed by default.
+    var journeyEvidence = renderTaskJourney(task);
+    shell.appendChild(journeyDisclosure(t("storyEvidenceDetails"), journeyEvidence));
+
+    // Closed technical details: IDs, source path, session, runtime, raw types.
     var techBody = hd("div", "task-technical-body");
     techBody.appendChild(hd("div", "grid-2 fs12 mb-8", [
       hd("div", "", [h("span", "dim", t("journeyTechId") + " "), h("span", "mono", task.id)]),
@@ -6648,18 +6946,19 @@ function showTask(id){
       }
     }
     if(task.timeline && task.timeline.length){
-      var tl = h("div", "timeline");
+      var tlTech = h("div", "timeline");
       task.timeline.forEach(function(e){
         var te = h("div", "timeline-entry");
         te.appendChild(h("span", "ts", fmtTm(e.timestamp)));
-        te.appendChild(h("span", "", boundedDiagnostic(e.type)));
-        te.appendChild(h("span", "dim", boundedDiagnostic(e.summary)));
-        tl.appendChild(te);
+        te.appendChild(h("span", "tl-kind", boundedDiagnostic(e.type)));
+        te.appendChild(h("span", "tl-summary", boundedDiagnostic(e.summary)));
+        tlTech.appendChild(te);
       });
       techBody.appendChild(collapsedSection(
-        t("taskTechnicalTimeline") + " (" + task.timeline.length + ")", tl));
+        t("taskTechnicalTimeline") + " (" + task.timeline.length + ")", tlTech));
     }
-    f.appendChild(collapsedSection(t("journeyTechnical"), techBody));
+    shell.appendChild(collapsedSection(t("journeyTechnical"), techBody));
+    f.appendChild(shell);
     showDetail(f);
   }).catch(function(e){
     detailEl.replaceChildren(detailErrorFragment("taskDetailLoadFailed", e));

@@ -1157,12 +1157,20 @@ test("Hub Task story executes the shared fixture as an ordered input-process-out
     "recorded file differences are not shown as waiting after the Task has failed");
 
   assert.ok(src.includes("function renderTaskStory"));
+  assert.ok(src.includes("function renderTaskWorkbench"), "full-page task workbench is shipped");
   assert.ok(src.includes('"task-story-flow"'));
   assert.ok(src.includes('"task-story-current-result"'));
   assert.ok(src.includes('"task-story-step-" + step.id'));
+  assert.ok(src.includes('"task-workbench"'), "workbench role is present");
+  assert.ok(src.includes("taskReportInstrTitle"), "instruction section uses plain-language key");
+  assert.ok(src.includes("task-process-timeline"), "process timeline is surfaced openly");
+  assert.ok(src.includes("detail-shell"), "detail uses full workbench shell not only a drawer strip");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   assert.ok(css.includes(".task-story-steps"));
   assert.ok(css.includes(".task-story-step:not(:last-child)::after"));
+  assert.ok(css.includes(".task-report-hero"), "task report hero styles ship");
+  assert.ok(css.includes(".task-report-card"), "open report cards ship");
+  assert.ok(css.includes("left: var(--sidebar)"), "detail spans the workspace beside the nav");
   assert.match(css, /@media\s*\(max-width:\s*768px\)[\s\S]*?\.task-story-step/);
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   for (const key of [
@@ -1171,9 +1179,15 @@ test("Hub Task story executes the shared fixture as an ordered input-process-out
     "storyInputDeliverablesLabel", "storyWorkerClaimLabel", "storyWorkerFilesLabel",
     "storyWorkerOutputTaskFailed", "storyFailedChecksLabel", "storyMainDecisionReasonLabel",
     "storyFinalFilesRepairedMissing",
+    "taskReportInstrTitle", "taskReportProcessTitle", "taskReportResultTitle",
+    "taskReportArtifactsTitle", "taskReportChecksTitle", "taskReportFinalTitle",
+    "taskReportBack", "tlWorkerCompleted", "tlVerifCompleted",
   ]) {
     assert.ok(i18n.indexOf(key) !== i18n.lastIndexOf(key), `${key} exists in both locales`);
   }
+  assert.ok(i18n.includes("Worker 收到的任务说明"), "zh instruction title is plain language");
+  assert.ok(i18n.includes("What the Worker was asked to do"), "en instruction title is plain language");
+  assert.ok(i18n.includes("活动记录"), "zh timeline label is plain language");
 });
 
 /* --- Task story adapter: fixture-driven journey coverage ---
@@ -1594,7 +1608,7 @@ test("Hub i18n carries journey keys in both languages and what/why never duplica
     assert.ok(i18n.includes(key), `en ${key} present`);
   }
   // Chinese translations present
-  assert.ok(i18n.includes("完整执行证据"), "zh journey evidence title");
+  assert.ok(i18n.includes("更多细节（可选）"), "zh journey evidence title stays plain language");
   assert.ok(i18n.includes("Main 输入"), "zh assignment");
   assert.ok(i18n.includes("Worker 执行"), "zh worker execution");
   assert.ok(i18n.includes("独立验证"), "zh verification");
@@ -2166,19 +2180,28 @@ test("Hub Task detail carries the direct Main Token savings setup card", async (
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   const { enSection, zhSection } = splitI18n(i18n);
 
-  // Renderer exists and is placed after the journey, before manual actions.
+  // Renderer exists and is placed after the open workbench, before manual actions.
   assert.ok(src.includes("function renderCalibrationCard"), "calibration card renderer");
-  assert.ok(src.includes("f.appendChild(renderCalibrationCard(task));"),
+  assert.ok(src.includes("function renderTaskWorkbench"), "open workbench is the primary report");
+  assert.ok(src.includes("shell.appendChild(renderCalibrationCard(task));"),
     "showTask mounts the calibration card");
-  const storyIdx = src.indexOf("f.appendChild(renderTaskStory(task));");
-  const journeyIdx = src.indexOf("var journeyEvidence = renderTaskJourney(task);");
-  const deliveryIdx = src.indexOf("f.appendChild(renderTaskDeliveryPlan(task));");
-  const calIdx = src.indexOf("f.appendChild(renderCalibrationCard(task));");
+  const workbenchIdx = src.indexOf("shell.appendChild(renderTaskWorkbench(task));");
+  const storyIdx = src.indexOf("shell.appendChild(renderTaskStory(task));");
+  const deliveryIdx = src.indexOf("shell.appendChild(renderTaskDeliveryPlan(task));");
+  const calIdx = src.indexOf("shell.appendChild(renderCalibrationCard(task));");
   const manualIdx = src.indexOf('journeyDisclosure(t("taskManualActions")');
+  const journeyIdx = src.indexOf("var journeyEvidence = renderTaskJourney(task);");
   const techIdx = src.indexOf('collapsedSection(t("journeyTechnical")');
-  assert.ok(storyIdx > 0 && journeyIdx > storyIdx && deliveryIdx > journeyIdx && calIdx > deliveryIdx
-      && manualIdx > calIdx && techIdx > manualIdx,
-    "story, full evidence, delivery plan, calibration, manual actions and technical details stay in readable order");
+  assert.ok(
+    workbenchIdx > 0
+      && storyIdx > workbenchIdx
+      && deliveryIdx > storyIdx
+      && calIdx > deliveryIdx
+      && manualIdx > calIdx
+      && journeyIdx > manualIdx
+      && techIdx > journeyIdx,
+    "workbench, story, delivery plan, calibration, manual actions, evidence and technical details stay in readable order",
+  );
 
   // State adapter covers every state.
   assert.ok(src.includes("function calibrationViewState"), "state adapter");
