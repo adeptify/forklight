@@ -539,15 +539,19 @@ test("Hub Task detail carries the bounded adaptation panel and bridges to the da
   assert.ok(src.includes("successor-already-created"), "successor-already-created reason covered");
   // Children Task id link / echo is part of the panel success row.
   assert.ok(src.includes("taskAdaptChildLabel"), "child Task id label");
-  // CSS responsive collapse for narrow viewports.
+  // CSS: readable label layout (not one glyph per line) + responsive stack.
   assert.ok(css.includes(".adaptation-panel"), "adaptation panel CSS");
   assert.ok(css.includes(".adapt-fields"), "adapt-fields CSS");
   assert.ok(css.includes(".adapt-row"), "adapt-row CSS");
+  assert.ok(css.includes(".adapt-row-main"), "adapt-row main grid ships");
+  assert.ok(css.includes(".adapt-enable-text"), "label text is its own flex child");
+  assert.ok(css.includes("word-break: normal"), "CJK labels do not force per-glyph breaks");
   assert.ok(css.includes(".adapt-preview-panel"), "adapt-preview CSS");
+  assert.ok(src.includes("adapt-enable-text"), "enable label text uses dedicated span");
   assert.match(
     css,
-    /@media\s*\(\s*max-width\s*:\s*768px\s*\)\s*\{[^}]*\.adapt-row\s*\{\s*grid-template-columns\s*:\s*1fr/i,
-    "adapt-row collapses to one column on narrow viewports",
+    /@media\s*\(\s*max-width\s*:\s*768px\s*\)\s*\{[\s\S]*?\.adapt-row-main\s*\{\s*grid-template-columns\s*:\s*1fr/i,
+    "adapt-row-main collapses to one column on narrow viewports",
   );
   // i18n copy: both languages carry the bounded reason labels and stopped hints.
   for (const key of [

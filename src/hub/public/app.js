@@ -4398,14 +4398,20 @@ function renderAdaptationPanel(task){
   var fieldsBox = h("div", "adapt-fields");
   ADAPT_FIELDS.forEach(function(def){
     var row = h("div", "adapt-row");
+    var main = h("div", "adapt-row-main");
     var enable = h("input", "");
     enable.type = "checkbox";
     enable.setAttribute("data-adapt-enable", def.field);
+    // Text lives in its own flex child so long zh/en labels wrap as phrases,
+    // not one character per line when the grid cell shrinks.
     var enableLab = h("label", "adapt-enable", "");
     enableLab.appendChild(enable);
-    enableLab.appendChild(document.createTextNode(t("taskAdaptEnable") + " - " + adaptFieldLabel(def.field)));
-    row.appendChild(enableLab);
-    var valLab = h("label", "adapt-value", t("taskAdaptValue"));
+    var enableText = h("span", "adapt-enable-text",
+      t("taskAdaptEnable") + " · " + adaptFieldLabel(def.field));
+    enableLab.appendChild(enableText);
+    main.appendChild(enableLab);
+    var valLab = h("label", "adapt-value", "");
+    valLab.appendChild(h("span", "adapt-value-label", t("taskAdaptValue")));
     var inputEl;
     if(def.mode === "mode"){
       inputEl = buildPolicyModeSelect(null);
@@ -4426,7 +4432,8 @@ function renderAdaptationPanel(task){
       inputEl.value = "";
     }
     valLab.appendChild(inputEl);
-    row.appendChild(valLab);
+    main.appendChild(valLab);
+    row.appendChild(main);
     fieldsBox.appendChild(row);
     state.values[def.field] = inputEl.value;
     enable.addEventListener("change", function(){
