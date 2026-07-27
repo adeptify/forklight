@@ -1,0 +1,178 @@
+version: 2
+name: Delivery settings and four-stage truth are understandable in Hub
+project: ../..
+taskClass: delivery-activation-truth-ui
+contract:
+  outcome: A non-technical user can configure reusable build/activation behavior and understand, before and after Integration, exactly which of the four delivery stages are planned, running, passed, failed, or not configured.
+  context:
+    - The backend contract adds settings.deliveryProfiles and task.deliveryPlan with resolution provenance, command counts, expected outcome, and four stage expectations.
+    - Current Hub has no Delivery Profile editor, preflight renders truncated raw JSON, and Task Detail compresses Integration to one overall status.
+    - FL-D198 proved that source verification in an isolated copy can pass while the live Hub still serves an older artifact.
+    - UI completion means explaining input, process, current state, output, reason, and next action; showing all fields is not enough.
+    - Technical ids, command text, fingerprints, and raw diagnostics remain available only in secondary disclosures.
+  inScope:
+    - Add a first-class Configure navigation page for Delivery Profiles and project bindings.
+    - Explain in plain Chinese and English what build, activation, and activation check commands do, when they run, and that save does not execute them.
+    - Let users create/edit/delete profiles, choose an optional default, and add/remove canonical project-path bindings by posting one complete registry.
+    - Compute unsaved state semantically from the current Delivery Profile draft versus saved settings; restoring values clears the marker without autosave.
+    - Add a readable Task Detail delivery plan before manual Integration controls.
+    - Replace preflight raw JSON with affected-file count, pass/rejection result, four expected stages, and a concrete next action; receipt id stays in technical details.
+    - Render actual Integration stage evidence separately from expected stages using localized status labels.
+    - Keep commands visible only inside the authenticated configuration editor or a closed technical disclosure.
+    - Add responsive styles and executable/static UI tests for both languages and key interaction wiring.
+  outOfScope:
+    - Do not execute, auto-test, auto-bind, or auto-activate profiles from the editor.
+    - Do not infer project commands, add framework presets, change backend validation, or weaken Integration confirmation.
+    - Do not add dependencies, redesign unrelated pages, commit, or push.
+  executionSteps:
+    - Inspect Hub navigation, settings state, form patterns, Task journey, preflight action, Integration history, i18n, and responsive CSS.
+    - Add one Delivery page whose opening explanation follows input, process, output, current status, and next action.
+    - Build bounded profile/default/project-binding controls that serialize a complete registry and preserve invalid drafts visibly.
+    - Add pure normalization/equality helpers for truthful unsaved state and newline command parsing.
+    - Render Task delivery expectations and actual stage evidence as two clearly labelled sequences.
+    - Replace raw preflight JSON with a readable result and keep ids/diagnostics in closed details.
+    - Add focused bilingual, semantic-dirty, DOM-structure, and narrow-layout coverage; run the stored checks once.
+  deliverables:
+    - Delivery Profiles navigation and complete visual editor.
+    - Truthful unsaved-state behavior with exact full-registry save.
+    - Task Detail expected-versus-actual four-stage explanation.
+    - Readable Integration preflight result and next action.
+    - Chinese/English copy and responsive regression evidence.
+  modules:
+    - name: Delivery configuration page
+      responsibility: Turn build/activation settings into understandable reusable profiles and project bindings.
+      consumes:
+        - settings.deliveryProfiles from Hub status.
+        - User edits to profile fields, default selection, and path bindings.
+      produces:
+        - One complete DeliveryProfilesSettings replacement posted on explicit save.
+      boundaries:
+        - Save never runs any command or creates a Task.
+        - Invalid drafts stay unsaved and show a concrete correction; no silent coercion or autosave.
+    - name: Delivery form truth
+      responsibility: Normalize profile arrays, commands, and bindings so the unsaved marker reflects semantic differences.
+      consumes:
+        - Saved registry and current form draft.
+      produces:
+        - Deterministic draft registry and dirty boolean.
+      boundaries:
+        - Restoring the saved semantic value clears dirty.
+        - Commands remain ordered because execution order matters.
+    - name: Task delivery journey
+      responsibility: Explain expected stages before apply and actual evidence after apply.
+      consumes:
+        - task.deliveryPlan.
+        - task.decision.integration stages when present.
+      produces:
+        - Four localized stage rows with plan/actual status, reason, and next action.
+      boundaries:
+        - Expected never becomes passed; not configured never becomes successful.
+        - Actual stage evidence always remains canonical and is not fabricated from overall Integration status.
+    - name: Preflight result
+      responsibility: Translate a receipt into a user decision before source mutation.
+      consumes:
+        - affectedFiles, rejectionReasons, deliveryPlan, receipt id and expiry.
+      produces:
+        - Readable pass/reject summary, planned stages, and next action.
+      boundaries:
+        - Receipt id and raw rejection diagnostic remain available but secondary.
+        - Apply continues to require explicit confirmation.
+  callChain:
+    - User opens Delivery under Configure and reads what each stage means before entering commands.
+    - User saves a complete validated profile registry and optional project binding.
+    - A later Task snapshots the matching profile and exposes deliveryPlan.
+    - Task Detail shows the expected four stages before Main opens manual Integration actions.
+    - Main runs preflight and sees source file scope plus the exact planned build/activation behavior.
+    - Main explicitly authorizes apply.
+    - Task Detail then shows actual stage evidence separately and identifies the first incomplete or failed stage.
+  scenarios:
+    - name: No profile warns about source-only delivery
+      given: task.deliveryPlan says artifact build and runtime activation are not configured.
+      when: The user opens Task Detail before Integration.
+      then: The page says source can be updated but the running product will not be built or activated and suggests configuring a profile for future Tasks.
+    - name: Build configured but activation absent
+      given: The plan requires artifact build and does not configure runtime activation.
+      when: Integration finishes source verification and build.
+      then: The UI shows both actual passes and says runtime activation was not configured rather than calling the live product updated.
+    - name: Profile draft restored
+      given: A saved profile has one build command and one project binding.
+      when: The user changes them and later restores the exact ordered values.
+      then: The unsaved marker clears and no settings request was made.
+    - name: Preflight rejected
+      given: The receipt contains one or more rejection reasons.
+      when: Preflight returns.
+      then: The user sees that no source was changed, the bounded reason, and the next correction; the receipt id is not the headline.
+    - name: Narrow bilingual layout
+      given: The Hub is switched between Chinese and English at a narrow viewport.
+      when: Delivery configuration and Task stage cards render.
+      then: Labels remain meaningful, commands wrap, actions remain reachable, and no horizontal overflow is introduced.
+  risks:
+    - Command editors can overwhelm new users, so the primary copy must describe behavior and keep examples bounded instead of leading with shell terminology.
+    - Reordering commands changes behavior, so semantic equality must preserve array order.
+    - UI may invent success from an overall completed result; actual rows must read only stage evidence.
+    - Registry deletion can break defaults/bindings, so the draft must remove or reject dependent references explicitly before save.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 1800
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+delivery:
+  buildCommands:
+    - npm run build
+  activationCommands: []
+  activationCheckCommands: []
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/index.html
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Delivery settings explain and edit the complete registry without executing commands.
+    - Task Detail distinguishes planned expectations from canonical actual stage evidence.
+    - Preflight output tells the user what will change and what will not happen before apply.
+    - Unsaved state is semantic, ordered commands remain ordered, and restoring values clears the marker.
+    - Chinese, English, accessibility structure, and narrow layout remain usable.
+  commands:
+    - node --check src/hub/public/app.js
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - npm run build
+    - git diff --check

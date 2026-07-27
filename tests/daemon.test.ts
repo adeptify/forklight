@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -16,11 +17,18 @@ import {
   daemonLaunchArguments,
   daemonRequest,
   daemonRequestTimeoutMs,
+  ensureDaemon,
+  restartDaemon,
+  routeMutation,
+  startDaemonProcess,
+  stopDaemon,
+  stopDaemonForHandoff,
 } from "../src/daemon/client.js";
 import { requiresMatchingBuildIdentity } from "../src/daemon/protocol.js";
+import { daemonSocketPath } from "../src/core/config.js";
 import { DaemonCoordinator, probeProvidersBounded } from "../src/daemon/coordinator.js";
 import { assertWorkPlan } from "../src/core/plan.js";
-import { buildTaskRecord, registerTaskFromSpec } from "../src/core/runner.js";
+import { buildTaskRecord, checkReviseEligibility, executeAttempt, prepareTaskWorkspace, registerTaskFromSpec } from "../src/core/runner.js";
 import { parseTaskSpec } from "../src/core/task.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
 import { SettingsService } from "../src/core/settings.js";
@@ -29,6 +37,19 @@ import {
   PROTOCOL_VERSION,
   currentBuildIdentity,
 } from "../src/core/build-identity.js";
+import {
+  authorizeExtraAttempt,
+  authorizeMainCorrection,
+  resolvePendingGrantExecutionOptions,
+} from "../src/core/attempt-authorization.js";
+import { isWorkspaceReady } from "../src/workspace/copy.js";
+import { captureCandidateRevision } from "../src/core/candidate-revision.js";
+
+// File-scope no-op SIGTERM handler: the coordinator's
+// authorizeActivationHandoffShutdown sends SIGTERM to its own pid,
+// which is the test process when using ForkLightDaemon in-process.
+// This handler prevents the test runner from exiting.
+process.on("SIGTERM", () => {});
 
 // --- revise harness ---
 
@@ -39,6 +60,9 @@ test("identity matching protects state changes but lets a new build stop an old 
   assert.equal(requiresMatchingBuildIdentity("integration_apply"), true);
   assert.equal(requiresMatchingBuildIdentity("shutdown"), false);
   assert.equal(requiresMatchingBuildIdentity("health"), false);
+  // Adaptation preview is read-only; apply is mutating.
+  assert.equal(requiresMatchingBuildIdentity("adaptation_preview"), false);
+  assert.equal(requiresMatchingBuildIdentity("adaptation_apply"), true);
 });
 
 test("Integration wait socket deadline covers the requested wait interval", () => {
@@ -47,6 +71,14 @@ test("Integration wait socket deadline covers the requested wait interval", () =
   assert.equal(
     daemonRequestTimeoutMs("integration_wait", { timeoutMs: 60_000 }),
     65_000,
+  );
+});
+
+test("Main remediation transport does not expire before configured verification", () => {
+  assert.equal(daemonRequestTimeoutMs("remediation_verify", {}), 6 * 60 * 60 * 1000 + 5_000);
+  assert.equal(
+    daemonRequestTimeoutMs("remediation_verify", { requestTimeoutMs: 30_000 }),
+    35_000,
   );
 });
 
@@ -469,6 +501,8 @@ test("plan-file submission atomically registers tasks before applying dependency
     assert.equal(store.getTask(foundation).status, "queued");
     assert.equal(store.getTask(first).status, "waiting");
     assert.equal(store.getTask(second).status, "waiting");
+    assert.ok(store.getTask(foundation).effectivePolicy, "plan Tasks snapshot effective policy");
+    assert.ok(store.getTask(first).effectivePolicy, "dependent plan Tasks snapshot effective policy");
     assert.match(store.getTask(first).error ?? "", /foundation/);
     assert.equal(store.listEvents(first).at(-1)?.type, "task.waiting");
     assert.equal(store.getPlanItems(result.planId).length, 3);
@@ -1179,6 +1213,230 @@ test("task_economics rejects nonexistent Task through the existing error path", 
   }
 });
 
+// --- economics_summary daemon integration ---
+
+test("economics_summary returns portfolio summary via the daemon", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-econ-summary-daemon-"));
+  {
+    const store = new StateStore(home);
+    const TS = "2026-07-23T12:00:00.000Z";
+    store.createTask({
+      id: "es1", name: "es1", status: "succeeded",
+      sourcePath: "/tmp/src", taskFile: "/tmp/es1.yaml",
+      spec: {
+        version: 2, name: "es1", project: "/tmp/proj",
+        provider: { name: "deepseek", model: "deepseek-v4-pro", endpoint: "https://api.deepseek.com", keychainService: "fk" },
+        runtime: { name: "claude-code", executable: "claude", effort: "medium", maxBudgetUsd: 10 },
+        workspace: { exclude: [] },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+        contract: { outcome: "", context: [], inScope: [], outOfScope: [], executionSteps: [], deliverables: [],
+          modules: [], callChain: [], scenarios: [], risks: [], changeBudget: { maxFiles: 1, maxDiffLines: 100 } },
+        acceptance: { criteria: [], commands: ["true"] },
+      },
+      paths: { root: "/x", baseline: "/x", workspace: "/x", logs: "/x", claudeConfig: "/x", diff: "/x" },
+      sessionId: "s-es1", createdAt: TS, updatedAt: TS,
+    } as TaskRecord);
+    store.createAttempt({
+      id: "ea-es1", taskId: "es1", ordinal: 1, status: "succeeded",
+      sessionId: "s-es1", rawLogPath: "/tmp/ea-es1.log",
+      startedAt: TS, finishedAt: TS, exitCode: 0,
+      usage: { inputTokens: 1000, outputTokens: 500, cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
+        source: "terminal-result" as const, complete: true },
+      runtimeCostEstimateUsd: 3.25,
+      runtimeBudgetUsd: 10,
+      officialCost: {
+        stage: "calculation" as const, quoted: true as const,
+        result: {
+          quoted: true as const, currency: "USD" as const, total: 0.07,
+          components: [],
+          pricing: {
+            provider: "deepseek", origin: "https://api.deepseek.com", route: "deepseek-direct-payg",
+            modelAliases: ["deepseek-v4-pro"], serviceTier: "standard", currency: "USD" as const,
+            unitTokens: 1_000_000,
+            source: { url: "https://api-docs.deepseek.com/quick_start/pricing/", checkedAt: TS },
+            promotion: null,
+          },
+          appliedTier: { applied: [{ minimumInputTokensExclusive: null, totalPromptInput: 1000 }], totalPromptInput: 1000 },
+          usageSource: "terminal-result" as const, providerBillClaim: false,
+        },
+      },
+    });
+    // Also seed a stable queued Task which must be excluded. A running Task
+    // is intentionally recovered as interrupted when the daemon starts.
+    store.createTask({
+      id: "es2-running", name: "es2-running", status: "queued",
+      sourcePath: "/tmp/src", taskFile: "/tmp/es2.yaml",
+      spec: {
+        version: 2, name: "es2-running", project: "/tmp/proj",
+        provider: { name: "deepseek", model: "deepseek-v4-pro", endpoint: "https://api.deepseek.com", keychainService: "fk" },
+        runtime: { name: "claude-code", executable: "claude", effort: "medium", maxBudgetUsd: 5 },
+        workspace: { exclude: [] },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+        contract: { outcome: "", context: [], inScope: [], outOfScope: [], executionSteps: [], deliverables: [],
+          modules: [], callChain: [], scenarios: [], risks: [], changeBudget: { maxFiles: 1, maxDiffLines: 100 } },
+        acceptance: { criteria: [], commands: ["true"] },
+      },
+      paths: { root: "/x", baseline: "/x", workspace: "/x", logs: "/x", claudeConfig: "/x", diff: "/x" },
+      sessionId: "s-es2", createdAt: TS, updatedAt: TS,
+    } as TaskRecord);
+    store.close();
+  }
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const s = await daemonRequest<Record<string, unknown>>(
+      "economics_summary", {}, home,
+    );
+    // Scope
+    const scope = s.scope as Record<string, unknown>;
+    assert.equal(scope.terminalTaskCount, 1, "running task excluded");
+    assert.equal(scope.nonEmpty, true);
+
+    // Budget
+    const budget = s.runtimeBudget as Record<string, unknown>;
+    assert.equal(budget.configuredFiniteCapSumUsd, 10);
+    assert.equal(budget.cappedAttemptCount, 1);
+    assert.equal(budget.uncappedAttemptCount, 0);
+    assert.equal(budget.unknownAttemptCount, 0);
+    assert.equal(budget.complete, true);
+
+    // Runtime estimate
+    const est = s.runtimeEstimate as Record<string, unknown>;
+    assert.equal(est.observedTotalUsd, 3.25);
+    assert.equal(est.sampleCount, 1);
+    assert.equal(est.missingCount, 0);
+    assert.equal(est.complete, true);
+
+    // Official cost
+    const oc = s.officialCost as Record<string, unknown>;
+    const ct = oc.currencyTotals as Array<Record<string, unknown>>;
+    assert.equal(ct.length, 1);
+    assert.equal(ct[0]!.currency, "USD");
+    assert.equal(ct[0]!.total, 0.07);
+    assert.equal(ct[0]!.providerBillClaim, false);
+
+    // Worker volume
+    const wv = s.workerVolume as Record<string, unknown>;
+    assert.ok(typeof wv.grossWorkerTokens === "number");
+    assert.equal(wv.completeTaskCount, 1);
+
+    // Direct-Codex savings: unavailable
+    const dcs = s.directCodexSavings as Record<string, unknown>;
+    assert.equal(dcs.availableTaskCount, 0);
+    assert.equal(dcs.unavailableTaskCount, 1);
+
+    // No legacy costUsd leak
+    const json = JSON.stringify(s);
+    assert.ok(!json.includes("costUsd"), "summary must not contain costUsd");
+    assert.ok(!json.includes("keychainService"));
+    assert.ok(!json.includes("resultText"));
+    assert.ok(!json.includes("rawLogPath"));
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("economics_summary accepts optional filter parameters", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-econ-summary-filter-"));
+  {
+    const store = new StateStore(home);
+    const TS = "2026-07-23T12:00:00.000Z";
+    store.createTask({
+      id: "ef-ds", name: "ef-ds", status: "succeeded",
+      sourcePath: "/tmp/src", taskFile: "/tmp/ef-ds.yaml",
+      spec: {
+        version: 2, name: "ef-ds", project: "/tmp/proj",
+        provider: { name: "deepseek", model: "deepseek-v4-pro", endpoint: "https://api.deepseek.com", keychainService: "fk" },
+        runtime: { name: "claude-code", executable: "claude", effort: "medium", maxBudgetUsd: 5 },
+        workspace: { exclude: [] },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+        contract: { outcome: "", context: [], inScope: [], outOfScope: [], executionSteps: [], deliverables: [],
+          modules: [], callChain: [], scenarios: [], risks: [], changeBudget: { maxFiles: 1, maxDiffLines: 100 } },
+        acceptance: { criteria: [], commands: ["true"] },
+      },
+      paths: { root: "/x", baseline: "/x", workspace: "/x", logs: "/x", claudeConfig: "/x", diff: "/x" },
+      sessionId: "s-ef-ds", createdAt: TS, updatedAt: TS,
+    } as TaskRecord);
+    store.createTask({
+      id: "ef-mm", name: "ef-mm", status: "succeeded",
+      sourcePath: "/tmp/src", taskFile: "/tmp/ef-mm.yaml",
+      spec: {
+        version: 2, name: "ef-mm", project: "/tmp/proj",
+        provider: { name: "minimax", model: "m3", endpoint: "https://api.minimax.io", keychainService: "fk" },
+        runtime: { name: "claude-code", executable: "claude", effort: "medium", maxBudgetUsd: 15 },
+        workspace: { exclude: [] },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+        contract: { outcome: "", context: [], inScope: [], outOfScope: [], executionSteps: [], deliverables: [],
+          modules: [], callChain: [], scenarios: [], risks: [], changeBudget: { maxFiles: 1, maxDiffLines: 100 } },
+        acceptance: { criteria: [], commands: ["true"] },
+      },
+      paths: { root: "/x", baseline: "/x", workspace: "/x", logs: "/x", claudeConfig: "/x", diff: "/x" },
+      sessionId: "s-ef-mm", createdAt: TS, updatedAt: TS,
+    } as TaskRecord);
+    store.createAttempt({
+      id: "ea-ef-ds", taskId: "ef-ds", ordinal: 1, status: "succeeded",
+      sessionId: "s-ef-ds", rawLogPath: "/tmp/ea-ef-ds.log",
+      startedAt: TS, finishedAt: TS, exitCode: 0,
+      runtimeBudgetUsd: 5,
+    });
+    store.createAttempt({
+      id: "ea-ef-mm", taskId: "ef-mm", ordinal: 1, status: "succeeded",
+      sessionId: "s-ef-mm", rawLogPath: "/tmp/ea-ef-mm.log",
+      startedAt: TS, finishedAt: TS, exitCode: 0,
+      runtimeBudgetUsd: 15,
+    });
+    store.close();
+  }
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    // Filter by provider
+    const s = await daemonRequest<Record<string, unknown>>(
+      "economics_summary", { providerName: "minimax" }, home,
+    );
+    const scope = s.scope as Record<string, unknown>;
+    assert.equal(scope.terminalTaskCount, 1);
+    const budget = s.runtimeBudget as Record<string, unknown>;
+    assert.equal(budget.configuredFiniteCapSumUsd, 15);
+
+    // Filter by model
+    const s2 = await daemonRequest<Record<string, unknown>>(
+      "economics_summary", { modelName: "deepseek-v4-pro" }, home,
+    );
+    const scope2 = s2.scope as Record<string, unknown>;
+    assert.equal(scope2.terminalTaskCount, 1);
+
+    // Unfiltered returns both
+    const s3 = await daemonRequest<Record<string, unknown>>(
+      "economics_summary", {}, home,
+    );
+    const scope3 = s3.scope as Record<string, unknown>;
+    assert.equal(scope3.terminalTaskCount, 2);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("economics_summary empty store returns nonEmpty false with zero denominators", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-econ-summary-empty-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const s = await daemonRequest<Record<string, unknown>>(
+      "economics_summary", {}, home,
+    );
+    const scope = s.scope as Record<string, unknown>;
+    assert.equal(scope.terminalTaskCount, 0);
+    assert.equal(scope.nonEmpty, false);
+    const budget = s.runtimeBudget as Record<string, unknown>;
+    assert.equal(budget.complete, false);
+  } finally {
+    await daemon.close();
+  }
+});
+
 test("daemon plan submission works with spaces in directory path", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight spaced path test-"));
   const planFile = path.join(home, "two wave plan.yaml");
@@ -1829,6 +2087,2132 @@ test("revise via daemon protocol surfaces the same eligibility and privacy behav
     );
   } finally {
     await daemon.close();
+    store.close();
+  }
+});
+
+// --- Task-derived guided direct-Codex capture ---
+
+function seedCalibrationReadyTask(home: string, taskId: string, taskClass: string, profileId: string): void {
+  const store = new StateStore(home);
+  const spec = parseTaskSpec({ version: 1, name: taskId, project: "/tmp", goal: "T",
+    taskClass, directCodexProfileId: profileId, acceptance: { commands: ["true"] } }, "/tmp");
+  store.createTask(buildTaskRecord({ spec, taskFile: `/tmp/${taskId}.yaml`, home, id: taskId,
+    sessionId: `s-${taskId}`, createdAt: "2026-07-23T12:00:00.000Z" }));
+  store.close();
+}
+
+function seedNonCalibrationTask(home: string, taskId: string): void {
+  const store = new StateStore(home);
+  // Intentionally omit both taskClass and directCodexProfileId.
+  const spec = parseTaskSpec({ version: 1, name: taskId, project: "/tmp", goal: "T",
+    acceptance: { commands: ["true"] } }, "/tmp");
+  store.createTask(buildTaskRecord({ spec, taskFile: `/tmp/${taskId}.yaml`, home, id: taskId,
+    sessionId: `s-${taskId}`, createdAt: "2026-07-23T12:00:00.000Z" }));
+  store.close();
+}
+
+const GC_USAGE = {
+  type: "turn.completed",
+  usage: { input_tokens: 4000, cached_input_tokens: 1000, cache_write_input_tokens: 0, output_tokens: 500, reasoning_output_tokens: 100 },
+};
+
+test("daemon direct_codex_guided_capture derives identity from stored Task and creates pending sample", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-dc-gc-ok-"));
+  seedCalibrationReadyTask(home, "gc-task", "gc-class", "gc-prof");
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const s = await daemonRequest<Record<string, unknown>>(
+      "direct_codex_guided_capture",
+      { forklightTaskId: "gc-task", codexRunRef: "codex-run:gc-run", usage: GC_USAGE },
+      home,
+    );
+    // Identity derived from the stored Task, not from caller-provided metadata.
+    assert.equal(s.forklightTaskId, "gc-task");
+    assert.equal(s.exactTaskClass, "gc-class");
+    assert.equal(s.directCodexProfileId, "gc-prof");
+    assert.equal(s.directRunRef, "codex-run:gc-run");
+    // Counts from canonical Codex terminal usage adapter — uncached input only.
+    assert.equal(s.inputTokens, 3000); // 4000 - 1000 - 0
+    assert.equal(s.outputTokens, 500);
+    assert.equal(s.complete, true);
+    // Generated opaque identifiers are content-free.
+    assert.equal(typeof s.sampleId, "string");
+    assert.match(s.sampleId as string, /^smp-/);
+    assert.equal(typeof s.pairingRef, "string");
+    assert.match(s.pairingRef as string, /^pair:/);
+    assert.equal(typeof s.capturedAt, "string");
+
+    // Sample appears in the exact pair inbox as pending.
+    const inbox = await daemonRequest<Array<Record<string, unknown>>>(
+      "direct_codex_inbox",
+      { taskClass: "gc-class", directCodexProfileId: "gc-prof" },
+      home,
+    );
+    assert.equal(inbox.length, 1);
+    assert.equal(inbox[0]!.reviewState, "pending");
+    assert.deepEqual(inbox[0]!.sample, s);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("daemon direct_codex_guided_capture rejects task missing calibration identity", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-dc-gc-noid-"));
+  seedNonCalibrationTask(home, "gc-noid");
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    await assert.rejects(
+      async () => daemonRequest("direct_codex_guided_capture", {
+        forklightTaskId: "gc-noid",
+        codexRunRef: "codex-run:gc-run",
+        usage: GC_USAGE,
+      }, home),
+      /Task is not calibration-ready: taskClass and directCodexProfileId are required/,
+    );
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("daemon direct_codex_guided_capture rejects task missing only directCodexProfileId", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-dc-gc-mispro-"));
+  const store = new StateStore(home);
+  const spec = parseTaskSpec({ version: 1, name: "gc-mispro", project: "/tmp", goal: "T",
+    taskClass: "gc-class", acceptance: { commands: ["true"] } }, "/tmp");
+  store.createTask(buildTaskRecord({ spec, taskFile: "/tmp/gc-mispro.yaml", home, id: "gc-mispro",
+    sessionId: "s-gc-mispro", createdAt: "2026-07-23T12:00:00.000Z" }));
+  store.close();
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    await assert.rejects(
+      async () => daemonRequest("direct_codex_guided_capture", {
+        forklightTaskId: "gc-mispro",
+        codexRunRef: "codex-run:gc-run",
+        usage: GC_USAGE,
+      }, home),
+      /Task is not calibration-ready: taskClass and directCodexProfileId are required/,
+    );
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("daemon direct_codex_guided_capture rejects task missing only taskClass", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-dc-gc-miscls-"));
+  const store = new StateStore(home);
+  const spec = parseTaskSpec({ version: 1, name: "gc-miscls", project: "/tmp", goal: "T",
+    directCodexProfileId: "gc-prof", acceptance: { commands: ["true"] } }, "/tmp");
+  store.createTask(buildTaskRecord({ spec, taskFile: "/tmp/gc-miscls.yaml", home, id: "gc-miscls",
+    sessionId: "s-gc-miscls", createdAt: "2026-07-23T12:00:00.000Z" }));
+  store.close();
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    await assert.rejects(
+      async () => daemonRequest("direct_codex_guided_capture", {
+        forklightTaskId: "gc-miscls",
+        codexRunRef: "codex-run:gc-run",
+        usage: GC_USAGE,
+      }, home),
+      /Task is not calibration-ready: taskClass and directCodexProfileId are required/,
+    );
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("daemon direct_codex_guided_capture rejects malformed usage through canonical validation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-dc-gc-badusg-"));
+  seedCalibrationReadyTask(home, "gc-task", "gc-class", "gc-prof");
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const secret = "gc-leak-XYZ";
+  try {
+    for (const badUsage of [null, 42, "not-obj", { type: "turn.completed" }, { prompt: secret }]) {
+      await assert.rejects(
+        async () => daemonRequest("direct_codex_guided_capture", {
+          forklightTaskId: "gc-task",
+          codexRunRef: "codex-run:gc-run",
+          usage: badUsage,
+        }, home),
+        /Invalid Codex/,
+      );
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("daemon direct_codex_guided_capture rejects duplicate capture via Store UNIQUE guard", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-dc-gc-dup-"));
+  seedCalibrationReadyTask(home, "gc-task", "gc-class", "gc-prof");
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    // First capture succeeds.
+    const first = await daemonRequest<Record<string, unknown>>(
+      "direct_codex_guided_capture",
+      { forklightTaskId: "gc-task", codexRunRef: "codex-run:gc-run", usage: GC_USAGE },
+      home,
+    );
+    assert.equal(typeof first.sampleId, "string");
+
+    // Same task with same run ref → duplicate rejection.
+    await assert.rejects(
+      async () => daemonRequest("direct_codex_guided_capture", {
+        forklightTaskId: "gc-task",
+        codexRunRef: "codex-run:gc-run",
+        usage: GC_USAGE,
+      }, home),
+      { name: "Error", message: "Duplicate sample identity rejected" },
+    );
+
+    // Inbox still has exactly one sample — no partial write occurred.
+    const inbox = await daemonRequest<Array<Record<string, unknown>>>(
+      "direct_codex_inbox",
+      { taskClass: "gc-class", directCodexProfileId: "gc-prof" },
+      home,
+    );
+    assert.equal(inbox.length, 1);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("daemon direct_codex_guided_capture errors are privacy-safe and never echo content", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-dc-gc-priv-"));
+  seedCalibrationReadyTask(home, "gc-task", "gc-class", "gc-prof");
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const secret = "GC-PRIV-LEAK";
+  try {
+    // Malformed usage — fixed error from canonical Codex usage adapter.
+    await assert.rejects(
+      async () => daemonRequest("direct_codex_guided_capture", {
+        forklightTaskId: "gc-task",
+        codexRunRef: "codex-run:gc-run",
+        usage: { prompt: secret },
+      }, home),
+      /Invalid Codex/,
+    );
+
+    // Bad runRef format — fixed error from canonical normalizer, never echoes.
+    await assert.rejects(
+      async () => daemonRequest("direct_codex_guided_capture", {
+        forklightTaskId: "gc-task",
+        codexRunRef: secret,
+        usage: GC_USAGE,
+      }, home),
+      /Invalid direct-Codex/,
+    );
+
+    // Non-string forklightTaskId — fixed TypeError before any Store access.
+    await assert.rejects(
+      async () => daemonRequest("direct_codex_guided_capture", {
+        forklightTaskId: null,
+        codexRunRef: "codex-run:gc-run",
+        usage: GC_USAGE,
+      }, home),
+      /Invalid forklightTaskId/,
+    );
+
+    // Unknown caller-supplied task id — fixed content-free error, never echoes.
+    const secretTaskId = `unknown-gc-${secret}`;
+    let unknownTaskError: unknown;
+    try {
+      await daemonRequest("direct_codex_guided_capture", {
+        forklightTaskId: secretTaskId,
+        codexRunRef: "codex-run:gc-run",
+        usage: GC_USAGE,
+      }, home);
+      assert.fail("guided capture must reject unknown task id");
+    } catch (e) {
+      unknownTaskError = e;
+    }
+    assert.ok(unknownTaskError instanceof Error);
+    const errorMessage = (unknownTaskError as Error).message;
+    assert.equal(errorMessage, "ForkLight Task not found for guided capture");
+    assert.ok(!errorMessage.includes(secretTaskId),
+      "error message must not echo caller-supplied task id");
+    assert.ok(!errorMessage.includes(secret),
+      "error message must not echo embedded secret");
+
+    // Verify no sample was created after all error paths.
+    const inbox = await daemonRequest<Array<Record<string, unknown>>>(
+      "direct_codex_inbox",
+      { taskClass: "gc-class", directCodexProfileId: "gc-prof" },
+      home,
+    );
+    assert.equal(inbox.length, 0);
+  } finally {
+    await daemon.close();
+  }
+});
+
+async function createStaleSocket(socketPath: string): Promise<void> {
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  const moved = `${socketPath}.stale`;
+  await rename(socketPath, moved);
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await rename(moved, socketPath);
+}
+
+test("daemon start rejects an active endpoint without stealing it", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-active-socket-"));
+  const first = new ForkLightDaemon(home, 0);
+  const second = new ForkLightDaemon(home, 0);
+  await first.start();
+  try {
+    await assert.rejects(() => second.start(), /already running/);
+    assert.equal((await daemonRequest<Record<string, unknown>>("health", {}, home)).ok, true);
+  } finally {
+    await second.close();
+    await first.close();
+  }
+});
+
+test("daemon start recovers a real stale Unix socket", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-stale-socket-"));
+  await createStaleSocket(daemonSocketPath(home));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    assert.equal((await daemonRequest<Record<string, unknown>>("health", {}, home)).ok, true);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("daemon start refuses a socket replaced after its stale probe", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-socket-race-"));
+  const socketPath = daemonSocketPath(home);
+  await createStaleSocket(socketPath);
+  const daemon = new ForkLightDaemon(home, 0);
+  let replacement: net.Server | undefined;
+  const probe = daemon as unknown as { probeSocketEndpoint: () => Promise<boolean> };
+  probe.probeSocketEndpoint = async () => {
+    replacement = net.createServer();
+    const replacementPath = `${socketPath}.replacement`;
+    await new Promise<void>((resolve, reject) => {
+      replacement?.once("error", reject);
+      replacement?.listen(replacementPath, resolve);
+    });
+    await rename(replacementPath, socketPath);
+    return false;
+  };
+  try {
+    await assert.rejects(() => daemon.start(), /changed after probing/);
+  } finally {
+    await daemon.close();
+    if (replacement) await new Promise<void>((resolve) => replacement?.close(() => resolve()));
+    try { await unlink(socketPath); } catch { /* removed */ }
+  }
+});
+
+test("late daemon close preserves a replacement endpoint", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-late-close-"));
+  const socketPath = daemonSocketPath(home);
+  const daemon = new ForkLightDaemon(home, 0);
+  const replacement = net.createServer();
+  let daemonClosed = false;
+  await daemon.start();
+  try {
+    const replacementPath = `${socketPath}.replacement`;
+    await new Promise<void>((resolve, reject) => {
+      replacement.once("error", reject);
+      replacement.listen(replacementPath, resolve);
+    });
+    await rename(replacementPath, socketPath);
+    await daemon.close();
+    daemonClosed = true;
+    const reachable = await new Promise<boolean>((resolve) => {
+      const socket = net.createConnection(socketPath);
+      socket.setTimeout(500);
+      socket.once("connect", () => { socket.destroy(); resolve(true); });
+      socket.once("error", () => resolve(false));
+      socket.once("timeout", () => { socket.destroy(); resolve(false); });
+    });
+    assert.equal(reachable, true);
+  } finally {
+    if (!daemonClosed) try { await daemon.close(); } catch { /* best effort */ }
+    await new Promise<void>((resolve) => replacement.close(() => resolve()));
+    try { await unlink(socketPath); } catch { /* removed */ }
+  }
+});
+
+test("stop and restart wait for the exact old daemon PID", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-exact-stop-"));
+  try {
+    startDaemonProcess(home);
+    const first = await ensureDaemon(home);
+    const firstPid = first.pid as number;
+    assert.ok(Number.isSafeInteger(firstPid) && firstPid > 0);
+    const replacement = await restartDaemon(home);
+    assert.notEqual(replacement.pid, firstPid);
+    assert.throws(() => process.kill(firstPid, 0), /ESRCH/);
+  } finally {
+    await stopDaemon(home);
+  }
+});
+
+// --- single-dispatch routing seam ---
+
+const ROUTE_PROBE = "forklight-route-PROBE-2026";
+
+test("routeMutation falls back when bootstrap fails, dispatches on success, and fails closed on dispatch error", async () => {
+  // Bootstrap failure → fallback runs, dispatch never called.
+  let fallbackCalled = false;
+  const result = await routeMutation(
+    async () => { throw new Error("ECONNREFUSED"); },
+    async () => "dispatch-should-not-reach",
+    async () => { fallbackCalled = true; return "fallback-ok"; },
+  );
+  assert.equal(result, "fallback-ok");
+  assert.equal(fallbackCalled, true);
+
+  // Bootstrap success + dispatch success → dispatch result, fallback never called.
+  fallbackCalled = false;
+  const dispatchResult = await routeMutation(
+    async () => {},
+    async () => "daemon-result",
+    async () => { fallbackCalled = true; return "local"; },
+  );
+  assert.equal(dispatchResult, "daemon-result");
+  assert.equal(fallbackCalled, false);
+
+  // Bootstrap success + dispatch error → error propagated, fallback never called.
+  const dispatchError = new Error(`daemon ${ROUTE_PROBE} build mismatch`);
+  fallbackCalled = false;
+  await assert.rejects(
+    () => routeMutation(
+      async () => {},
+      async () => { throw dispatchError; },
+      async () => { fallbackCalled = true; return "local"; },
+    ),
+    (error: unknown) => error === dispatchError,
+  );
+  assert.equal(fallbackCalled, false,
+    "fallback must never be called after daemon dispatch begins");
+});
+
+// --- local revise admission ordering ---
+
+test("local revise admission validates non-attempt eligibility before any authorization state mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-revise-admit-route-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const exec = settings.get().execution;
+  const task = standaloneSucceededTask(store, "admit-route");
+  const initialEvents = store.listEvents(task.id).length;
+
+  // Invalid feedback: precheck with base maxAttempts rejects before
+  // any durable authorization grant could be recorded.  The "exhausted-attempts"
+  // shortcut is only allowed when authorization is explicitly present.
+  const blankCheck = checkReviseEligibility(store, task.id, "   ", exec.maxAttempts);
+  assert.equal(blankCheck.eligible, false);
+  assert.equal(blankCheck.reason, "missing-feedback");
+  assert.equal(store.listEvents(task.id).length, initialEvents,
+    "rejection on non-attempt criteria must not append any event");
+  assert.equal(
+    store.listEvents(task.id).filter((e) => e.type === "attempt.authorization.granted").length, 0,
+    "no authorization grant must exist after non-attempt rejection",
+  );
+
+  // Valid feedback + non-attempt eligibility: canonical feedback is available,
+  // no events were appended by the read-only precheck.
+  const okCheck = checkReviseEligibility(store, task.id, "valid correction", exec.maxAttempts);
+  assert.equal(okCheck.eligible, true);
+  assert.equal(okCheck.canonicalFeedback, "valid correction");
+  assert.equal(store.listEvents(task.id).length, initialEvents);
+
+  store.close();
+});
+
+// --- coordinator pending-grant resilience and recovery ---
+
+const COORD_PROBE = "forklight-coord-pending-DELTA-2026";
+
+function exhaustedCoordinatorTask(store: StateStore, name: string): { taskId: string; sessionId: string } {
+  const task = registerTaskFromSpec(store, {
+    version: 1, name, project: "/tmp/src",
+    goal: "Coordinator pending-grant test", constraints: [],
+    provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test" },
+    runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 1 },
+    workspace: { exclude: [] },
+    worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+    acceptance: { commands: ["true"] },
+  }, "forklight://test/coord-pending");
+  const now = new Date().toISOString();
+  for (let ordinal = 1; ordinal <= 3; ordinal += 1) {
+    store.createAttempt({
+      id: `ca${ordinal}`, taskId: task.id, ordinal, status: "failed",
+      sessionId: task.sessionId, rawLogPath: "/dev/null",
+      startedAt: now, finishedAt: now, exitCode: 1,
+    });
+  }
+  store.setTaskStatus(task.id, "failed", { error: "Independent verification failed" });
+  return { taskId: task.id, sessionId: task.sessionId };
+}
+
+test("coordinator resume succeeds with pending grant and no authorization", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-coord-resume-pending-"));
+  const store = new StateStore(home);
+  const { taskId } = exhaustedCoordinatorTask(store, "resume-pending");
+  // Authorize a durable pending grant for ordinal 4.
+  authorizeExtraAttempt(store, taskId, {
+    additionalAttempts: 1, maxBudgetUsd: null,
+    reason: `${COORD_PROBE}-resume`, confirm: true,
+  }, 3, 20, 2);
+  const settings = new SettingsService(store);
+  settings.update({ execution: { maxAttempts: 3, maxExtraAttempts: 2 } });
+  const coordinator = testCoordinator(store, 0);
+  try {
+    // Resume without authorization — must succeed because a pending grant exists.
+    const queued = coordinator.resume(taskId);
+    assert.equal(queued.id, taskId);
+    assert.deepEqual(coordinator.health().queuedTaskIds, [taskId]);
+    // No second grant event was minted.
+    const grants = store.listEvents(taskId).filter(
+      (e) => e.type === "attempt.authorization.granted",
+    );
+    assert.equal(grants.length, 1, "coordinator resume must not mint duplicate grant");
+    const pending = resolvePendingGrantExecutionOptions(store, taskId, 3, 2);
+    assert.ok(pending !== null, "pending grant must still be resolvable");
+    assert.equal(pending!.maximumOrdinal, 4);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("coordinator revise uses pending grant ordinal for eligibility and passes it to execution", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-coord-revise-pending-"));
+  const store = new StateStore(home);
+  const task = standaloneSucceededTask(store, "revise-pending");
+  seedPassingVerification(store, task);
+  // Seed a second terminal base attempt so authorizeExtraAttempt sees the
+  // two terminal base attempts that the configured maxAttempts=2 requires.
+  const now = new Date().toISOString();
+  store.createAttempt({
+    id: "coord-revise-a2", taskId: task.id, ordinal: 2, status: "succeeded",
+    sessionId: task.sessionId, rawLogPath: "/dev/null",
+    startedAt: now, finishedAt: now, exitCode: 0,
+  });
+  // Only 2 base attempts so maxAttempts=2 would normally reject revise.
+  const settings = new SettingsService(store);
+  settings.update({ execution: { maxAttempts: 2, maxExtraAttempts: 2 } });
+  // Pre-authorize ordinal 3 as a durable pending correction grant.
+  authorizeExtraAttempt(store, task.id, {
+    additionalAttempts: 1, maxBudgetUsd: null,
+    reason: `${COORD_PROBE}-revise`, confirm: true,
+  }, 2, 20, 2);
+  const coordinator = testCoordinator(store, 0);
+  try {
+    // Revise without authorization — must succeed with the pending grant.
+    const queued = coordinator.revise(task.id, "valid revise feedback text");
+    assert.equal(queued.id, task.id);
+    assert.equal(queued.status, "queued");
+    assert.deepEqual(coordinator.health().queuedTaskIds, [task.id]);
+    // No duplicate grant event was minted.
+    const grants = store.listEvents(task.id).filter(
+      (e) => e.type === "attempt.authorization.granted",
+    );
+    assert.equal(grants.length, 1,
+      "coordinator revise must not mint a duplicate grant event");
+    // The pending grant is still durable after the task transition.
+    const pending = resolvePendingGrantExecutionOptions(store, task.id, 2, 2);
+    assert.ok(pending !== null);
+    assert.equal(pending!.maximumOrdinal, 3);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("coordinator recovery enqueues tasks with pending grants reconstructing from durable events", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-coord-recover-pending-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  settings.update({ execution: { maxAttempts: 3, maxExtraAttempts: 2 } });
+  // Create two tasks: one with pending grant, one without.
+  // Task A: exhausted base + pending grant
+  const { taskId: taskA, sessionId: sessionA } = exhaustedCoordinatorTask(store, "recover-a");
+  authorizeExtraAttempt(store, taskA, {
+    additionalAttempts: 1, maxBudgetUsd: null,
+    reason: `${COORD_PROBE}-recover`, confirm: true,
+  }, 3, 20, 2);
+  // Task B: exhausted base, no pending grant
+  const taskB = registerTaskFromSpec(store, {
+    version: 1, name: "recover-b", project: "/tmp/src",
+    goal: "Recovery test B", constraints: [],
+    provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test" },
+    runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 1 },
+    workspace: { exclude: [] },
+    worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+    acceptance: { commands: ["true"] },
+  }, "forklight://test/recover-b");
+  const now = new Date().toISOString();
+  for (let ordinal = 1; ordinal <= 3; ordinal += 1) {
+    store.createAttempt({
+      id: `cb${ordinal}`, taskId: taskB.id, ordinal, status: "failed",
+      sessionId: taskB.sessionId, rawLogPath: "/dev/null",
+      startedAt: now, finishedAt: now, exitCode: 1,
+    });
+  }
+  store.setTaskStatus(taskB.id, "failed", { error: "Independent verification failed" });
+  // Set both tasks to "running" so recovery picks them up — simulates
+  // daemon restart with lost in-memory execution options.
+  store.setTaskStatus(taskA, "running", {
+    startedAt: now, workerPid: 99999, error: null, finishedAt: null,
+  });
+  store.setTaskStatus(taskB.id, "running", {
+    startedAt: now, workerPid: 99999, error: null, finishedAt: null,
+  });
+
+  // Fresh coordinator to simulate daemon restart.
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const recovered = await coordinator.recover();
+    assert.equal(recovered.length, 2, "both running tasks must be recovered");
+    assert.ok(recovered.includes(taskA));
+    assert.ok(recovered.includes(taskB.id));
+    // Both tasks are now queued via recover → enqueue.  With maxConcurrency=0
+    // they stay in the queue (never executed).
+    const queued = coordinator.health().queuedTaskIds as string[];
+    assert.equal(queued.length, 2);
+    assert.ok(queued.includes(taskA));
+    assert.ok(queued.includes(taskB.id));
+    // Task A's pending grant is still intact and the job would reconstruct
+    // it in execute() because enqueue received no executionOptions.
+    const pendingA = resolvePendingGrantExecutionOptions(store, taskA, 3, 2);
+    assert.ok(pendingA !== null, "task A pending grant must survive recovery");
+    assert.equal(pendingA!.maximumOrdinal, 4);
+    // Task B has no pending grant — verify it gets rejected during execute.
+    const pendingB = resolvePendingGrantExecutionOptions(store, taskB.id, 3, 2);
+    assert.equal(pendingB, null, "task B must not have a phantom pending grant");
+    // No new grant events were created by recovery.
+    const grantsA = store.listEvents(taskA).filter(
+      (e) => e.type === "attempt.authorization.granted",
+    );
+    assert.equal(grantsA.length, 1);
+    void sessionA;
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+// --- Activation handoff stop lifecycle ---
+
+const HOF_PROBE = "forklight-handoff-PROBE-2026";
+
+/** Seed a task, receipt, and Integration operation through a DaemonCoordinator
+ *  so authorizeActivationHandoffShutdown has something to validate. */
+async function seededIntegrationOperation(
+  store: StateStore,
+  coordinator: DaemonCoordinator,
+  label: string,
+): Promise<{ operationId: string; taskId: string; receiptId: string }> {
+  const ts = new Date().toISOString();
+  const expiry = new Date(Date.now() + 86_400_000).toISOString();
+  const task = registerTaskFromSpec(
+    store,
+    {
+      version: 1,
+      name: `${HOF_PROBE}-${label}`,
+      project: "/tmp/forklight-handoff-source",
+      goal: "Exercise handoff stop",
+      constraints: [],
+      provider: {
+        name: "deepseek", model: "deepseek-v4-flash",
+        keychainService: "forklight.test.api-key",
+      },
+      runtime: {
+        name: "claude-code", executable: "claude",
+        effort: "low", maxBudgetUsd: 0.1,
+      },
+      workspace: { exclude: [] },
+      worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+    },
+    `forklight://test/${HOF_PROBE}-${label}`,
+  );
+  store.setTaskStatus(task.id, "succeeded", { error: null });
+  const receiptId = `rec-${task.id}`;
+  store.saveIntegrationReceipt({
+    id: receiptId, taskId: task.id, patchDigest: "abc123",
+    affectedFiles: [], rejectionReasons: [], sourceEvidence: {},
+    createdAt: ts, expiresAt: expiry, consumed: false,
+  });
+  const operationId = `op-${task.id}`;
+  const context = { operationId, taskId: task.id, receiptId };
+  store.addEvent(
+    task.id, undefined, "integration.operation.started",
+    "Integration operation started", context,
+  );
+  for (const evidence of [
+    { stage: "source-applied", status: "passed" },
+    { stage: "source-verified", status: "passed" },
+    { stage: "artifact-built", status: "not-applicable" },
+  ] as const) {
+    store.addEvent(
+      task.id, undefined, "integration.stage.completed",
+      `${evidence.stage}: ${evidence.status}`,
+      { operationId, receiptId, evidence },
+    );
+  }
+  await coordinator.recover();
+  return context;
+}
+
+test("authorizeActivationHandoffShutdown validates, authorizes once with durable event and targetPid, rejects replay/mismatch/unknown", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-authz-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  try {
+    const ids = await seededIntegrationOperation(store, coordinator, "authz");
+
+    // First authorization succeeds and returns targetPid.
+    const result = coordinator.authorizeActivationHandoffShutdown(
+      ids.operationId, ids.taskId, ids.receiptId,
+    );
+    assert.equal(result.stopping, true);
+    assert.equal(result.handoffAuthorized, true);
+    assert.equal(result.targetPid, process.pid);
+    assert.ok(
+      store.listEvents(ids.taskId).some(
+        (event) =>
+          event.type === "integration.handoff.authorized"
+          && (event.payload as { operationId?: string } | null)?.operationId === ids.operationId,
+      ),
+      "durable authorization event must be persisted",
+    );
+
+    // Replay must fail (one-use in-memory Set).
+    assert.throws(
+      () => coordinator.authorizeActivationHandoffShutdown(
+        ids.operationId, ids.taskId, ids.receiptId,
+      ),
+      /already authorized/,
+    );
+
+    // Mismatched taskId must fail.
+    assert.throws(
+      () => coordinator.authorizeActivationHandoffShutdown(
+        ids.operationId, "wrong-task-id", ids.receiptId,
+      ),
+      /does not match/,
+    );
+
+    // Unknown operationId must fail.
+    assert.throws(
+      () => coordinator.authorizeActivationHandoffShutdown(
+        "nonexistent-op", "any-task", "any-rec",
+      ),
+      /Unknown Integration operation/,
+    );
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("durable replay is rejected after coordinator reconstruction", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-durable-"));
+  // Seed operation and authorize in a first coordinator instance.
+  const store1 = new StateStore(home);
+  const settings1 = new SettingsService(store1);
+  const coord1 = new DaemonCoordinator(store1, settings1, 0);
+  const ids = await seededIntegrationOperation(store1, coord1, "durable");
+  coord1.authorizeActivationHandoffShutdown(
+    ids.operationId, ids.taskId, ids.receiptId,
+  );
+  await coord1.shutdown();
+  store1.close();
+
+  // Reconstruct a fresh coordinator — simulates daemon restart.
+  // The durable authorization event must be recovered so replay fails.
+  const store2 = new StateStore(home);
+  const settings2 = new SettingsService(store2);
+  const coord2 = new DaemonCoordinator(store2, settings2, 0);
+  try {
+    await coord2.recover();
+    assert.throws(
+      () => coord2.authorizeActivationHandoffShutdown(
+        ids.operationId, ids.taskId, ids.receiptId,
+      ),
+      /already authorized/,
+      "durable replay must be rejected after coordinator reconstruction",
+    );
+  } finally {
+    await coord2.shutdown();
+    store2.close();
+  }
+});
+
+test("authorizeActivationHandoffShutdown rejects when activation result already stored", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-done-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  try {
+    const ids = await seededIntegrationOperation(store, coordinator, "done");
+
+    coordinator.completeIntegrationActivation(
+      ids.operationId, ids.taskId, ids.receiptId,
+      { stage: "runtime-activated", status: "failed", error: "test" },
+    );
+
+    // Now handoff shutdown must reject.
+    assert.throws(
+      () => coordinator.authorizeActivationHandoffShutdown(
+        ids.operationId, ids.taskId, ids.receiptId,
+      ),
+      /already complete/,
+    );
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("stopDaemonForHandoff fails hard when the daemon is not reachable", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-gone-"));
+  try {
+    await assert.rejects(
+      () => stopDaemonForHandoff(home, "any-op", "any-task", "any-rec"),
+      /activation handoff shutdown failed/,
+    );
+  } finally {
+    try { await stopDaemon(home); } catch { /* no-op */ }
+  }
+});
+
+test("handoff client waits for the target PID and rejects a replacement PID", async () => {
+  const runFixture = async (
+    healthPids: number[],
+  ): Promise<{ home: string; server: net.Server; healthRequests: () => number }> => {
+    const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-client-"));
+    let healthCount = 0;
+    const server = net.createServer((socket) => {
+      let buffer = "";
+      socket.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) return;
+        const request = JSON.parse(buffer.slice(0, newline)) as {
+          id: string;
+          method: string;
+        };
+        const targetPid = healthPids[0] ?? 41001;
+        const healthPid = healthPids[Math.min(healthCount, healthPids.length - 1)];
+        const result = request.method === "activation_handoff_shutdown"
+          ? { stopping: true, handoffAuthorized: true, targetPid }
+          : { pid: healthPid };
+        if (request.method === "health") healthCount += 1;
+        socket.end(`${JSON.stringify({
+          id: request.id,
+          ok: true,
+          result,
+          serverIdentity: currentBuildIdentity(),
+        })}\n`);
+        if (request.method === "health" && healthCount >= healthPids.length) {
+          setImmediate(() => server.close());
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(daemonSocketPath(home), resolve);
+    });
+    return { home, server, healthRequests: () => healthCount };
+  };
+
+  const draining = await runFixture([41001, 41001]);
+  try {
+    const result = await stopDaemonForHandoff(
+      draining.home, "op", "task", "receipt",
+    );
+    assert.equal(result.stopped, true);
+    assert.equal(draining.healthRequests(), 2);
+  } finally {
+    if (draining.server.listening) {
+      await new Promise<void>((resolve) => draining.server.close(() => resolve()));
+    }
+  }
+
+  const replacement = await runFixture([41001, 41002]);
+  try {
+    await assert.rejects(
+      () => stopDaemonForHandoff(
+        replacement.home, "op", "task", "receipt",
+      ),
+      /endpoint was replaced/,
+    );
+  } finally {
+    if (replacement.server.listening) {
+      await new Promise<void>((resolve) => replacement.server.close(() => resolve()));
+    }
+  }
+});
+
+test("unknown operation rejected and valid operation succeeds through daemon protocol", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-proto-"));
+  // Seed data directly in the store.  Keep both the seeding store AND
+  // the daemon's store open concurrently so WAL readers can see all data.
+  const seedStore = new StateStore(home);
+  const seedSettings = new SettingsService(seedStore);
+  const seedCoord = new DaemonCoordinator(seedStore, seedSettings, 0);
+  const ids = await seededIntegrationOperation(seedStore, seedCoord, "proto");
+
+  // Start the daemon while the seed store is still open — both connections
+  // share the same WAL and the daemon's recover() reads the seeded events.
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    // Unknown operation must fail.
+    const unknownResp = await daemonExchange(
+      "activation_handoff_shutdown",
+      { operationId: "nonexistent", taskId: "any", receiptId: "any" },
+      home,
+    );
+    assert.equal(unknownResp.ok, false);
+    assert.match(unknownResp.error ?? "", /Unknown Integration operation/);
+
+    // Valid operation must succeed with targetPid.
+    const response = await daemonExchange(
+      "activation_handoff_shutdown",
+      { operationId: ids.operationId, taskId: ids.taskId, receiptId: ids.receiptId },
+      home,
+    );
+    assert.equal(response.ok, true);
+    const result = response.result as Record<string, unknown>;
+    assert.equal(result.stopping, true);
+    assert.equal(result.handoffAuthorized, true);
+    assert.equal(result.targetPid, process.pid);
+
+    // Replay must fail.
+    const replay = await daemonExchange(
+      "activation_handoff_shutdown",
+      { operationId: ids.operationId, taskId: ids.taskId, receiptId: ids.receiptId },
+      home,
+    );
+    assert.equal(replay.ok, false);
+    assert.match(replay.error ?? "", /already authorized/);
+  } finally {
+    await daemon.close();
+    await seedCoord.shutdown();
+    seedStore.close();
+  }
+});
+
+test("handoff authorization stays live while the target daemon is draining", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-drain-"));
+  const seedStore = new StateStore(home);
+  const seedSettings = new SettingsService(seedStore);
+  const seedCoord = new DaemonCoordinator(seedStore, seedSettings, 0);
+  const ids = await seededIntegrationOperation(seedStore, seedCoord, "drain");
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    // Authorize: stores durable event, returns targetPid.
+    const authResp = await daemonExchange(
+      "activation_handoff_shutdown",
+      { operationId: ids.operationId, taskId: ids.taskId, receiptId: ids.receiptId },
+      home,
+    );
+    assert.equal(authResp.ok, true);
+
+    // Daemon server is still up (file-scope no-op SIGTERM handler).
+    const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    assert.equal(health.pid, process.pid,
+      "in-process daemon always reports the test process PID");
+
+    // A replacement daemon on a different home must reject the handoff
+    // because it has no matching Integration operation.
+    const home2 = await mkdtemp(path.join(tmpdir(), "forklight-drain-repl-"));
+    try {
+      startDaemonProcess(home2);
+      await ensureDaemon(home2);
+      await assert.rejects(
+        () => stopDaemonForHandoff(home2, ids.operationId, ids.taskId, ids.receiptId),
+        /activation handoff shutdown failed/,
+      );
+    } finally {
+      await stopDaemon(home2);
+    }
+
+    // Original daemon is still alive — same PID, draining.
+    const healthAfter = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    assert.equal(healthAfter.pid, process.pid);
+  } finally {
+    await daemon.close();
+    await seedCoord.shutdown();
+    seedStore.close();
+  }
+});
+
+test("ordinary stop still waits for the exact PID and does not accept endpoint-only relinquishment", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-ordinary-stop-pid-"));
+  try {
+    startDaemonProcess(home);
+    const health = await ensureDaemon(home);
+    const firstPid = health.pid as number;
+    assert.ok(Number.isSafeInteger(firstPid) && firstPid > 0);
+
+    const replacement = await restartDaemon(home);
+    assert.notEqual(replacement.pid, firstPid);
+    assert.throws(() => process.kill(firstPid, 0), /ESRCH/);
+  } finally {
+    await stopDaemon(home);
+  }
+});
+
+// --- Per-profile concurrency ---
+
+import {
+  defaultAdvancedPolicyFields,
+  resolveEffectivePolicy,
+  enforcementCapabilityForRuntime,
+} from "../src/core/advanced-policy.js";
+
+test("per-profile concurrency is reflected in effective policy snapshot", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const glob = defaultAdvancedPolicyFields();
+  glob.maxConcurrency = 4; // global cap
+
+  // Worker A capped at 1
+  const snap = resolveEffectivePolicy(
+    { maxConcurrency: 1 },
+    undefined,
+    glob,
+    "worker-a",
+    caps,
+  );
+  assert.equal(snap.values.maxConcurrency, 1);
+  assert.equal(snap.provenance.maxConcurrency, "worker");
+  assert.equal(snap.profileId, "worker-a");
+});
+
+test("per-profile concurrency retains its local cap for scheduler intersection", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const glob = defaultAdvancedPolicyFields();
+  glob.maxConcurrency = 2;
+
+  const snap = resolveEffectivePolicy(
+    { maxConcurrency: 5 },
+    undefined,
+    glob,
+    "over-capped",
+    caps,
+  );
+  assert.equal(snap.values.maxConcurrency, 5);
+  assert.equal(snap.provenance.maxConcurrency, "worker");
+});
+
+test("per-profile concurrency: Task override takes precedence over worker profile", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const glob = defaultAdvancedPolicyFields();
+  glob.maxConcurrency = 5; // global
+
+  const snap = resolveEffectivePolicy(
+    { maxConcurrency: 3 }, // worker
+    { maxConcurrency: 4 }, // task override
+    glob,
+    "profile-x",
+    caps,
+  );
+  assert.equal(snap.values.maxConcurrency, 4);
+  assert.equal(snap.provenance.maxConcurrency, "task");
+});
+
+test("snapshot stores truthful enforcement capability", () => {
+  const claudeCaps = enforcementCapabilityForRuntime("claude-code");
+  const snap = resolveEffectivePolicy(
+    undefined, undefined, defaultAdvancedPolicyFields(), "default", claudeCaps,
+  );
+  assert.equal(snap.enforcementCapability.durationEnforcement, "preemptive");
+  assert.equal(snap.enforcementCapability.tokenEnforcement, "post-observation");
+  assert.equal(snap.enforcementCapability.progressWatchdog, "live");
+
+  const grokCaps = enforcementCapabilityForRuntime("grok-build");
+  const grokSnap = resolveEffectivePolicy(
+    undefined, undefined, defaultAdvancedPolicyFields(), "default", grokCaps,
+  );
+  assert.equal(grokSnap.enforcementCapability.tokenEnforcement, "unsupported");
+});
+
+// --- Bounded policy adaptation transition chain ---
+
+import type { AdvancedPolicyFields, EffectivePolicySnapshot } from "../src/core/types.js";
+
+interface AdaptationTaskSeed {
+  effectivePolicy: EffectivePolicySnapshot;
+  status?: TaskRecord["status"];
+}
+
+function seedAdaptationTask(
+  store: StateStore,
+  home: string,
+  seed: AdaptationTaskSeed,
+): TaskRecord {
+  const task = registerTaskFromSpec(
+    store,
+    {
+      version: 1,
+      name: `adapt-${Math.random().toString(36).slice(2)}`,
+      project: "/tmp/src",
+      goal: "Adaptation transition test",
+      constraints: [],
+      provider: {
+        name: "deepseek", model: "deepseek-v4-flash",
+        keychainService: "forklight.test.api-key",
+      },
+      runtime: {
+        name: "claude-code", executable: "claude",
+        effort: "low", maxBudgetUsd: 0.1,
+      },
+      workspace: { exclude: [] },
+      worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+    },
+    `forklight://test/adapt-${Math.random().toString(36).slice(2)}`,
+    seed.effectivePolicy,
+  );
+  // Default terminal status is succeeded so the gate accepts the seed.
+  const terminalStatus = seed.status ?? "succeeded";
+  if (terminalStatus !== "queued") {
+    store.setTaskStatus(task.id, terminalStatus, { error: null });
+  }
+  void home;
+  return store.getTask(task.id);
+}
+
+function rootSnapshot(overrides: Partial<AdvancedPolicyFields> = {}): EffectivePolicySnapshot {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const base: EffectivePolicySnapshot = resolveEffectivePolicy(
+    undefined, undefined, defaultAdvancedPolicyFields(), "default", caps,
+  );
+  return {
+    ...base,
+    values: { ...base.values, maxAdaptationRounds: 0, ...overrides },
+    provenance: { ...base.provenance, maxAdaptationRounds: "global" },
+  };
+}
+
+test("model_routing is registered as read-only and validates bounded inputs", () => {
+  assert.equal(requiresMatchingBuildIdentity("model_routing"), false);
+});
+
+test("model_routing coordinator rejects empty taskClass and fewer than 2 candidates", () => {
+  const store = new StateStore(path.join(tmpdir(), "fl-mr-"));
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings);
+  try {
+    assert.throws(() => coordinator.modelRouting("", [{ provider: "a", model: "b" }, { provider: "c", model: "d" }]), /1 to 200 characters/);
+    assert.throws(() => coordinator.modelRouting("  ", [{ provider: "a", model: "b" }, { provider: "c", model: "d" }]), /1 to 200 characters/);
+    assert.throws(() => coordinator.modelRouting("test", [{ provider: "a", model: "b" }]), /2 to 10/);
+    assert.throws(() => coordinator.modelRouting("test", []), /2 to 10/);
+    assert.throws(() => coordinator.modelRouting("test", [{ provider: "", model: "b" }, { provider: "c", model: "d" }]), /provider must contain/);
+    assert.throws(() => coordinator.modelRouting("test", [{ provider: "a", model: "" }, { provider: "c", model: "d" }]), /model must contain/);
+    assert.throws(() => coordinator.modelRouting("test", [
+      { provider: "a", model: "b" },
+      { provider: "a", model: "b" },
+    ]), /must be unique/);
+    assert.throws(() => coordinator.modelRouting("test", Array.from(
+      { length: 11 },
+      (_, index) => ({ provider: "p", model: String(index) }),
+    )), /2 to 10/);
+  } finally {
+    store.close();
+  }
+});
+
+test("model_routing coordinator returns privacy-safe advisory for empty history", () => {
+  const store = new StateStore(path.join(tmpdir(), "fl-mr-safe-"));
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings);
+  try {
+    const result = coordinator.modelRouting("nonexistent-class", [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+    ]);
+    assert.equal(result.taskClass, "nonexistent-class");
+    assert.equal(result.candidates.length, 2);
+    // No recommendation with zero samples
+    assert.equal(result.shouldRunCompetition, true);
+    // Privacy-safe: no Task ids, no error text
+    const json = JSON.stringify(result);
+    assert.doesNotMatch(json, /error/i);
+    assert.doesNotMatch(json, /api[_-]?key/i);
+    assert.doesNotMatch(json, /\/tasks\//);
+  } finally {
+    store.close();
+  }
+});
+
+test("adaptation disabled: zero rounds blocks apply and preview returns stopped", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-disabled-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = seedAdaptationTask(store, home, {
+    effectivePolicy: rootSnapshot({ maxAdaptationRounds: 0, maxDurationMs: 60_000 }),
+  });
+  try {
+    const preview = coordinator.adaptationPreview({
+      taskId: task.id,
+      patch: { maxDurationMs: 600_000 },
+      reason: "duration-budget",
+    });
+    assert.equal(preview.status, "stopped");
+    assert.equal(preview.stoppedReason, "adaptation-disabled");
+
+    const result = coordinator.adaptationApply({
+      taskId: task.id,
+      patch: { maxDurationMs: 600_000 },
+      reason: "duration-budget",
+      confirm: true,
+    });
+    assert.equal(result.status, "stopped");
+    assert.equal(result.preview.stoppedReason, "adaptation-disabled");
+    assert.equal(store.listTasks().length, 1, "no successor Task was created");
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("adaptation one bounded successor: cap=1 yields one child and blocks duplicate", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-once-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  const root = seedAdaptationTask(store, home, {
+    effectivePolicy: rootSnapshot({ maxAdaptationRounds: 1, maxDurationMs: 60_000 }),
+    status: "succeeded",
+  });
+  try {
+    const first = coordinator.adaptationApply({
+      taskId: root.id,
+      patch: { maxDurationMs: 600_000 },
+      reason: "duration-budget",
+      confirm: true,
+    });
+    assert.equal(first.status, "eligible");
+    assert.ok(first.childTaskId);
+    assert.ok(first.lineageId);
+    assert.deepEqual(
+      coordinator.health().queuedTaskIds,
+      [first.childTaskId],
+      "the persisted successor enters the normal scheduler queue",
+    );
+    // Two tasks now: root + child.
+    assert.equal(store.listTasks().length, 2);
+    // Successful creation event exists.
+    const childId = first.childTaskId!;
+    const childEvents = store.listEvents(childId);
+    assert.ok(childEvents.some((e) => e.type === "task.created"));
+    assert.ok(childEvents.some((e) => e.type === "task.adaptation.transitioned"));
+
+    // Duplicate apply is rejected with successor-already-created.
+    const dup = coordinator.adaptationApply({
+      taskId: root.id,
+      patch: { maxDurationMs: 700_000 },
+      reason: "duration-budget",
+      confirm: true,
+    });
+    assert.equal(dup.status, "stopped");
+    assert.equal(dup.preview.stoppedReason, "successor-already-created");
+    assert.equal(store.listTasks().length, 2, "no extra Task was created on duplicate");
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("adaptation exhausted lineage: round-one child cannot produce a round-two grandchild when cap is 1", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-exhaust-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  const root = seedAdaptationTask(store, home, {
+    effectivePolicy: rootSnapshot({ maxAdaptationRounds: 1, maxDurationMs: 60_000 }),
+  });
+  try {
+    // First transition: root -> child. The child inherits the root's cap=1.
+    const first = coordinator.adaptationApply({
+      taskId: root.id,
+      patch: { maxDurationMs: 600_000 },
+      reason: "duration-budget",
+      confirm: true,
+    });
+    assert.equal(first.status, "eligible");
+    const childId = first.childTaskId!;
+    // Mark the child terminal so it can serve as a parent.
+    store.setTaskStatus(childId, "succeeded", { error: null });
+    const childStored = store.getTask(childId);
+    assert.equal(childStored.effectivePolicy!.values.maxAdaptationRounds, 1);
+
+    // Adjusting from child: would be round 2, exceeds cap=1.
+    const exhausted = coordinator.adaptationPreview({
+      taskId: childId,
+      patch: { maxDurationMs: 700_000 },
+      reason: "duration-budget",
+    });
+    assert.equal(exhausted.status, "stopped");
+    assert.equal(exhausted.stoppedReason, "round-limit-reached");
+
+    const exhaustedApply = coordinator.adaptationApply({
+      taskId: childId,
+      patch: { maxDurationMs: 700_000 },
+      reason: "duration-budget",
+      confirm: true,
+    });
+    assert.equal(exhaustedApply.status, "stopped");
+    assert.equal(exhaustedApply.preview.stoppedReason, "round-limit-reached");
+    assert.equal(store.listTasks().length, 2, "exhausted lineage did not create a successor");
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("adaptation restart idempotency: re-opening the daemon does not duplicate apply", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-restart-"));
+  const store1 = new StateStore(home);
+  const settings1 = new SettingsService(store1);
+  const coord1 = new DaemonCoordinator(store1, settings1, 0);
+  const root = seedAdaptationTask(store1, home, {
+    effectivePolicy: rootSnapshot({ maxAdaptationRounds: 1, maxDurationMs: 60_000 }),
+  });
+  try {
+    const first = coord1.adaptationApply({
+      taskId: root.id,
+      patch: { maxDurationMs: 600_000 },
+      reason: "duration-budget",
+      confirm: true,
+    });
+    assert.equal(first.status, "eligible");
+    await coord1.shutdown();
+    store1.close();
+
+    // Reopen and retry the same apply — must not create another successor.
+    const store2 = new StateStore(home);
+    const settings2 = new SettingsService(store2);
+    const coord2 = new DaemonCoordinator(store2, settings2, 0);
+    try {
+      const retry = coord2.adaptationApply({
+        taskId: root.id,
+        patch: { maxDurationMs: 600_000 },
+        reason: "duration-budget",
+        confirm: true,
+      });
+      assert.equal(retry.status, "stopped");
+      assert.equal(retry.preview.stoppedReason, "successor-already-created");
+      assert.equal(store2.listTasks().length, 2, "no second successor after recovery");
+    } finally {
+      await coord2.shutdown();
+      store2.close();
+    }
+  } finally {
+    // ensure resources cleaned even if branch fell through without matching
+  }
+});
+
+test("adaptation settings drift cannot expand the root cap", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-drift-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  const root = seedAdaptationTask(store, home, {
+    effectivePolicy: rootSnapshot({ maxAdaptationRounds: 1, maxDurationMs: 60_000 }),
+  });
+  try {
+    // Drift settings — change a global ceiling that should not reach the root cap.
+    settings.update({ execution: { maxAttempts: 7 } });
+    // Preview still respects the immutable root cap of 1.
+    const preview = coordinator.adaptationPreview({
+      taskId: root.id,
+      patch: { maxDurationMs: 600_000 },
+      reason: "duration-budget",
+    });
+    assert.equal(preview.status, "eligible");
+    assert.equal(preview.maxAdaptationRounds, 1, "cap is read from the root snapshot, not live settings");
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("adaptation safety: maxAdaptationRounds in patch is forbidden and not applied", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-cap-patch-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const root = seedAdaptationTask(store, home, {
+    effectivePolicy: rootSnapshot({ maxAdaptationRounds: 1, maxDurationMs: 60_000 }),
+  });
+  try {
+    const preview = coordinator.adaptationPreview({
+      taskId: root.id,
+      patch: { maxAdaptationRounds: 99 as unknown as never },
+      reason: "other-flexible-policy",
+    });
+    assert.equal(preview.status, "stopped");
+    assert.equal(preview.stoppedReason, "forbidden-field");
+    assert.equal(store.listTasks().length, 1);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("adaptation apply requires explicit confirm: true", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-confirm-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const store = new StateStore(home);
+  const root = seedAdaptationTask(store, home, {
+    effectivePolicy: rootSnapshot({ maxAdaptationRounds: 1, maxDurationMs: 60_000 }),
+  });
+  try {
+    await assert.rejects(
+      async () => daemonRequest("adaptation_apply", {
+        taskId: root.id,
+        patch: { maxDurationMs: 600_000 },
+        reason: "duration-budget",
+      }, home),
+      /confirm/,
+    );
+    assert.equal(store.listTasks().length, 1, "no successor Task when confirm is missing");
+  } finally {
+    await daemon.close();
+    store.close();
+  }
+});
+
+test("adaptation daemon preview/apply round-trip over the local socket", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-socket-"));
+  const store = new StateStore(home);
+  const root = seedAdaptationTask(store, home, {
+    effectivePolicy: rootSnapshot({ maxAdaptationRounds: 1, maxDurationMs: 60_000 }),
+  });
+  store.close();
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    // Read preview over the socket.
+    const preview = await daemonRequest<Record<string, unknown>>(
+      "adaptation_preview",
+      {
+        taskId: root.id,
+        patch: { maxDurationMs: 600_000 },
+        reason: "duration-budget",
+      },
+      home,
+    );
+    assert.equal(preview.status, "eligible");
+    assert.equal(preview.nextRound, 1);
+    assert.equal(preview.maxAdaptationRounds, 1);
+    const fields = preview.fields as Array<Record<string, unknown>>;
+    const dur = fields.find((f) => f.field === "maxDurationMs");
+    assert.ok(dur);
+    assert.equal(dur!.before, 60_000);
+    assert.equal(dur!.after, 600_000);
+    assert.equal(dur!.changed, true);
+
+    // Apply via daemon.
+    const apply = await daemonRequest<Record<string, unknown>>(
+      "adaptation_apply",
+      {
+        taskId: root.id,
+        patch: { maxDurationMs: 600_000 },
+        reason: "duration-budget",
+        confirm: true,
+      },
+      home,
+    );
+    assert.equal(apply.status, "eligible");
+    assert.ok(typeof apply.childTaskId === "string");
+    assert.ok(typeof apply.lineageId === "string");
+
+    // Duplicate apply is rejected.
+    const dup = await daemonRequest<{
+      status: string;
+      preview: { stoppedReason?: string };
+    }>(
+      "adaptation_apply",
+      {
+        taskId: root.id,
+        patch: { maxDurationMs: 700_000 },
+        reason: "duration-budget",
+        confirm: true,
+      },
+      home,
+    );
+    assert.equal(dup.status, "stopped");
+    assert.equal(dup.preview.stoppedReason, "successor-already-created");
+
+    // Reason is validated as a bounded category; unknown reason → daemon error.
+    await assert.rejects(
+      async () => daemonRequest("adaptation_preview", {
+        taskId: root.id,
+        patch: { maxDurationMs: 800_000 },
+        reason: "not-a-bounded-reason",
+      }, home),
+      /bounded reason category/,
+    );
+
+    // Forbid field (maxAdaptationRounds) is checked first by the gate — it
+    // never reaches the cap-or-successor checks. Cast bypasses the type system
+    // since runtime rejection does not need the typed patch surface.
+    const reject = await daemonRequest<{
+      status: string;
+      stoppedReason?: string;
+    }>(
+      "adaptation_preview",
+      {
+        taskId: root.id,
+        patch: { maxAdaptationRounds: 99 as unknown as never },
+        reason: "other-flexible-policy",
+      },
+      home,
+    );
+    assert.equal(reject.status, "stopped");
+    assert.equal(reject.stoppedReason, "forbidden-field");
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("adaptation persistence: lineage edge is recoverable after daemon restart", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-recover-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coord1 = new DaemonCoordinator(store, settings, 0);
+  const root = seedAdaptationTask(store, home, {
+    effectivePolicy: rootSnapshot({ maxAdaptationRounds: 1, maxDurationMs: 60_000 }),
+  });
+  try {
+    const first = coord1.adaptationApply({
+      taskId: root.id,
+      patch: { maxDurationMs: 600_000 },
+      reason: "duration-budget",
+      confirm: true,
+    });
+    assert.equal(first.status, "eligible");
+    await coord1.shutdown();
+    store.close();
+    // Reopen
+    const store2 = new StateStore(home);
+    const coord2 = new DaemonCoordinator(store2, new SettingsService(store2), 0);
+    try {
+      const recovered = await coord2.recover();
+      // Verify lineage is durable.
+      const edges = store2.listAdaptationLineageForRoot(root.id);
+      assert.equal(edges.length, 1);
+      assert.equal(edges[0]!.parentTaskId, root.id);
+      assert.equal(edges[0]!.round, 1);
+      assert.equal(edges[0]!.proposedReason, "duration-budget");
+      const childId = edges[0]!.childTaskId;
+      assert.ok(recovered.includes(childId), "restart recovers a committed-but-not-running successor");
+      assert.ok(
+        (coord2.health().queuedTaskIds as string[]).includes(childId),
+        "recovered successor returns to the normal scheduler queue",
+      );
+      // Verify the child Task was also persisted.
+      const child = store2.getTask(childId);
+      assert.equal(child.effectivePolicy!.values.maxDurationMs, 600_000);
+      assert.equal(child.effectivePolicy!.values.maxAdaptationRounds, 1);
+      // No duplicate apply possible after recovery.
+      const retry = coord2.adaptationApply({
+        taskId: root.id,
+        patch: { maxDurationMs: 600_000 },
+        reason: "duration-budget",
+        confirm: true,
+      });
+      assert.equal(retry.status, "stopped");
+      assert.equal(retry.preview.stoppedReason, "successor-already-created");
+    } finally {
+      await coord2.shutdown();
+      store2.close();
+    }
+  } finally {
+    // no-op
+  }
+});
+
+// --- workspace preparation observability (FL-D preparation) ---
+
+const PREP_PROBE = "forklight-prep-PROBE-MARKER-2026";
+
+function makePrepTaskSpec(project: string, name: string): TaskRecord["spec"] {
+  return {
+    version: 1,
+    name,
+    project,
+    goal: "exercise preparation progress",
+    constraints: [],
+    provider: {
+      name: "deepseek",
+      model: "deepseek-v4-flash",
+      keychainService: "forklight.test.api-key",
+    },
+    runtime: {
+      name: "claude-code",
+      executable: "claude",
+      effort: "low",
+      maxBudgetUsd: 0.1,
+    },
+    workspace: { exclude: [] },
+    worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+    acceptance: { commands: ["true"] },
+  };
+}
+
+test("prepareTaskWorkspace persists ordered stage events and exposes the live stage", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-prep-events-"));
+  const project = path.join(home, `${PREP_PROBE}-source`);
+  const srcDir = path.join(project, "src");
+  const privateDir = path.join(project, `${PREP_PROBE}-private`);
+  await mkdir(srcDir, { recursive: true });
+  await mkdir(privateDir, { recursive: true });
+  await writeFile(path.join(srcDir, "value.ts"), "export const x = 1;\n");
+  await writeFile(path.join(privateDir, "secret.txt"), "do-not-leak");
+
+  const store = new StateStore(home);
+  const task = registerTaskFromSpec(
+    store,
+    makePrepTaskSpec(project, `${PREP_PROBE}-name`),
+    `forklight://test/${PREP_PROBE}`,
+  );
+  const prepared = await prepareTaskWorkspace(store, task);
+  assert.equal(prepared.status, "preparing");
+  const events = store.listEvents(task.id);
+  const stageEvents = events.filter((event) => event.type === "workspace.preparation.stage");
+  // The full ordered vocabulary must be present and in the documented
+  // order; each observation becomes a durable Task event before the
+  // Worker starts.
+  const stages = stageEvents.map((event) => (event.payload as { stage: string; phase: string }).stage);
+  const phases = stageEvents.map((event) => (event.payload as { stage: string; phase: string }).phase);
+  assert.deepEqual(stages, [
+    "init",
+    "source-scan",
+    "source-scan",
+    "baseline-copy",
+    "baseline-copy",
+    "worker-copy",
+    "worker-copy",
+    "dependency-link",
+    "dependency-link",
+    "context-write",
+    "context-write",
+    "complete",
+  ]);
+  for (const phase of phases.slice(0, -1)) {
+    assert.ok(phase === "start" || phase === "complete");
+  }
+  assert.equal(phases.at(-1), "complete");
+
+  // Elapsed is strictly monotonic across consecutive stage events.
+  const elapsed = stageEvents.map((event) => (event.payload as { elapsedMs: number }).elapsedMs);
+  for (let index = 1; index < elapsed.length; index += 1) {
+    assert.ok(
+      elapsed[index]! >= elapsed[index - 1]!,
+      `elapsed must be non-decreasing, got ${elapsed.join(", ")}`,
+    );
+  }
+
+  // The terminal workspace.prepared event is unchanged and carries the
+  // same manifest shape (copiedFiles, skippedSymlinks, linkedDependencies).
+  const preparedEvent = events.find((event) => event.type === "workspace.prepared");
+  assert.ok(preparedEvent, "workspace.prepared event must be emitted after stage events");
+  const preparedPayload = preparedEvent!.payload as {
+    workspace: string;
+    baseline: string;
+    copiedFiles: number;
+    skippedSymlinks: string[];
+    linkedDependencies: string[];
+  };
+  assert.equal(preparedPayload.copiedFiles, 2);
+  assert.equal(preparedPayload.skippedSymlinks.length, 0);
+  assert.equal(preparedPayload.linkedDependencies.length, 0);
+  assert.equal(preparedPayload.workspace, task.paths.workspace);
+  assert.equal(preparedPayload.baseline, task.paths.baseline);
+
+  // Latest-preparation-stage projection returns the last stage event payload
+  // as a structured cursor without loading full event payload history.
+  const latest = store.latestPreparationStageMeta(task.id);
+  assert.ok(latest, "latestPreparationStageMeta must return the most recent stage");
+  assert.equal(latest!.stage, "complete");
+  assert.equal(latest!.phase, "complete");
+
+  // Privacy: stage event payloads must not contain project paths, file
+  // names, excluded names, credentials, or the probe marker.
+  const serialized = JSON.stringify(stageEvents);
+  for (const privateNeedle of [
+    PREP_PROBE,
+    project,
+    privateDir,
+    "secret.txt",
+    "value.ts",
+    task.paths.workspace,
+    task.paths.baseline,
+    "api-key",
+    "keychain",
+  ]) {
+    assert.ok(!serialized.includes(privateNeedle),
+      `stage events must not leak ${privateNeedle}, got: ${serialized}`);
+  }
+  // Summary text is fixed and contains no private content.
+  for (const event of stageEvents) {
+    assert.match(event.summary, /^Preparation: (init|source-scan|baseline-copy|worker-copy|dependency-link|context-write|complete) \((start|complete)\)$/);
+  }
+  store.close();
+});
+
+test("list/summaries surfaces the latest preparation stage while Task is preparing", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-prep-list-"));
+  const project = path.join(home, `${PREP_PROBE}-source`);
+  const srcDir = path.join(project, "src");
+  await mkdir(srcDir, { recursive: true });
+  await writeFile(path.join(srcDir, "value.ts"), "export const x = 1;\n");
+  await writeFile(path.join(srcDir, "nested.ts"), "export const y = 2;\n");
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const task = await daemonRequest<TaskRecord>(
+      "submit",
+      {
+        baseDirectory: home,
+        task: {
+          version: 1,
+          name: "preparing-list",
+          project,
+          goal: "exercise live preparation stage projection",
+          provider: { name: "deepseek", model: "deepseek-v4-flash" },
+          runtime: { name: "claude-code" },
+          worker: { allowedCommands: [] },
+          acceptance: { commands: ["true"] },
+        },
+      },
+      home,
+    );
+    // list_summaries includes this task; the surface exposes the latest
+    // structured preparation stage through the cursor embedded in progress.
+    const list = await daemonRequest<Array<Record<string, unknown>>>(
+      "list_summaries", { limit: 5 }, home,
+    );
+    const surface = list.find((entry) => entry.taskId === task.id);
+    assert.ok(surface, "list_summaries must include the submitted task");
+
+    // The progress payload itself (the new structured stage cursor) must
+    // not contain project paths, file names, or credential markers.
+    const progress = (surface as { progress?: Record<string, unknown> }).progress;
+    const preparationStage = progress?.preparationStage as
+      | { stage?: string; phase?: string; elapsedMs?: number; countKind?: string; count?: number }
+      | undefined;
+    if (preparationStage !== undefined) {
+      const progressJson = JSON.stringify(preparationStage);
+      for (const privateNeedle of [
+        PREP_PROBE,
+        project,
+        "value.ts",
+        "nested.ts",
+      ]) {
+        assert.ok(!progressJson.includes(privateNeedle),
+          `progress payload must not leak ${privateNeedle}, got: ${progressJson}`);
+      }
+      assert.equal(typeof preparationStage.stage, "string");
+      assert.ok(preparationStage.phase === "start" || preparationStage.phase === "complete");
+      assert.equal(typeof preparationStage.elapsedMs, "number");
+      assert.ok(preparationStage.countKind === undefined
+        || preparationStage.countKind === "files"
+        || preparationStage.countKind === "dependencies");
+    }
+
+    // The store-side cursor returns the structured stage directly
+    // (or undefined once the terminal workspace.prepared event wins).
+    // This is what the daemon list/status path uses.
+    const store = new StateStore(home);
+    const meta = store.latestPreparationStageMeta(task.id);
+    if (meta !== undefined) {
+      assert.equal(typeof meta.stage, "string");
+      assert.ok(meta.phase === "start" || meta.phase === "complete");
+      assert.equal(typeof meta.elapsedMs, "number");
+    }
+    store.close();
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("prepareTaskWorkspace never emits workspace.prepared on observer failure", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-prep-fail-"));
+  const project = path.join(home, `${PREP_PROBE}-source`);
+  const srcDir = path.join(project, "src");
+  await mkdir(srcDir, { recursive: true });
+  await writeFile(path.join(srcDir, "value.ts"), "export const x = 1;\n");
+
+  const store = new StateStore(home);
+  const task = registerTaskFromSpec(
+    store,
+    makePrepTaskSpec(project, `${PREP_PROBE}-fail`),
+    `forklight://test/${PREP_PROBE}-fail`,
+  );
+  // Force a deterministic failure mid-preparation by registering a
+  // pre-stage event then injecting a failing observer.  We use the
+  // runner's prepareTaskWorkspace contract: it threads its own
+  // internal observer, so we can't pass one through.  Instead we
+  // simulate a copy-stage failure by writing a file that conflicts
+  // with the symlink step, then verify the existing fail-closed
+  // behavior (no workspace.prepared, status=failed, raw error in
+  // the Task error field but never in the progress payload).
+  // Place a non-directory at the node_modules target inside the
+  // baseline root so cp will succeed but the copy filter or the
+  // later context step will operate on a known-bad state.
+  // Easiest deterministic failure: pre-create a regular file where
+  // prepareWorkspace will try to mkdir the logs directory with
+  // mode 0o700 — it will fail because a file already exists.
+  await mkdir(task.paths.root, { recursive: true });
+  await writeFile(task.paths.logs, "block-mkdir");
+
+  await assert.rejects(() => prepareTaskWorkspace(store, task));
+  const after = store.getTask(task.id);
+  assert.equal(after.status, "failed");
+  const events = store.listEvents(task.id);
+  const prepared = events.find((event) => event.type === "workspace.prepared");
+  assert.equal(prepared, undefined,
+    "workspace.prepared must not be emitted when preparation fails");
+  // At least one stage event was recorded before the failure.
+  const stageEvents = events.filter((event) => event.type === "workspace.preparation.stage");
+  assert.ok(stageEvents.length > 0,
+    "stage events emitted before the failure must remain in the audit log");
+  // The Task error captures the privacy-safe failure message; the stage
+  // event payloads still contain no project paths, file names, or
+  // credentials.
+  const stageSerialized = JSON.stringify(stageEvents);
+  for (const privateNeedle of [
+    PREP_PROBE,
+    project,
+    "value.ts",
+    "block-mkdir",
+  ]) {
+    assert.ok(!stageSerialized.includes(privateNeedle),
+      `failed preparation stage events must not leak ${privateNeedle}, got: ${stageSerialized}`);
+  }
+  store.close();
+});
+
+test("preparing recovery clears partial snapshots without inventing a Worker interruption", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-prep-recovery-"));
+  const project = path.join(home, "source");
+  await mkdir(project);
+  await writeFile(path.join(project, "value.txt"), "source\n");
+  const store = new StateStore(home);
+  const task = registerTaskFromSpec(
+    store,
+    makePrepTaskSpec(project, "preparing recovery"),
+    "forklight://test/preparing-recovery",
+  );
+  await mkdir(task.paths.baseline, { recursive: true });
+  await mkdir(task.paths.workspace, { recursive: true });
+  await writeFile(path.join(task.paths.workspace, "stale.txt"), "stale\n");
+  await mkdir(task.paths.logs, { recursive: true });
+  await mkdir(task.paths.claudeConfig, { recursive: true });
+  const log = path.join(task.paths.logs, "preparation.jsonl");
+  const credential = path.join(task.paths.claudeConfig, "credential-marker");
+  await writeFile(log, "log\n");
+  await writeFile(credential, "credential\n");
+  store.setTaskStatus(task.id, "preparing", { error: null, finishedAt: null });
+
+  const coordinator = testCoordinator(store, 0);
+  try {
+    assert.deepEqual(await coordinator.recover(), [task.id]);
+    assert.equal(store.getTask(task.id).status, "preparing");
+    assert.equal(store.listAttempts(task.id).length, 0);
+    assert.equal(await isWorkspaceReady(task.paths), false);
+    assert.deepEqual(coordinator.health().queuedTaskIds, [task.id]);
+    assert.equal(await readFile(log, "utf8"), "log\n");
+    assert.equal(await readFile(credential, "utf8"), "credential\n");
+    const events = store.listEvents(task.id);
+    assert.ok(events.some((event) => event.type === "workspace.preparation.stage"));
+    assert.equal(events.some((event) => event.type === "worker.interrupted"), false);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("preparing recovery cleanup failure stays a workspace failure with no Attempt", async () => {
+  if (process.platform === "win32") return;
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-prep-recovery-error-"));
+  const project = path.join(home, "source");
+  await mkdir(project);
+  await writeFile(path.join(project, "value.txt"), "source\n");
+  const store = new StateStore(home);
+  const task = registerTaskFromSpec(
+    store,
+    makePrepTaskSpec(project, "preparing recovery error"),
+    "forklight://test/preparing-recovery-error",
+  );
+  await mkdir(task.paths.baseline, { recursive: true });
+  await writeFile(path.join(task.paths.baseline, "stale.txt"), "stale\n");
+  await chmod(task.paths.baseline, 0o000);
+  store.setTaskStatus(task.id, "preparing", { error: null, finishedAt: null });
+  const coordinator = testCoordinator(store, 0);
+  try {
+    assert.deepEqual(await coordinator.recover(), [task.id]);
+    const recovered = store.getTask(task.id);
+    assert.equal(recovered.status, "failed");
+    assert.match(recovered.error ?? "", /^Workspace preparation failed:/);
+    assert.equal(store.listAttempts(task.id).length, 0);
+    assert.equal(store.listEvents(task.id).some((event) => event.type === "worker.failed"), false);
+    assert.deepEqual(coordinator.health().queuedTaskIds, []);
+  } finally {
+    await chmod(task.paths.baseline, 0o755);
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("executeAttempt refuses an incomplete first snapshot before creating an Attempt", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-prep-attempt-gate-"));
+  const project = path.join(home, "source");
+  await mkdir(project);
+  await writeFile(path.join(project, "value.txt"), "source\n");
+  const store = new StateStore(home);
+  const task = registerTaskFromSpec(
+    store,
+    makePrepTaskSpec(project, "first attempt readiness gate"),
+    "forklight://test/first-attempt-readiness",
+  );
+  await mkdir(task.paths.workspace, { recursive: true });
+  await assert.rejects(
+    executeAttempt(store, task, false),
+    /snapshot is incomplete/,
+  );
+  assert.equal(store.listAttempts(task.id).length, 0);
+  store.close();
+});
+
+// --- Main correction daemon tests ---
+
+test("correct authorizes a Main correction for a failed task", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = standaloneSucceededTask(store, "correction-target", "failed");
+  const attemptId = seedPassingVerification(store, task);
+  store.updateAttempt(attemptId, { status: "failed", exitCode: 1, error: "Needs correction" });
+  store.setTaskStatus(task.id, "failed", { error: "Needs correction" });
+  try {
+    const result = coordinator.correct(task.id, "Fix the module boundary", null, true);
+    assert.equal(result.status, "queued", "the durable correction is visible before execution");
+    const grants = store.listEvents(task.id).filter(
+      (e) => e.type === "attempt.authorization.granted",
+    );
+    assert.equal(grants.length, 1);
+    const payload = grants[0]?.payload as Record<string, unknown>;
+    assert.equal(payload?.kind, "correction");
+    assert.equal(payload?.reason, "main-correction");
+    assert.equal(payload?.feedback, "Fix the module boundary");
+    assert.equal(payload?.priorAttemptId, attemptId);
+    assert.equal(payload?.targetOrdinal, 2);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("structured correction binds the exact reusable candidate and rejects stale input before mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-structured-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = standaloneSucceededTask(store, "structured-correction", "failed");
+  const attemptId = seedPassingVerification(store, task);
+  store.updateAttempt(attemptId, { status: "failed", exitCode: 1, error: "Needs correction" });
+  store.setTaskStatus(task.id, "failed", { error: "Needs correction" });
+  await mkdir(task.paths.root, { recursive: true });
+  await writeFile(task.paths.diff, "candidate patch bytes\n");
+  const revision = await captureCandidateRevision(
+    store, store.getTask(task.id), store.getAttempt(attemptId),
+    1, false, ["src/module.ts"], 1, 4,
+  );
+  try {
+    const result = coordinator.correct(
+      task.id,
+      "Keep the useful module and repair its remaining boundary",
+      null,
+      true,
+      revision.id,
+      ["src/module.ts"],
+      [{
+        description: "Repair the remaining module boundary",
+        acceptanceExpectation: "The original acceptance command passes",
+      }],
+    );
+    assert.equal(result.status, "queued");
+    const payload = store.listEvents(task.id)
+      .find((event) => event.type === "attempt.authorization.granted")?.payload as Record<string, unknown>;
+    assert.equal(payload.candidateRevisionId, revision.id);
+    assert.equal(typeof payload.gapContractDigest, "string");
+    assert.deepEqual(
+      (payload.gapContract as { reusablePaths: string[] }).reusablePaths,
+      ["src/module.ts"],
+    );
+
+    const staleTask = standaloneSucceededTask(store, "stale-structured-correction", "failed");
+    const staleAttemptId = seedPassingVerification(store, staleTask);
+    store.updateAttempt(staleAttemptId, { status: "failed", exitCode: 1, error: "Needs correction" });
+    store.setTaskStatus(staleTask.id, "failed", { error: "Needs correction" });
+    await mkdir(staleTask.paths.root, { recursive: true });
+    await writeFile(staleTask.paths.diff, "original candidate bytes\n");
+    const staleRevision = await captureCandidateRevision(
+      store, store.getTask(staleTask.id), store.getAttempt(staleAttemptId),
+      1, false, ["src/stale.ts"], 1, 2,
+    );
+    await writeFile(staleTask.paths.diff, "changed candidate bytes\n");
+    const beforeEvents = store.listEvents(staleTask.id).length;
+    assert.throws(
+      () => coordinator.correct(
+        staleTask.id,
+        "Try to repair a stale candidate revision",
+        null,
+        true,
+        staleRevision.id,
+        ["src/stale.ts"],
+        [{
+          description: "Repair the remaining stale issue",
+          acceptanceExpectation: "The original acceptance command passes",
+        }],
+      ),
+      /no longer matches the current workspace/,
+    );
+    assert.equal(store.getTask(staleTask.id).status, "failed");
+    assert.equal(store.listEvents(staleTask.id).length, beforeEvents);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("correct rejects succeeded tasks with clear reason", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-status-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = standaloneSucceededTask(store, "succeeded-no-correct");
+  try {
+    assert.throws(
+      () => coordinator.correct(task.id, "Feedback", null, true),
+      /cannot be corrected from status succeeded/,
+    );
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("correct requires explicit confirm flag", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-confirm-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = standaloneSucceededTask(store, "no-confirm", "failed");
+  seedPassingVerification(store, task);
+  store.setTaskStatus(task.id, "failed", { error: "Needs correction" });
+  try {
+    assert.throws(
+      () => coordinator.correct(task.id, "Feedback", null, false),
+      /requires confirm: true/,
+    );
+    assert.equal(store.getTask(task.id).status, "failed");
+    assert.equal(
+      store.listEvents(task.id).filter((event) => event.type === "attempt.authorization.granted").length,
+      0,
+    );
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("correct requires non-empty feedback", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-fb-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = standaloneSucceededTask(store, "blank-feedback", "failed");
+  seedPassingVerification(store, task);
+  store.setTaskStatus(task.id, "failed", { error: "Needs correction" });
+  try {
+    assert.throws(
+      () => coordinator.correct(task.id, "   " as unknown as string, null, true),
+      /correction feedback/,
+    );
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("correction recovery reconstructs a post-grant crash without duplicate authorization", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-recovery-"));
+  const store = new StateStore(home);
+  const task = standaloneSucceededTask(store, "correction-recovery", "failed");
+  const attemptId = seedPassingVerification(store, task);
+  store.updateAttempt(attemptId, { status: "failed", exitCode: 1, error: "Needs correction" });
+  store.setTaskStatus(task.id, "failed", { error: "Needs correction" });
+  authorizeMainCorrection(store, task.id, {
+    feedback: "Keep the useful files and repair the failed boundary",
+    maxBudgetUsd: null,
+    confirm: true,
+  }, 3, 1, 20);
+
+  const recoveredCoordinator = testCoordinator(store, 0);
+  try {
+    const recovered = await recoveredCoordinator.recover();
+    assert.ok(recovered.includes(task.id));
+    assert.equal(store.getTask(task.id).status, "queued");
+    assert.equal(
+      store.listEvents(task.id).filter((event) => event.type === "attempt.authorization.granted").length,
+      1,
+    );
+  } finally {
+    await recoveredCoordinator.shutdown();
+    store.close();
+  }
+});
+
+test("pending correction cannot be replayed with different Main feedback", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-conflict-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = standaloneSucceededTask(store, "correction-conflict", "failed");
+  const attemptId = seedPassingVerification(store, task);
+  store.updateAttempt(attemptId, { status: "failed", exitCode: 1, error: "Needs correction" });
+  store.setTaskStatus(task.id, "failed", { error: "Needs correction" });
+  authorizeMainCorrection(store, task.id, {
+    feedback: "Original bounded correction",
+    maxBudgetUsd: null,
+    confirm: true,
+  }, 3, 1, 20);
+  try {
+    assert.throws(
+      () => coordinator.correct(task.id, "Different direction", null, true),
+      /conflicts with requested authorization/,
+    );
+    assert.equal(store.getTask(task.id).status, "failed");
+  } finally {
+    await coordinator.shutdown();
     store.close();
   }
 });

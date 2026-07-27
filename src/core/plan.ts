@@ -7,8 +7,9 @@ import {
   requireObject,
   requireStringArray,
 } from "./parse-helpers.js";
-import { assessTaskQuality, loadTaskSpec } from "./task.js";
-import type { TaskPolicy } from "./settings.js";
+import { loadTaskSpec } from "./task.js";
+import { assessTaskQualityWithPolicy, effectiveQualityPolicyFromGlobal } from "./contract-quality.js";
+import { cloneDefaults, type TaskPolicy } from "./settings.js";
 import type { ContractTaskSpec, QualityReport } from "./types.js";
 
 export interface WorkPlanItem {
@@ -98,7 +99,13 @@ export async function loadWorkPlan(
   const loadedItems: WorkPlanItem[] = [];
   for (const item of rawItems) {
     const loaded = await loadTaskSpec(item.taskFile, policy);
-    const quality = assessTaskQuality(loaded.spec, policy?.contractQuality);
+    const quality = assessTaskQualityWithPolicy(
+      loaded.spec,
+      loaded.spec.qualityPolicy
+        ?? effectiveQualityPolicyFromGlobal(
+          policy?.contractQuality ?? cloneDefaults().contractQuality,
+        ),
+    );
     if (loaded.spec.version !== 2) {
       issues.push(`Task ${item.id} uses legacy contract version 1`);
       continue;

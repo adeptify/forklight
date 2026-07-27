@@ -18,6 +18,7 @@ import { providerEnvironment, resolveProvider } from "../core/providers.js";
 import { readProviderKey } from "../core/secrets.js";
 import { ClaudeEventNormalizer } from "../events/normalize.js";
 import { cloneDefaults, type ExecutionSettings, type ProviderDefaultSettings } from "../core/settings.js";
+import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
 import type {
   RuntimeSpecView,
   WorkerAdapter,
@@ -316,6 +317,14 @@ export async function runClaudeWorker(
 
   // --- no-progress watchdog ---
   const exec = executionSettings ?? cloneDefaults().execution;
+  const noProgressTimeoutMs = noProgressFromSnapshot(
+    task.effectivePolicy,
+    exec.noProgressTimeoutMs,
+  );
+  const workerStopGraceMs = stopGraceFromSnapshot(
+    task.effectivePolicy,
+    exec.workerStopGraceMs,
+  );
   let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
   let escalationTimer: ReturnType<typeof setTimeout> | undefined;
   let watchdogFired = false;
@@ -335,6 +344,11 @@ export async function runClaudeWorker(
   const scheduleWatchdog = (): void => {
     if (watchdogTerminal || watchdogFired) return;
     if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
+    // null noProgressTimeoutMs means unlimited — disable the watchdog.
+    if (noProgressTimeoutMs === null) {
+      watchdogTimer = undefined;
+      return;
+    }
     const timeout = setTimeout(() => {
       watchdogFired = true;
       const pid = child?.pid;
@@ -345,11 +359,11 @@ export async function runClaudeWorker(
             child.kill("SIGTERM");
           }
           escalationTimer = undefined;
-        }, exec.workerStopGraceMs);
+        }, workerStopGraceMs);
         escalation.unref();
         escalationTimer = escalation;
       }
-    }, exec.noProgressTimeoutMs);
+    }, noProgressTimeoutMs);
     timeout.unref();
     watchdogTimer = timeout;
   };
@@ -440,6 +454,14 @@ export async function runClaudeWorker(
       exitCode: interruptedExitCode(outcome.code),
       ...terminalFields(terminal),
       error: "No effective implementation progress detected within the configured interval; worker was terminated by the progress watchdog",
+      policyLimit: {
+        category: "no-progress",
+        enforcementPhase: "preemptive",
+        configured: noProgressTimeoutMs,
+        observed: noProgressTimeoutMs ?? 0,
+        effect: "hard-fail",
+        detail: "Worker reached the configured no-progress interval and was terminated",
+      },
     };
   }
 

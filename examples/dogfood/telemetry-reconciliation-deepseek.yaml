@@ -1,0 +1,155 @@
+version: 2
+name: Explain top-level and per-model Worker Token differences
+project: ../..
+taskClass: telemetry-reconciliation-truth
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: Add a canonical, user-readable reconciliation between terminal top-level Worker Token counters and the optional per-model breakdown, without double-counting, silently choosing a winner, changing Task success, or inventing an official bill or Token saving.
+  presentation:
+    summary: 当运行时给出两套不一致的 Token 数时，ForkLight 会把两套口径、差值和影响讲清楚；现有统计继续使用明确标注的顶层口径，不把另一套偷偷相加，也不把差异误判成任务失败。
+    language: zh-CN
+  context:
+    - FL-D216 was found on real Volcengine glm-5.2[1M] Task 54e2dc29-b603-4e92-b657-66ebda5d8917. Its terminal top-level gross is 41,261,873 while the summed perModel gross is 43,144,768, a +1,882,895 difference.
+    - AttemptTokenUsage persists four top-level counters plus an optional perModel array. Existing Worker volume intentionally counts only top-level counters and has a regression test preventing double counting.
+    - Top-level terminal usage remains the canonical current Worker-volume and official-cost input. The per-model breakdown is diagnostic evidence only until runtime/provider semantics prove equivalence.
+    - A mismatch is a soft telemetry-quality warning. It must not fail a Task, trigger retry, reduce model quality scores, or block Integration. Savings and official-cost values may remain available but must state which input they used and show the warning nearby.
+  inScope:
+    - Add one pure canonical reconciliation module that compares each complete Attempt's four top-level counters with sums of its perModel entries and computes component and gross deltas as perModel minus top-level.
+    - Represent matched, mismatch, partial and unavailable Task-level states with exact attempt counts. Distinguish missing terminal usage from missing per-model breakdown.
+    - Include bounded per-Attempt evidence with ordinal, top-level totals, per-model totals, signed component/gross deltas and model count; do not expose prompts, outputs, logs, paths, credentials or arbitrary model text.
+    - Embed the reconciliation unchanged in TaskTokenReport and therefore TaskEconomicsReport. Keep existing Worker-volume, boundary-reduction, direct-savings and official-cost arithmetic unchanged and explicitly label top-level terminal usage as their current source.
+    - Extend the human `forklight tokens` output and Task Detail economics UI with plain English and Chinese copy explaining what differs, what ForkLight currently counts, and what the mismatch cannot prove.
+    - Add focused executable tests using exact matched, mismatched, partially reported, missing-usage and multi-Attempt fixtures, including the real GLM counters and immutability/privacy assertions.
+  outOfScope:
+    - Changing Worker Token volume arithmetic, substituting perModel totals, treating perModel entries as per-request pricing rows, changing official price calculation, recalculating historical usage, Provider probing, model routing weights, Task success/failure, retry behavior, Integration, commit, or push.
+    - Claiming either counter family is the Provider bill, treating the difference as a numeric uncertainty bound, or claiming the delta is saved/wasted Tokens.
+  executionSteps:
+    - Trace normalized terminal usage through Attempt storage, TaskTokenReport, TaskEconomicsReport, CLI and Hub before editing.
+    - Implement and test one detached deeply-frozen reconciliation projection with safe integer arithmetic and deterministic ordering.
+    - Add the projection to the canonical Task Token report without changing existing arithmetic or report availability states.
+    - Render a compact explanation-first CLI section and Task Detail card; keep per-Attempt component detail secondary.
+    - Run focused tests, strict TypeScript, JavaScript syntax and diff checks once; report remaining semantic risks rather than weakening tests.
+  deliverables:
+    - Canonical Token-usage reconciliation types and pure implementation.
+    - TaskTokenReport and TaskEconomicsReport propagation.
+    - Human CLI and bilingual Task Detail presentation.
+    - Focused regression tests including the real GLM mismatch.
+  modules:
+    - name: Reconciliation core
+      responsibility: Compare two runtime-reported Token counter families without treating one as billing truth or adding them together.
+      consumes:
+        - Persisted Attempt ordinal and optional complete AttemptTokenUsage.
+        - Four top-level counters and optional perModel counter rows.
+      produces:
+        - Detached task-level state, counts and bounded per-Attempt comparison evidence.
+        - Signed component and gross deltas defined as perModel minus top-level.
+      boundaries:
+        - Safe-integer arithmetic only; malformed or overflowing evidence becomes unavailable rather than a guessed number.
+        - Model count may be exposed, but arbitrary perModel model strings must not enter compact report or Hub output.
+    - name: Canonical report propagation
+      responsibility: Carry reconciliation evidence beside existing Token arithmetic without changing the arithmetic.
+      consumes:
+        - One-snapshot Attempt collection already used by TaskTokenReport and TaskEconomicsReport.
+      produces:
+        - One immutable usageReconciliation section shared by CLI and Hub consumers.
+      boundaries:
+        - Existing top-level Worker volume remains canonical and perModel is never double-counted or repurposed as request-level pricing data.
+    - name: Explanation-first consumers
+      responsibility: Tell a non-expert why two numbers differ and what the product does about it.
+      consumes:
+        - Canonical reconciliation state, counts, totals and deltas.
+      produces:
+        - Human CLI section plus bilingual Task Detail summary and collapsed evidence.
+      boundaries:
+        - Never call the delta savings, waste, a bill, or an uncertainty interval; never claim mismatch means Worker failure.
+  callChain:
+    - Claude Code result normalization stores top-level usage and optional perModel breakdown on an Attempt.
+    - TaskTokenReport reads the same Attempt snapshot used for Worker-volume arithmetic and asks the reconciliation core to compare both families.
+    - TaskEconomicsReport embeds the canonical Token report without recomputing the comparison.
+    - CLI and Hub render the state, current top-level counting rule, exact signed difference and caveats; routing and Task lifecycle remain unchanged.
+  scenarios:
+    - name: Exact match
+      given: Every complete Attempt has a perModel breakdown whose four sums exactly match top-level counters.
+      when: The Task report is built.
+      then: Reconciliation is matched, all deltas are zero, and top-level Worker volume is unchanged.
+    - name: Real GLM mismatch
+      given: One Attempt has top-level gross 41,261,873 and perModel gross 43,144,768.
+      when: The report and Task Detail are rendered.
+      then: They show mismatch and +1,882,895 diagnostic difference, say Worker volume uses the top-level 41,261,873, and do not call the difference cost, savings or failure.
+    - name: Partial breakdown coverage
+      given: Some complete Attempts have matching perModel breakdowns while another complete Attempt has no breakdown.
+      when: Reconciliation is built.
+      then: State is partial with separate compared and missing-breakdown counts; no missing Attempt is treated as zero.
+    - name: Mismatch plus missing evidence
+      given: At least one compared Attempt mismatches and another Attempt lacks terminal usage or perModel detail.
+      when: Reconciliation is built.
+      then: Mismatch remains visible as the dominant state while coverage gaps are also counted.
+    - name: No per-model evidence
+      given: No Attempt has a usable perModel breakdown.
+      when: The report is built.
+      then: Reconciliation is unavailable and existing top-level Worker-volume reporting continues with an explicit no-breakdown explanation.
+  risks:
+    - Summed perModel rows may cover internal runtime activity that top-level usage intentionally excludes, so the delta must remain diagnostic rather than a bound or replacement.
+    - Adding a warning without showing which number drives cost and savings would still confuse users; every consumer must state that current arithmetic uses top-level terminal usage.
+    - Large Token counters can overflow Number safe-integer sums even when individual fields parsed correctly, so aggregation must fail closed.
+  changeBudget:
+    maxFiles: 14
+    maxDiffLines: 1800
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/cli/exchange-receipts.ts
+    - src/hub/public
+    - tests/token-reconciliation.test.ts
+    - tests/token-report.test.ts
+    - tests/task-economics-report.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - "Exact, mismatch, partial and unavailable states are derived from the persisted Attempt snapshot with safe arithmetic, exact coverage counts and no raw content/model-string exposure."
+    - "The real GLM counters reconcile to a +1,882,895 perModel-minus-top-level gross delta while Worker volume remains 41,261,873 and is never double-counted."
+    - "Reconciliation is a soft telemetry warning only: it does not change Task status, retries, Integration, routing scores, official price calculation or direct-savings arithmetic."
+    - "CLI and Task Detail clearly identify top-level terminal usage as the current arithmetic source and never label the diagnostic delta as savings, waste, bill or numeric uncertainty bound."
+    - "All new report evidence is detached, deeply frozen, deterministic and privacy-safe."
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/token-reconciliation.test.ts tests/token-report.test.ts tests/task-economics-report.test.ts tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

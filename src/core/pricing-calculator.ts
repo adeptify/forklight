@@ -100,10 +100,36 @@ export interface QuotedCost {
   readonly providerBillClaim: false;
 }
 
+export interface BoundedComponentRange {
+  readonly component: CostComponent;
+  readonly tokens: number;
+  /** `null` means the rate is unpublished but irrelevant because tokens are zero. */
+  readonly minRatePerMillion: number | null;
+  readonly maxRatePerMillion: number | null;
+  readonly minAmount: number;
+  readonly maxAmount: number;
+}
+
+export interface BoundedEstimate {
+  readonly currency: PricingCurrency;
+  readonly min: number;
+  readonly max: number;
+  readonly components: readonly BoundedComponentRange[];
+  readonly pricing: PricingIdentitySnapshot;
+  readonly method: "aggregate-tier-bounds";
+  readonly usageSource: "terminal-result";
+  readonly providerBillClaim: false;
+}
+
 export interface UnavailableCost {
   readonly quoted: false;
   readonly reason: PricingQuoteUnavailableReason;
   readonly evidence: UnavailableEvidence;
+  /** Conservative native-currency range from aggregate-tier rate bounds.
+   *  Present only when the reason is per-request-usage-required, the catalog
+   *  entry is multi-tier, aggregate is non-zero, and every positive Token
+   *  component has a published rate in every possible tier. */
+  readonly boundedEstimate?: BoundedEstimate;
 }
 
 export type PricingQuote = QuotedCost | UnavailableCost;
@@ -261,6 +287,104 @@ function pricingIdentity(e: PricingCatalogEntry): PricingIdentitySnapshot {
     promotion: e.promotion };
 }
 
+// Bounded estimate builder -----------------------------------------------------
+
+/**
+ * Build a conservative native-currency min/max range from the minimum and
+ * maximum published rates across all catalog tiers.  Every positive Token
+ * component must have a published rate in every tier; otherwise the range
+ * is not produced.  The returned estimate is never a Provider bill claim.
+ */
+function buildBoundedEstimate(
+  entry: PricingCatalogEntry,
+  aggregate: TokenAggregate,
+): BoundedEstimate | undefined {
+  const tiers = entry.rates;
+  // Must be multi-tier.
+  if (tiers.length <= 1) return undefined;
+
+  const aggregatePromptInput = aggregate.inputTokens
+    + aggregate.cacheReadInputTokens
+    + aggregate.cacheCreationInputTokens;
+  const possibleTiers = tiers.filter((tier) =>
+    tier.minimumInputTokensExclusive === null
+      || tier.minimumInputTokensExclusive < aggregatePromptInput);
+  if (possibleTiers.length === 0) return undefined;
+
+  type CompKey = "input" | "output" | "cacheRead" | "cacheCreation";
+  const agg: Record<CompKey, number> = {
+    input: aggregate.inputTokens,
+    output: aggregate.outputTokens,
+    cacheRead: aggregate.cacheReadInputTokens,
+    cacheCreation: aggregate.cacheCreationInputTokens,
+  };
+
+  // Collect rates per component across all tiers.
+  const ratesPerComp: Record<CompKey, number[]> = {
+    input: [],
+    output: [],
+    cacheRead: [],
+    cacheCreation: [],
+  };
+  for (const t of possibleTiers) {
+    ratesPerComp.input.push(t.input);
+    ratesPerComp.output.push(t.output);
+    ratesPerComp.cacheRead.push(t.cacheRead);
+    if (t.cacheCreation !== null) {
+      ratesPerComp.cacheCreation.push(t.cacheCreation);
+    }
+  }
+
+  const components: BoundedComponentRange[] = [];
+  let totalMin = 0, totalMax = 0;
+
+  for (const compKey of ["input", "output", "cacheRead", "cacheCreation"] as CompKey[]) {
+    const tokens = agg[compKey];
+    if (tokens === 0) {
+      const rates = ratesPerComp[compKey];
+      const everyPossibleRatePublished = rates.length === possibleTiers.length;
+      components.push({
+        component: compKey,
+        tokens: 0,
+        minRatePerMillion: everyPossibleRatePublished ? Math.min(...rates) : null,
+        maxRatePerMillion: everyPossibleRatePublished ? Math.max(...rates) : null,
+        minAmount: 0,
+        maxAmount: 0,
+      });
+      continue;
+    }
+    // Positive tokens — every tier must have a published rate for this component.
+    const rates = ratesPerComp[compKey];
+    if (rates.length < possibleTiers.length) return undefined;
+    const minRate = Math.min(...rates);
+    const maxRate = Math.max(...rates);
+    if (minRate < 0 || maxRate < 0) return undefined;
+    const minAmt = (tokens * minRate) / entry.unitTokens;
+    const maxAmt = (tokens * maxRate) / entry.unitTokens;
+    totalMin += minAmt;
+    totalMax += maxAmt;
+    components.push({
+      component: compKey,
+      tokens,
+      minRatePerMillion: minRate,
+      maxRatePerMillion: maxRate,
+      minAmount: minAmt,
+      maxAmount: maxAmt,
+    });
+  }
+
+  return {
+    currency: entry.currency,
+    min: totalMin,
+    max: totalMax,
+    components,
+    pricing: pricingIdentity(entry),
+    method: "aggregate-tier-bounds",
+    usageSource: "terminal-result",
+    providerBillClaim: false,
+  };
+}
+
 // Public API ------------------------------------------------------------------
 
 export function calculateOfficialCost(
@@ -330,10 +454,12 @@ export function calculateOfficialCost(
 
   // 5. Multi-tier non-zero aggregate — per-request rows required.
   if (requestRows === undefined || requestRows === null) {
+    const bounded = buildBoundedEstimate(entry, aggregate);
     return cloneAndFreeze({ quoted: false, reason: "per-request-usage-required",
       evidence: { provider: entry.provider, currency: entry.currency, tiersAvailable: entry.rates.length,
         components: COST_COMPONENTS.map(c => aggComponent(c, aggregate)),
-        expectedAggregate: aggregate, observedAggregate: null, positiveNullRateComponents: [] } });
+        expectedAggregate: aggregate, observedAggregate: null, positiveNullRateComponents: [] },
+      ...(bounded === undefined ? {} : { boundedEstimate: bounded }) });
   }
 
   // 6. Validate the supplied rows.

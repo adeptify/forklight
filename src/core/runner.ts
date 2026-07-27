@@ -10,22 +10,42 @@ import type {
   ProviderSpec,
   TaskRecord,
   VerificationResult,
+  EffectivePolicySnapshot,
+  PolicyLimitEvidence,
 } from "./types.js";
 import { resolveAttemptOfficialCost } from "./attempt-economics.js";
 import { taskPaths } from "./config.js";
 import { loadTaskSpec } from "./task.js";
 import { cloneDefaults, type ExecutionSettings, type ProviderDefaultsSettings, type TaskPolicy } from "./settings.js";
+import {
+  deriveEnforcementCapability,
+  enforcementCapabilityForRuntime,
+  resolveTaskEffectivePolicy,
+} from "./advanced-policy.js";
 import { buildRemediationPacket, formatRemediationPacket } from "./remediation.js";
 import {
   MAIN_REVIEW_REASON_MAX_LENGTH,
   recordMainReview,
 } from "./main-review.js";
+import { resolvePendingCorrectionGrant } from "./attempt-authorization.js";
+import {
+  captureCandidateRevision,
+  buildCorrectionInstruction,
+  candidateRevisionMatchesCurrentDiff,
+  resolveLatestRevision,
+} from "./candidate-revision.js";
 import { isoTimestamp as timestamp } from "./time.js";
 import { StateStore } from "../state/store.js";
-import { assertWorkspaceExists, prepareWorkspace } from "../workspace/copy.js";
+import {
+  assertWorkspaceExists,
+  isWorkspaceReady,
+  prepareWorkspace,
+  type PreparationObservation,
+} from "../workspace/copy.js";
 import { verifyTask } from "./verifier.js";
-import { checkpointSatisfied } from "./checkpoint.js";
+import { checkpointSatisfied, resolveTerminalAfterVerification } from "./checkpoint.js";
 import { getWorkerAdapter } from "../workers/registry.js";
+import type { WorkerExecutionResult } from "../workers/types.js";
 
 export interface RunResult {
   task: TaskRecord;
@@ -51,10 +71,11 @@ interface TaskRecordInput {
   id: string;
   sessionId: string;
   createdAt: string;
+  effectivePolicy?: EffectivePolicySnapshot | undefined;
 }
 
 export function buildTaskRecord(input: TaskRecordInput): TaskRecord {
-  const { spec, taskFile, home, id, sessionId, createdAt } = input;
+  const { spec, taskFile, home, id, sessionId, createdAt, effectivePolicy } = input;
   return {
     id,
     name: spec.name,
@@ -66,6 +87,7 @@ export function buildTaskRecord(input: TaskRecordInput): TaskRecord {
     sessionId,
     createdAt,
     updatedAt: createdAt,
+    ...(effectivePolicy === undefined ? {} : { effectivePolicy }),
   };
 }
 
@@ -73,6 +95,7 @@ export function registerTaskFromSpec(
   store: StateStore,
   spec: TaskRecord["spec"],
   taskFile: string,
+  effectivePolicy?: EffectivePolicySnapshot,
 ): TaskRecord {
   const id = randomUUID();
   const createdAt = timestamp();
@@ -83,6 +106,7 @@ export function registerTaskFromSpec(
     id,
     sessionId: randomUUID(),
     createdAt,
+    ...(effectivePolicy === undefined ? {} : { effectivePolicy }),
   });
   store.createTask(record);
   store.addEvent(id, undefined, "task.created", `Task created: ${spec.name}`, {
@@ -94,10 +118,52 @@ export function registerTaskFromSpec(
   return store.getTask(id);
 }
 
+/** Privacy-safe Task-event bridge for typed preparation observations.
+ *  Each observation becomes a durable `workspace.preparation.stage` event
+ *  whose payload contains only the stage code, phase, monotonic elapsed
+ *  milliseconds, and the aggregate count when actually known — never
+ *  paths, file names, excluded names, credentials, or command text. */
+function persistPreparationObservation(
+  store: StateStore,
+  taskId: string,
+  observation: PreparationObservation,
+): void {
+  store.addEvent(
+    taskId,
+    undefined,
+    "workspace.preparation.stage",
+    `Preparation: ${observation.stage} (${observation.phase})`,
+    {
+      stage: observation.stage,
+      phase: observation.phase,
+      elapsedMs: observation.elapsedMs,
+      ...(observation.count === undefined ? {} : { count: observation.count }),
+      ...(observation.countKind === undefined ? {} : { countKind: observation.countKind }),
+    },
+  );
+}
+
 export async function prepareTaskWorkspace(store: StateStore, task: TaskRecord): Promise<TaskRecord> {
   store.setTaskStatus(task.id, "preparing", { finishedAt: null, error: null });
   try {
-    const manifest = await prepareWorkspace(task.spec, task.paths);
+    const manifest = await prepareWorkspace(
+      task.spec,
+      task.paths,
+      undefined,
+      {
+        observer: (observation) => {
+          // Bridge to a durable Task event before returning.  Storing the
+          // event here keeps observation order identical to the order in
+          // which prepareWorkspace emits them.  The observer contract is
+          // fail-closed: any throw or rejection from a downstream
+          // observer attached by an external caller propagates out of
+          // prepareWorkspace unchanged, and the existing catch block
+          // then records the terminal failure without emitting the
+          // final workspace.prepared event.
+          persistPreparationObservation(store, task.id, observation);
+        },
+      },
+    );
     store.addEvent(task.id, undefined, "workspace.prepared", "Isolated workspace prepared", {
       workspace: task.paths.workspace,
       baseline: task.paths.baseline,
@@ -120,8 +186,9 @@ export async function createTaskFromSpec(
   store: StateStore,
   spec: TaskRecord["spec"],
   taskFile: string,
+  effectivePolicy?: EffectivePolicySnapshot,
 ): Promise<TaskRecord> {
-  const task = registerTaskFromSpec(store, spec, taskFile);
+  const task = registerTaskFromSpec(store, spec, taskFile, effectivePolicy);
   return prepareTaskWorkspace(store, task);
 }
 
@@ -131,7 +198,29 @@ export async function createTask(
   policy?: TaskPolicy,
 ): Promise<TaskRecord> {
   const { taskFile, spec } = await loadTaskSpec(taskFileInput, policy);
-  return createTaskFromSpec(store, spec, taskFile);
+  const effectivePolicy = resolvePolicyFromTaskSpec(spec, policy);
+  return createTaskFromSpec(store, spec, taskFile, effectivePolicy);
+}
+
+/** Resolve the effective advanced policy from a TaskSpec and optional policy.
+ *  Returns undefined for legacy tasks without a policy.
+ *  Never invents a strict new ceiling for legacy tasks. */
+function resolvePolicyFromTaskSpec(
+  spec: TaskRecord["spec"],
+  policy?: TaskPolicy,
+): EffectivePolicySnapshot | undefined {
+  if (policy === undefined) return undefined;
+
+  let capabilities = enforcementCapabilityForRuntime(spec.runtime.name);
+
+  try {
+    const adapter = getWorkerAdapter(spec.runtime.name);
+    capabilities = deriveEnforcementCapability(adapter.capabilities());
+  } catch {
+    // Conservative defaults for unknown runtimes
+  }
+
+  return resolveTaskEffectivePolicy(spec, policy, capabilities);
 }
 
 function installInterruptForwarding(): {
@@ -160,6 +249,105 @@ function installInterruptForwarding(): {
   };
 }
 
+function createDurationController(
+  task: TaskRecord,
+  attempt: AttemptRecord,
+): {
+  attach: (child: ChildProcess) => void;
+  stop: () => void;
+  triggered: () => boolean;
+  observedMs: () => number;
+} {
+  const maxDurationMs = task.effectivePolicy?.values.maxDurationMs ?? null;
+  const stopGraceMs = task.effectivePolicy?.values.workerStopGraceMs ?? 10_000;
+  let durationTimer: ReturnType<typeof setTimeout> | undefined;
+  let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+  let didTrigger = false;
+
+  const observedMs = (): number => Math.max(0, Date.now() - Date.parse(attempt.startedAt));
+  const attach = (child: ChildProcess): void => {
+    if (maxDurationMs === null) return;
+    const remainingMs = Math.max(0, maxDurationMs - observedMs());
+    durationTimer = setTimeout(() => {
+      didTrigger = true;
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGINT");
+        escalationTimer = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+          escalationTimer = undefined;
+        }, stopGraceMs);
+        escalationTimer.unref();
+      }
+    }, remainingMs);
+    durationTimer.unref();
+  };
+  const stop = (): void => {
+    if (durationTimer !== undefined) clearTimeout(durationTimer);
+    if (escalationTimer !== undefined) clearTimeout(escalationTimer);
+    durationTimer = undefined;
+    escalationTimer = undefined;
+  };
+  return { attach, stop, triggered: () => didTrigger, observedMs };
+}
+
+function policyEventType(evidence: PolicyLimitEvidence):
+  "policy.duration.exceeded" | "policy.token.exceeded" | "policy.noprogress.exceeded" | "policy.size.exceeded" {
+  switch (evidence.category) {
+    case "duration": return "policy.duration.exceeded";
+    case "observed-token": return "policy.token.exceeded";
+    case "no-progress": return "policy.noprogress.exceeded";
+    case "file-limit":
+    case "changed-line-limit": return "policy.size.exceeded";
+  }
+}
+
+function recordPolicyLimit(
+  store: StateStore,
+  task: TaskRecord,
+  attemptId: string,
+  evidence: PolicyLimitEvidence,
+): void {
+  store.addEvent(
+    task.id,
+    attemptId,
+    policyEventType(evidence),
+    `Worker policy limit triggered: ${evidence.category}`,
+    evidence,
+  );
+}
+
+function failForPolicyLimit(
+  store: StateStore,
+  task: TaskRecord,
+  attempt: AttemptRecord,
+  worker: WorkerExecutionResult,
+  evidence: PolicyLimitEvidence,
+): RunResult {
+  const finishedAt = timestamp();
+  const error = `Worker policy limit exceeded: ${evidence.category}`;
+  recordPolicyLimit(store, task, attempt.id, evidence);
+  store.updateAttempt(attempt.id, {
+    status: "failed",
+    finishedAt,
+    exitCode: worker.exitCode,
+    ...(worker.resultText === undefined ? {} : { resultText: worker.resultText }),
+    ...(worker.costUsd === undefined ? {} : { costUsd: worker.costUsd }),
+    ...(worker.turns === undefined ? {} : { turns: worker.turns }),
+    ...(worker.runtimeCostEstimateUsd === undefined
+      ? {}
+      : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
+    ...(worker.usage === undefined ? {} : { usage: worker.usage }),
+    error,
+    officialCost: buildOfficialCost(task.spec.provider, worker.usage),
+  });
+  store.setTaskStatus(task.id, "failed", {
+    finishedAt,
+    workerPid: null,
+    error,
+  });
+  return { task: store.getTask(task.id), attempt: store.getAttempt(attempt.id) };
+}
+
 export async function executeAttempt(
   store: StateStore,
   task: TaskRecord,
@@ -170,16 +358,23 @@ export async function executeAttempt(
   providerDefaults?: ProviderDefaultsSettings,
   options?: AttemptExecutionOptions,
 ): Promise<RunResult> {
-  await assertWorkspaceExists(task.paths);
+  if (resuming) {
+    await assertWorkspaceExists(task.paths);
+  } else if (!(await isWorkspaceReady(task.paths))) {
+    throw new Error("Worker snapshot is incomplete; preparation must finish before execution");
+  }
   const exec = execution ?? cloneDefaults().execution;
   const ordinal = store.nextAttemptOrdinal(task.id);
-  const maximumOrdinal = options?.maximumOrdinal ?? exec.maxAttempts;
+  // Read base maxAttempts from immutable task snapshot, falling back to live settings for legacy tasks
+  const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
+  const maximumOrdinal = options?.maximumOrdinal ?? baseMaxAttempts;
   if (ordinal > maximumOrdinal) {
     throw new Error(
       `Task ${task.id} has reached maximum attempts (${maximumOrdinal}); cannot start attempt ${ordinal}`,
     );
   }
   const attemptId = randomUUID();
+  const adapter = getWorkerAdapter(task.spec.runtime.name);
   const attempt: AttemptRecord = {
     id: attemptId,
     taskId: task.id,
@@ -191,6 +386,7 @@ export async function executeAttempt(
     runtimeBudgetUsd: options?.maxBudgetUsdOverride === undefined
       ? task.spec.runtime.maxBudgetUsd
       : options.maxBudgetUsdOverride,
+    runtimeBudgetEnforcement: adapter.capabilities().budgetFlag,
   };
   store.createAttempt(attempt);
   store.setTaskStatus(task.id, "running", {
@@ -201,11 +397,11 @@ export async function executeAttempt(
   });
 
   const forwarding = installInterruptForwarding();
+  const duration = createDurationController(task, attempt);
   let worker;
   try {
     try {
       const pd = providerDefaults?.[task.spec.provider.name];
-      const adapter = getWorkerAdapter(task.spec.runtime.name);
       // KD14: fail closed when the selected runtime doctor is not ok (even if
       // global health.ok is true because Claude is present).
       const doctorResult = adapter.doctor();
@@ -224,7 +420,10 @@ export async function executeAttempt(
         attempt,
         resuming,
         hooks: {
-          onSpawn: forwarding.setChild,
+          onSpawn: (child) => {
+            forwarding.setChild(child);
+            duration.attach(child);
+          },
           ...(onProgress === undefined ? {} : { onEvent: onProgress }),
           wasInterrupted: forwarding.wasInterrupted,
           ...(feedback === undefined ? {} : { feedback }),
@@ -251,10 +450,29 @@ export async function executeAttempt(
       return { task: store.getTask(task.id), attempt: store.getAttempt(attemptId) };
     }
   } finally {
+    duration.stop();
     forwarding.dispose();
   }
 
   const workerFinishedAt = timestamp();
+  const maxDurationMs = task.effectivePolicy?.values.maxDurationMs ?? null;
+  if (
+    maxDurationMs !== null
+    && (duration.triggered() || duration.observedMs() > maxDurationMs)
+  ) {
+    return failForPolicyLimit(store, task, attempt, worker, {
+      category: "duration",
+      enforcementPhase: duration.triggered() ? "preemptive" : "post-observation",
+      configured: maxDurationMs,
+      observed: duration.observedMs(),
+      effect: "hard-fail",
+      detail: "Worker exceeded the configured wall-duration limit",
+    });
+  }
+
+  if (worker.policyLimit !== undefined) {
+    recordPolicyLimit(store, task, attemptId, worker.policyLimit);
+  }
   if (worker.status === "interrupted") {
     store.updateAttempt(attemptId, {
       status: "interrupted",
@@ -299,30 +517,100 @@ export async function executeAttempt(
     return { task: store.getTask(task.id), attempt: store.getAttempt(attemptId) };
   }
 
+  // Post-observation Token enforcement from the immutable Task snapshot.
+  const snap = task.effectivePolicy;
+  if (snap !== undefined && worker.status === "succeeded") {
+    if (snap.values.observedTokenCeiling !== null && worker.usage !== undefined) {
+      const grossTokens =
+        worker.usage.inputTokens
+        + worker.usage.outputTokens
+        + worker.usage.cacheReadInputTokens
+        + worker.usage.cacheCreationInputTokens;
+      if (grossTokens > snap.values.observedTokenCeiling) {
+        return failForPolicyLimit(store, task, attempt, worker, {
+          category: "observed-token",
+          enforcementPhase: "post-observation",
+          configured: snap.values.observedTokenCeiling,
+          observed: grossTokens,
+          effect: "hard-fail",
+          detail: "Observed gross Tokens exceeded the configured ceiling",
+        });
+      }
+    }
+  }
+
   const verification = await verifyTask(store, store.getTask(task.id), attemptId);
-  const adapter = getWorkerAdapter(task.spec.runtime.name);
-  const checkpointCap = adapter.capabilities().checkpoint;
-  let checkpointPassed: boolean;
-  if (checkpointCap === "unsupported") {
+
+ // Capture immutable CandidateRevision evidence with private snapshot artifact.
+ // The revision is bound to this Attempt, the verification event sequence,
+ // and the exact integration Diff bytes at this point in time.
+ // Must complete before the terminal status update.
+  const verificationEvent = store.listEvents(task.id)
+    .filter((event) => event.type === "verification.completed" && event.attemptId === attemptId)
+    .at(-1);
+  let revisionCaptureFailure: string | undefined;
+  try {
+    if (verificationEvent === undefined) {
+      throw new Error("canonical verification event is missing");
+    }
+    const affected = verification.sourceCompatibility?.affectedPaths ?? [];
+    const business = verification.patches?.business;
+    await captureCandidateRevision(
+      store,
+      store.getTask(task.id),
+      store.getAttempt(attemptId),
+      verificationEvent.sequence,
+      verification.passed,
+      affected,
+      business?.filesChanged ?? 0,
+      business?.changedLines ?? 0,
+    );
+  } catch (error) {
+    revisionCaptureFailure = error instanceof Error ? error.message : String(error);
     store.addEvent(
       task.id,
       attemptId,
-      "checkpoint.skipped",
-      "Checkpoint skipped: runtime does not support ForkLight checkpoint MCP",
-      { reason: "runtime-unsupported", runtime: task.spec.runtime.name },
+      "candidate.revision.capture.failed",
+      "Candidate revision capture failed",
+      { category: "candidate-evidence", reason: revisionCaptureFailure.slice(0, 500) },
     );
-    checkpointPassed = true;
-  } else {
-    checkpointPassed = checkpointSatisfied(
+  }
+
+  const checkpointCap = adapter.capabilities().checkpoint;
+  // Only inspect events when the runtime can produce a checkpoint; unsupported
+  // never satisfies via payload (gapReason = runtime-unsupported instead).
+  const checkpointOk = checkpointCap === "unsupported"
+    ? false
+    : checkpointSatisfied(
       store.listEvents(task.id),
       attemptId,
       task.spec.acceptance.commands.length,
     );
+  const terminal = resolveTerminalAfterVerification({
+    verificationPassed: verification.passed,
+    checkpointCapability: checkpointCap,
+    checkpointSatisfied: checkpointOk,
+  });
+  if (terminal.recordCheckpointGap && terminal.gapReason !== undefined) {
+    const reason = terminal.gapReason;
+    store.addEvent(
+      task.id,
+      attemptId,
+      "checkpoint.skipped",
+      reason === "runtime-unsupported"
+        ? "Checkpoint skipped: runtime does not support ForkLight checkpoint MCP"
+        : "Worker checkpoint missing or failed (non-authoritative); independent verification is decisive",
+      {
+        reason,
+        runtime: task.spec.runtime.name,
+        verificationPassed: verification.passed,
+      },
+    );
   }
-  const finalStatus = verification.passed && checkpointPassed ? "succeeded" : "failed";
-  const failure = !checkpointPassed
-    ? "Required bounded checkpoint missing or failed"
-    : "Independent verification failed";
+  const finalStatus = revisionCaptureFailure === undefined ? terminal.status : "failed";
+  const failure = revisionCaptureFailure === undefined
+    ? terminal.failureReason
+    : `Candidate revision capture failed: ${revisionCaptureFailure}`;
   const finishedAt = timestamp();
   store.updateAttempt(attemptId, {
     status: finalStatus,
@@ -333,13 +621,13 @@ export async function executeAttempt(
     ...(worker.turns === undefined ? {} : { turns: worker.turns }),
     ...(worker.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
     ...(worker.usage === undefined ? {} : { usage: worker.usage }),
-    ...(finalStatus === "failed" ? { error: failure } : {}),
+    ...(finalStatus === "failed" && failure !== undefined ? { error: failure } : {}),
     officialCost: buildOfficialCost(task.spec.provider, worker.usage),
   });
   store.setTaskStatus(task.id, finalStatus, {
     finishedAt,
     workerPid: null,
-    ...(finalStatus === "succeeded" ? { error: null } : { error: failure }),
+    ...(finalStatus === "succeeded" ? { error: null } : { error: failure ?? "Independent verification failed" }),
   });
   return {
     task: store.getTask(task.id),
@@ -382,8 +670,9 @@ export async function resumeTask(
     throw new Error(`Task ${taskId} cannot resume from status ${task.status}`);
   }
   const exec = execution ?? cloneDefaults().execution;
+  const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
   const attemptCount = store.listAttempts(taskId).length;
-  const maximumOrdinal = options?.maximumOrdinal ?? exec.maxAttempts;
+  const maximumOrdinal = options?.maximumOrdinal ?? baseMaxAttempts;
   if (attemptCount >= maximumOrdinal) {
     throw new Error(`Task ${taskId} has reached maximum attempts (${maximumOrdinal})`);
   }
@@ -396,6 +685,81 @@ export async function resumeTask(
     .join("\n\n");
   return executeAttempt(
     store, task, true, onProgress, combinedFeedback || undefined, exec, providerDefaults, options,
+  );
+}
+
+/** Move a failed candidate into a durable queued correction state after its
+ * authorization grant has been recorded. Existing Attempts, verification,
+ * workspace, session, and logs remain immutable. */
+export function prepareMainCorrectionTask(store: StateStore, taskId: string): TaskRecord {
+  const task = store.getTask(taskId);
+  if (task.status !== "failed" && task.status !== "interrupted") {
+    throw new Error(`Task ${taskId} cannot prepare correction from status ${task.status}`);
+  }
+  store.setTaskStatus(taskId, "queued", {
+    finishedAt: null,
+    error: null,
+    workerPid: null,
+    currentAttemptId: null,
+  });
+  return store.getTask(taskId);
+}
+
+/** Execute exactly one previously authorized Main correction. The durable
+ * grant is re-read so local, daemon, and restart-recovery paths all use the
+ * same canonical feedback and budget. */
+export async function correctTask(
+  store: StateStore,
+  taskId: string,
+  onProgress?: ProgressListener,
+  execution?: ExecutionSettings,
+  providerDefaults?: ProviderDefaultsSettings,
+): Promise<RunResult> {
+  const exec = execution ?? cloneDefaults().execution;
+  const task = store.getTask(taskId);
+  if (task.status !== "queued") {
+    throw new Error(`Task ${taskId} correction requires queued status`);
+  }
+  const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
+  const pending = resolvePendingCorrectionGrant(store, taskId, baseMaxAttempts);
+  if (pending === null) {
+    throw new Error(`Task ${taskId} has no pending Main correction grant`);
+  }
+  const verifierFeedback = latestRemediationFeedback(store, taskId);
+
+  // When a structured gap contract is bound to this correction, build the
+  // canonical Worker instruction with reusable paths, gaps, and stop rule.
+  let correctionFeedback: string;
+  if (pending.gapContract !== undefined) {
+    const revision = resolveLatestRevision(store.listEvents(taskId));
+    if (
+      revision === undefined
+      || revision.taskId !== taskId
+      || revision.id !== pending.gapContract.candidateRevisionId
+      || !candidateRevisionMatchesCurrentDiff(task, revision)
+    ) {
+      throw new Error("Structured correction rejected: retained candidate no longer matches its authorized revision");
+    }
+    correctionFeedback = [
+      verifierFeedback,
+      buildCorrectionInstruction(pending.gapContract, pending.feedback),
+    ].filter((item): item is string => item !== undefined).join("\n\n");
+  } else {
+    correctionFeedback = [
+      verifierFeedback,
+      `Additional main agent review:\n${pending.feedback}`,
+    ].filter((item): item is string => item !== undefined).join("\n\n");
+  }
+
+  return executeAttempt(
+    store,
+    task,
+    true,
+    onProgress,
+    correctionFeedback,
+    exec,
+    providerDefaults,
+    pending.executionOptions,
   );
 }
 
@@ -527,11 +891,13 @@ export async function reviseTask(
   options?: AttemptExecutionOptions,
 ): Promise<RunResult> {
   const exec = execution ?? cloneDefaults().execution;
+  const task = store.getTask(taskId);
+  const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
   const check = checkReviseEligibility(
     store,
     taskId,
     feedback,
-    options?.maximumOrdinal ?? exec.maxAttempts,
+    options?.maximumOrdinal ?? baseMaxAttempts,
   );
   if (!check.eligible) {
     throw new Error(check.reason !== undefined

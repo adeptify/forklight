@@ -19,7 +19,10 @@ type TaskScopedMcpOperation =
   | "forklight_submit" | "forklight_status" | "forklight_wait" | "forklight_inspect" | "forklight_resume"
   | "forklight_integration_preflight" | "forklight_integration_apply"
   | "forklight_integration_status" | "forklight_integration_wait"
-  | "forklight_integration_history" | "forklight_main_review"
+  | "forklight_integration_history" | "forklight_main_review" | "forklight_correct"
+  | "forklight_correction_eligibility"
+  | "forklight_remediation_verify"
+  | "forklight_candidate_reverify"
   | "forklight_direct_codex_capture";
 
 interface WithMcpExchangeReceiptParams<T> {

@@ -211,6 +211,31 @@ test("listTaskSurfaces returns progress for store-backed running tasks", async (
   store.close();
 });
 
+test("listTaskSurfaces exposes the current workflow stage after Main review", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-surface-review-"));
+  const store = new StateStore(home);
+  const task = makeTask("33333333-3333-4333-8333-333333333333", "succeeded");
+  store.createTask(task);
+  store.addEvent(task.id, "attempt-1", "verification.completed", "passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+  });
+  const verification = store.listEvents(task.id).at(-1)!;
+  store.addEvent(task.id, "attempt-1", "main-review.completed", "accepted", {
+    decision: "accept",
+    reason: "The retained result passed the complete acceptance contract.",
+    attemptId: "attempt-1",
+    verificationEventSequence: verification.sequence,
+  });
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store));
+  const surface = coordinator.listTaskSurfaces(["succeeded"], 10)[0]!;
+  assert.equal(surface.decisionStage, "ready-for-integration");
+  store.close();
+});
+
 const dualAuthFailedEvents = (): EventRecord[] => [
   {
     id: 1,

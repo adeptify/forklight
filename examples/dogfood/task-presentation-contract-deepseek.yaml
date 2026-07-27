@@ -1,0 +1,155 @@
+version: 2
+name: Main-authored user presentation contract
+project: ../..
+contract:
+  outcome: Add a bounded Main-authored presentation block to new structured Tasks so every consumer can explain the requested outcome in the user's language without guessing from a technical contract.
+  presentation:
+    summary: ForkLight will let Main write one short user-facing explanation so Task Detail can explain the request without exposing the technical brief first.
+    language: en
+  context:
+    - The Hub now presents an ordered input, Worker process, output, checks, result, cause, and next-action journey.
+    - Its primary assignment wording still falls back to contract.outcome, which is often English technical prose written for a Worker rather than for the user.
+    - PROJECT_STATUS next-engineering item 14 requires a bounded user-facing summary and display language in new Task contracts.
+    - FL-D200 requires dependent backend and UI work to share one canonical safe-response fixture instead of guessing field shapes from prose.
+    - Existing version 1 and version 2 Tasks must continue to parse and render honestly when this new optional block is absent.
+  inScope:
+    - Add an optional presentation object to TaskContract with one bounded single-paragraph summary and a bounded BCP-47-like language tag.
+    - Parse and validate the object at the canonical parseTaskSpec boundary. Reject partial, blank, overlong, multiline, unsupported-field, or malformed values without logging their contents.
+    - Preserve the presentation block in the immutable Task spec and through MCP inline task construction when supplied.
+    - Add the presentation block to the Worker prompt as user-facing context without replacing the observable technical outcome or acceptance contract.
+    - Project the block into buildSafeTaskJourney assignment data as one bounded object. Fall back to the existing outcome/goal when absent; never invent or translate a summary.
+    - Update the canonical Task story fixture to demonstrate the exact safe response shape that the UI task will consume.
+    - Add focused parser, MCP adapter, safe journey, compatibility, and prompt tests.
+  outOfScope:
+    - Hub renderer, i18n, CSS, visual layout, Provider execution, model routing, pricing, Task state transitions, verification, Main review, Integration, commit, or push behavior.
+    - Automatically generating, translating, rewriting, or inferring user-facing summaries.
+    - Requiring migration of stored legacy Tasks or every existing repository example in this pass.
+    - Making the presentation block a security or execution hard gate; absence remains compatible and visible consumers must fall back honestly.
+  executionSteps:
+    - Trace TaskContract types, parseTaskSpec, MCP input and inline adapters, Worker prompt construction, and buildSafeTaskJourney.
+    - Define one shared presentation shape and validation boundary with explicit maximums and supported language-tag syntax.
+    - Thread the optional field through storage, prompt, and safe journey without copying arbitrary contract data.
+    - Update the canonical safe-response fixture with the exact projected shape.
+    - Add focused normal, missing, malformed, maximum-bound, legacy, MCP, prompt, and privacy tests.
+    - Run the independent acceptance commands once and report any remaining compatibility risk.
+  deliverables:
+    - A typed optional Main-authored Task presentation contract.
+    - Canonical parser and MCP transport support with bounded validation.
+    - Worker prompt and safe Task journey consumption.
+    - A canonical shared safe-response fixture for the dependent UI pass.
+    - Focused regression tests for valid, invalid, and legacy inputs.
+  modules:
+    - name: Presentation contract
+      responsibility: Store one Main-authored explanation of the requested user outcome and its source language on the immutable Task.
+      consumes:
+        - Optional presentation input from YAML, JSON, or MCP.
+      produces:
+        - A validated TaskContract presentation snapshot.
+      boundaries:
+        - No automatic generation, translation, credentials, raw prompts, HTML, or unbounded text.
+    - name: Task execution prompt
+      responsibility: Give the Worker the user-facing intent as context while retaining the technical outcome and acceptance as execution authority.
+      consumes:
+        - Validated presentation and the existing structured Task contract.
+      produces:
+        - A clearly labelled user-facing summary in the bounded Worker prompt.
+      boundaries:
+        - Presentation does not override scope, modules, acceptance, safety, or verification.
+    - name: Safe journey projection
+      responsibility: Expose the exact Main-authored presentation shape to Hub without leaking or inventing content.
+      consumes:
+        - Stored Task presentation, outcome, and legacy goal.
+      produces:
+        - Bounded assignment presentation data plus existing honest fallbacks.
+      boundaries:
+        - No raw Task copy, translation, prompt, logs, diff, credentials, or unrelated absolute path.
+  callChain:
+    - Main authors a technical execution contract and an optional user presentation summary with language.
+    - parseTaskSpec validates and freezes both meanings on Task creation.
+    - ForkLight gives the Worker the presentation as context while preserving the technical contract as authority.
+    - buildSafeTaskJourney selects only the validated presentation fields for the safe Hub response.
+    - Hub can prefer the authored summary and fall back to outcome or legacy goal when it is absent.
+  scenarios:
+    - name: Chinese Main presentation
+      given: A new version 2 Task includes a short Chinese user summary and language zh-CN.
+      when: The Task is parsed, prompted, stored, and projected to the safe journey.
+      then: The exact bounded summary and language survive without translation while technical outcome and acceptance remain unchanged.
+    - name: Existing structured Task
+      given: A version 2 Task created before the presentation field exists has only contract.outcome.
+      when: It is parsed and shown through the safe journey.
+      then: It remains valid and consumers receive no invented presentation, so they can use the existing outcome fallback.
+    - name: Legacy Task
+      given: A stored version 1 Task has only goal and constraints.
+      when: It is projected to the safe journey.
+      then: It remains unchanged and the existing legacy goal fallback stays available.
+    - name: Invalid presentation input
+      given: Presentation is partial, blank, multiline, overlong, has unknown fields, or contains a malformed language tag.
+      when: parseTaskSpec or MCP validation receives it.
+      then: Submission fails at the canonical input boundary without persisting the Task or echoing the supplied content into an error.
+    - name: Presentation is not execution authority
+      given: The friendly summary omits a technical constraint that remains in the structured contract.
+      when: The Worker prompt and verifier are built.
+      then: The full scope, boundaries, and acceptance remain authoritative and are not weakened by the summary.
+  risks:
+    - A loosely validated display string could become another unbounded or unsafe copy channel, so validation must be centralized and tests must cover exact bounds.
+    - Requiring the field immediately would break stored and third-party version 2 Tasks, so this pass introduces it as optional and preserves honest fallbacks.
+    - Backend and UI can drift if they invent separate shapes, so the checked-in Task story fixture is the shared consumer contract for the next task.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 1400
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/task.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - tests/task.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-settings.test.ts
+    - tests/fixtures/hub-task-story-v1.json
+acceptance:
+  criteria:
+    - New structured Tasks may carry one bounded Main-authored user summary and language while existing version 1 and version 2 Tasks remain valid.
+    - Parser and MCP boundaries reject partial, blank, overlong, multiline, unknown-field, and malformed-language presentation inputs without echoing their content.
+    - Worker prompts label presentation as user-facing context and keep the technical contract and acceptance authoritative.
+    - Safe Task journey exposes only the exact validated presentation shape and never invents or translates missing content.
+    - The checked-in Task story fixture is the canonical safe response shape consumed by the dependent UI work.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts tests/mcp.test.ts tests/hub-settings.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

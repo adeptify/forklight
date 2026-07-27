@@ -1,0 +1,169 @@
+version: 2
+name: Verified Main remediation disposition core
+project: ../..
+contract:
+  outcome: Preserve immutable Worker machine failure while letting Main explicitly verify the repaired current source and record a separate durable verified-repaired-delivered disposition that Board and model statistics can consume.
+  context:
+    - FL-D158 records that a failed Worker Task still looks undelivered after Main repairs and ships the source.
+    - Machine Task, Attempt, verification, and failure-category evidence must never be rewritten.
+    - Existing Integration code already copies source to a temporary verification directory and runs stored Task acceptance commands with a timeout and verifier Git environment; reuse or safely extract this behavior.
+    - The operation is explicit and bounded. It must never call a model, resume a Worker, tune policy, or retry itself.
+    - Development file and line estimates are guidance; preserve coherent production consumers and tests over compression.
+  inScope:
+    - Add strict immutable Main-remediation check and final-disposition domain types and validation.
+    - Persist every explicitly requested failed or passing check durably and restart-safely; derive final delivery only from a passing check.
+    - Accept only taskId, a bounded reason, and confirm true. Load commands only from task.spec.acceptance.commands.
+    - Reject unknown, nonterminal, or already-succeeded Tasks; reject a second passing final disposition before executing commands.
+    - Copy the current original project to an isolated verification directory, run every stored acceptance command with the configured Integration timeout, and always clean up.
+    - Add daemon, CLI, and MCP operations with truthful mutation annotations, compact output, and receipt attribution.
+    - Project compact remediation evidence into Task list/detail surfaces without raw stdout, stderr, reason, source, prompt, or Diff content.
+    - Extend Provider/model statistics with acceptedDeliveryCount, acceptedDeliveryRate, mainRepairedDeliveryCount, and remediation-check counts while keeping existing machine fields and failure distribution unchanged.
+    - Add focused tests for persistence, restart, failed-then-passed checks, duplicate pass, confirm gates, command authority, status immutability, statistics, and privacy-safe errors.
+  outOfScope:
+    - Hub UI; a dependent Task will consume the core projection.
+    - Source mutation, Worker patch application, commit, push, Provider/model calls, Worker resume, or automatic retry.
+    - Changing Worker success/failure semantics, deleting failures from statistics, or automatically changing Competition ranking.
+    - Direct-Codex calibration arithmetic, official Provider pricing arithmetic, or accepting user-supplied shell commands.
+    - Rendering raw command output in list/statistics surfaces.
+  executionSteps:
+    - Inspect main-review, Integration verification, Store migration, daemon protocol, CLI/MCP receipt, Task summary, and statistics conventions.
+    - Define hard evidence rules separately from the descriptive reason.
+    - Reuse or extract isolated-source acceptance execution without changing current Integration behavior.
+    - Persist failed and passing checks atomically; permit manual retry only after a failed check and allow exactly one passing final disposition.
+    - Wire strict daemon, CLI, and MCP adapters with confirm true and canonical operation attribution.
+    - Add compact Task projection and parallel final-delivery statistics without changing existing machine metrics.
+    - Run focused and full validation once and report uncertainty instead of entering a parameter-tuning loop.
+  deliverables:
+    - Durable Main remediation verification checks and unique verified final-delivery disposition.
+    - CLI and MCP operations with explicit confirmation and compact truthful output.
+    - Task projections and dual-outcome statistics.
+    - Regression tests proving machine evidence immutability and absence of autonomous loops.
+  modules:
+    - name: Main remediation domain
+      responsibility: Validate and execute one explicitly requested current-source acceptance check.
+      consumes:
+        - A failed or interrupted Task, stored acceptance commands, Integration timeout, bounded reason, and confirm true.
+      produces:
+        - An immutable failed or passed check and a final disposition only when all commands pass.
+      boundaries:
+        - No arbitrary commands, Task-status rewrite, Worker/model invocation, automatic retry, or second passing disposition.
+    - name: State Store
+      responsibility: Persist append-only check history and validate Task/check identity across restart.
+      consumes:
+        - A normalized remediation check.
+      produces:
+        - Ordered history and optional unique verified-repaired-delivered disposition.
+      boundaries:
+        - Corrupt rows fail closed and prior evidence is never overwritten.
+    - name: Daemon and control surfaces
+      responsibility: Route the explicit operation and return compact evidence.
+      consumes:
+        - taskId, reason, and confirm.
+      produces:
+        - Check id/status, machine status, command aggregate, final disposition, and receipt attribution.
+      boundaries:
+        - Bounded errors do not echo untrusted input; MCP marks local mutation truthfully.
+    - name: Task and statistics projections
+      responsibility: Present machine result and accepted final delivery as simultaneous facts.
+      consumes:
+        - Immutable Task history and remediation checks.
+      produces:
+        - Compact disposition plus accepted-delivery and remediation counts.
+      boundaries:
+        - Existing success/failure fields remain unchanged and failed Workers remain classified as failures.
+  callChain:
+    - Main invokes CLI or MCP remediation verify with taskId, reason, and confirm true.
+    - Daemon loads the immutable failed or interrupted Task and Integration timeout.
+    - The service copies the current original project to a temporary verification directory.
+    - It runs only stored acceptance commands and persists all command results.
+    - A passing check becomes the unique verified-repaired-delivered disposition.
+    - Task summaries and statistics read the compact dual outcome without changing machine history.
+  scenarios:
+    - name: Main repair passes
+      given: A failed Task whose original project has been repaired by Main.
+      when: Main explicitly confirms remediation verification.
+      then: All stored acceptance commands pass in an isolated copy, final delivery is recorded, and Task status stays failed.
+    - name: Repair still fails
+      given: The current source does not pass every stored acceptance command.
+      when: Main explicitly runs the check.
+      then: A failed check is stored, no delivery is recorded, and nothing reruns automatically.
+    - name: Manual retry after another fix
+      given: One failed remediation check exists and Main changes the source again.
+      when: Main explicitly confirms another check.
+      then: A second check may pass and becomes the unique final disposition while the failed check remains visible.
+    - name: Duplicate pass
+      given: A passing disposition already exists.
+      when: Main requests another check.
+      then: ForkLight rejects before command execution or state mutation.
+    - name: Invalid authority
+      given: A succeeded, running, queued, or unknown Task, missing confirm, oversized reason, or command-like extra input.
+      when: The operation is requested.
+      then: It fails closed without command execution or state changes.
+    - name: Statistics preserve both truths
+      given: A failed Worker Task has a passing Main remediation disposition.
+      when: Provider/model statistics are computed.
+      then: Machine success remains zero and failure classification remains, while accepted and Main-repaired delivery each count one.
+  risks:
+    - Running acceptance in original source could mutate it, so verification must use an isolated copy.
+    - Passing tests prove current-source acceptance for the referenced Task, not that the Worker succeeded.
+    - Changing current successRate semantics would corrupt longitudinal evidence, so only add parallel metrics.
+    - Long synchronous verification could exceed request deadlines; follow existing durable operation patterns if needed.
+    - Raw command output or reasons could leak through compact surfaces.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 3200
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: xhigh
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/state/store.ts
+    - src/daemon
+    - src/cli.ts
+    - src/cli/exchange-receipts.ts
+    - src/mcp/server.ts
+    - tests/statistics.test.ts
+    - tests/daemon.test.ts
+acceptance:
+  criteria:
+    - Original machine status, verification, failure classification, and current statistics fields remain unchanged.
+    - Only stored acceptance commands run against an isolated copy with bounded timeout and cleanup.
+    - Failed checks persist without delivery, later manual check may pass, and a second pass is rejected before execution.
+    - CLI and MCP require confirm and expose compact evidence with canonical receipt attribution.
+    - Statistics add accepted-delivery fields while retaining the failed Worker in failureDistribution.
+    - No model call, Worker resume, automatic retry, source mutation, commit, or push is introduced.
+  commands:
+    - npm run check
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

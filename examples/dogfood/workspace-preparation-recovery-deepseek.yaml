@@ -1,0 +1,157 @@
+version: 2
+name: Crash-safe workspace preparation recovery
+project: ../..
+taskClass: workspace-preparation-recovery
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: A daemon restart during workspace preparation can never let a partial baseline, Worker copy, context file, or source manifest enter Worker execution; recovery rebuilds one clean snapshot and records preparation-specific progress instead of pretending a Worker was interrupted.
+  presentation:
+    summary: ForkLight 在准备任务时即使被重启，也会丢弃半成品并重新准备，不会让 Worker 在不完整的项目副本上继续工作。
+    language: zh-CN
+  context:
+    - DaemonCoordinator.recover currently treats preparing, running, and verifying Tasks through one interruption path.
+    - A preparing Task can have a partially created workspace directory but no complete source-manifest.json and no Attempt.
+    - The non-resuming execution path currently checks only whether the workspace directory exists, so a partial copy can be mistaken for a ready workspace.
+    - FL-D187 and PROJECT_STATUS next-engineering item 13 require incomplete preparation to be discarded and rebuilt before Worker execution.
+    - Workspace preparation already emits bounded privacy-safe stages and writes source-manifest.json after both copies and context files.
+  inScope:
+    - Define one explicit readiness boundary for a prepared Task workspace. A directory alone is not readiness; the baseline, Worker copy, and valid completion manifest must agree with the preparation lifecycle.
+    - Make preparation restart-safe and idempotent by deleting only incomplete Task-owned snapshot artifacts before rebuilding. Never delete the original source project, Task history, logs, credentials, Integration backups, or unrelated Task roots.
+    - Distinguish recovery of a preparing Task from interruption of a running or verifying Worker. Do not create or consume an Attempt for preparation-only recovery.
+    - Force a stale preparing Task through clean preparation even if partial directories or a truncated manifest exist.
+    - Preserve normal fresh submission, real running/verifying recovery, plan/competition reconciliation, pending Attempt authorization, and immutable Task policy behavior.
+    - Add deterministic regression coverage for absent, partial, stale, and valid preparation artifacts plus daemon recovery semantics.
+  outOfScope:
+    - Worker model execution, Provider APIs, retry/adaptation policy, Integration and activation logic, Hub layout, model routing, pricing, task decomposition, commit, or push.
+    - Broad deletion of the Task root, logs, database, original project, other runs, or user files.
+    - Invented percent complete, fake heartbeats, automatic extra Attempts, or treating parameter changes as recovery progress.
+  executionSteps:
+    - Trace the preparation write order, Task paths, queue recovery flags, and the exact point where Worker execution starts.
+    - Introduce the smallest shared readiness/reset boundary that makes a completed preparation distinguishable from any partial directory state.
+    - Route preparing recovery through an unconditional clean reprepare path with a preparation-specific durable event and no Attempt mutation.
+    - Keep running and verifying recovery behavior unchanged and fail closed if rebuilt preparation cannot complete.
+    - Add focused tests that seed partial directories, stale files, malformed or missing manifests, and a valid prepared snapshot.
+    - Run the acceptance commands once and report any remaining live daemon restart coverage separately.
+  deliverables:
+    - Crash-safe idempotent workspace preparation.
+    - Honest preparing-specific daemon recovery semantics.
+    - A readiness guard that rejects partial or malformed snapshot artifacts before Worker execution.
+    - Regression tests covering cleanup boundaries and preserved running recovery.
+  modules:
+    - name: Workspace readiness and reset
+      responsibility: Decide whether Task-owned preparation artifacts form one complete snapshot and remove only incomplete snapshot outputs before a clean rebuild.
+      consumes:
+        - TaskPaths, baseline and workspace metadata, and source-manifest.json.
+      produces:
+        - A ready assertion or a clean Task-owned preparation surface.
+      boundaries:
+        - Never traverse outside the exact Task root or remove logs, credentials, Integration backups, the database, or source project.
+    - name: Preparation recovery scheduler
+      responsibility: Recognize stale preparing Tasks and enqueue one forced reprepare without creating an Attempt or using Worker-interruption wording.
+      consumes:
+        - Stored Task status, existing Attempts, and durable recovery events.
+      produces:
+        - One queued recovery job with explicit reprepare intent and truthful progress evidence.
+      boundaries:
+        - Running and verifying Tasks keep their existing orphan-stop, Attempt interruption, and resume semantics.
+    - name: Recovery verification
+      responsibility: Prove that every partial artifact shape is rebuilt cleanly and valid completed preparation remains usable.
+      consumes:
+        - Temporary source projects, seeded Task paths, and recovered Task/event state.
+      produces:
+        - Deterministic workspace and daemon regression evidence.
+      boundaries:
+        - No real Provider call, production daemon mutation, timing guess, or broad filesystem cleanup.
+  callChain:
+    - A Task enters preparing and begins writing its isolated baseline and Worker copy.
+    - The daemon stops before preparation completion and later recovers the stored preparing Task.
+    - Recovery classifies it as preparation-only work, records that the snapshot will be rebuilt, and enqueues forced reprepare without an Attempt.
+    - The preparation boundary removes only stale snapshot artifacts, copies source into fresh baseline and workspace trees, writes context, and commits a valid manifest last.
+    - The scheduler rechecks readiness and only then starts the first Worker Attempt.
+    - Running or verifying Tasks continue through the existing interrupted-Attempt resume path.
+  scenarios:
+    - name: Partial workspace directory
+      given: Preparation stopped after creating a workspace directory containing only some source files and no complete manifest.
+      when: The daemon recovers the preparing Task.
+      then: Stale files are removed, both copies and context are rebuilt, one valid manifest is written, and Attempt ordinal remains one when Worker execution eventually starts.
+    - name: Truncated or malformed manifest
+      given: Partial preparation left both directories and a source-manifest.json file that cannot prove completion.
+      when: Readiness is checked or recovery runs.
+      then: The snapshot is rejected and rebuilt rather than reaching executeAttempt.
+    - name: Stale file from incomplete copy
+      given: A file exists only in the partial Task workspace and not in the source project.
+      when: Clean reprepare completes.
+      then: The stale file is absent from baseline and workspace while current source files are present.
+    - name: Completed preparation
+      given: Baseline, workspace, context, and a valid manifest were fully written.
+      when: Normal queued execution checks readiness.
+      then: The snapshot is accepted without destructive rebuilding.
+    - name: Running Worker recovery
+      given: A Task has a running Attempt and Worker PID when the daemon restarts.
+      when: Recovery runs.
+      then: Existing orphan-stop, interrupted Attempt, and bounded resume semantics remain unchanged.
+    - name: Reprepare failure
+      given: The source project cannot be copied during recovery.
+      when: Forced preparation runs.
+      then: The Task fails closed with preparation-specific evidence and no Worker Attempt or automatic retry loop.
+  risks:
+    - Cleanup can become destructive if paths are not derived from the exact TaskPaths object and constrained to the Task root.
+    - Checking only manifest existence can accept a truncated file, so readiness must parse and validate the completion shape.
+    - Reusing Worker interruption events for preparation would corrupt failure statistics and confuse users.
+    - A completed preparation must not be rebuilt during ordinary execution because that would silently move its source baseline.
+  changeBudget:
+    maxFiles: 6
+    maxDiffLines: 1400
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workspace/copy.ts
+    - src/core/runner.ts
+    - src/daemon/coordinator.ts
+    - tests/workspace.test.ts
+    - tests/daemon.test.ts
+acceptance:
+  criteria:
+    - No partial or malformed preparation artifact can satisfy the readiness boundary or reach Worker execution.
+    - Preparing recovery performs one clean reprepare without creating, interrupting, or consuming an Attempt.
+    - Cleanup is confined to Task-owned snapshot artifacts and preserves logs, credentials, Integration data, Task history, the source project, and other runs.
+    - Running and verifying recovery, pending authorization, plans, competitions, and immutable policy behavior remain compatible.
+    - Recovery and preparation failures remain bounded, evidence-backed, and never trigger an automatic retry/adaptation loop.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/workspace.test.ts tests/daemon.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

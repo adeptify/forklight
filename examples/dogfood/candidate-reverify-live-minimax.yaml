@@ -1,0 +1,117 @@
+version: 2
+name: Live candidate reverify-only dogfood
+project: fixtures/candidate-reuse-runtime
+taskClass: candidate-reverify-live-dogfood
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: Create feature.txt containing exactly one line, candidate reuse works, so ForkLight can retain the useful file after a deterministic one-time acceptance failure and reverify it without launching another Worker.
+  presentation:
+    summary: 用一个极小项目验证：Worker 成果已经正确、第一次验收临时失败时，只重新验收，不再次调用模型。
+    language: zh-CN
+  context:
+    - The fixture verification script intentionally fails only on its first invocation inside one isolated workspace.
+    - Independent verification must retain the correct feature.txt after that controlled failure.
+    - Main will then authorize one verification-only pass in the same workspace; no Worker or new Attempt may be created.
+  inScope:
+    - Create feature.txt with the exact accepted line and newline.
+    - Preserve README.md and verify.mjs unchanged.
+    - Report completion without manually running the acceptance command.
+  outOfScope:
+    - Editing the verification harness, changing acceptance commands, touching original source, retries, corrections, adaptation, commit, or push.
+  executionSteps:
+    - Read README.md and verify.mjs to understand the tiny fixture.
+    - Create feature.txt with the exact required content.
+    - Report the useful candidate output without invoking verify.mjs.
+  deliverables:
+    - One feature.txt file with the exact accepted content.
+    - One retained candidate whose first independent acceptance invocation fails once.
+  modules:
+    - name: Candidate output
+      responsibility: Produce the smallest useful Worker result that can survive a failed acceptance pass.
+      consumes:
+        - The exact accepted line from the Task outcome.
+      produces:
+        - feature.txt with one line and a trailing newline.
+      boundaries:
+        - Do not edit or run the verification harness.
+    - name: Verification-only recovery
+      responsibility: Let Main rerun all original acceptance commands without a model call.
+      consumes:
+        - The retained workspace and original acceptance contract.
+      produces:
+        - A new verification result bound to the original Attempt, with zero incremental Worker Tokens.
+      boundaries:
+        - No Worker, no new Attempt, no automatic retry, and no claim about full-restart savings without a paired baseline.
+  callChain:
+    - MiniMax creates feature.txt in the isolated candidate workspace.
+    - Independent verification records the controlled first-invocation failure and retains feature.txt.
+    - Main explicitly authorizes one reverify-only pass.
+    - ForkLight reruns node verify.mjs locally in the same workspace without MiniMax.
+    - A passing Task still requires a fresh Main accept before Integration.
+  scenarios:
+    - name: Useful candidate with transient check failure
+      given: feature.txt is correct and acceptance has not run in this workspace.
+      when: Independent verification runs for the Worker Attempt.
+      then: The Task fails once while the useful candidate remains retained.
+    - name: Reverify without Worker
+      given: The failure is behavior-only and maxMainReverifications is one.
+      when: Main confirms a verification-only rerun with a reason.
+      then: Every original acceptance command reruns, the Task passes, and no Worker usage or Attempt is added.
+    - name: No loop
+      given: The first verification fails.
+      when: Main has not authorized reverify-only.
+      then: No retry, correction, or adaptation starts automatically.
+  risks:
+    - A Worker that invokes verify.mjs would consume the controlled failure, so the Task explicitly forbids it.
+    - This proves zero incremental Worker usage for reverification, not a counterfactual full-restart cost.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 4
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: low
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 600000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .verify-count
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - README.md
+    - verify.mjs
+    - feature.txt
+acceptance:
+  criteria:
+    - feature.txt contains exactly candidate reuse works followed by one newline.
+    - verify.mjs remains unchanged and the workspace-local counter is excluded from the business Diff.
+    - The first Task stops after one failed Attempt; only explicit Main reverification may rerun acceptance.
+  commands:
+    - node verify.mjs

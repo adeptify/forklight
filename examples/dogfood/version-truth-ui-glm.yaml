@@ -1,0 +1,152 @@
+version: 2
+name: Overview explains source build and running version
+project: ../..
+taskClass: hub-version-delivery-truth-ui
+contract:
+  outcome: A non-technical user can open Overview and immediately tell whether the edited source, the built ForkLight product, and the running task service are aligned, which layer is stale, what has actually happened, and the one safe next action.
+  context:
+    - Authenticated /api/status now returns versionJourney with state, nextAction, and layers.source/artifact/daemon.
+    - Source state, built product, and running daemon are three different facts. The UI must not collapse them into one green/red service badge.
+    - versionJourney states are ready, source-needs-build, artifact-needs-restart, protocol-mismatch, or unavailable. Next actions are none, build, restart, rebuild-and-restart, or inspect.
+    - Exact build ids, digests, protocol versions, and timestamps are technical evidence, not primary copy.
+    - The Overview already has a daemon control card. This feature should explain why a build or restart is needed before asking the user to click anything.
+  inScope:
+    - Add one prominent Overview version card immediately after readiness and before task metrics.
+    - Present the three layers in order as current source, built product, and running task service, with plain input/process/output meaning for each.
+    - Show one overall plain-language outcome and one next action derived only from the stable state/nextAction codes.
+    - Make source-needs-build say that edits exist but are not yet in the built product; make artifact-needs-restart say the product is built but the running service is older; make ready say all three align.
+    - For stopped or unavailable daemon/source evidence, stay honest and suggest inspect or restart without claiming a mismatch was proven.
+    - Keep exact digests, build ids, protocol versions, and timestamps inside one closed technical disclosure.
+    - Reuse the existing authenticated daemon restart action only when nextAction is restart; do not add automatic build/restart or a build mutation endpoint.
+    - Add bilingual, state-mapping, technical-disclosure, ordering, and narrow-layout tests.
+  outOfScope:
+    - Do not change the backend response, source digest, build process, daemon lifecycle rules, task pages, settings, or delivery profiles.
+    - Do not run npm build, restart automatically, infer equality from timestamps, expose paths, or add dependencies.
+    - Do not commit or push.
+  executionSteps:
+    - Trace S.hub status storage, Overview order, daemon controls, localized copy, and responsive patterns.
+    - Add a pure presentation adapter for versionJourney state and nextAction codes.
+    - Render three connected layer rows plus one outcome and next action; put exact evidence in a closed disclosure.
+    - Wire an explicit restart button only for the existing restart action and confirmation path.
+    - Test every stable state and both languages, then run the stored checks once.
+  deliverables:
+    - Overview three-layer version journey card.
+    - Plain state and next-action mapping with no raw protocol language in the primary view.
+    - Closed exact-evidence disclosure and safe optional restart action.
+    - Bilingual responsive regression evidence.
+  modules:
+    - name: Version journey adapter
+      responsibility: Convert stable backend state and layer availability into bounded presentation codes and one safe action.
+      consumes:
+        - S.hub.versionJourney.
+      produces:
+        - Three ordered layer states, one outcome key, one next-action key, and restart eligibility.
+      boundaries:
+        - Pure; no DOM, mutation, digest comparison, timestamp inference, or invented readiness.
+    - name: Overview version card
+      responsibility: Explain what changed, what was built, what is running, and what the user should do next.
+      consumes:
+        - Version journey adapter output and localized copy.
+      produces:
+        - Readable three-step card, status, next action, and optional restart button.
+      boundaries:
+        - Technical identity evidence stays in a closed disclosure.
+    - name: Existing restart action
+      responsibility: Reuse the current confirmed daemon restart route only when the backend says restart is the next action.
+      consumes:
+        - Explicit user click and confirmation.
+      produces:
+        - Existing daemon restart request and refreshed status.
+      boundaries:
+        - No automatic action, no build endpoint, and no mutation for ready/unavailable/source-needs-build.
+  callChain:
+    - Hub refresh stores /api/status.versionJourney.
+    - The pure adapter maps stable state codes without recomputing identity.
+    - Overview renders source, built product, and running service in that order.
+    - The user reads the overall result and one next action.
+    - Only an explicit restart click can reuse the existing confirmed lifecycle action.
+  scenarios:
+    - name: Source needs build
+      given: state is source-needs-build and nextAction is build.
+      when: Overview renders.
+      then: It says the source contains newer edits, the built product does not include them yet, and the next step is to build; no restart button is offered.
+    - name: Artifact needs restart
+      given: state is artifact-needs-restart and nextAction is restart.
+      when: Overview renders.
+      then: It says the built product is ready but the running service is older, and offers the existing confirmed restart action.
+    - name: Fully ready
+      given: state is ready and nextAction is none with all layers available.
+      when: Overview renders.
+      then: It says all three layers align and no action is needed.
+    - name: Missing evidence
+      given: state is unavailable and one or more layers are unavailable.
+      when: Overview renders.
+      then: It names which layer cannot be confirmed and never displays a false green aligned state.
+  risks:
+    - Recomputing equality in JavaScript would diverge from backend truth, so the UI must map codes only.
+    - A restart button beside source-needs-build could run the wrong action, so button eligibility must require nextAction restart exactly.
+    - Showing hashes prominently would recreate the original comprehension problem, so exact evidence stays collapsed.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 1000
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+delivery:
+  buildCommands:
+    - npm run build
+  activationCommands: []
+  activationCheckCommands: []
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Overview explains current source, built product, and running task service as three ordered facts.
+    - Every backend state maps to plain bilingual outcome and next action without recomputing identity.
+    - Exact hashes ids timestamps and protocol evidence remain inside a closed disclosure.
+    - Restart is offered only for nextAction restart and still requires explicit confirmation.
+    - The card appears before metrics and remains readable on narrow screens.
+  commands:
+    - node --check src/hub/public/app.js
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - npm run build
+    - git diff --check

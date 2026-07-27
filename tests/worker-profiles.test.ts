@@ -11,6 +11,8 @@ import {
   resolveWorkerSelection,
   setDefaultWorkerProfile,
   upsertWorkerProfile,
+  validateWorkerProfile,
+  type WorkerProfile,
 } from "../src/core/worker-profiles.js";
 import {
   removeModelConfig as removeMC,
@@ -305,6 +307,341 @@ test("Hub Models + Workers chain: model catalog, worker with limits, setDefault"
     await server.stop();
     store.close();
   }
+});
+
+// --- pricingRoute: Worker profile, resolution, and precedence ---
+
+test("Worker profile with pricingRoute threads into resolved selection", () => {
+  const settings = cloneDefaults();
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "minimax-cn",
+    label: "MiniMax CN",
+    runtime: "claude-code",
+    provider: "minimax",
+    model: "MiniMax-M3",
+    endpoint: "https://api.minimaxi.com/anthropic",
+    pricingRoute: "minimax-china-direct-payg",
+  });
+  const resolved = resolveWorkerSelection({ workerProfileId: "minimax-cn" }, {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles: profiles,
+  });
+  assert.equal(resolved.pricingRoute, "minimax-china-direct-payg");
+});
+
+test("explicit pricingRoute override wins over Worker profile", () => {
+  const settings = cloneDefaults();
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "intl",
+    label: "MiniMax Intl",
+    runtime: "claude-code",
+    provider: "minimax",
+    model: "MiniMax-M3",
+    endpoint: "https://api.minimax.io/anthropic",
+    pricingRoute: "minimax-international-direct-payg",
+  });
+  const resolved = resolveWorkerSelection({
+    workerProfileId: "intl",
+    pricingRoute: "minimax-china-direct-payg",
+  }, {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles: profiles,
+  });
+  assert.equal(resolved.pricingRoute, "minimax-china-direct-payg");
+});
+
+test("missing pricingRoute stays undefined through resolution", () => {
+  const settings = cloneDefaults();
+  const resolved = resolveWorkerSelection({}, {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles: settings.workerProfiles,
+    modelCatalog: settings.modelCatalog,
+  });
+  assert.equal(resolved.pricingRoute, undefined);
+});
+
+test("explicit Provider or endpoint override does not inherit a stale Worker pricingRoute", () => {
+  const settings = cloneDefaults();
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "mm-cn-stale-route",
+    label: "MM CN",
+    runtime: "claude-code",
+    provider: "minimax",
+    model: "MiniMax-M3",
+    endpoint: "https://api.minimaxi.com/anthropic",
+    pricingRoute: "minimax-china-direct-payg",
+  });
+  const common = {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles: profiles,
+  };
+  assert.equal(resolveWorkerSelection({
+    workerProfileId: "mm-cn-stale-route",
+    provider: "deepseek",
+    model: "deepseek-v4-pro",
+  }, common).pricingRoute, undefined);
+  assert.equal(resolveWorkerSelection({
+    workerProfileId: "mm-cn-stale-route",
+    endpoint: "https://api.minimax.io/anthropic",
+  }, common).pricingRoute, undefined);
+});
+
+test("explicit pricingRoute override is syntactically validated", () => {
+  const settings = cloneDefaults();
+  assert.throws(() => resolveWorkerSelection({ pricingRoute: " padded route " }, {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles: settings.workerProfiles,
+    modelCatalog: settings.modelCatalog,
+  }), /bounded non-empty identifier/);
+});
+
+test("pricingRoute is not forwarded to worker environment", async () => {
+  const { resolveProvider, providerEnvironment } = await import("../src/core/providers.js");
+  const config = resolveProvider("minimax", {
+    endpoint: "https://api.minimax.io/anthropic",
+    model: "MiniMax-M3",
+    keychainService: "forklight.minimax.api-key",
+  });
+  const env = providerEnvironment(config, "test-api-key");
+  // pricingRoute must not appear in the environment
+  for (const key of Object.keys(env)) {
+    assert.ok(!/pricing/i.test(key), `pricingRoute leaked into env key: ${key}`);
+    assert.ok(!/route/i.test(key), `route leaked into env key: ${key}`);
+  }
+});
+
+test("parseTaskSpec snapshots Worker pricingRoute into Task ProviderSpec", async () => {
+  const settings = cloneDefaults();
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "mm-cn",
+    label: "MM CN",
+    runtime: "claude-code",
+    provider: "minimax",
+    model: "MiniMax-M3",
+    endpoint: "https://api.minimaxi.com/anthropic",
+    pricingRoute: "minimax-china-direct-payg",
+  });
+  const policy = {
+    contractQuality: settings.contractQuality,
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    completionPolicy: settings.completionPolicy,
+    workerProfiles: profiles,
+  };
+  const raw = {
+    version: 2,
+    name: "pricing-route-inherit",
+    project: process.cwd(),
+    workerProfileId: "mm-cn",
+    contract: {
+      outcome: "A reasonable outcome description for testing pricing route inheritance",
+      context: ["c"],
+      inScope: ["i"],
+      outOfScope: ["o"],
+      executionSteps: ["s"],
+      deliverables: ["d"],
+      modules: [{
+        name: "m",
+        responsibility: "long enough responsibility here for this test",
+        consumes: ["c"],
+        produces: ["p"],
+        boundaries: ["b"],
+      }],
+      callChain: ["a", "b"],
+      scenarios: [
+        { name: "normal", given: "g", when: "w", then: "t" },
+        { name: "edge", given: "g", when: "w", then: "t" },
+      ],
+      risks: ["r"],
+      changeBudget: { maxFiles: 4, maxDiffLines: 300 },
+    },
+    worker: { focusPaths: ["src"], allowedCommands: [], allowEdits: true },
+    acceptance: { criteria: ["c"], commands: ["true"] },
+  };
+  const spec = parseTaskSpec(raw, process.cwd(), policy);
+  assert.equal(spec.provider.pricingRoute, "minimax-china-direct-payg");
+
+  const invalid = {
+    ...raw,
+    provider: {
+      name: "minimax",
+      model: "MiniMax-M3",
+      endpoint: "https://api.minimaxi.com/anthropic",
+      pricingRoute: " padded route ",
+      keychainService: "forklight.minimax.api-key",
+    },
+  };
+  assert.throws(() => parseTaskSpec(invalid, process.cwd(), policy),
+    /task\.provider\.pricingRoute must be a bounded non-empty identifier/);
+
+  const changedIdentity = {
+    ...raw,
+    provider: {
+      name: "deepseek",
+      model: "deepseek-v4-pro",
+      endpoint: "https://api.deepseek.com/anthropic",
+      keychainService: "forklight.deepseek.api-key",
+    },
+  };
+  const changed = parseTaskSpec(changedIdentity, process.cwd(), policy);
+  assert.equal(changed.provider.pricingRoute, undefined);
+});
+
+test("parseTaskSpec explicit pricingRoute overrides Worker pricingRoute", async () => {
+  const settings = cloneDefaults();
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "mm-intl",
+    label: "MM Intl",
+    runtime: "claude-code",
+    provider: "minimax",
+    model: "MiniMax-M3",
+    endpoint: "https://api.minimax.io/anthropic",
+    pricingRoute: "minimax-international-direct-payg",
+  });
+  const policy = {
+    contractQuality: settings.contractQuality,
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    completionPolicy: settings.completionPolicy,
+    workerProfiles: profiles,
+  };
+  const raw = {
+    version: 2,
+    name: "explicit-override",
+    project: process.cwd(),
+    workerProfileId: "mm-intl",
+    provider: {
+      name: "minimax",
+      model: "MiniMax-M3",
+      endpoint: "https://api.minimax.io/anthropic",
+      pricingRoute: "minimax-china-direct-payg",
+      keychainService: "forklight.minimax.api-key",
+    },
+    contract: {
+      outcome: "A reasonable outcome description for testing explicit pricing route override",
+      context: ["c"],
+      inScope: ["i"],
+      outOfScope: ["o"],
+      executionSteps: ["s"],
+      deliverables: ["d"],
+      modules: [{
+        name: "m",
+        responsibility: "long enough responsibility here for this test",
+        consumes: ["c"],
+        produces: ["p"],
+        boundaries: ["b"],
+      }],
+      callChain: ["a", "b"],
+      scenarios: [
+        { name: "normal", given: "g", when: "w", then: "t" },
+        { name: "edge", given: "g", when: "w", then: "t" },
+      ],
+      risks: ["r"],
+      changeBudget: { maxFiles: 4, maxDiffLines: 300 },
+    },
+    worker: { focusPaths: ["src"], allowedCommands: [], allowEdits: true },
+    acceptance: { criteria: ["c"], commands: ["true"] },
+  };
+  const spec = parseTaskSpec(raw, process.cwd(), policy);
+  assert.equal(spec.provider.pricingRoute, "minimax-china-direct-payg");
+});
+
+test("validateWorkerProfile rejects invalid pricingRoute", () => {
+  assert.throws(() => validateWorkerProfile({
+    id: "bad-route",
+    label: "Bad route",
+    runtime: "claude-code",
+    provider: "minimax",
+    model: "MiniMax-M3",
+    pricingRoute: "",
+  } as unknown as WorkerProfile, "workerProfile", cloneDefaults().modelCatalog),
+    /pricingRoute must be a bounded non-empty identifier/);
+});
+
+test("MCP inlineTask propagates pricingRoute from Worker profile", () => {
+  const settings = cloneDefaults();
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "mm-cn-worker",
+    label: "MM CN",
+    runtime: "claude-code",
+    provider: "minimax",
+    model: "MiniMax-M3",
+    endpoint: "https://api.minimaxi.com/anthropic",
+    pricingRoute: "minimax-china-direct-payg",
+  });
+  const settingsWith = { ...settings, workerProfiles: profiles };
+  const doc = inlineTask({
+    name: "t",
+    project: "/tmp/proj",
+    contract: {
+      outcome: "A proper outcome description with enough length here",
+      modules: [{
+        name: "core",
+        responsibility: "Owns the main path of the feature",
+        consumes: ["input"],
+        produces: ["output"],
+        boundaries: ["no network"],
+      }],
+      callChain: ["start", "finish"],
+      scenarios: [
+        { name: "happy", given: "ok", when: "run", then: "pass" },
+        { name: "fail", given: "bad", when: "run", then: "error" },
+      ],
+      risks: ["scope creep"],
+      changeBudget: { maxFiles: 4, maxDiffLines: 80 },
+    } as never,
+    focusPaths: ["src"],
+    acceptance: { criteria: ["ok"], commands: ["true"] },
+    workerProfileId: "mm-cn-worker",
+    allowEdits: true,
+  }, settingsWith);
+  assert.equal((doc.provider as Record<string, unknown>).pricingRoute, "minimax-china-direct-payg");
+});
+
+test("MCP inlineTask explicit pricingRoute overrides Worker pricingRoute", () => {
+  const settings = cloneDefaults();
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "mm-intl-worker",
+    label: "MM Intl",
+    runtime: "claude-code",
+    provider: "minimax",
+    model: "MiniMax-M3",
+    endpoint: "https://api.minimax.io/anthropic",
+    pricingRoute: "minimax-international-direct-payg",
+  });
+  const settingsWith = { ...settings, workerProfiles: profiles };
+  const doc = inlineTask({
+    name: "t",
+    project: "/tmp/proj",
+    contract: {
+      outcome: "A proper outcome description with enough length here",
+      modules: [{
+        name: "core",
+        responsibility: "Owns the main path of the feature",
+        consumes: ["input"],
+        produces: ["output"],
+        boundaries: ["no network"],
+      }],
+      callChain: ["start", "finish"],
+      scenarios: [
+        { name: "happy", given: "ok", when: "run", then: "pass" },
+        { name: "fail", given: "bad", when: "run", then: "error" },
+      ],
+      risks: ["scope creep"],
+      changeBudget: { maxFiles: 4, maxDiffLines: 80 },
+    } as never,
+    focusPaths: ["src"],
+    acceptance: { criteria: ["ok"], commands: ["true"] },
+    workerProfileId: "mm-intl-worker",
+    pricingRoute: "minimax-china-direct-payg",
+    allowEdits: true,
+  }, settingsWith);
+  assert.equal((doc.provider as Record<string, unknown>).pricingRoute, "minimax-china-direct-payg");
 });
 
 test("SettingsService persists model catalog and worker profiles", async () => {

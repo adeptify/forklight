@@ -1,0 +1,162 @@
+version: 2
+name: Hub guided direct Main Token savings journey
+project: ../..
+taskClass: hub-calibration-ui
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: Give a non-technical Hub user a complete visual path from “savings unavailable” to a reviewed direct-run baseline and then a truthful Main Token savings estimate, without asking them to understand calibration protocol objects.
+  context:
+    - ForkLight already separates Worker activity, Main exchange, official Provider cost, and direct Main Token savings. Savings correctly remain unavailable without a compatible published baseline.
+    - A parallel backend task owns the HTTP API. Implement against this fixed contract rather than changing server or core logic.
+    - "GET /api/ops/tasks/:id/calibration returns: state identity-missing or ready; optional identity; samples capped at 50 with sampleId, capturedAt, grossTokens, reviewState; optional publicationPreview with ready, reason, pendingCount, acceptedCount, rejectedCount, nextVersion, acceptedSampleIds."
+    - POST /capture accepts runRef plus the exact turn.completed object with input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, and reasoning_output_tokens.
+    - POST /review accepts sampleId, accepted/rejected decision, optional bounded rejectionReason, and confirm true. POST /publish accepts confirm true and creates a conservative low-confidence publication.
+    - The UI objective is to explain what happened, what input is needed, what ForkLight will do, what output will appear, the current state, and the next action. Protocol vocabulary stays secondary.
+  inScope:
+    - Add a Token savings setup card to Task Detail after the readable journey and before manual operations or technical details.
+    - Show the card when savings are unavailable or calibration samples need action; when savings are available, show a compact completed state and link the user to the existing economics evidence in the same detail.
+    - "Explain four steps in plain English and Chinese: run the same task directly with the named Main profile, copy only the five terminal Token counts, review whether the run was truly equivalent and good enough, then publish accepted evidence so ForkLight can calculate a range."
+    - If Task identity is missing, explain that this historical Task cannot be calibrated and that future Task contracts need a task class plus Main profile. Do not offer fake fields to retrofit identity.
+    - Render five numeric fields with human labels and short examples. Enforce non-negative safe integers, cached subsets not exceeding input, and reasoning not exceeding output before calling the API.
+    - Generate a bounded opaque runRef in the browser for capture; do not ask the user to invent an internal id. Require one explicit confirmation before sending count-only evidence.
+    - "Render sample rows as plain states: waiting for Main review, accepted, or rejected. Show captured time and gross Token count, not raw canonical objects."
+    - For a pending sample, offer Accept only after a clear equivalence checklist and confirmation. Offer Reject with one of the existing four bounded reasons translated into plain language.
+    - Show publication readiness as “not ready and why” or “ready with N accepted samples.” Publishing requires confirmation and clearly says the first Hub publication is low confidence, versioned, and reversible only by adding a later evidence version, not editing history.
+    - After capture, review, or publish, reload the calibration state and Task detail/economics once. Never loop, retry automatically, run Codex, or launch a Provider request.
+    - Keep the original usage counts and stable ids inside a closed technical disclosure. Primary copy must not say that Worker Tokens or boundary work are savings.
+    - Add behavior-focused asset tests for the full state machine, exact endpoint paths and bodies, validation, confirmations, bilingual keys, no automatic execution, and no raw JSON requirement.
+  outOfScope:
+    - Do not edit server, core, daemon, CLI, MCP, economics math, model routing, Provider pricing, Task schema, or persistence.
+    - Do not launch an equivalent direct run, read Codex history, capture prompts or responses, auto-accept evidence, auto-publish, infer Task identity, convert currencies, or change the general visual theme.
+    - Do not commit, push, retry a Worker, or adapt policy from this Task result.
+  executionSteps:
+    - Inspect current Task Detail, economics renderer, form helpers, localization, and confirmation patterns.
+    - Define one UI state adapter for identity-missing, no samples, pending review, ready to publish, published/savings available, and API failure.
+    - Build the plain-language four-step card and count-only capture form against the fixed backend contract.
+    - Add review and publish actions with confirmation and one bounded refresh after success.
+    - Add paired English/Chinese copy and minimal responsive styles; keep long evidence collapsed.
+    - Add focused tests and run the stored acceptance commands once.
+  deliverables:
+    - Bilingual Token savings setup card in Task Detail.
+    - Count-only direct-run evidence form with understandable validation.
+    - Review inbox and conservative publication controls.
+    - Honest complete, unavailable, and error states with a clear next action.
+    - Focused UI regression coverage.
+  modules:
+    - name: Calibration journey UI
+      responsibility: Explain the direct-run comparison as a four-step user journey instead of a protocol workflow.
+      consumes:
+        - Safe calibration state and existing Task economics state.
+      produces:
+        - Current status, required input, process explanation, result, and next action.
+      boundaries:
+        - No identity inference, savings arithmetic, Provider execution, raw objects, or automatic mutation.
+    - name: Count-only capture form
+      responsibility: Collect and locally validate only the five canonical terminal Token counters.
+      consumes:
+        - User-entered non-negative counts from an equivalent direct run.
+      produces:
+        - One exact turn.completed payload plus a generated opaque run reference after confirmation.
+      boundaries:
+        - No prompts, responses, files, logs, paths, credentials, or browser history.
+    - name: Review and publication actions
+      responsibility: Let Main explicitly accept/reject equivalence evidence and publish accepted samples.
+      consumes:
+        - Safe sample rows, bounded rejection reason, readiness, and confirmations.
+      produces:
+        - One review or publication request followed by one state refresh.
+      boundaries:
+        - No automatic acceptance, publication, retries, confidence inflation, or history mutation.
+  callChain:
+    - User opens Task Detail and sees whether direct Main Token savings is measurable.
+    - Hub reads the Task calibration state from the backend.
+    - If eligible, the user runs an equivalent task directly and enters only five terminal Token counts.
+    - Hub validates and captures one pending sample after confirmation.
+    - Main reviews equivalence and quality, then explicitly accepts or rejects the sample.
+    - When ready, Main explicitly publishes low-confidence versioned evidence.
+    - Hub refreshes once and the unchanged economics renderer displays the calculated savings range when compatible.
+  scenarios:
+    - name: Historical Task cannot calibrate
+      given: The backend returns identity-missing.
+      when: Task Detail renders.
+      then: The user sees why this Task cannot produce savings and what future contracts need, without any fake retrofit controls.
+    - name: First equivalent run
+      given: An eligible Task has no samples.
+      when: The user enters valid counts and confirms capture.
+      then: One pending sample appears and the UI says Main review is required before savings can change.
+    - name: Invalid counts
+      given: A value is negative, fractional, unsafe, cached components exceed input, or reasoning exceeds output.
+      when: The user tries to capture.
+      then: The UI explains the specific count relationship and sends no request.
+    - name: Evidence is not equivalent
+      given: A pending sample used a different task or had insufficient quality.
+      when: Main selects a bounded reject reason and confirms.
+      then: The sample becomes rejected and cannot silently enter publication.
+    - name: Ready to publish
+      given: At least one accepted new sample makes preview ready.
+      when: Main confirms publication.
+      then: The UI states that low-confidence versioned evidence was published and refreshes the economics result once.
+    - name: Narrow viewport
+      given: Task Detail is about 390 CSS pixels wide.
+      when: The journey, inputs, samples, and actions render.
+      then: They remain one readable column with no horizontal overflow.
+  risks:
+    - Users may confuse Worker usage with savings, so every state repeats that savings comes only from an equivalent direct-run comparison.
+    - Five count fields can still feel technical, so lead with the goal and step-by-step source of each value, and keep canonical names secondary.
+    - A candidate may invent backend fields, so tests must bind to the fixed response and endpoint contract above.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 1800
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: xhigh
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Task Detail presents the calibration workflow as an understandable input, process, state, output, reason, and next action in both languages.
+    - Only five non-negative safe Token counters are collected; relationship validation happens before any request and raw prompts, outputs, logs, files, paths, credentials, or JSON are never requested.
+    - Samples stay pending until explicit Main review, publication requires explicit confirmation, and no automatic direct run, Provider call, Task, competition, retry, adaptation, commit, or push occurs.
+    - Identity-missing, no-sample, pending, rejected, ready, published, unavailable, and API-error states are honest and bounded.
+    - Worker volume and boundary work are never called savings; the existing economics renderer remains the only savings calculation view.
+    - Existing Task journey, manual controls, technical details, economics, localization, and confirmation handlers remain functional.
+  commands:
+    - node --check src/hub/public/app.js
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

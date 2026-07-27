@@ -67,6 +67,14 @@ const MM_CN_PROVIDER: ProviderSpec = {
   keychainService: "forklight.minimax.api-key",
 };
 
+const VOLCENGINE_PROVIDER: ProviderSpec = {
+  name: "volcengine",
+  model: "glm-5.2[1M]",
+  endpoint: "https://ark.cn-beijing.volces.com/api/coding",
+  keychainService: "forklight.volcengine.api-key",
+  pricingRoute: "volcengine-coding-plan-subscription",
+};
+
 // --- Exact DeepSeek dogfood cost -------------------------------------------
 
 test("DeepSeek Pro live dogfood usage quotes exact USD 0.069825939", () => {
@@ -79,7 +87,7 @@ test("DeepSeek Pro live dogfood usage quotes exact USD 0.069825939", () => {
   assert.equal(r.result.providerBillClaim, false);
   assert.equal(r.result.usageSource, "terminal-result");
   assert.equal(r.result.pricing.source.url, "https://api-docs.deepseek.com/quick_start/pricing/");
-  assert.equal(r.result.pricing.source.checkedAt, "2026-07-23");
+  assert.equal(r.result.pricing.source.checkedAt, "2026-07-26");
   assert.equal(r.result.appliedTier.applied[0]!.minimumInputTokensExclusive, null);
   assert.equal(r.result.appliedTier.totalPromptInput, 51_105 + 715_008);
   // Verify component totals sum to the quoted total
@@ -117,6 +125,15 @@ test("null usage returns usage-missing", () => {
     null as unknown as AttemptTokenUsage,
   ));
   assert.equal(r.reason, "usage-missing");
+});
+
+test("Volcengine Coding Plan keeps tokens but never invents a per-request cost", () => {
+  const result = asIdentityUnavail(resolveAttemptOfficialCost(
+    VOLCENGINE_PROVIDER,
+    usage(1234, 567, 890, 0),
+  ));
+  assert.equal(result.reason, "subscription-plan-no-per-request-price");
+  assertDeepFrozen(result);
 });
 
 // --- Missing service tier --------------------------------------------------
@@ -423,4 +440,66 @@ test("MiniMax China direct-PAYG route with rows quotes in CNY", () => {
   assert.equal(r.result.pricing.currency, "CNY");
   assert.equal(r.result.pricing.origin, "https://api.minimaxi.com");
   assert.equal(r.result.pricing.route, "minimax-china-direct-payg");
+});
+
+// --- Bounded estimate evidence ------------------------------------------------
+
+test("MiniMax without rows: unavailable result carries bounded estimate in per-request-usage-required", () => {
+  const provider: ProviderSpec = {
+    ...MM_INTL_PROVIDER,
+    pricingRoute: "minimax-international-direct-payg",
+  };
+  const r = asCalcUnavail(
+    resolveAttemptOfficialCost(provider, usage(500_000, 100_000, 50_000, 0)),
+    "per-request-usage-required",
+  );
+  assert.ok(r.result.boundedEstimate !== undefined, "bounded estimate should be present");
+  const be = r.result.boundedEstimate!;
+  assert.equal(be.currency, "USD");
+  assert.equal(be.method, "aggregate-tier-bounds");
+  assert.equal(be.providerBillClaim, false);
+  assert.ok(be.min <= be.max, "min <= max");
+  assert.ok(be.min > 0, "min should be positive");
+});
+
+test("MiniMax with positive cache-creation: calc unavailable without bounded estimate", () => {
+  const provider: ProviderSpec = {
+    ...MM_INTL_PROVIDER,
+    pricingRoute: "minimax-international-direct-payg",
+  };
+  const r = asCalcUnavail(
+    resolveAttemptOfficialCost(provider, usage(100, 50, 20, 30)),
+    "per-request-usage-required",
+  );
+  // cache-creation is positive but unpublished → no bounded estimate
+  assert.equal(r.result.boundedEstimate, undefined);
+});
+
+test("DeepSeek single-tier: no bounded estimate on unavailable result", () => {
+  const r = asQuoted(resolveAttemptOfficialCost(DS_PRO_PROVIDER, usage(1, 0, 0, 0)));
+  assert.equal("boundedEstimate" in r.result, false);
+});
+
+test("MiniMax with rows: quoted result carries no bounded estimate", () => {
+  const provider: ProviderSpec = {
+    ...MM_INTL_PROVIDER,
+    pricingRoute: "minimax-international-direct-payg",
+  };
+  const r = asQuoted(resolveAttemptOfficialCost(provider, usage(512_000 + 512_001, 0, 0, 0),
+    [row(512_000, 0, 0, 0), row(512_001, 0, 0, 0)]));
+  assert.equal(r.quoted, true);
+});
+
+test("bounded estimate is deeply frozen in calc-unavailable result", () => {
+  const provider: ProviderSpec = {
+    ...MM_INTL_PROVIDER,
+    pricingRoute: "minimax-international-direct-payg",
+  };
+  const r = asCalcUnavail(
+    resolveAttemptOfficialCost(provider, usage(100_000, 50_000, 0, 0)),
+    "per-request-usage-required",
+  );
+  assert.ok(r.result.boundedEstimate !== undefined);
+  assertDeepFrozen(r.result.boundedEstimate!);
+  assert.throws(() => { (r.result.boundedEstimate as { min: number }).min = 0; }, TypeError);
 });

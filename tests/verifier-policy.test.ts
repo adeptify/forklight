@@ -9,6 +9,10 @@ import { loadTaskSpec } from "../src/core/task.js";
 import type { TaskRecord } from "../src/core/types.js";
 import { StateStore } from "../src/state/store.js";
 import { prepareWorkspace } from "../src/workspace/copy.js";
+import {
+  defaultAdvancedPolicyFields,
+  enforcementCapabilityForRuntime,
+} from "../src/core/advanced-policy.js";
 
 // --- Verifier completion-policy tests ---
 //
@@ -270,6 +274,45 @@ test("changeBudgetMode hard still fails over-budget Task", async () => {
     cleanup();
   }
 });
+
+for (const mode of ["hard", "warn"] as const) {
+  test(`Worker file limit ${mode} mode has the configured verification effect`, async () => {
+    const { store, task, cleanup } = await fixture("off", true, true);
+    try {
+      const values = {
+        ...defaultAdvancedPolicyFields(),
+        fileLimit: 0,
+        fileLimitMode: mode,
+        completionMode: "off" as const,
+      };
+      task.effectivePolicy = {
+        profileId: "test-worker",
+        values,
+        provenance: Object.fromEntries(
+          Object.keys(values).map((field) => [field, "worker"]),
+        ) as Record<keyof typeof values, "worker">,
+        enforcementCapability: enforcementCapabilityForRuntime("claude-code"),
+      };
+      const attemptId = `attempt-file-${mode}`;
+      store.createAttempt({
+        id: attemptId, taskId: task.id, ordinal: 1, status: "running",
+        sessionId: task.sessionId, rawLogPath: "/tmp/log", startedAt: new Date().toISOString(),
+      });
+      const { verifyTask } = await import("../src/core/verifier.js");
+      const result = await verifyTask(store, task, attemptId);
+      assert.equal(result.policyPassed, mode === "warn");
+      assert.equal(result.passed, mode === "warn");
+      const event = store.listEvents(task.id).find((candidate) => candidate.type === "policy.size.exceeded");
+      assert.ok(event);
+      assert.equal(
+        (event.payload as { enforcementPhase: string }).enforcementPhase,
+        "post-observation",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+}
 
 test("unrelated source drift does not fail verification when affected paths are intact", async () => {
   const { store, task, cleanup } = await fixture("hard", true, true);

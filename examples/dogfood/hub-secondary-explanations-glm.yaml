@@ -1,0 +1,151 @@
+version: 2
+name: Hub secondary workflows in plain language
+project: ../..
+contract:
+  outcome: Finish the Hub's explanation-first experience across secondary workflows so a non-technical user understands plan progress, competition comparison, supervision, integration, and advanced policy choices before seeing internal labels or controls.
+  context:
+    - Main pages and the primary Task journey now explain assignment, execution, verification, delivery, cause, and next action in bilingual plain language.
+    - Real browser dogfood still finds raw English and internal vocabulary in plan and competition detail drawers, older decision panels, loading/error states, and advanced policy mode options.
+    - The goal is not to delete evidence or simplify away safety. It is to present user meaning first and keep raw ids, protocol terms, formulas, and audit values inside closed technical details.
+    - A parallel DeepSeek Task owns model-routing core files. This Task must edit only Hub public assets and their focused UI tests.
+  inScope:
+    - Audit src/hub/public/app.js for prominent hard-coded English and unexplained internal labels in Plans, Competitions, plan detail, competition detail, task supervision, Main review, Integration, adaptation, loading/error states, and remaining visible summary tables.
+    - Add paired English and Chinese copy for every changed visible label. Keep Provider/model/runtime ids only where the user is choosing or comparing them; move unrelated operation ids and internal state codes into closed technical details.
+    - "Explain each secondary workflow using the same questions as Task Detail: what this is, what is happening now, what evidence is available, and what the user can do next."
+    - Localize plan lanes and progress, competition candidate/finished/recommendation wording, loading and bounded failure summaries, review and integration state labels, and user-visible status values.
+    - Keep raw server errors out of prominent UI. Show a safe localized summary and retain bounded diagnostic text only inside technical details when the existing response contains it.
+    - Render policy values hard, warn, score, and off with localized display labels plus one short explanation of their effect. Preserve the canonical option values sent to the backend.
+    - Explain that hard blocks, warn reports but permits, score records evidence, and off ignores only that flexible Quality check; none disables Safety, independent verification, Main review, or Integration confirmation.
+    - Place advanced controls after a concise explanation and keep destructive or billable confirmation gates unchanged.
+    - Preserve navigation, API shapes, data calculations, Task states, form values, event handlers, confirmation behavior, and technical audit access.
+    - Add focused tests that assert the renderer consumes localization keys and canonical values remain unchanged. Avoid large source-order assertions and do not mistake string presence for rendered behavior.
+  outOfScope:
+    - Model-routing core, statistics, daemon, MCP, CLI, settings schemas, Provider execution, pricing formulas, task state machine, or Integration implementation.
+    - A new visual theme, broad layout redesign, deleting technical evidence, changing canonical hard/warn/score/off values, or weakening confirmation gates.
+    - Commit, push, retry, adaptation, Provider probe, or automatic user action.
+  executionSteps:
+    - Inspect every Hub render function and identify raw user-visible labels outside closed technical details.
+    - Group copy by workflow question and add exact paired i18n keys before changing renderers.
+    - Replace prominent raw labels with localized explanatory summaries while preserving canonical data and control values.
+    - Move remaining internal ids or diagnostic-only blocks into closed technical disclosures where appropriate.
+    - Add or refine CSS only when needed to keep explanations readable and controls visually secondary.
+    - Add focused regression tests and run the acceptance commands once without repeatedly loosening assertions.
+  deliverables:
+    - Explanation-first bilingual Plan and Competition pages and detail drawers.
+    - Readable Task supervision, review, Integration, and adaptation control descriptions.
+    - Localized flexible-policy display labels that preserve canonical backend values.
+    - Safe loading/error summaries and closed technical diagnostics.
+    - Focused UI regression coverage.
+  modules:
+    - name: Bilingual secondary-workflow vocabulary
+      responsibility: Express plans, comparisons, review, delivery, and flexible policy effects in natural English and Chinese.
+      consumes:
+        - Existing Hub state meanings and safety boundaries.
+      produces:
+        - Paired labels, explanations, empty states, progress summaries, and next-action copy.
+      boundaries:
+        - No invented result, hidden failure, formula change, or removal of technical evidence.
+    - name: Secondary workflow renderers
+      responsibility: Present meaning and process before controls or audit data.
+      consumes:
+        - Existing plan, competition, task decision, Integration, and adaptation responses.
+      produces:
+        - Readable state, evidence, cause, next action, and localized controls.
+      boundaries:
+        - Existing handlers, canonical values, requests, and confirmation gates remain unchanged.
+    - name: Focused presentation
+      responsibility: Keep explanations visually primary and technical details secondary.
+      consumes:
+        - Existing Hub design tokens and responsive layout.
+      produces:
+        - Small scoped styles only when current classes cannot express the hierarchy.
+      boundaries:
+        - No theme replacement or broad page redesign.
+  callChain:
+    - Hub receives the existing safe API response.
+    - Renderer identifies the workflow and current evidence-backed state.
+    - i18n supplies a plain-language explanation for the active locale.
+    - User sees meaning, process, evidence, and next action before controls.
+    - Canonical values and raw audit evidence remain available to existing backend calls and closed technical details.
+  scenarios:
+    - name: Plan with mixed task states
+      given: A plan contains waiting, active, blocked, failed, and completed items.
+      when: The user opens the plan detail in Chinese or English.
+      then: Every lane and progress summary is localized and explains the next dependency or action without foregrounding internal ids.
+    - name: Competition without a confident winner
+      given: Candidate evidence is incomplete or scores are tied.
+      when: The user opens competition detail.
+      then: The UI says no reliable recommendation is available yet, shows what is still missing, and does not imply the first listed model won.
+    - name: Flexible policy modes
+      given: A user edits file, line, completion, or contract-quality enforcement.
+      when: The mode options are shown.
+      then: Localized labels explain block, warn, score, and ignore effects while option values remain hard, warn, score, and off.
+    - name: Operation failure
+      given: A plan, competition, review, or Integration request fails with an internal diagnostic.
+      when: The drawer renders the failure.
+      then: A bounded localized summary is prominent and any retained diagnostic is secondary technical evidence.
+    - name: Confirmation safety
+      given: A user is about to apply Integration, probe a Provider, or create an adapted successor.
+      when: They press the action button.
+      then: The existing explicit confirmation still occurs with no automatic submission.
+  risks:
+    - Renaming select labels can accidentally change backend values, so tests must verify displayed text and canonical values separately.
+    - Friendly summaries can hide meaningful failure evidence, so technical disclosures remain available and machine status is not rewritten.
+    - Broad string replacement can break handlers or duplicate translations, so changes stay within named render paths and paired locale keys.
+    - Static tests may pass while DOM composition is broken, so tests should target construction contracts and Main will run real browser QA.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 1800
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Plans, Competitions, their detail drawers, and Task control sections explain meaning, state, evidence, and next action before internal data or controls.
+    - Changed user-visible labels and status values have equivalent English and Chinese copy.
+    - Flexible policy options have localized display labels and effect explanations while their canonical submitted values remain hard, warn, score, and off.
+    - Raw operation ids, internal state codes, and diagnostics are not prominent; technical evidence remains available on demand.
+    - Existing navigation, handlers, forms, calculations, Task states, API requests, and explicit confirmation gates remain unchanged.
+    - No model-routing, daemon, CLI, MCP, settings, Provider, pricing, execution, commit, or push behavior changes.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts tests/hub-ops-mutations.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

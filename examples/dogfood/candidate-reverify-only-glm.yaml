@@ -1,0 +1,167 @@
+version: 2
+name: Candidate reverify-only without Worker execution
+project: ../..
+taskClass: candidate-reverify-control-plane
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: Add an explicit Main-authorized candidate reverification path that reruns a failed candidate's complete original acceptance suite without launching a Worker or creating another Attempt, while preserving the original failure and requiring a fresh Main acceptance before Integration.
+  presentation:
+    summary: 当 Worker 留下的候选本身已经可用、失败来自临时验收问题时，Main 可以只重新验收，不再调用模型；原失败仍保留，通过后仍要 Main 明确接受才能合入。
+    language: zh-CN
+  context:
+    - ForkLight already has Main remediation verification for the current source checkout; that operation must remain distinct because it proves Main-repaired source delivery, not retained Worker-candidate delivery.
+    - ForkLight also has Main correction, which creates another Worker Attempt in the same workspace/session. Reverify-only is the cheaper first option when no code change is required.
+    - The live MiniMax candidate-reuse dogfood proved that an unnecessary correction can consume 37711 gross Worker Tokens even when the candidate file is already correct.
+    - Existing verification.completed evidence and Main review binding are the authoritative Integration gates.
+  inScope:
+    - Add a core candidate-reverification operation for a failed Task whose latest Worker Attempt completed and whose latest independent verification failed only behavior acceptance while policy and source compatibility passed.
+    - Require bounded non-empty Main reason, explicit confirm, a retained non-empty business candidate Diff, no running Attempt, and a configurable frozen maxMainReverifications allowance with default 1 and 0 disabling the operation.
+    - Persist authorization and start/completion evidence before and after the check; a daemon crash must leave the Task failed and must never cause automatic Worker execution or automatic reverification.
+    - Rerun every original acceptance command in the retained workspace, recompute business/generated/integration patches and source compatibility, and emit canonical verification evidence without creating or rewriting an Attempt.
+    - On pass, move only the Task to succeeded, preserve the failed Attempt, require a new Main Review accept bound to the new verification event, and allow normal Integration after that accept. On failure, leave the Task failed with the original candidate and failure history intact.
+    - Expose one shared operation through CLI, daemon, MCP and Hub Task Detail, with Chinese and English plain-language copy.
+    - "Show exact facts: Worker invoked = no, incremental Worker Tokens = 0, incremental model/provider runtime cost = 0, acceptance command count and duration. Explicitly say local verification time and Main orchestration exchange are not zero and no full-restart saving is claimed without a paired baseline."
+    - Add focused executable tests for eligibility, caps, task/attempt immutability, pass/fail, concurrency, crash-safe status, Main Review and Integration binding, daemon protocol, CLI/MCP receipts, Hub mutation/projection and bilingual assets.
+  outOfScope:
+    - Automatically deciding that any failure is transient, automatically rerunning checks, retry loops, changing acceptance commands, weakening policy or source-compatibility failures, competition-candidate reevaluation, Main-remediation semantics, Worker correction semantics, automatic Main acceptance, Integration apply, commit, or push.
+    - Claiming direct Main Token savings, official Provider savings, or a hypothetical full-restart cost without paired evidence.
+  executionSteps:
+    - Audit verifier, Main remediation, Main review, Integration, authorization and Task Detail consumers before choosing shared boundaries.
+    - Implement a single canonical core operation and immutable allowance resolution; keep verification execution reusable without putting the Task into a crash-recoverable Worker state.
+    - Wire daemon protocol/coordinator/server, CLI exchange receipt, MCP exchange receipt and Hub mutation to the same core operation.
+    - "Extend the safe Task Detail projection and bilingual UI with the three-way choice: reverify only, correct with Worker, or restart/new Task."
+    - Add behavioral tests that prove zero Worker invocation/Attempt creation and fresh Main Review binding.
+    - Run all focused acceptance commands and report any remaining product risks without inventing success.
+  deliverables:
+    - Core candidate-reverification module and advanced-policy allowance.
+    - CLI, daemon, MCP and Hub control surfaces using one canonical operation.
+    - Task Detail safe projection and bilingual explanation-first UI.
+    - Focused tests in tests/candidate-reverification.test.ts plus updated protocol/control-surface tests.
+  modules:
+    - name: Candidate reverification core
+      responsibility: Authorize and execute one bounded verification-only pass against the retained candidate without Worker execution or Attempt mutation.
+      consumes:
+        - Failed Task, latest Attempt and latest independent verification evidence.
+        - Frozen maxMainReverifications allowance, bounded Main reason and explicit confirmation.
+        - Original acceptance commands, retained workspace and source compatibility snapshot.
+      produces:
+        - Durable authorization and reverification evidence.
+        - A new canonical verification.completed event and a succeeded or unchanged-failed Task status.
+        - Exact zero-Worker execution facts and bounded command results.
+      boundaries:
+        - Never invoke a Worker, create an Attempt, rewrite the prior Attempt or auto-run after a restart.
+        - Reject policy/source failures, missing/non-empty candidate Diff, active execution and competition candidates.
+    - name: Supervision control surfaces
+      responsibility: Give Main one consistent explicit operation from CLI, daemon, MCP and Hub.
+      consumes:
+        - Task id, bounded reason and confirm true.
+        - Canonical eligibility and operation result from core.
+      produces:
+        - Privacy-safe structured responses and exchange receipts.
+        - Fixed rejection categories that do not echo private candidate content or command output.
+      boundaries:
+        - Never duplicate eligibility logic or return raw private outputs on list/summary surfaces.
+    - name: Explanation-first Task Detail
+      responsibility: Explain when verification-only is available and how it differs from Worker correction and full restart.
+      consumes:
+        - Safe candidate-reverification projection, existing candidate-reuse projection and Token/cost evidence.
+      produces:
+        - Bilingual status, reason input, action, allowance, command result, duration and exact zero-Worker facts.
+      boundaries:
+        - Do not call local verification free, do not imply model savings without a paired baseline, and keep raw commands/details secondary.
+    - name: Behavioral verification
+      responsibility: Prove the operation and its integration gates through executable fixtures rather than static field-presence assertions.
+      consumes:
+        - Failed candidate fixtures for passing, failing, concurrent and exhausted-cap cases.
+      produces:
+        - Regression tests for core, restart behavior, Main Review/Integration binding and all control surfaces.
+      boundaries:
+        - Tests must not weaken existing correction, remediation, competition or Integration safety behavior.
+  callChain:
+    - Main inspects a failed candidate and chooses Reverify only with a bounded reason and explicit confirmation.
+    - Core validates the latest failed verification, retained Diff, frozen allowance and task ownership, then records one authorization without changing Task status.
+    - The verifier reruns every original acceptance command in the retained workspace and recomputes patch and source evidence without invoking a Worker.
+    - Core records the canonical verification result; failure leaves Task failed, while pass moves only Task status to succeeded and preserves the failed Attempt.
+    - Task Detail shows the exact result and zero Worker/model delta; Main must record a fresh accept bound to this verification before Integration preflight can pass.
+  scenarios:
+    - name: Transient acceptance failure passes without Worker
+      given: A failed Task has one completed Worker Attempt, a non-empty retained business Diff, policy/source checks passed, and the latest acceptance command failure is no longer present.
+      when: Main explicitly authorizes candidate reverification within its frozen allowance.
+      then: All commands rerun, no Worker or new Attempt exists, the old Attempt remains failed, Task becomes succeeded, and fresh Main acceptance is still required.
+    - name: Candidate still fails
+      given: The latest failed candidate still violates an original acceptance command.
+      when: Main runs one reverification.
+      then: The new verification evidence fails, Task and Attempt remain failed, the allowance is consumed, and nothing retries automatically.
+    - name: Wrong failure category
+      given: The latest verification failed policy, source compatibility, has no non-empty business Diff, or belongs to a competition.
+      when: Main requests reverify-only.
+      then: The operation rejects before running commands and recommends correction, contract/policy revision, competition reevaluation or a new Task as appropriate.
+    - name: Crash during local verification
+      given: Authorization was recorded but command execution did not complete before the daemon stopped.
+      when: The daemon restarts.
+      then: The original Task remains failed, no Worker is queued, no reverification auto-runs, and the durable incomplete evidence remains inspectable.
+    - name: Allowance and settings
+      given: Worker default or Task override sets maxMainReverifications to zero or the configured count is exhausted.
+      when: Main requests another reverification.
+      then: The request is rejected without commands, Worker usage or Attempt changes, and UI explains the effective source and remaining count.
+  risks:
+    - Reusing verifyTask naively changes Task status to verifying and daemon recovery may mistake a crash for interrupted Worker execution; the verification core needs an explicit status-management boundary.
+    - A passing reverify attached to a failed Attempt can confuse existing Task Detail consumers; the UI and Main Review binding must explicitly represent verification-only success without rewriting Attempt history.
+    - Local command execution has wall time and Main exchange cost even though Worker Tokens and model/provider cost are exactly zero.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 3000
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: medium
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 600000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/daemon
+    - src/cli.ts
+    - src/mcp
+    - src/hub/server.ts
+    - src/hub/public
+    - src/state/store.ts
+    - tests
+acceptance:
+  criteria:
+    - Reverify-only never launches a Worker or creates/rewrites an Attempt, preserves prior failed evidence, and consumes a separate frozen configurable allowance.
+    - Passing reverification creates canonical verification evidence, moves only Task status to succeeded, and still requires a fresh Main Review accept before Integration.
+    - Failed or crashed reverification remains failed without automatic rerun; policy/source/competition/non-candidate cases reject before commands.
+    - CLI, daemon, MCP and Hub use one core operation and Task Detail explains zero Worker/model delta without claiming total execution is free or direct savings.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/candidate-reverification.test.ts tests/attempt-authorization.test.ts tests/daemon.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts tests/integration.test.ts
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

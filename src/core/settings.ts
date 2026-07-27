@@ -16,6 +16,10 @@ import {
   validateModelCatalogSettings,
   type ModelCatalogSettings,
 } from "./model-catalog.js";
+import {
+  validateDeliveryProfilesSettings,
+  type DeliveryProfilesSettings,
+} from "./delivery-profiles.js";
 
 // --- Versioned settings contract ---
 
@@ -24,9 +28,11 @@ export const SETTINGS_VERSION = 1;
 export type { PolicyMode } from "./types.js";
 
 export interface ContractQualitySettings {
-  maxFiles: number;
-  maxDiffLines: number;
-  maxFocusPaths: number;
+  /** Missing only in legacy/test inputs; resolution normalizes it to hard. */
+  mode?: PolicyMode;
+  maxFiles: number | null;
+  maxDiffLines: number | null;
+  maxFocusPaths: number | null;
   minScenarios: number;
   minCallChainSteps: number;
   minOutcomeCharacters: number;
@@ -39,12 +45,14 @@ export interface ExecutionSettings {
   maxConcurrency: number;
   noProgressTimeoutMs: number;
   defaultEffort: EffortLevel;
-  defaultProvider: "deepseek" | "qwen" | "minimax" | "glm" | "xai";
+  defaultProvider: "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai";
   /** Default Worker runtime when Task YAML/MCP omits runtime.name. */
   defaultRuntime: RuntimeName;
   defaultMaxBudgetUsd: number | null;
   maximumBudgetUsd: number;
   maxAttempts: number;
+  /** Maximum additional Attempts beyond maxAttempts that require explicit Main authorization (default 1, 0 disables). */
+  maxExtraAttempts: number;
   workerStopGraceMs: number;
 }
 
@@ -61,6 +69,42 @@ export interface RankingWeightSettings {
   cost: number;
   duration: number;
   delivery: number;
+}
+
+export interface ModelRoutingSettings {
+  /** Minimum relevant samples per candidate before a recommendation is
+   *  produced.  Must be ≥ 1.  Below this threshold the advisory reports
+   *  insufficient evidence and optionally suggests competition. */
+  minRelevantSamples: number;
+  /** Score-gap ratio below which two top candidates are considered too
+   *  close to call.  Must be in [0, 1].  When the top-to-second gap divided by
+   *  the maximum possible score is below this threshold, every candidate
+   *  is marked with insufficient-gap uncertainty. */
+  uncertaintyThreshold: number;
+  /** When true and evidence is insufficient or scores are too close, the
+   *  advisory recommends a bounded competition instead of picking a
+   *  single winner. */
+  competitionOnUncertainty: boolean;
+  /** Whether unavailable enabled factors block advice or remain visible warnings. */
+  missingEvidenceMode: "strict" | "flexible";
+  /** Non-negative routing factor weights. */
+  weights: ModelRoutingWeightSettings;
+}
+
+export interface ModelRoutingWeightSettings {
+  acceptedDelivery: number;
+  verifiedBehavior: number;
+  modelQualityFailure: number;
+  correctionChurn: number;
+  /** 0 by default — scores only when all candidates have comparable exact
+   *  official-cost evidence in the same native currency. */
+  officialCost: number;
+  /** 0 by default — affects advice only after explicit enablement. */
+  duration: number;
+  /** 0 by default — opt-in factor that considers bounded, same-envelope
+   *  budget outcomes (completion without canonical budget exhaustion).
+   *  Stays zero so default routing recommendations do not change. */
+  budgetReliability: number;
 }
 
 export interface CompetitionSettings {
@@ -107,6 +151,7 @@ export interface ProviderDefaultsSettings {
   qwen: ProviderDefaultSettings;
   minimax: ProviderDefaultSettings;
   glm: ProviderDefaultSettings;
+  volcengine: ProviderDefaultSettings;
   xai: ProviderDefaultSettings;
 }
 
@@ -124,6 +169,10 @@ export interface ForkLightSettings {
   modelCatalog: ModelCatalogSettings;
   /** Named Worker profiles (runtime + modelConfigId + per-worker limits). */
   workerProfiles: WorkerProfilesSettings;
+  /** Delivery Profiles registry (build/activation bundles, detached from Task execution). */
+  deliveryProfiles: DeliveryProfilesSettings;
+  /** Evidence-aware model-routing advisory settings. */
+  modelRouting: ModelRoutingSettings;
 }
 
 /** One immutable snapshot of the settings sections that govern task creation.
@@ -137,6 +186,8 @@ export interface TaskPolicy {
   /** Optional for older test fixtures; omitted → derived from execution + providerDefaults. */
   workerProfiles?: WorkerProfilesSettings;
   modelCatalog?: ModelCatalogSettings;
+  /** Optional Delivery Profiles registry. Omitted → built-in empty defaults. */
+  deliveryProfiles?: DeliveryProfilesSettings;
 }
 
 // --- Built-in defaults matching current behavior ---
@@ -146,6 +197,7 @@ const ALIBABA_ENDPOINT = "https://dashscope.aliyuncs.com/apps/anthropic";
 const DEFAULTS: ForkLightSettings = {
   version: SETTINGS_VERSION as typeof SETTINGS_VERSION,
   contractQuality: {
+    mode: "hard",
     maxFiles: 12,
     maxDiffLines: 1200,
     maxFocusPaths: 8,
@@ -167,6 +219,7 @@ const DEFAULTS: ForkLightSettings = {
     defaultMaxBudgetUsd: 0.5,
     maximumBudgetUsd: 20,
     maxAttempts: 3,
+    maxExtraAttempts: 1,
     workerStopGraceMs: 10_000,
   },
   competition: {
@@ -223,6 +276,12 @@ const DEFAULTS: ForkLightSettings = {
       defaultKeychainService: "forklight.qwen.api-key",
       requestTimeoutMs: 3_000_000,
     },
+    volcengine: {
+      defaultModel: "glm-5.2[1M]",
+      defaultEndpoint: "https://ark.cn-beijing.volces.com/api/coding",
+      defaultKeychainService: "forklight.volcengine.api-key",
+      requestTimeoutMs: 3_000_000,
+    },
     xai: {
       defaultModel: "grok-4.5",
       defaultEndpoint: "https://api.x.ai/v1",
@@ -253,6 +312,13 @@ const DEFAULTS: ForkLightSettings = {
         endpoint: "https://dashscope.aliyuncs.com/apps/anthropic",
       },
       {
+        id: "volcengine-glm52-1m",
+        label: "Volcengine GLM 5.2 1M",
+        provider: "volcengine",
+        model: "glm-5.2[1M]",
+        endpoint: "https://ark.cn-beijing.volces.com/api/coding",
+      },
+      {
         id: "xai-grok",
         label: "xAI Grok",
         provider: "xai",
@@ -275,7 +341,64 @@ const DEFAULTS: ForkLightSettings = {
         effort: "high",
         // maxBudgetUsd omitted → inherit execution.defaultMaxBudgetUsd (FL-D92)
       },
+      {
+        id: "volcengine-glm52-1m",
+        label: "Volcengine GLM 5.2 1M Worker",
+        runtime: "claude-code",
+        modelConfigId: "volcengine-glm52-1m",
+        provider: "volcengine",
+        model: "glm-5.2[1M]",
+        endpoint: "https://ark.cn-beijing.volces.com/api/coding",
+        effort: "high",
+        pricingRoute: "volcengine-coding-plan-subscription",
+        maxBudgetUsd: null,
+        advancedPolicy: {
+          maxDurationMs: null,
+          observedTokenCeiling: null,
+          noProgressTimeoutMs: null,
+          fileLimit: null,
+          fileLimitMode: "warn",
+          changedLineLimit: null,
+          changedLineLimitMode: "warn",
+          baseMaxAttempts: 1,
+          maxExtraAttempts: 0,
+          maxConcurrency: 1,
+          completionMode: "warn",
+          changeBudgetMode: "warn",
+          maxAdaptationRounds: 0,
+        },
+        contractQuality: {
+          mode: "warn",
+          maxFiles: null,
+          maxDiffLines: null,
+          maxFocusPaths: null,
+          minScenarios: 0,
+          minCallChainSteps: 0,
+          minOutcomeCharacters: 0,
+          minModuleResponsibilityCharacters: 0,
+        },
+      },
     ],
+  },
+  deliveryProfiles: {
+    defaultProfileId: null,
+    profiles: [],
+    projectBindings: {},
+  },
+  modelRouting: {
+    minRelevantSamples: 5,
+    uncertaintyThreshold: 0.15,
+    competitionOnUncertainty: true,
+    missingEvidenceMode: "flexible",
+    weights: {
+      acceptedDelivery: 1,
+      verifiedBehavior: 1,
+      modelQualityFailure: 0.5,
+      correctionChurn: 0.2,
+      officialCost: 0,
+      duration: 0,
+      budgetReliability: 0,
+    },
   },
 };
 
@@ -284,14 +407,14 @@ const DEFAULTS: ForkLightSettings = {
 const KNOWN_SECTIONS: Record<string, readonly string[]> = {
   version: [],
   contractQuality: [
-    "maxFiles", "maxDiffLines", "maxFocusPaths", "minScenarios",
+    "mode", "maxFiles", "maxDiffLines", "maxFocusPaths", "minScenarios",
     "minCallChainSteps", "minOutcomeCharacters", "minModuleResponsibilityCharacters",
   ],
   completionPolicy: ["noChangeMode", "changeBudgetMode"],
   execution: [
     "maxConcurrency", "noProgressTimeoutMs", "defaultEffort",
     "defaultProvider", "defaultRuntime", "defaultMaxBudgetUsd", "maximumBudgetUsd",
-    "maxAttempts", "workerStopGraceMs",
+    "maxAttempts", "maxExtraAttempts", "workerStopGraceMs",
   ],
   competition: [
     "minCandidates", "maxCandidates", "tieThreshold", "rankingWeights",
@@ -301,12 +424,22 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
     "verificationTimeoutMs", "reviewReceiptTtlMs", "backupRetentionCount", "autoRollback",
   ],
   console: ["loopbackPort", "refreshIntervalMs", "boardListLimit", "taskListLimit", "eventListLimit"],
-  providerDefaults: ["deepseek", "qwen", "minimax", "glm", "xai"],
+  providerDefaults: ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"],
   probe: ["probeTimeoutMs", "maxBudgetUsd", "cacheLifetimeMs", "maxProbeConcurrency"],
   // array-body sections use custom validation, not deepMerge field lists
   modelCatalog: ["models"],
   workerProfiles: ["defaultProfileId", "profiles"],
+  deliveryProfiles: ["defaultProfileId", "profiles", "projectBindings"],
+  modelRouting: [
+    "minRelevantSamples", "uncertaintyThreshold", "competitionOnUncertainty",
+    "missingEvidenceMode", "weights",
+  ],
 };
+
+const MODEL_ROUTING_WEIGHT_FIELDS: readonly string[] = [
+  "acceptedDelivery", "verifiedBehavior", "modelQualityFailure",
+  "correctionChurn", "officialCost", "duration", "budgetReliability",
+];
 
 const TOP_LEVEL_KEYS = Object.keys(KNOWN_SECTIONS);
 
@@ -320,7 +453,7 @@ const PROVIDER_DEFAULT_FIELDS: readonly string[] = [
 ];
 
 const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"]);
-const VALID_PROVIDER_NAMES = new Set<string>(["deepseek", "qwen", "minimax", "glm", "xai"]);
+const VALID_PROVIDER_NAMES = new Set<string>(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]);
 const VALID_POLICY_MODES = new Set<string>(["hard", "warn", "score", "off"]);
 
 // Rejects credential-bearing field names.  `defaultKeychainService` names a
@@ -434,7 +567,17 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
 
   const cq = validateSection(doc.contractQuality, "contractQuality.");
   assertNoUnknownFields(cq, KNOWN_SECTIONS.contractQuality!, "contractQuality.");
-  for (const f of KNOWN_SECTIONS.contractQuality!) {
+  assert(
+    typeof cq.mode === "string" && VALID_POLICY_MODES.has(cq.mode),
+    "contractQuality.mode must be one of hard, warn, score, off",
+  );
+  for (const f of ["maxFiles", "maxDiffLines", "maxFocusPaths"] as const) {
+    if (cq[f] !== null) assertPositiveInteger(cq[f], `contractQuality.${f}`);
+  }
+  for (const f of [
+    "minScenarios", "minCallChainSteps", "minOutcomeCharacters",
+    "minModuleResponsibilityCharacters",
+  ] as const) {
     assertNonNegativeInteger(cq[f], `contractQuality.${f}`);
   }
 
@@ -486,6 +629,7 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
     );
   }
   assertPositiveInteger(ex.maxAttempts, "execution.maxAttempts");
+  assertNonNegativeInteger(ex.maxExtraAttempts, "execution.maxExtraAttempts");
   assertPositiveInteger(ex.workerStopGraceMs, "execution.workerStopGraceMs");
   assert(ex.workerStopGraceMs >= 100, "execution.workerStopGraceMs must be at least 100 ms");
 
@@ -571,6 +715,37 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
   assertPositiveInteger(pr.maxProbeConcurrency, "probe.maxProbeConcurrency");
   assert(pr.maxProbeConcurrency <= 8, "probe.maxProbeConcurrency must not exceed 8");
 
+  // --- modelRouting ---
+  if (doc.modelRouting !== undefined) {
+    const mr = validateSection(doc.modelRouting, "modelRouting.");
+    assertNoUnknownFields(mr, KNOWN_SECTIONS.modelRouting!, "modelRouting.");
+    assertPositiveInteger(mr.minRelevantSamples, "modelRouting.minRelevantSamples");
+    assert(
+      (mr.minRelevantSamples as number) >= 1,
+      "modelRouting.minRelevantSamples must be at least 1",
+    );
+    assert(
+      (mr.minRelevantSamples as number) <= 10_000,
+      "modelRouting.minRelevantSamples must not exceed 10000",
+    );
+    assertNonNegativeNumber(mr.uncertaintyThreshold, "modelRouting.uncertaintyThreshold");
+    assert(
+      (mr.uncertaintyThreshold as number) <= 1,
+      "modelRouting.uncertaintyThreshold must not exceed 1",
+    );
+    assertBoolean(mr.competitionOnUncertainty, "modelRouting.competitionOnUncertainty");
+    assert(
+      mr.missingEvidenceMode === "strict" || mr.missingEvidenceMode === "flexible",
+      "modelRouting.missingEvidenceMode must be strict or flexible",
+    );
+    const rw = validateSection(mr.weights, "modelRouting.weights.");
+    assertNoUnknownFields(rw, MODEL_ROUTING_WEIGHT_FIELDS, "modelRouting.weights.");
+    for (const f of MODEL_ROUTING_WEIGHT_FIELDS) {
+      assertNonNegativeNumber(rw[f], `modelRouting.weights.${f}`);
+      assert((rw[f] as number) <= 1_000, `modelRouting.weights.${f} must not exceed 1000`);
+    }
+  }
+
   // --- modelCatalog (optional on legacy docs → synthesized in merge/get) ---
   if (doc.modelCatalog !== undefined) {
     try {
@@ -591,6 +766,17 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
         "workerProfiles",
         catalog,
       );
+    } catch (error) {
+      throw new SettingsValidationError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  // --- deliveryProfiles (optional on legacy docs → synthesized in merge/get) ---
+  if (doc.deliveryProfiles !== undefined) {
+    try {
+      doc.deliveryProfiles = validateDeliveryProfilesSettings(doc.deliveryProfiles, "deliveryProfiles");
     } catch (error) {
       throw new SettingsValidationError(
         error instanceof Error ? error.message : String(error),
@@ -675,6 +861,30 @@ function mergeSettings(
           error instanceof Error ? error.message : String(error),
         );
       }
+    } else if (section === "deliveryProfiles") {
+      // Replace whole section when patching (profiles is an array, not field-mergeable).
+      try {
+        base[section] = validateDeliveryProfilesSettings(obj, "deliveryProfiles");
+      } catch (error) {
+        throw new SettingsValidationError(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    } else if (section === "modelRouting") {
+      const rp = obj.weights as Record<string, unknown> | undefined;
+      const mergedMr = deepMerge(
+        base[section] as unknown as Record<string, unknown>,
+        obj,
+        KNOWN_SECTIONS.modelRouting!,
+      );
+      if (rp && typeof rp === "object" && !Array.isArray(rp)) {
+        (mergedMr as Record<string, unknown>).weights = deepMerge(
+          (current.modelRouting.weights as unknown) as Record<string, unknown>,
+          rp,
+          MODEL_ROUTING_WEIGHT_FIELDS,
+        );
+      }
+      base[section] = mergedMr;
     } else {
       base[section] = deepMerge(
         base[section] as Record<string, unknown>,
@@ -698,6 +908,12 @@ function mergeSettings(
       asSettings.providerDefaults,
       asSettings.modelCatalog,
     );
+  }
+  if (asSettings.deliveryProfiles === undefined) {
+    asSettings.deliveryProfiles = { defaultProfileId: null, profiles: [], projectBindings: {} };
+  }
+  if (asSettings.modelRouting === undefined) {
+    asSettings.modelRouting = structuredClone(DEFAULTS.modelRouting);
   }
 
   return asSettings;
@@ -786,6 +1002,29 @@ export class SettingsService {
           throw new SettingsValidationError(
             error instanceof Error ? error.message : String(error),
           );
+        }
+      } else if (section === "deliveryProfiles") {
+        try {
+          validateDeliveryProfilesSettings(obj, "deliveryProfiles");
+        } catch (error) {
+          throw new SettingsValidationError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+    } else if (section === "modelRouting") {
+      assertNoUnknownFields(obj, KNOWN_SECTIONS.modelRouting!, "modelRouting.");
+      if ("missingEvidenceMode" in obj) {
+        assert(
+          obj.missingEvidenceMode === "strict" || obj.missingEvidenceMode === "flexible",
+          "modelRouting.missingEvidenceMode must be strict or flexible",
+        );
+      }
+        if ("weights" in obj) {
+          const rp = validateSection(obj.weights, "modelRouting.weights.");
+          assertNoUnknownFields(rp, MODEL_ROUTING_WEIGHT_FIELDS, "modelRouting.weights.");
+          for (const f of MODEL_ROUTING_WEIGHT_FIELDS) {
+            if (f in rp) assertNonNegativeNumber(rp[f], `modelRouting.weights.${f}`);
+          }
         }
       } else {
         assertNoUnknownFields(obj, KNOWN_SECTIONS[section]!, `${section}.`);

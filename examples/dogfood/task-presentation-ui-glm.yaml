@@ -1,0 +1,150 @@
+version: 2
+name: Main-authored presentation in readable Task journeys
+project: ../..
+contract:
+  outcome: Make Task Detail prefer the exact Main-authored user summary from the canonical safe journey and prove the same readable process for success, verification failure, authentication failure, active execution, and legacy tasks.
+  presentation:
+    summary: Task Detail will show Main's short explanation first, then walk through Worker progress, checks, final delivery, causes, and next steps.
+    language: en
+  context:
+    - A preceding DeepSeek task adds optional journey.assignment.presentation with summary and language and updates tests/fixtures/hub-task-story-v1.json as the canonical safe response contract.
+    - Do not guess the field shape from this prose. Read and consume the checked-in fixture and current server types after that task has been integrated.
+    - The existing pure taskStoryPresentation adapter already separates Main input, Worker process, Worker output, independent checks, final handling, cause, and next action.
+    - The current adapter uses assignment.outcome or assignment.goal as its primary input text. That remains the honest fallback for older tasks.
+    - The user's priority is comprehension of what happened, not the amount of data rendered.
+  inScope:
+    - Update taskStoryPresentation to prefer a valid canonical Main-authored presentation summary and otherwise preserve the outcome or legacy goal fallback.
+    - Keep the authored text exact and bounded. Do not translate, rewrite, or combine it with the technical outcome.
+    - Explain in both Hub locales that the primary text was written by Main for the user. Keep the presentation language and technical outcome available in the existing closed assignment evidence when useful, not as prominent codes.
+    - Use the shared fixture as the executable consumer contract and reject alternate guessed property names.
+    - Extend fixture-driven adapter tests across successful reviewed delivery, failed independent verification, authentication failure before useful work, active Worker execution, and a legacy task without presentation.
+    - For every scenario, assert the ordered seven-step journey, the truthful state of Worker output and independent checks, the evidence-backed cause, and a concrete next action.
+    - Preserve Task controls, API requests, canonical machine states, confirmation gates, and all current technical evidence.
+  outOfScope:
+    - Task schema, parser, MCP, daemon, server journey projection, Provider execution, model routing, pricing, verification, Main review, Integration, or runtime state changes.
+    - Automatic translation or generation of user summaries.
+    - New dependencies, a visual theme redesign, removal of technical evidence, commit, push, Provider probe, retry, or adaptation.
+  executionSteps:
+    - Inspect the current canonical Task story fixture after the upstream task is integrated.
+    - Trace taskStoryPresentation and renderTaskStory without changing their ordered process model.
+    - Prefer the canonical presentation summary only when its exact safe shape is present; preserve current fallbacks.
+    - Add paired English and Chinese explanations and keep technical data secondary.
+    - Derive the five journey scenarios from the shared fixture and test actual adapter outputs rather than string presence alone.
+    - Run the focused UI acceptance commands once and report remaining manual browser coverage.
+  deliverables:
+    - Task Detail that leads with Main's exact user-facing summary when available.
+    - Honest legacy and missing-presentation fallback behavior.
+    - Five executable journey scenarios covering normal, active, and major failure states.
+    - Paired English and Chinese copy with no prominent raw backend reason.
+  modules:
+    - name: Task presentation adapter
+      responsibility: Select the trusted Main-authored summary or an honest legacy fallback without changing machine evidence.
+      consumes:
+        - Canonical safe Task story fixture and journey.assignment data.
+      produces:
+        - One bounded primary Main-input value and source-language metadata for rendering.
+      boundaries:
+        - No translation, invented text, alternate schema, raw prompt, or unbounded value.
+    - name: Task journey renderer
+      responsibility: Explain why the primary input is user-facing while keeping technical assignment details available on demand.
+      consumes:
+        - Pure taskStoryPresentation output and current Hub locale.
+      produces:
+        - Readable Main-input copy plus the existing ordered collaboration journey.
+      boundaries:
+        - No machine state, control, request, or confirmation change.
+    - name: Fixture-driven journey coverage
+      responsibility: Prove the same seven-step semantics across success, failure, configuration, active, and legacy states.
+      consumes:
+        - Canonical fixture and controlled evidence mutations.
+      produces:
+        - Executable adapter assertions for state, evidence, cause, and next action.
+      boundaries:
+        - No giant source-order assertion or fake browser state unrelated to the canonical response.
+  callChain:
+    - Main authors a user presentation as part of the Task contract.
+    - Server projects the validated presentation into the canonical safe journey.
+    - taskStoryPresentation consumes that exact shape and chooses the primary input text.
+    - renderTaskStory explains input, process, output, checks, result, cause, and next action.
+    - Legacy Tasks without presentation continue through outcome or goal fallback without invented content.
+  scenarios:
+    - name: Successful reviewed delivery
+      given: A Task has a Main-authored summary, successful Worker output, passing independent checks, and an accepted or integrated result.
+      when: The adapter renders its journey.
+      then: The authored summary leads, all checks and final result are complete, and next action is review, integrate, or done according to evidence.
+    - name: Failed independent verification
+      given: A Worker reports completion and files but one acceptance check fails.
+      when: The adapter renders its journey.
+      then: Worker output remains failed, the failed check is visible, the cause is verification, and the next action asks Main to inspect or revise.
+    - name: Authentication stopped execution
+      given: Provider credentials fail before useful Worker work or independent checks.
+      when: The adapter renders its journey.
+      then: The process and output are failed or empty, the cause is configuration rather than coding quality, and the next action is credentials.
+    - name: Active execution
+      given: A Worker Attempt is running and no final verification exists.
+      when: The adapter renders its journey.
+      then: Process is running, output/check/result remain pending, and the user is told to wait rather than retry.
+    - name: Legacy task fallback
+      given: A version 1 or older version 2 safe journey has no presentation block.
+      when: The adapter renders its journey.
+      then: Existing outcome or goal appears with honest fallback copy and no fabricated Main-authored label.
+  risks:
+    - UI work could silently invent a field shape, so the fixture is the only accepted schema source.
+    - A friendly summary could hide technical scope, so the full assignment remains in a closed evidence disclosure.
+    - Derived scenario mutations can become unrealistic, so each test must update all evidence that drives the corresponding state and assert the resulting cause and next action.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 1000
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - tests/fixtures/hub-task-story-v1.json
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Main-authored presentation is the primary Task input when present, remains exact and bounded, and is never translated or inferred.
+    - Existing outcome and legacy goal remain honest fallbacks when presentation is absent.
+    - Success, verification failure, authentication failure, active execution, and legacy fixtures all preserve the ordered seven-step journey and evidence-backed status, cause, and next action.
+    - Technical assignment details remain available on demand while raw backend reasons and language codes are not prominent.
+    - Existing controls, requests, machine states, and confirmation gates remain unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - node --check src/hub/public/app.js
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

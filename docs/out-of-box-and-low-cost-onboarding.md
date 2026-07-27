@@ -2,9 +2,9 @@
 
 | 字段 | 值 |
 | --- | --- |
-| 状态 | Phase 1–3：`forklight hub` 一键前后端 + Main 三通道 + Hub 监督/探测/集成 |
-| 日期 | 2026-07-25 |
-| 基线 | WorkerAdapter + Hub v1（settings / Keychain / Main MCP install） |
+| 状态 | Hub-only：`forklight hub` 一键任务服务 + UI；Main 三通道 + 监督/探测/集成 |
+| 日期 | 2026-07-27 |
+| 基线 | WorkerAdapter + Hub（settings / Keychain / Main install）；Console/Setup 已移除 |
 | 参考 | [farion1231/cc-switch](https://github.com/farion1231/cc-switch)（CC Switch） |
 | 相关 | `docs/main-clients/*`、`docs/superpowers/specs/2026-07-25-worker-runtime-adapter-design.md` |
 
@@ -104,16 +104,16 @@ CC Switch 的做法（可借鉴）：
 | --- | --- | --- |
 | Main | 用户本机**已安装**的优先：Grok Build → Claude Code → Codex | 不强迫新装 |
 | Worker runtime | `claude-code`（或检测 Grok 已登录则可选 `grok-build`） | 生态成熟 / 本机已 dogfood OAuth |
-| Worker Provider | DeepSeek（API Key）或 xAI（OAuth 种子） | 成本与可用性平衡 |
-| `defaultMaxBudgetUsd` | **0.5** | 单任务有顶 |
-| 并发 | 1～2 | 避免账单失控 |
-| 首次任务模板 | 「Hello 合同」：改一个小文件 + `true` 验收 | 必过验证链 |
+| Worker Provider | DeepSeek（API Key）、MiniMax/Volcengine，或 xAI（本机 Grok OAuth 种子） | 成本与可用性平衡 |
+| 开发预设预算 | 默认开发 Worker 对金额/时长/Token/文件**不设硬顶**；无进展超时仍有限（约 30 分钟） | 本地 dogfood 优先完成度；生产可在 Advanced 收紧 |
+| 并发 | 默认最多 4；可在 Advanced 调低 | 本地并行；账单敏感时再降 |
+| 首次任务模板 | `examples/deepseek-checkout.yaml` + `fixtures/checkout`：小改动 + 独立验收 | 必过验证链 |
 
 ---
 
 ## 4. 产品形态：ForkLight Hub
 
-名称可叫 **ForkLight Hub** / **控制中心**（实现上可演进现有 `setup` + `console`，不必立刻 Tauri）。
+名称是 **ForkLight Hub**（本地控制台）。**唯一**浏览器控制面是 `forklight hub`；独立 Console / Setup UI 已删除，不再演进。
 
 ### 4.1 信息架构（对标 CC Switch 简化版）
 
@@ -128,7 +128,7 @@ ForkLight Hub
 ├── 接入 Main（核心差异化）
 │     Grok / Claude Code / Codex / OpenCode
 │     [检测] [一键安装 MCP] [打开 App 说明] [测试 forklight_health]
-├── 任务（可链到现有 Console 看板）
+├── 任务（Hub Board 看板）
 └── 关于 / 诊断导出
 ```
 
@@ -175,7 +175,7 @@ ForkLight Hub
 向导 Step C — 谁来写代码？（Worker）
   ○ Claude Code Worker + DeepSeek/Qwen/…（填 Key + 探测）
   ○ Grok Worker（检测 grok login / 或 xAI Key）
-  显示：预计单任务预算上限 $0.50（可改）
+  显示：有效策略预览（金额/时长/Token 上限；开发预设可为「不设硬顶」）
 
 向导 Step D — 一键接入 Main
   对每个勾选的 Main：
@@ -212,11 +212,11 @@ Hub → 设置 → Provider / Runtime → 保存 → **不需要**用户改 Main
 
 - 检测：Node、claude、grok、codex、`FORKLIGHT_HOME`  
 - 启停 daemon、显示 build identity 是否匹配  
-- 「修复」：重建 token、打开 Console、导出诊断 zip（无密钥）
+- 「修复」：重建 token、打开 Hub、导出诊断 zip（无密钥）
 
 ### 6.2 Provider 与密钥（ForkLight Worker 用）
 
-- 列表：deepseek / qwen / minimax / glm / xai  
+- 列表：deepseek / qwen / minimax / glm / volcengine / xai
 - 动作：保存 Keychain、probe（xai = keychain-only 或 OAuth 状态）、删除  
 - **不**把密钥写进各 Main 的配置文件  
 
@@ -267,8 +267,8 @@ Hub → 设置 → Provider / Runtime → 保存 → **不需要**用户改 Main
 | 角色 | 选择 |
 | --- | --- |
 | Main | Grok Build（用户已 OAuth）或 Claude Code |
-| Worker | `claude-code` + DeepSeek Key |
-| 预算 | $0.5 / 任务 |
+| Worker | `claude-code` + DeepSeek Key（或 Hub 中已有的默认 Worker） |
+| 预算 | 开发预设可不设硬顶；账单敏感时在 Worker Advanced 设金额上限 |
 | 理由 | Worker 生态稳；DeepSeek 单价友好；Main 用已有订阅 |
 
 ### 组合 L2 — 全 Grok
@@ -422,7 +422,7 @@ Hub 是唯一浏览器控制面：Models / Workers / Main 安装 / Daemon / Boar
 
 | Worker runtime | 允许的 Provider |
 | --- | --- |
-| `claude-code` | deepseek / qwen / minimax / glm（**禁止 xai**） |
+| `claude-code` | deepseek / qwen / minimax / glm / volcengine（**禁止 xai**） |
 | `grok-build` | **仅 xai** |
 
 非法组合在 Hub 保存时返回 422，不会写入半残 settings。

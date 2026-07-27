@@ -1,0 +1,154 @@
+version: 2
+name: Hub knows whether source build and running daemon are the same version
+project: ../..
+taskClass: hub-version-delivery-truth-backend
+contract:
+  outcome: Hub status exposes one safe deterministic version journey that distinguishes current source content, the built ForkLight artifact serving the Hub, and the daemon actually executing tasks, with one truthful state and next-action code.
+  context:
+    - A source edit, npm run build, and daemon restart are three different events. Users currently see only a daemon build id and cannot tell which layer is stale.
+    - Current buildId is generated from build time and Git revision, so it cannot prove that dirty working-tree source equals the built artifact.
+    - Current development build identity ignores Hub public assets even though they are copied into dist and materially change the UI.
+    - Hub /api/status already returns daemon health and receives packageRoot; it must remain read-only and must not build or restart anything.
+    - The later UI will consume the exact versionJourney response defined here; use stable codes, not backend prose.
+  inScope:
+    - Add a deterministic sourceDigest over package.json, production TypeScript, build scripts, and Hub public assets that affect dist output.
+    - Store sourceDigest in new build identity files while keeping older identities without it readable.
+    - Add a read-only package-source inspection that computes the same digest without executing Git, build, or shell commands.
+    - Add a pure safe version-journey projection comparing source digest, Hub artifact identity, and daemon identity.
+    - Expose versionJourney in /api/status with layers source, artifact, daemon; overall states ready, source-needs-build, artifact-needs-restart, protocol-mismatch, or unavailable; and nextAction none, build, restart, rebuild-and-restart, or inspect.
+    - Explain state precedence with behavior tests, including dirty Hub public assets, legacy artifact identity, stopped daemon, source newer than artifact, artifact newer than daemon, and protocol mismatch.
+    - Keep exact digests/build ids available in the response only as bounded technical evidence; do not expose file contents or paths outside the package root.
+  outOfScope:
+    - Do not add UI, run npm build from an API request, restart the daemon, mutate settings, execute Git, or add dependencies.
+    - Do not change the protocol compatibility rule or weaken build-mismatch safety.
+    - Do not infer that source is deployed merely because Git revisions match.
+    - Do not commit or push.
+  executionSteps:
+    - Trace build identity generation, runtime loading, Hub status composition, daemon health identity, and existing tests.
+    - Define one shared deterministic file enumeration and digest contract that includes Hub assets.
+    - Extend BuildIdentity compatibly with optional sourceDigest and make the build script produce it.
+    - Build a pure version-journey projection with explicit precedence and bounded evidence.
+    - Add it to Hub status and cover every state without subprocesses or mutation.
+    - Run the stored checks once.
+  deliverables:
+    - Deterministic source digest shared by live source inspection and generated build identity.
+    - Safe versionJourney Hub status response.
+    - Backward-compatible identity parsing and state-precedence tests.
+  modules:
+    - name: Source content identity
+      responsibility: Deterministically identify all source inputs that materially produce the ForkLight runtime and Hub UI.
+      consumes:
+        - package.json, src TypeScript, scripts mjs, and src/hub/public assets under a validated package root.
+      produces:
+        - A SHA-256 source digest and latest source modification time.
+      boundaries:
+        - Read-only, path-bounded, stable ordering, no Git or shell execution, no node_modules/dist/state directories.
+    - name: Version journey projection
+      responsibility: Decide which of source, artifact, or daemon is stale and what action is needed.
+      consumes:
+        - Current source digest, Hub artifact BuildIdentity, and optional daemon BuildIdentity/running state.
+      produces:
+        - Three layer records, one overall state, and one next-action code.
+      boundaries:
+        - Pure stable codes; no localized prose, no mutation, and no invented equality when evidence is absent.
+    - name: Hub status boundary
+      responsibility: Attach the version journey to the existing read-only status snapshot.
+      consumes:
+        - packageRoot, current Hub artifact identity, and daemon probe result.
+      produces:
+        - versionJourney in authenticated /api/status.
+      boundaries:
+        - A status read never builds, restarts, starts, stops, or writes files.
+  callChain:
+    - Hub status inspects current source files under packageRoot.
+    - It reads the BuildIdentity embedded in the artifact serving Hub.
+    - It reads the daemon identity already returned by the health probe.
+    - The pure projection compares source to artifact first, then artifact protocol/build to daemon.
+    - The API returns one state and next action for a later readable UI.
+  scenarios:
+    - name: Source changed after build
+      given: A Hub public JS file changes after the artifact was built.
+      when: Version journey is projected.
+      then: State is source-needs-build and next action is build even if the daemon still matches the old artifact.
+    - name: Built artifact not running
+      given: Source digest matches the Hub artifact but daemon build id differs.
+      when: Version journey is projected.
+      then: State is artifact-needs-restart and next action is restart.
+    - name: Fully aligned
+      given: Source digest matches artifact and daemon build id matches artifact with compatible protocol.
+      when: Version journey is projected.
+      then: State is ready and next action is none.
+    - name: Legacy identity
+      given: The running artifact was produced before sourceDigest existed.
+      when: Version journey is projected.
+      then: State is unavailable or rebuild-and-restart as defined by explicit precedence; it never claims source is current.
+  risks:
+    - Missing a production input makes the UI lie, so enumeration must include Hub public assets and tests must mutate one.
+    - Adding a required identity field would reject existing daemons, so sourceDigest must be optional at the parser boundary.
+    - Different digest algorithms in build script and runtime inspection would create permanent false mismatch, so golden tests must prove parity.
+  changeBudget:
+    maxFiles: 7
+    maxDiffLines: 1300
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+delivery:
+  buildCommands:
+    - npm run build
+  activationCommands: []
+  activationCheckCommands: []
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/build-identity.ts
+    - scripts/write-build-identity.mjs
+    - src/hub/server.ts
+    - tests/build-identity.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-health-cache.test.ts
+    - tests/fixtures/hub-task-story-v1.json
+acceptance:
+  criteria:
+    - Source, Hub artifact, and daemon identity are three separate facts with deterministic comparison.
+    - Hub public asset changes invalidate the source digest.
+    - Older identities remain readable but never produce false ready state.
+    - /api/status stays read-only and returns a stable state plus next-action code.
+    - No build, restart, Git, or shell command runs during status inspection.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/build-identity.test.ts tests/hub-settings.test.ts tests/hub-health-cache.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - npm run build
+    - git diff --check

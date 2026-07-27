@@ -77,6 +77,7 @@ export type PricingUnavailableReason =
   | "unsupported-endpoint"
   | "unsupported-model"
   | "unsupported-service-tier"
+  | "subscription-plan-no-per-request-price"
   | "ambiguous-match"
   | "no-match";
 
@@ -98,13 +99,13 @@ export type PricingCatalog = readonly PricingCatalogEntry[];
 // ---------------------------------------------------------------------------
 
 const DS_SRC: PricingSourceEvidence = {
-  url: "https://api-docs.deepseek.com/quick_start/pricing/", checkedAt: "2026-07-23",
+  url: "https://api-docs.deepseek.com/quick_start/pricing/", checkedAt: "2026-07-26",
 };
 const MM_INTL_SRC: PricingSourceEvidence = {
-  url: "https://platform.minimax.io/docs/guides/pricing-paygo", checkedAt: "2026-07-23",
+  url: "https://platform.minimax.io/docs/guides/pricing-paygo", checkedAt: "2026-07-26",
 };
 const MM_CN_SRC: PricingSourceEvidence = {
-  url: "https://platform.minimaxi.com/docs/guides/pricing-paygo", checkedAt: "2026-07-23",
+  url: "https://platform.minimaxi.com/docs/guides/pricing-paygo", checkedAt: "2026-07-26",
 };
 
 // ---------------------------------------------------------------------------
@@ -117,6 +118,9 @@ const MM_CN = "https://api.minimaxi.com";
 const DS_ROUTE = "deepseek-direct-payg";
 const MM_INTL_ROUTE = "minimax-international-direct-payg";
 const MM_CN_ROUTE = "minimax-china-direct-payg";
+const VOLCENGINE_ORIGIN = "https://ark.cn-beijing.volces.com";
+const VOLCENGINE_ROUTE = "volcengine-coding-plan-subscription";
+const VOLCENGINE_MODEL = "glm-5.2[1M]";
 const DS_FLASH_ALIASES: readonly string[] = ["deepseek-v4-flash", "deepseek-v4-flash[1M]"];
 const DS_PRO_ALIASES: readonly string[] = ["deepseek-v4-pro", "deepseek-v4-pro[1M]"];
 const MM_ALIASES: readonly string[] = ["MiniMax-M3", "MiniMax-M3[1m]"];
@@ -272,6 +276,25 @@ export function resolveOfficialPricing(
   // Stage 1 — normalise endpoint
   const origin = normalizeOrigin(request.endpoint);
   if (origin === null) return { matched: false, reason: "malformed-endpoint" };
+
+  // Coding Plan is a subscription route, not a per-request PAYG table. Keep
+  // its identity strict, then return an explicit unavailability reason rather
+  // than fabricating a zero-dollar quote or borrowing another GLM route.
+  if (request.provider === "volcengine") {
+    if (origin !== VOLCENGINE_ORIGIN) {
+      return { matched: false, reason: "unsupported-endpoint" };
+    }
+    if (request.route === undefined) {
+      return { matched: false, reason: "route-required" };
+    }
+    if (request.route !== VOLCENGINE_ROUTE) {
+      return { matched: false, reason: "unsupported-route" };
+    }
+    if (request.modelAlias !== VOLCENGINE_MODEL) {
+      return { matched: false, reason: "unsupported-model" };
+    }
+    return { matched: false, reason: "subscription-plan-no-per-request-price" };
+  }
 
   // Stage 2 — origin must be known for the requested provider
   let originOk = false;

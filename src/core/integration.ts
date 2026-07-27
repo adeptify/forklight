@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readFile, readdir, realpath, rm, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, lstat, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { IntegrationSettings } from "./settings.js";
 import type { StateStore } from "../state/store.js";
 import type {
+  DeliveryPlanView,
   IntegrationReceiptRecord,
   IntegrationResultRecord,
   IntegrationStageEvidence,
@@ -12,9 +12,11 @@ import type {
   TaskRecord,
   VerificationCommandResult,
 } from "./types.js";
+import { buildDeliveryPlanView } from "./delivery-profiles.js";
 import { runCaptured } from "./process.js";
 import { verifierProcessEnvironment } from "../workspace/verifier-git.js";
 import { latestMainReview } from "./main-review.js";
+import { copyForVerification } from "./integration-verification-copy.js";
 
 // --- Public type aliases ---
 
@@ -372,6 +374,7 @@ function buildReceipt(
   sourceEvidence: Record<string, string>,
   reasons: string[],
   ttlMs: number,
+  deliveryPlan?: DeliveryPlanView,
 ): IntegrationReceiptRecord {
   const now = new Date();
   return {
@@ -384,6 +387,7 @@ function buildReceipt(
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
     consumed: false,
+    ...(deliveryPlan === undefined ? {} : { deliveryPlan }),
   };
 }
 
@@ -414,43 +418,6 @@ async function rollbackSource(
     }
   }
   return failures;
-}
-
-// --- Verification copy ---
-
-async function copyForVerification(
-  sourcePath: string,
-  excludes: string[],
-): Promise<string> {
-  const tmpDir = path.join(
-    tmpdir(),
-    `fl-verify-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-  );
-  await mkdir(tmpDir, { recursive: true, mode: 0o700 });
-
-  const excludeSet = new Set([".git", "node_modules", ...excludes]);
-  const filter = (src: string): boolean => {
-    const rel = path.relative(sourcePath, src);
-    if (!rel || rel === ".") return true;
-    return !rel.split(path.sep).some((part) => excludeSet.has(part));
-  };
-
-  await cp(sourcePath, tmpDir, { recursive: true, filter });
-
-  const srcModules = path.join(sourcePath, "node_modules");
-  try {
-    const st = await lstat(srcModules);
-    const dependencyPath = st.isSymbolicLink()
-      ? await realpath(srcModules)
-      : srcModules;
-    if ((await lstat(dependencyPath)).isDirectory()) {
-      await symlink(dependencyPath, path.join(tmpDir, "node_modules"), "dir");
-    }
-  } catch {
-    // No node_modules in source — fine for simple projects
-  }
-
-  return tmpDir;
 }
 
 // --- Backup pruning ---
@@ -504,6 +471,12 @@ export async function preflightIntegration(
   const task = store.getTask(taskId);
   const reasons: string[] = [];
 
+  // Compute immutable delivery plan from the Task snapshot (before any I/O).
+  const deliveryPlan = buildDeliveryPlanView(
+    task.spec.delivery,
+    task.spec.deliveryResolution,
+  );
+
   // 1. Task must be succeeded
   if (task.status !== "succeeded") {
     reasons.push(`Task status is "${task.status}", must be "succeeded"`);
@@ -521,6 +494,28 @@ export async function preflightIntegration(
     reasons.push("Main agent review acceptance is required");
   }
 
+  // When the Main accept is bound to a CandidateRevision digest, verify the
+  // live Diff bytes match before creating a passing receipt. A changed patch
+  // after Main accept is rejected even before the existing dry-run and source
+  // checks.
+  if (review?.decision === "accept" && review.acceptedPatchDigest !== undefined) {
+    let currentDiff: string;
+    try {
+      currentDiff = await readFile(task.paths.diff, "utf8");
+    } catch {
+      reasons.push("Diff file is missing or unreadable");
+    }
+    if (reasons.length === 0) {
+      const currentDigest = sha256(currentDiff!);
+      if (currentDigest !== review.acceptedPatchDigest) {
+        reasons.push(
+          "Accepted candidate revision patch digest does not match the current diff; " +
+          "the patch has changed since Main acceptance",
+        );
+      }
+    }
+  }
+
   // 2. Read diff
   let diff: string;
   try {
@@ -528,7 +523,7 @@ export async function preflightIntegration(
   } catch {
     reasons.push("Diff file is missing or unreadable");
     const receipt = buildReceipt(
-      task.id, "", [], {}, reasons, settings.reviewReceiptTtlMs,
+      task.id, "", [], {}, reasons, settings.reviewReceiptTtlMs, deliveryPlan,
     );
     store.saveIntegrationReceipt(receipt);
     storePreflightEvent(store, task.id, receipt);
@@ -628,7 +623,7 @@ export async function preflightIntegration(
 
   const receipt = buildReceipt(
     task.id, diff, affectedFiles, sourceEvidence, reasons,
-    settings.reviewReceiptTtlMs,
+    settings.reviewReceiptTtlMs, deliveryPlan,
   );
   store.saveIntegrationReceipt(receipt);
   storePreflightEvent(store, task.id, receipt);
@@ -659,6 +654,7 @@ function storePreflightEvent(
       passed: receipt.rejectionReasons.length === 0,
       rejectionReasons: receipt.rejectionReasons,
       affectedFiles: receipt.affectedFiles,
+      ...(receipt.deliveryPlan === undefined ? {} : { deliveryPlan: receipt.deliveryPlan }),
     },
   );
 }
@@ -974,11 +970,11 @@ export async function applyIntegration(
       task.sourcePath,
       task.spec.workspace.exclude,
     );
-    const verificationEnvironment = await verifierProcessEnvironment(task, verifyDir);
+    const { env: verificationEnvironment, shellGitPrefix } = await verifierProcessEnvironment(task, verifyDir);
     for (const command of task.spec.acceptance.commands) {
       const result = await runCaptured(
         "/bin/zsh",
-        ["-lc", command],
+        ["-lc", shellGitPrefix + command],
         {
           cwd: verifyDir,
           env: verificationEnvironment,

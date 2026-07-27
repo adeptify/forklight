@@ -37,6 +37,80 @@ Governs Worker runtime behavior and cost ceilings.
 | `maxAttempts` | 3 | Maximum attempts per task before the daemon refuses resume |
 | `workerStopGraceMs` | 10,000 | Grace period for SIGINT before SIGKILL |
 
+### Worker Advanced policy
+
+Each Worker Profile can carry an `advancedPolicy`. A Task may override these
+fields; ForkLight freezes the resolved values when the Task is created. Hub
+shows the effective value and whether it came from the Task, Worker, or global
+default.
+
+| Field | Development default | Meaning |
+| --- | --- | --- |
+| `maxDurationMs` | `null` | Maximum Worker wall time; `null` is unlimited |
+| `observedTokenCeiling` | `null` | Post-observed Token ceiling; `null` is unlimited |
+| `noProgressTimeoutMs` | 1,800,000 | Watchdog threshold; `null` disables it |
+| `workerStopGraceMs` | 10,000 | Graceful stop window |
+| `fileLimit` / `fileLimitMode` | `null` / `warn` | File-count evidence and enforcement mode |
+| `changedLineLimit` / `changedLineLimitMode` | `null` / `warn` | Changed-line evidence and enforcement mode |
+| `baseMaxAttempts` | 3 | Ordinary Attempts admitted by the frozen Task policy |
+| `maxExtraAttempts` | 1 | Explicit extra Attempts; separate from Main recovery paths |
+| `maxMainCorrections` | 1 | Main-authorized same-candidate Worker repairs; 0 disables |
+| `maxMainReverifications` | 1 | Main-authorized full check reruns with no Worker or new Attempt; 0 disables |
+| `maxConcurrency` | 2 | Per-profile scheduling cap, intersected with the global cap |
+| `completionMode` | `hard` | Editable no-change completion policy |
+| `changeBudgetMode` | `hard` | Contract change-budget enforcement policy |
+| `maxAdaptationRounds` | 0 | Bounded successor-policy rounds; 0 disables |
+
+The two Main recovery caps and `maxAdaptationRounds` are authority/loop caps.
+They may be configured before Task creation, but Task adaptation cannot enlarge
+them after execution begins. Reverify-only records local command duration and
+Main exchange separately; its zero Worker Tokens must not be presented as a
+measured full-restart saving without an equivalent paired baseline.
+
+### modelRouting
+
+Governs the evidence-aware model-routing advisory. This is a read-only advisor — it never
+launches work, switches Workers, disables models, or mutates settings.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `minRelevantSamples` | 5 | Minimum relevant historical samples before a recommendation is produced |
+| `uncertaintyThreshold` | 0.15 | Score-gap ratio below which two top candidates are considered too close to call |
+| `competitionOnUncertainty` | true | When true, insufficient evidence or close scores suggest a bounded competition |
+| `missingEvidenceMode` | `flexible` | `strict` blocks a recommendation when any enabled factor lacks comparable evidence; `flexible` omits that factor, explains the gap, and may use the remaining evidence |
+| `weights.acceptedDelivery` | 1 | Weight for accepted delivery rate (machine success + Main-remediated) |
+| `weights.verifiedBehavior` | 1 | Weight for independently verified behavior rate |
+| `weights.modelQualityFailure` | 0.5 | Weight applied as a penalty for model-quality failure rate |
+| `weights.correctionChurn` | 0.2 | Weight applied to explicit Main-requested revisions and Main-repaired deliveries |
+| `weights.officialCost` | 0 | Weight for official-cost efficiency (only scores when all candidates have same-currency exact quotes) |
+| `weights.duration` | 0 | Weight for execution speed (disabled by default; requires explicit enablement) |
+| `weights.budgetReliability` | 0 | Optional soft preference for reaching a reviewable result before an enforced USD or Token limit stops the Attempt |
+
+Non-model failures (credentials, provider errors, policy limits, workspace issues,
+interruptions) are counted separately and never inflate sample sufficiency or
+penalize a model. A policy-only failure whose independent behavior checks passed
+may still contribute that positive behavior evidence.
+
+Official-cost comparison requires every relevant Attempt for every candidate to have
+an exact Provider-native quote in one shared native currency. Runtime telemetry,
+legacy costUsd, subscription plans, ranges,
+and currency conversion are never substituted. When evidence or currency is not
+comparable, the cost factor is marked unavailable with a stable reason.
+
+Budget reliability is disabled by default. When enabled, it is deliberately
+narrower than success rate: it asks whether an Attempt reached a reviewable
+result before an enforced runtime USD budget or observed Token ceiling stopped
+it. ForkLight reads the runtime budget frozen on each Attempt, so a correction
+with a different authorized budget cannot hide an earlier exhausted Attempt.
+
+Only Attempts under one identical, actually enforced budget envelope are
+compared. An uncapped success is not proof that a model can finish under a
+specific limit. A configured USD value is also excluded when that Runtime has
+no frozen evidence that it supports the budget flag. Different envelopes are
+never averaged or converted. Missing evidence follows `missingEvidenceMode`.
+The factor never disables a model, changes Task success, starts a retry or
+Competition, raises a budget, or overrides Main.
+
 ### competition
 
 Governs multi-model competition creation and scoring.
@@ -97,6 +171,13 @@ Built-in provider defaults:
 | qwen | `qwen3.7-plus` | `https://dashscope.aliyuncs.com/apps/anthropic` |
 | minimax | `MiniMax-M3` | `https://api.minimax.io/anthropic` |
 | glm | `glm-5.2` | Alibaba endpoint (shared with qwen) |
+| volcengine | `glm-5.2[1M]` | `https://ark.cn-beijing.volces.com/api/coding` |
+
+The built-in `volcengine-glm52-1m` Worker uses Claude Code and the Keychain
+service `forklight.volcengine.api-key`. Its model id is preserved exactly,
+including `[1M]`. Coding Plan is represented as a subscription route: Worker
+tokens remain measurable, but ForkLight reports per-request cost as unavailable
+instead of inventing a zero-dollar or PAYG quote.
 
 ### probe
 
@@ -137,6 +218,55 @@ Settings changes do NOT retroactively affect tasks that were already created.
 - **Integration receipts**: The preflight receipt captures source evidence
   (file digests) at review time. The apply step re-verifies every digest and
   the patch before mutating source.
+
+## Workspace exclusion and Integration eligibility
+
+A Task Contract declares two distinct workspace fields that look similar but
+carry different product meanings. ForkLight keeps them on one shared
+named-segment rule so that content deliberately hidden from the safe Worker
+snapshot can never become delivery merely because an acceptance build
+recreated it.
+
+- **`workspace.exclude`** names path segments (for example `dist`,
+  `node_modules`, `.git`, `coverage`) that are omitted from the isolated
+  baseline and Worker snapshot at preparation time. Because excluded content
+  has no trustworthy baseline, it is never eligible for automatic source
+  Integration, even when a verifier-side build recreates it inside the Worker
+  workspace after the edit.
+- **`workspace.generatedPaths`** lists glob patterns (for example `dist/**`)
+  for content that *is* included in the snapshot but whose changes are
+  generated noise. Such changes are retained as generated evidence and kept
+  out of the reviewed Integration patch, but the path remains part of the
+  compared tree.
+
+The two share one normalized named-segment matcher: a relative path is
+excluded when any of its segments equals a configured `exclude` name, so a
+nested path such as `pkg/coverage/report.json` follows the same meaning as
+`coverage/report.json`. Patch classification reuses that exact rule, so a
+recreated `dist` tree appears in **raw** and **generated** audit evidence
+but is absent from **business** metrics and from the reviewed
+`integration.patch`.
+
+This is a product invariant, not a `dist`-specific workaround:
+
+- **Raw evidence** (`workspace.raw.patch`) retains every changed file,
+  including recreated excluded output, so the audit trail stays complete and
+  non-destructive.
+- **Generated evidence** (`workspace.generated.patch`) retains excluded and
+  generated-paths output separately, with its own file and line counts.
+- **Integration evidence** (`<task>/workspace.diff`) contains only eligible
+  business source changes. Integration preflight measures, reviews, and
+  applies only this patch, so recreated excluded output cannot inflate the
+  reviewed file or line counts.
+
+An included source path is never discarded merely because its name contains
+`generated` (for example `src/generated/client.ts`): classification uses
+segment equality against configured excludes plus explicit `generatedPaths`
+patterns, never a directory-name heuristic. ForkLight internal paths
+(`.forklight/**`) remain internal regardless of exclusion. Raising
+Integration size limits is never a remedy for a recreated excluded tree -
+if excluded output reaches Integration, that is a classification bug to
+fix at the policy boundary, not a limit to widen.
 
 ## Non-configurable safety invariants
 

@@ -16,6 +16,7 @@ import {
 } from "../core/task.js";
 import { readProviderKey } from "../core/secrets.js";
 import { cloneDefaults } from "../core/settings.js";
+import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
 import type { NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
 import { GrokEventNormalizer } from "../events/grok-normalize.js";
 import type {
@@ -173,17 +174,21 @@ export function buildGrokSandboxProfile(input: {
   userHome: string;
   /** Operator ~/.grok — read-only for binary/bundled assets; writes stay task-local. */
   operatorGrokHome: string;
+  /** Grok imports Claude-compatible settings at startup; keep them read-only. */
+  operatorClaudeHome: string;
   /** Node/Grok temp roots (design §8.4 / Claude parity). */
   temporaryDirectory: string;
 }): string {
-  // Deny operator home reads EXCEPT workspace/task grok home/logs/runtime/tmp/operator .grok
-  // (Grok CLI needs ~/.grok/bin + bundled assets even when GROK_HOME is task-local).
+  // Deny operator-home file contents EXCEPT the task paths and the two
+  // read-only configuration roots Grok imports at startup. Metadata remains
+  // readable because macOS trust discovery fails before network startup when
+  // every home-directory metadata read is denied.
   return `(version 1)
 (deny default)
 (import "system.sb")
 (allow process*)
 (allow file-read*)
-(deny file-read*
+(deny file-read-data
   (require-all
     (subpath "${sandboxLiteral(input.userHome)}")
     (require-not (subpath "${sandboxLiteral(input.workspace)}"))
@@ -191,6 +196,7 @@ export function buildGrokSandboxProfile(input: {
     (require-not (subpath "${sandboxLiteral(input.logs)}"))
     (require-not (subpath "${sandboxLiteral(input.runtimeDirectory)}"))
     (require-not (subpath "${sandboxLiteral(input.operatorGrokHome)}"))
+    (require-not (subpath "${sandboxLiteral(input.operatorClaudeHome)}"))
     (require-not (subpath "${sandboxLiteral(input.temporaryDirectory)}"))))
 (allow file-write*
   (subpath "${sandboxLiteral(input.workspace)}")
@@ -281,6 +287,14 @@ export class GrokBuildAdapter implements WorkerAdapter {
     const { store, task, attempt, resuming } = ctx;
     const hooks = ctx.hooks ?? {};
     const exec = ctx.execution ?? cloneDefaults().execution;
+    const noProgressTimeoutMs = noProgressFromSnapshot(
+      task.effectivePolicy,
+      exec.noProgressTimeoutMs,
+    );
+    const workerStopGraceMs = stopGraceFromSnapshot(
+      task.effectivePolicy,
+      exec.workerStopGraceMs,
+    );
 
     if (task.spec.provider.name !== "xai") {
       throw new Error(
@@ -327,6 +341,10 @@ export class GrokBuildAdapter implements WorkerAdapter {
     const scheduleWatchdog = (): void => {
       if (watchdogTerminal || watchdogFired) return;
       if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
+      if (noProgressTimeoutMs === null) {
+        watchdogTimer = undefined;
+        return;
+      }
       const timeout = setTimeout(() => {
         watchdogFired = true;
         const pid = child?.pid;
@@ -337,11 +355,11 @@ export class GrokBuildAdapter implements WorkerAdapter {
               child.kill("SIGTERM");
             }
             escalationTimer = undefined;
-          }, exec.workerStopGraceMs);
+          }, workerStopGraceMs);
           escalation.unref();
           escalationTimer = escalation;
         }
-      }, exec.noProgressTimeoutMs);
+      }, noProgressTimeoutMs);
       timeout.unref();
       watchdogTimer = timeout;
     };
@@ -377,6 +395,7 @@ export class GrokBuildAdapter implements WorkerAdapter {
       const profilePath = path.join(profileDir, "profile.sb");
       const temporaryDirectory = realpathSync(process.env.TMPDIR ?? "/tmp");
       const operatorGrokHome = path.join(homedir(), ".grok");
+      const operatorClaudeHome = path.join(homedir(), ".claude");
       const profile = buildGrokSandboxProfile({
         workspace: task.paths.workspace,
         grokHome,
@@ -384,6 +403,7 @@ export class GrokBuildAdapter implements WorkerAdapter {
         runtimeDirectory: path.dirname(bin),
         userHome: process.env.HOME ?? homedir(),
         operatorGrokHome,
+        operatorClaudeHome,
         temporaryDirectory,
       });
       await writeFile(profilePath, profile, { mode: 0o600 });
@@ -508,6 +528,14 @@ export class GrokBuildAdapter implements WorkerAdapter {
         ...terminalFields(terminal),
         error:
           "No effective implementation progress detected within the configured interval; worker was terminated by the progress watchdog",
+        policyLimit: {
+          category: "no-progress",
+          enforcementPhase: "preemptive",
+          configured: noProgressTimeoutMs,
+          observed: noProgressTimeoutMs ?? 0,
+          effect: "hard-fail",
+          detail: "Worker reached the configured no-progress interval and was terminated",
+        },
       };
     }
     if (exitCode !== 0 || terminal?.isError) {

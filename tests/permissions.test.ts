@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import type { AttemptRecord, TaskRecord } from "../src/core/types.js";
 import {
   allowedToolArguments,
@@ -105,7 +107,12 @@ test("macOS Worker launch restricts writes to task-owned directories", { skip: p
   assert.match(profile, /daemon\/protocol\.ts/);
   assert.match(profile, /core\/build-identity\.ts/);
   assert.match(profile, /forklight\.sock/);
-  assert.match(profile, /\(literal "\/Users\/[^"]+"\)/);
+  const sourceRoot = path.join(
+    path.dirname(path.dirname(fileURLToPath(import.meta.url))),
+    "src",
+  );
+  const escapedSourceRoot = sourceRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(profile, new RegExp(`\\(literal "${escapedSourceRoot}"\\)`));
   assert.doesNotMatch(profile, /fixtures\/checkout/);
   assert.doesNotMatch(profile, /verifier-git|GIT_DIR|GIT_INDEX_FILE/);
 });

@@ -231,6 +231,98 @@ test("integration runs all build commands and retains source when build fails", 
   }
 });
 
+test("preflight receipt includes safe delivery plan from task snapshot", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-dp-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(
+      store,
+      ["true"],
+      true,
+      {
+        buildCommands: ["npm ci"],
+        activationCommands: ["npm run build"],
+        activationCheckCommands: ["npm test"],
+      },
+    );
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.equal(receipt.rejectionReasons.length, 0);
+    assert.ok(receipt.deliveryPlan, "delivery plan must be present in receipt");
+    assert.equal(receipt.deliveryPlan!.buildCommandCount, 1);
+    assert.equal(receipt.deliveryPlan!.activationCommandCount, 1);
+    assert.equal(receipt.deliveryPlan!.activationCheckCommandCount, 1);
+    assert.equal(receipt.deliveryPlan!.outcome, "activation");
+    assert.equal(receipt.deliveryPlan!.stages.artifactBuild, "required");
+    assert.equal(receipt.deliveryPlan!.stages.runtimeActivation, "required");
+    // Verify no command text leaked
+    const serialized = JSON.stringify(receipt.deliveryPlan);
+    assert.ok(!serialized.includes("npm ci"));
+    assert.ok(!serialized.includes("npm test"));
+  } finally {
+    store.close();
+  }
+});
+
+test("preflight event payload includes delivery plan", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-dp-ev-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(
+      store,
+      ["true"],
+      true,
+      { buildCommands: ["make"], activationCommands: [], activationCheckCommands: [] },
+    );
+    await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    const events = store.listEvents(task.id);
+    const preflightEvent = events.find((e) => e.type === "integration.preflight.completed");
+    assert.ok(preflightEvent, "preflight event must exist");
+    const payload = preflightEvent!.payload as Record<string, unknown> | undefined;
+    assert.ok(payload?.deliveryPlan, "preflight event payload must include deliveryPlan");
+    const plan = payload!.deliveryPlan as Record<string, unknown>;
+    assert.equal(plan.outcome, "build");
+  } finally {
+    store.close();
+  }
+});
+
+test("preflight delivery plan for source-only task reports not-configured build and activation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-dp-src-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"]);
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(receipt.deliveryPlan);
+    assert.equal(receipt.deliveryPlan!.outcome, "none");
+    assert.equal(receipt.deliveryPlan!.stages.artifactBuild, "not-configured");
+    assert.equal(receipt.deliveryPlan!.stages.runtimeActivation, "not-configured");
+    assert.equal(receipt.deliveryPlan!.stages.sourceApply, "required");
+    assert.equal(receipt.deliveryPlan!.stages.sourceVerify, "required");
+  } finally {
+    store.close();
+  }
+});
+
+test("legacy receipt without deliveryPlan remains readable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-leg-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"]);
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.equal(receipt.rejectionReasons.length, 0);
+    const stored = store.getIntegrationReceipt(receipt.id);
+    assert.ok(stored);
+    // Receipt was just created with delivery plan; test that absence is compatible
+    const { deliveryPlan: _, ...withoutPlan } = receipt;
+    const json = JSON.stringify(withoutPlan);
+    const parsed = JSON.parse(json);
+    assert.equal(parsed.deliveryPlan, undefined, "absent deliveryPlan parses as undefined");
+    assert.equal(parsed.taskId, task.id);
+  } finally {
+    store.close();
+  }
+});
+
 test("passing machine verification cannot preflight without current Main Codex accept", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "fl-int-review-gate-"));
   const store = new StateStore(root);
@@ -899,4 +991,126 @@ test("rename patch is rejected at preflight", async () => {
       r.includes("rename"),
     ),
   );
+});
+
+test("recreated excluded dist does not inflate the integration patch or block apply", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-dist-"));
+  const store = new StateStore(root);
+  try {
+    const sourceDir = path.join(root, "source");
+    const taskHome = path.join(root, "state");
+    await mkdir(sourceDir);
+    await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal text.\n");
+    const acceptanceCommands = ["true"];
+    const taskSpec = spec(sourceDir, acceptanceCommands);
+    // dist is excluded from the snapshot but NOT declared in generatedPaths,
+    // so a verifier build that recreates it must be classified as generated
+    // evidence rather than business delivery.
+    taskSpec.workspace.exclude = [".git", "node_modules", "dist"];
+
+    const paths = taskPaths(taskHome, "task-dist");
+    await prepareWorkspace(taskSpec, paths);
+
+    // Worker edits one real source file.
+    await writeFile(
+      path.join(paths.workspace, "readme.md"),
+      "# hello\n\nChanged text.\n",
+    );
+    // Independent acceptance build recreates a large dist tree that was
+    // never present in the baseline snapshot.
+    await mkdir(path.join(paths.workspace, "dist"), { recursive: true });
+    for (let i = 0; i < 300; i += 1) {
+      await writeFile(
+        path.join(paths.workspace, "dist", `bundle-${i}.js`),
+        `// generated ${i}\n`,
+      );
+    }
+    await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+
+    const task: TaskRecord = {
+      id: "task-dist",
+      name: taskSpec.name,
+      status: "succeeded",
+      sourcePath: sourceDir,
+      taskFile: "/nonexistent/task.yaml",
+      spec: taskSpec,
+      paths,
+      sessionId: "test-session",
+      currentAttemptId: "attempt-1",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    store.createTask(task);
+    const attempt: AttemptRecord = {
+      id: "attempt-1",
+      taskId: task.id,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: task.sessionId,
+      rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+      startedAt: task.createdAt,
+      finishedAt: task.updatedAt,
+      exitCode: 0,
+      runtimeBudgetUsd: taskSpec.runtime.maxBudgetUsd,
+    };
+    store.createAttempt(attempt);
+    const verification: VerificationResult = {
+      passed: true,
+      behaviorPassed: true,
+      policyPassed: true,
+      sourceCompatible: true,
+      commands: acceptanceCommands.map((command) => ({
+        command,
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+      })),
+      diffPath: paths.diff,
+      sourceUnchanged: true,
+    };
+    store.addEvent(
+      task.id,
+      attempt.id,
+      "verification.completed",
+      "Independent verification passed",
+      verification,
+    );
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Scoped source change independently verified",
+      confirm: true,
+    });
+
+    // Integration preflight measures only the reviewed (source-only) patch,
+    // so the 300 recreated dist files cannot push it over the configured
+    // file or line limits.
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.deepEqual(receipt.rejectionReasons, []);
+    assert.deepEqual(receipt.affectedFiles, ["readme.md"]);
+
+    const result = await applyIntegration(store, task.id, receipt.id, INTEGRATION_DEFAULTS);
+    assert.equal(result.status, "applied");
+    assert.match(await readFile(path.join(sourceDir, "readme.md"), "utf8"), /Changed text/);
+
+    // Raw and generated audit evidence retain the full recreated dist tree.
+    const raw = await readFile(path.join(paths.root, "workspace.raw.patch"), "utf8");
+    assert.match(raw, /dist\/bundle-0\.js/);
+    assert.match(raw, /dist\/bundle-299\.js/);
+    assert.match(raw, /readme\.md/);
+    const generated = await readFile(
+      path.join(paths.root, "workspace.generated.patch"),
+      "utf8",
+    );
+    assert.match(generated, /dist\/bundle-0\.js/);
+    assert.match(generated, /dist\/bundle-299\.js/);
+    assert.doesNotMatch(generated, /readme\.md/);
+    // The reviewed Integration patch stayed source-only.
+    const integration = await readFile(paths.diff, "utf8");
+    assert.match(integration, /readme\.md/);
+    assert.doesNotMatch(integration, /dist\//);
+  } finally {
+    store.close();
+  }
 });

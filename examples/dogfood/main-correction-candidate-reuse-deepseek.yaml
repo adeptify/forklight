@@ -1,0 +1,190 @@
+version: 2
+name: Main-authorized candidate reuse and bounded correction
+project: ../..
+taskClass: main-correction-candidate-reuse
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: When a failed or interrupted Worker has produced a partially useful candidate, Main can explicitly authorize a bounded correction that reuses the same Task workspace and runtime session, reruns the original acceptance contract, and records only the correction Attempt's incremental usage, without reopening automatic retry loops.
+  presentation:
+    summary: Worker 失败后如果成果还有可用部分，Main 可以让它在原工作区继续修一次；不会从头重做，也不会因为关闭自动重试而失去复用能力。
+    language: zh-CN
+  context:
+    - Failed and interrupted Tasks already retain their isolated workspace, Attempt history, raw logs, and runtime session id.
+    - resumeTask already combines structured verifier remediation with bounded Main feedback and reuses the existing workspace and session.
+    - Today every Attempt beyond baseMaxAttempts must consume maxExtraAttempts. A profile configured as baseMaxAttempts 1 and maxExtraAttempts 0 therefore blocks an explicit Main correction even when the candidate is mostly useful.
+    - Automatic retry allowance and Main-authorized candidate correction are different product decisions and must not share one cap.
+    - Existing Attempt authorization evidence assumes every ordinal above the base limit is a generic extra grant, so mixed authorization kinds must remain sequential and restart-safe rather than corrupting history.
+    - The Hub already exposes Worker advanced settings and Task supervision actions, but its Resume and Revise wording does not explain candidate reuse to a non-technical user.
+  inScope:
+    - Add maxMainCorrections as a non-negative, immutable advanced-policy field with precedence Task override over Worker Profile over global default. Default it to one in development-friendly policy, while preserving legacy Task compatibility.
+    - Add an explicit Main correction operation for failed or interrupted Tasks. It requires bounded non-empty feedback, an explicit confirm flag, and an explicit per-Attempt runtime budget that may be null for uncapped.
+    - Admit a Main correction independently from maxExtraAttempts, limited only by the Task's frozen maxMainCorrections. Setting maxExtraAttempts to zero must continue to disable generic extra retry grants.
+    - Reuse the same Task id, isolated workspace, baseline, logs, and latest runtime session. Preserve every prior Attempt and verification result as immutable history.
+    - Feed the Worker both the latest structured verifier remediation and canonical Main feedback, then independently rerun every original stored acceptance command. A passing correction returns the existing Task to succeeded so normal Main Review and Integration can proceed.
+    - Persist privacy-safe authorization lineage that distinguishes generic extra attempts from Main corrections, includes target ordinal and prior Attempt identity, and can reconstruct a pending correction after daemon restart without forwarding secrets or full Task content.
+    - Keep Attempt ordinals globally sequential when generic extra grants and Main corrections are mixed. Legacy authorization events without a kind remain valid generic-extra evidence.
+    - Expose the operation through daemon protocol, CLI, MCP, Hub mutation route, and a plain-language Task Detail action. The UI must say what will be reused, what will be rerun, and that this is a manual bounded correction rather than automatic retry.
+    - Add maxMainCorrections to each Worker Profile's advanced UI settings with clear Chinese and English labels/help, persistence, preview, and effective-policy provenance.
+    - Surface correction progress and outcome in existing Task evidence without inventing savings. Show the correction Attempt's own Token/cost evidence as incremental cost; do not claim a counterfactual full-restart saving unless measured data exists.
+    - Add deterministic tests for separate caps, mixed grant order, restart recovery, session/workspace reuse, success/failure, legacy events, profile/UI persistence, protocol/CLI/MCP/Hub validation, and no automatic loop.
+  outOfScope:
+    - Automatically deciding whether a candidate is worth reusing, automatically launching a correction, changing model routing, comparing providers, or estimating unmeasured avoided Token cost.
+    - Rebuilding the workspace from source, creating a successor Task, weakening acceptance commands, editing original source before Integration, or changing commit/push authority.
+    - Allowing correction of competition candidates whose comparison is already terminal; fail closed with a clear reason rather than invalidating competition evidence silently.
+    - Repeated parameter tuning, adaptation, or retry loops in response to this Task's own result.
+  executionSteps:
+    - Trace generic authorization, resume/revise, daemon restart recovery, Task state clearing, protocol schemas, and Hub supervision actions before editing.
+    - Introduce a shared durable Attempt-admission ledger or equivalent smallest design that validates legacy generic grants and new Main-correction grants without ordinal ambiguity.
+    - Implement policy resolution and explicit correction admission, including one pending grant, idempotent recovery, separate cap accounting, and bounded canonical feedback.
+    - Execute correction through the existing same-workspace/same-session resume path and original independent verification; record correction-specific events and Main Review evidence.
+    - Wire the operation through daemon, CLI, MCP, and Hub, then add the Worker advanced setting and plain-language Task Detail action.
+    - Add focused regression tests before running the declared acceptance commands once. Report any unresolved edge instead of weakening the gates or adding retries.
+  deliverables:
+    - A separate maxMainCorrections Worker/Task policy that does not alter maxExtraAttempts semantics.
+    - One explicit, restart-safe, same-candidate Main correction operation across programmatic and visual control surfaces.
+    - Durable correction lineage and truthful incremental usage/cost evidence.
+    - Plain-language bilingual UI that explains reuse, verification, limits, and next outcome.
+    - Regression coverage for policy, authorization, execution, restart, protocol, and UI behavior.
+  modules:
+    - name: Correction admission policy
+      responsibility: Resolve the frozen per-Task correction cap and authorize one sequential correction Attempt independently from generic extra retry grants.
+      consumes:
+        - Effective AdvancedPolicy snapshot, terminal Task status, Attempt history, authorization events, bounded feedback, explicit confirmation, and runtime budget.
+      produces:
+        - One durable correction grant and AttemptExecutionOptions for the next ordinal, or one privacy-safe rejection.
+      boundaries:
+        - Never mutates old Attempts, consumes maxExtraAttempts, accepts unconfirmed requests, or grants more than maxMainCorrections.
+    - name: Same-candidate correction execution
+      responsibility: Continue the failed candidate using its existing workspace and runtime session, then run the complete original acceptance contract.
+      consumes:
+        - Pending correction grant, latest remediation packet, canonical Main feedback, retained Task paths, and prior session id.
+      produces:
+        - A new Attempt, correction-specific events, fresh verification evidence, and a succeeded, failed, or interrupted Task outcome.
+      boundaries:
+        - No fresh snapshot, successor Task, automatic second correction, original-source writes, acceptance weakening, or hidden retry.
+    - name: Correction control surfaces
+      responsibility: Offer the same explicit operation and validation through daemon, CLI, MCP, Hub API, and Task Detail.
+      consumes:
+        - Task id, feedback, budget, confirmation, Task decision state, and correction-cap evidence.
+      produces:
+        - Consistent request/result shapes and a readable explanation of reuse, full verification, incremental cost, and remaining correction allowance.
+      boundaries:
+        - UI and protocol do not infer permission, auto-submit, expose secrets, or label correction as proven Token savings.
+    - name: Worker policy configuration
+      responsibility: Let each Worker Profile configure maxMainCorrections and show its resolved value and provenance before Task creation.
+      consumes:
+        - Worker Profile draft, global defaults, Task override, and existing AdvancedPolicy validation.
+      produces:
+        - Persisted profile configuration, Task snapshot, preview row, and bilingual advanced-setting control.
+      boundaries:
+        - Later settings edits never change an already-created Task's correction cap.
+  callChain:
+    - A Worker produces useful files but the runtime or independent verifier leaves the Task failed or interrupted.
+    - Main reviews the Diff, logs, remediation packet, and incremental economics, then chooses whether reuse is worthwhile.
+    - Main submits one confirmed correction with concrete feedback and a runtime budget.
+    - ForkLight checks the Task's frozen maxMainCorrections, records a correction grant for the next global Attempt ordinal, and queues the same Task.
+    - The Worker resumes the retained session inside the retained isolated workspace with verifier evidence plus Main feedback.
+    - ForkLight independently reruns every original acceptance command and records the correction Attempt's own Tokens, cost, and outcome.
+    - On success the Task becomes eligible for Main acceptance and normal Integration; on failure it stops unless Main explicitly authorizes another correction still allowed by the frozen cap.
+  scenarios:
+    - name: Extra retries disabled but one correction allowed
+      given: A failed Task froze baseMaxAttempts 1, maxExtraAttempts 0, and maxMainCorrections 1 after producing a useful candidate.
+      when: Main confirms a correction with bounded feedback and uncapped runtime budget.
+      then: Attempt ordinal two starts in the same workspace/session, while an ordinary extra resume remains rejected.
+    - name: Correction cap exhausted
+      given: The Task has already consumed its only Main correction.
+      when: Main requests another correction.
+      then: ForkLight rejects before changing Task state or creating a grant, queue item, or model call.
+    - name: Mixed authorization kinds
+      given: A Task policy permits both generic extra Attempts and Main corrections and their grants occur in either order.
+      when: Each next Attempt is admitted.
+      then: Ordinals remain unique and sequential, each cap counts only its own grant kind, and restart recovery finds at most one truthful pending grant.
+    - name: Correction succeeds
+      given: A failed candidate needs a small change and its original acceptance commands are unchanged.
+      when: The resumed Worker fixes the candidate and every independent check passes.
+      then: The Task succeeds with old evidence preserved, new verification attached to the correction Attempt, and normal Main Review and Integration available.
+    - name: Correction fails
+      given: The resumed Worker exits or acceptance still fails.
+      when: The correction Attempt finishes.
+      then: The Task stays terminal with a readable failure reason, incremental usage/cost remains visible, and no further work starts automatically.
+    - name: Daemon restarts after grant
+      given: A correction grant and Main feedback are durable but the daemon stops before the Attempt starts.
+      when: Recovery runs.
+      then: Exactly one correction job is reconstructed with the same canonical feedback and authorization; no duplicate grant or Attempt is created.
+    - name: Legacy generic grant
+      given: Stored history contains an old attempt.authorization.granted event without an authorization kind.
+      when: New admission logic validates the Task.
+      then: The event remains a valid generic-extra grant and cannot be recounted as a Main correction.
+    - name: Competition candidate
+      given: A failed Task belongs to a competition with terminal comparison evidence.
+      when: Main requests candidate correction.
+      then: The request fails closed with a clear non-sensitive reason and leaves competition history unchanged.
+    - name: Worker-specific configuration
+      given: One Worker Profile allows two Main corrections and another allows zero.
+      when: New Tasks are created with each profile and later the settings change.
+      then: Each Task keeps its originally resolved cap and provenance; the UI truthfully previews the difference.
+  risks:
+    - Treating all ordinals above baseMaxAttempts as generic extras would make mixed histories appear corrupt; authorization kind and sequential admission must be validated together.
+    - Persisting full feedback in generic public events could leak user content; reuse bounded Main Review storage and expose only intended projections.
+    - Losing feedback across daemon restart could launch an unsafe directionless correction; recovery must fail closed unless canonical feedback can be reconstructed.
+    - Reusing a candidate after its source baseline diverges must remain governed by normal Diff, Main Review, and Integration preflight rather than silently overwriting source.
+    - UI wording that promises saved Tokens would be misleading without a measured full-restart counterfactual; show incremental correction cost and describe reuse factually.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 3200
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/daemon
+    - src/cli.ts
+    - src/mcp
+    - src/hub
+    - tests
+acceptance:
+  criteria:
+    - maxMainCorrections is independently configurable per Worker and frozen per Task; maxExtraAttempts zero still blocks generic extra grants but not an allowed confirmed Main correction.
+    - Main correction is explicit, bounded, restart-safe, same-workspace/same-session, and never automatically loops.
+    - Mixed and legacy authorization histories remain sequential, idempotent, and fail closed on corruption.
+    - Every correction reruns all original acceptance commands and records only factual incremental Attempt usage/cost without invented savings.
+    - CLI, MCP, daemon, Hub API, and plain-language bilingual Task Detail expose consistent semantics and confirmations.
+    - Existing revise, resume, plans, Integration, settings migration, Task snapshots, and Provider execution remain compatible.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/attempt-authorization.test.ts tests/settings.test.ts tests/task.test.ts tests/daemon.test.ts
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

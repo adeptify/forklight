@@ -3,6 +3,7 @@ import type {
   VerificationCommandResult,
   VerificationResult,
   CompletionPolicyCheck,
+  PolicyLimitEvidence,
   PolicyMode,
 } from "./types.js";
 import type { StateStore } from "../state/store.js";
@@ -11,13 +12,96 @@ import { assessSourceCompatibility } from "../workspace/copy.js";
 import { createPathPolicy } from "../workspace/path-policy.js";
 import { writeWorkspacePatchReport } from "../workspace/patch.js";
 import { verifierProcessEnvironment } from "../workspace/verifier-git.js";
+import {
+  sizePolicyFromSnapshot,
+} from "./advanced-policy.js";
+import { assessContractInfeasibility } from "./contract-infeasible.js";
 
-function resolveNoChangeMode(spec: TaskRecord["spec"]): PolicyMode {
-  return spec.completionPolicy?.noChangeMode ?? "hard";
+/** Collect privacy-safe contract-infeasible reason codes from durable events.
+ *  Codes may be declared by Main before verification (or fixtures). Free-text
+ *  command output is never parsed. */
+function contractInfeasibilityCodesFromEvents(
+  store: StateStore,
+  taskId: string,
+): string[] {
+  const codes: string[] = [];
+  for (const event of store.listEvents(taskId)) {
+    const payload = event.payload;
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+      continue;
+    }
+    const record = payload as {
+      contractInfeasibilityCodes?: unknown;
+      failureCategory?: unknown;
+    };
+    if (Array.isArray(record.contractInfeasibilityCodes)) {
+      for (const code of record.contractInfeasibilityCodes) {
+        if (typeof code === "string" && code.trim().length > 0) {
+          codes.push(code.trim());
+        }
+      }
+    }
+    if (record.failureCategory === "contract-infeasible") {
+      codes.push("contract-infeasible");
+    }
+  }
+  return codes;
 }
 
-function resolveChangeBudgetMode(spec: TaskRecord["spec"]): PolicyMode {
-  return spec.completionPolicy?.changeBudgetMode ?? "hard";
+function resolveNoChangeMode(task: TaskRecord): PolicyMode {
+  if (task.effectivePolicy !== undefined) {
+    return task.effectivePolicy.values.completionMode;
+  }
+  return task.spec.completionPolicy?.noChangeMode ?? "hard";
+}
+
+function resolveChangeBudgetMode(task: TaskRecord): PolicyMode {
+  if (task.effectivePolicy !== undefined) {
+    return task.effectivePolicy.values.changeBudgetMode;
+  }
+  return task.spec.completionPolicy?.changeBudgetMode ?? "hard";
+}
+
+/** Evaluate whether file/line limits from the effective policy snapshot are violated. */
+function evaluateSizePolicy(
+  task: TaskRecord,
+  diff: { filesChanged: number; changedLines: number },
+): { fileLimitEvidence: PolicyLimitEvidence | null; lineLimitEvidence: PolicyLimitEvidence | null } {
+  const size = sizePolicyFromSnapshot(task.effectivePolicy);
+  const results: { fileLimitEvidence: PolicyLimitEvidence | null; lineLimitEvidence: PolicyLimitEvidence | null } = {
+    fileLimitEvidence: null,
+    lineLimitEvidence: null,
+  };
+
+  if (size.fileLimit !== null && diff.filesChanged > size.fileLimit) {
+    results.fileLimitEvidence = {
+      category: "file-limit",
+      enforcementPhase: "post-observation",
+      configured: size.fileLimit,
+      observed: diff.filesChanged,
+      effect: size.fileLimitMode === "off" ? "ignored"
+        : size.fileLimitMode === "warn" ? "warning"
+        : size.fileLimitMode === "score" ? "score-evidence"
+        : "hard-fail",
+      detail: `Business patch files (${diff.filesChanged}) exceeded file limit (${size.fileLimit}); mode: ${size.fileLimitMode}`,
+    };
+  }
+
+  if (size.changedLineLimit !== null && diff.changedLines > size.changedLineLimit) {
+    results.lineLimitEvidence = {
+      category: "changed-line-limit",
+      enforcementPhase: "post-observation",
+      configured: size.changedLineLimit,
+      observed: diff.changedLines,
+      effect: size.changedLineLimitMode === "off" ? "ignored"
+        : size.changedLineLimitMode === "warn" ? "warning"
+        : size.changedLineLimitMode === "score" ? "score-evidence"
+        : "hard-fail",
+      detail: `Business patch lines (${diff.changedLines}) exceeded changed-line limit (${size.changedLineLimit}); mode: ${size.changedLineLimitMode}`,
+    };
+  }
+
+  return results;
 }
 
 function modeEffect(
@@ -38,12 +122,12 @@ function modeEffect(
 }
 
 function evaluateCompletionPolicy(
-  spec: TaskRecord["spec"],
+  task: TaskRecord,
   diff: { filesChanged: number; changedLines: number },
 ): CompletionPolicyCheck {
-  const noChangeMode = resolveNoChangeMode(spec);
+  const noChangeMode = resolveNoChangeMode(task);
 
-  if (!spec.worker.allowEdits) {
+  if (!task.spec.worker.allowEdits) {
     return {
       check: "not-applicable",
       noChangeMode,
@@ -97,12 +181,40 @@ export async function verifyTask(
   store.setTaskStatus(task.id, "verifying");
   store.addEvent(task.id, attemptId, "verification.started", "Independent verification started");
 
+  const { verification, summary } = await executeVerificationPass(store, task, attemptId);
+
+  store.addEvent(task.id, attemptId, "verification.completed", summary, verification);
+  return verification;
+}
+
+/**
+ * Run the reusable verification pass: every acceptance command in the retained
+ * workspace, plus business/generated/integration patch recompute, source
+ * compatibility, completion policy, and size-policy evaluation.
+ *
+ * Emits per-command `verification.command.completed` and `policy.size.exceeded`
+ * events bound to the supplied attemptId, but NEVER sets Task status and NEVER
+ * emits `verification.started` or `verification.completed` - the caller owns
+ * the status-management boundary and the canonical completion evidence. This
+ * lets the candidate-reverification core rerun the exact same acceptance suite
+ * without putting the Task into a crash-recoverable "verifying" state.
+ *
+ * `timeoutMs` is optional; omitting it preserves the historical unbounded
+ * behavior used by the normal Worker verification path.
+ */
+export async function executeVerificationPass(
+  store: StateStore,
+  task: TaskRecord,
+  attemptId: string,
+  timeoutMs?: number,
+): Promise<{ verification: VerificationResult; summary: string }> {
   const commands: VerificationCommandResult[] = [];
-  const verifierEnvironment = await verifierProcessEnvironment(task);
+  const { env: verifierEnvironment, shellGitPrefix } = await verifierProcessEnvironment(task);
   for (const command of task.spec.acceptance.commands) {
-    const result = await runCaptured("/bin/zsh", ["-lc", command], {
+    const result = await runCaptured("/bin/zsh", ["-lc", shellGitPrefix + command], {
       cwd: task.paths.workspace,
       env: verifierEnvironment,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
     });
     const commandResult: VerificationCommandResult = {
       command,
@@ -133,7 +245,7 @@ export async function verifyTask(
     patches.integration.affectedPaths,
   );
 
-  const changeBudgetMode = resolveChangeBudgetMode(task.spec);
+  const changeBudgetMode = resolveChangeBudgetMode(task);
   let changeBudget: VerificationResult["changeBudget"];
   if (task.spec.version === 2) {
     const withinBudget =
@@ -148,17 +260,36 @@ export async function verifyTask(
     };
   }
 
-  const completionPolicyCheck = evaluateCompletionPolicy(task.spec, diffMeasure);
+  // Evaluate advanced-policy size limits from snapshot
+  const sizeLimits = evaluateSizePolicy(task, diffMeasure);
+  if (sizeLimits.fileLimitEvidence !== null) {
+    store.addEvent(
+      task.id, attemptId, "policy.size.exceeded",
+      sizeLimits.fileLimitEvidence.detail,
+      sizeLimits.fileLimitEvidence,
+    );
+  }
+  if (sizeLimits.lineLimitEvidence !== null) {
+    store.addEvent(
+      task.id, attemptId, "policy.size.exceeded",
+      sizeLimits.lineLimitEvidence.detail,
+      sizeLimits.lineLimitEvidence,
+    );
+  }
+
+  const completionPolicyCheck = evaluateCompletionPolicy(task, diffMeasure);
 
   const behaviorPassed = commands.length === task.spec.acceptance.commands.length
     && commands.every((command) => command.exitCode === 0);
   // Policy hard-fails only for hard-mode change-budget overruns and hard no-change policy.
   const policyPassed = (changeBudget?.effect !== "hard-fail")
-    && completionPolicyCheck.check !== "hard-fail";
+    && completionPolicyCheck.check !== "hard-fail"
+    && sizeLimits.fileLimitEvidence?.effect !== "hard-fail"
+    && sizeLimits.lineLimitEvidence?.effect !== "hard-fail";
   const sourceCompatible = sourceAssessment.compatible;
   const passed = behaviorPassed && policyPassed && sourceCompatible;
 
-  const verification: VerificationResult = {
+  let verification: VerificationResult = {
     passed,
     behaviorPassed,
     policyPassed,
@@ -191,15 +322,39 @@ export async function verifyTask(
   } else if (!behaviorPassed) {
     summary = "Independent verification failed: acceptance commands";
   } else if (!policyPassed) {
-    summary = completionPolicyCheck.check === "hard-fail"
-      ? "Independent verification failed: completion policy"
-      : "Independent verification failed: change budget";
+    if (completionPolicyCheck.check === "hard-fail") {
+      summary = "Independent verification failed: completion policy";
+    } else if (
+      sizeLimits.fileLimitEvidence?.effect === "hard-fail"
+      || sizeLimits.lineLimitEvidence?.effect === "hard-fail"
+    ) {
+      summary = "Independent verification failed: Worker size policy";
+    } else {
+      summary = "Independent verification failed: change budget";
+    }
   } else if (!sourceCompatible) {
     summary = "Independent verification failed: affected source paths changed";
   } else {
     summary = "Independent verification failed";
   }
 
-  store.addEvent(task.id, attemptId, "verification.completed", summary, verification);
-  return verification;
+  // When independent acceptance (or Main-declared codes) proves the contract
+  // boundary is unsatisfiable, stamp failureCategory so same-policy retry stops.
+  const assessment = assessContractInfeasibility({
+    verificationPassed: passed,
+    reasonCodes: contractInfeasibilityCodesFromEvents(store, task.id),
+  });
+  if (assessment.infeasible && assessment.failureCategory !== undefined) {
+    verification = {
+      ...verification,
+      failureCategory: assessment.failureCategory,
+      contractInfeasibility: {
+        reason: assessment.reason ?? "contradictory-acceptance",
+        summary: assessment.summary,
+      },
+    };
+    summary = assessment.summary;
+  }
+
+  return { verification, summary };
 }

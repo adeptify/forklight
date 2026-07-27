@@ -1,0 +1,101 @@
+{
+  "id": "task-readable-story",
+  "name": "Make Task Detail understandable",
+  "status": "failed",
+  "progress": {
+    "lastEventAt": "2026-07-27T02:00:00.000Z"
+  },
+  "journey": {
+    "assignment": {
+      "contractVersion": 2,
+      "presentation": {
+        "summary": "A user can understand what Main asked for and what was finally delivered.",
+        "language": "en"
+      },
+      "outcome": "A user can understand what Main asked for and what was finally delivered.",
+      "inScope": ["Show the assignment, execution, checks, and final result in order."],
+      "outOfScope": ["Do not expose prompts, credentials, or full logs."],
+      "executionSteps": ["Read the existing evidence.", "Build a bounded implementation.", "Run the agreed checks."],
+      "deliverables": ["Readable Task Detail", "Bilingual regression checks"],
+      "focusPaths": ["src/hub/public/app.js"],
+      "acceptanceCriteria": ["The primary view explains input, process, output, state, reason, and next action."],
+      "acceptanceCommands": ["Hub UI behavior checks"]
+    },
+    "workerExecution": {
+      "provider": "minimax",
+      "model": "MiniMax-M3",
+      "runtime": "claude-code",
+      "attempts": [
+        {
+          "ordinal": 1,
+          "status": "failed",
+          "startedAt": "2026-07-27T01:00:00.000Z",
+          "finishedAt": "2026-07-27T01:20:00.000Z",
+          "exitCode": 1,
+          "turns": 24
+        }
+      ],
+      "workerClaim": {
+        "label": "unverified-claim",
+        "text": "I updated the Task Detail layout and added tests."
+      },
+      "changedFilePaths": ["src/hub/public/app.js", "src/hub/public/i18n.js"]
+    },
+    "independentVerification": {
+      "available": true,
+      "checks": [
+        { "label": "Hub UI behavior checks", "passed": true, "exitCode": 0 },
+        { "label": "Project compilation", "passed": false, "exitCode": 2 }
+      ],
+      "conclusion": "failed",
+      "failedCount": 1,
+      "totalCount": 2
+    },
+    "finalDelivery": {
+      "mainReview": {
+        "decision": "accept",
+        "reason": "Main corrected the compile issue and reran the same checks."
+      },
+      "remediationDisposition": {
+        "status": "verified-repaired-delivered"
+      },
+      "integration": {
+        "status": "completed",
+        "applied": true
+      }
+    },
+    "cause": {
+      "what": "failed",
+      "why": "Independent verification found a compile error in the Worker output.",
+      "failureCategory": "verification"
+    },
+    "nextAction": {
+      "label": "done"
+    }
+  },
+  "deliveryPlan": {
+    "resolutionSource": "project",
+    "profileId": "forklight-live",
+    "buildCommandCount": 1,
+    "activationCommandCount": 1,
+    "activationCheckCommandCount": 1,
+    "outcome": "activation",
+    "stages": {
+      "sourceApply": "required",
+      "sourceVerify": "required",
+      "artifactBuild": "required",
+      "runtimeActivation": "required"
+    }
+  },
+  "decision": {
+    "integration": {
+      "status": "completed",
+      "stages": [
+        { "stage": "source-applied", "status": "passed" },
+        { "stage": "source-verified", "status": "passed" },
+        { "stage": "artifact-built", "status": "passed" },
+        { "stage": "runtime-activated", "status": "passed" }
+      ]
+    }
+  }
+}

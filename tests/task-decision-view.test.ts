@@ -386,3 +386,37 @@ test("Decision View progress is terminal for finished tasks (FL-D83)", () => {
   });
   assert.equal(view.progress.activity, "terminal");
 });
+
+test("Decision View exposes a readable preparation cursor only while preparing", () => {
+  const stage = event(1, "workspace.preparation.stage", {
+    stage: "source-scan",
+    phase: "complete",
+    elapsedMs: 362_000,
+    countKind: "files",
+    count: 306,
+  });
+  const preparing = buildTaskDecisionView({
+    task: task("preparing"),
+    attempts: [],
+    events: [stage],
+    integrationResults: [],
+    nowMs: Date.parse(now),
+  });
+  assert.deepEqual(preparing.progress.preparationStage, {
+    stage: "source-scan",
+    phase: "complete",
+    elapsedMs: 362_000,
+    countKind: "files",
+    count: 306,
+  });
+
+  const running = buildTaskDecisionView({
+    task: task("running"),
+    attempts: [attempt],
+    events: [stage],
+    integrationResults: [],
+    nowMs: Date.parse(now),
+  });
+  assert.equal(running.progress.preparationStage, undefined,
+    "completed preparation must not become stale live status");
+});

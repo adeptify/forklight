@@ -1,0 +1,112 @@
+version: 2
+name: Hub plain-language economics glossary
+project: ../..
+contract:
+  outcome: Rewrite the English and Chinese Hub economics vocabulary so a first-time user can understand what each Token and cost number means without mistaking Worker activity for Main Token savings.
+  context:
+    - The current Insights page exposes internal terms such as Boundary Reduction, orchestration exchange, runtimeCostEstimateUsd, typed reason codes, and raw eight or nine digit Token ranges.
+    - The user explicitly reported that both the Chinese and English wording is difficult for beginners and does not explain what the numbers can and cannot prove.
+    - Main has frozen the UI contract below so a parallel MiniMax task can consume the same keys without inventing a second terminology system.
+  inScope:
+    - Edit only src/hub/public/i18n.js.
+    - Rewrite the existing econ* English and Chinese strings in plain language while keeping mathematical truth and evidence boundaries intact.
+    - Add paired zh/en keys including econGuideTitle, econGuideWorker, econGuideExchange, econGuideSavings, econTechnicalDetails, econExactTokens, econReasonPerRequestUsageRequired, econReasonMissingOfficialCostRecord, econReasonRouteRequired, econReasonUnsupportedRoute, econReasonUsageMissing, econReasonUnsupportedModel, econReasonUnsupportedEndpoint, econReasonServiceTierMissing, and econReasonSubscriptionPlanNoPerRequestPrice.
+    - Add paired Task Detail story keys including taskStoryTitle, taskStoryWhat, taskStoryWhy, taskStoryNext, taskStoryTechnical, taskStorySucceeded, taskStoryWorking, taskStoryQueued, taskStoryVerificationFailed, taskStoryAuthenticationFailed, taskStoryBudgetFailed, taskStoryRuntimeFailed, taskStoryUnknownFailed, taskStoryNextReview, taskStoryNextCredentials, taskStoryNextBudget, taskStoryNextRuntime, taskStoryNextWait, taskStoryNextNone, taskTechnicalError, taskTechnicalFailureCategory, taskTechnicalDecision, and taskTechnicalTimeline.
+    - Rename the boundary metric to describe work kept inside the Worker, not savings. Explain that it is Worker Token volume minus measured Main-Worker exchange and cannot prove direct Main Token savings.
+    - Keep Provider, Worker, Main, Token, Attempt, PAYG, CLI, and MCP only where they are product nouns; explain them in the surrounding sentence instead of stacking jargon.
+    - Keep English and Chinese meaning aligned and grammatical.
+  outOfScope:
+    - Do not edit app.js, CSS, backend economics calculations, tests, task data, settings, or Provider code.
+    - Do not change formulas, rename API fields, claim estimated cost is a bill, or claim boundary reduction is direct savings.
+    - Do not commit, push, retry, or tune policy automatically.
+  executionSteps:
+    - Audit the current econ* keys in both locale bags and group them by the user question they answer.
+    - Rewrite titles and explanations using conclusion first, meaning second, technical caveat last.
+    - Add the exact shared keys listed in scope with complete zh/en parity.
+    - Check for raw internal reason codes and make the new reason labels actionable and understandable.
+    - Run the focused asset and economics tests once.
+  deliverables:
+    - A paired English and Chinese plain-language economics glossary in i18n.js.
+    - Stable keys for the parallel Insights renderer.
+  modules:
+    - name: Hub bilingual glossary
+      responsibility: Translate technical evidence into user-facing concepts with exact zh/en parity.
+      consumes:
+        - Existing economics meanings, truth boundaries, and the frozen key list.
+      produces:
+        - Concise titles, explanations, guide copy, technical-detail label, exact-value label, and human reason labels.
+      boundaries:
+        - No formula, UI structure, backend, settings, secret, or source authority changes.
+  callChain:
+    - Insights asks i18n for a user-facing metric or reason label.
+    - The locale bag returns aligned plain-language copy for the active language.
+    - The renderer shows the conclusion first and retains the technical caveat below it.
+  scenarios:
+    - name: Beginner sees Worker work volume
+      given: The user has never heard of boundary reduction.
+      when: Insights renders the metric.
+      then: The title says this is work handled inside the Worker and the explanation explicitly says it is not proven Main Token savings.
+    - name: Missing MiniMax price evidence
+      given: Exact MiniMax request-level usage is unavailable.
+      when: The reason list renders calculation:per-request-usage-required.
+      then: The user sees a natural-language explanation rather than the internal reason code.
+    - name: Failed Task detail
+      given: A Task failed authentication, budget, runtime, or independent verification.
+      when: The detail drawer opens.
+      then: The user-facing story keys explain what happened, why it failed, and the appropriate next action before technical evidence.
+    - name: English and Chinese parity
+      given: The user changes language.
+      when: The same economics card rerenders.
+      then: The promise, caveat, and evidence boundary remain equivalent in both languages.
+  risks:
+    - Oversimplification could turn an estimate into a claim, so the rewritten copy must retain source, coverage, and unavailable semantics.
+    - Literal translation can sound unnatural, so each language should be written natively while preserving meaning.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 420
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/i18n.js
+acceptance:
+  criteria:
+    - Every new key exists in both zh and en locale bags.
+    - Boundary Reduction is no longer presented as an unexplained product concept or as direct Main Token savings.
+    - Common official-cost unavailable codes have plain-language labels.
+    - Task Detail story keys cover success, active, queued, verification, authentication, budget, runtime, unknown failure, and next-action states.
+    - No backend formula, API identity, credential, commit, or push behavior changes.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/economics-summary.test.ts tests/hub-ui-assets.test.ts
+    - git diff --check

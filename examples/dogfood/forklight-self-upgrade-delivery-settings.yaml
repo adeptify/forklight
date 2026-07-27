@@ -1,0 +1,15 @@
+deliveryProfiles:
+  defaultProfileId: null
+  profiles:
+    - id: forklight-self-upgrade
+      label: ForkLight self-upgrade
+      buildCommands:
+        - npm run build
+      activationCommands:
+        - >-
+          node dist/src/cli.js daemon stop; for i in {1..100}; do node dist/src/cli.js daemon status >/dev/null 2>&1 || break; sleep 0.05; done; node dist/src/cli.js daemon start
+      activationCheckCommands:
+        - >-
+          node dist/src/cli.js health --json | node -e 'let data=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => data += chunk); process.stdin.on("end", () => { const value = JSON.parse(data); if (value.identityStatus !== "matched") process.exit(1); });'
+  projectBindings:
+    /Users/yijunwang/code/forklight: forklight-self-upgrade

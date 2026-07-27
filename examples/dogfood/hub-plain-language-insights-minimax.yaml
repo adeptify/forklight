@@ -1,0 +1,143 @@
+version: 2
+name: Hub beginner-friendly Insights hierarchy
+project: ../..
+contract:
+  outcome: Recompose Hub Insights and Task Detail so users see understandable answers first, compact evidence second, and internal diagnostics only on demand.
+  context:
+    - Current Insights renders correct but dense evidence cards and raw values such as 492585967 - 532554162 Tokens.
+    - The parallel GLM task owns i18n.js and will add the exact keys named below; this task must consume those keys and must not edit i18n.js.
+    - Main remains responsible for reconciling the parallel patches and can correct minor integration gaps.
+  inScope:
+    - Edit src/hub/public/app.js and tests/hub-ui-assets.test.ts only.
+    - Add a top guide using econGuideTitle, econGuideWorker, econGuideExchange, and econGuideSavings.
+    - Put verified direct Main savings, Main-Worker communication volume, and Worker processing volume in the first decision group.
+    - Render large Token values in a locale-aware compact form such as about 20.7M or about 2071万 while preserving the exact integer in accessible title or secondary text using econExactTokens.
+    - Rename and move boundary-reduction evidence into a collapsed technical section titled by econTechnicalDetails.
+    - Map composite official-cost reasons to the new i18n keys so users never see calculation:per-request-usage-required, pricing-identity:route-required, missing:missing-officialCost-record, usage:usage-missing, or equivalent known codes as raw UI text.
+    - Add a Task Detail story panel above supervision and technical evidence. It must answer what happened, why it failed, and what the user should do next using Task status, decision.failureCategory, decision.verification, error, and decision.nextAction.
+    - Authentication, budget, runtime, independent-verification, queued, active, succeeded, and unknown-failure states must each use the matching taskStory* i18n keys from the parallel glossary task.
+    - Move raw task.error, failureCategory, stage, decision detail, timeline, and economics evidence under a collapsed disclosure titled with taskStoryTechnical. Keep supervision and Integration controls available and unchanged.
+    - Keep values, signs, coverage counts, currency separation, source links, and unavailable semantics unchanged.
+    - Add focused static and behavioral assertions for the guide, compact/exact Token rendering, collapsed technical details, and reason translation.
+  outOfScope:
+    - Do not edit i18n.js, app.css, backend calculations, settings, task data, Provider code, or list pages outside Insights and Task Detail.
+    - Do not invent savings, hide missing coverage, convert currencies, or remove source links.
+    - Do not commit, push, retry, or tune policy automatically.
+  executionSteps:
+    - Trace renderPortfolioEconomics, its helper cards, reason mapping, and range rendering.
+    - Add a small locale-aware Token formatter that always retains exact values in accessible metadata.
+    - Build the three-item guide and reorder only the decision-level economics cards.
+    - Place boundary and low-level gap evidence in one closed details disclosure by default.
+    - Translate known composite reason codes through the frozen i18n key contract.
+    - Add one deterministic Task Detail story resolver and render its three answers before controls; keep raw evidence in a closed technical disclosure.
+    - Add focused tests and run them once.
+  deliverables:
+    - A novice-readable Insights hierarchy with progressive disclosure.
+    - Compact but auditable Token values and translated reason codes.
+    - A Task Detail story panel that explains failure and next action without deleting raw evidence.
+    - Focused UI asset tests.
+  modules:
+    - name: Insights information hierarchy
+      responsibility: Present decision-level answers before technical evidence.
+      consumes:
+        - Canonical economics summary and bilingual i18n keys.
+      produces:
+        - Three-item guide, reordered primary cards, and collapsed technical details.
+      boundaries:
+        - No economics recomputation or data mutation.
+    - name: Token presentation
+      responsibility: Make large Token counts scannable without losing exact evidence.
+      consumes:
+        - Exact integer ranges and active locale.
+      produces:
+        - Compact visible values plus exact accessible values.
+      boundaries:
+        - No rounding is written back or used in calculations.
+    - name: Task story resolver
+      responsibility: Turn canonical Task status and evidence into what happened, why, and next-action copy.
+      consumes:
+        - Task status, failure category, independent verification, raw error, and decision next action.
+      produces:
+        - Three localized user-facing answers plus a closed technical evidence section.
+      boundaries:
+        - Raw machine truth is preserved and no Task status, review, or Integration state is rewritten.
+  callChain:
+    - Hub receives the canonical economics summary.
+    - The renderer formats exact values for display without changing the data.
+    - Users see the three decision questions first and may expand technical details for the boundary formula and evidence gaps.
+  scenarios:
+    - name: Large Token range
+      given: A range contains eight or nine digit values.
+      when: Insights renders in Chinese or English.
+      then: The visible text is compact and localized while exact integers remain available to assistive technology or hover metadata.
+    - name: No direct baseline
+      given: Direct Main savings cannot be calibrated.
+      when: The primary cards render.
+      then: The card clearly says it cannot yet be measured and does not substitute Worker Token volume.
+    - name: Technical reason code
+      given: Official pricing returns a known typed unavailable code.
+      when: The technical details render.
+      then: The code is replaced with a plain-language i18n label and its count remains correct.
+    - name: Verification failure detail
+      given: A Worker returned a candidate but independent acceptance failed.
+      when: The Task Detail drawer opens.
+      then: The top panel explains that the candidate exists but did not pass independent checks, suggests Main review or correction, and keeps the raw error under technical details.
+    - name: Configuration failure detail
+      given: failureCategory is authentication.
+      when: The Task Detail drawer opens.
+      then: The top panel explains that credentials or account region prevented execution and suggests checking configuration rather than blaming model coding ability.
+  risks:
+    - Compact formatting can hide exactness, so exact values must remain accessible and tests must assert both forms.
+    - Collapsing evidence can look like hiding data, so the disclosure label and summary must state what it contains.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 520
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Three plain-language questions appear before technical economics evidence.
+    - Large Token values are compact on screen and exact in accessible metadata.
+    - Boundary evidence is closed by default under a clearly named technical disclosure and is never called direct savings.
+    - Known composite unavailable codes are translated through i18n keys.
+    - Task Detail explains what happened, why, and next action for all named status/failure states before showing raw technical evidence.
+    - Existing supervision and Integration actions keep their behavior and confirmation gates.
+    - Exact economics values and evidence semantics are unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/economics-summary.test.ts tests/hub-ui-assets.test.ts
+    - git diff --check

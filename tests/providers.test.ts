@@ -12,7 +12,7 @@ import { cloneDefaults, type ProviderDefaultSettings } from "../src/core/setting
 import { parseTaskSpec } from "../src/core/task.js";
 
 test("provider registry exposes Claude Code-compatible defaults plus xai", () => {
-  assert.deepEqual(providerNames(), ["deepseek", "qwen", "minimax", "glm", "xai"]);
+  assert.deepEqual(providerNames(), ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]);
   assert.deepEqual(
     providerNames().map((name) => {
       const definition = providerDefinition(name);
@@ -23,9 +23,21 @@ test("provider registry exposes Claude Code-compatible defaults plus xai", () =>
       ["qwen", "qwen3.7-plus", "https://dashscope.aliyuncs.com/apps/anthropic"],
       ["minimax", "MiniMax-M3", "https://api.minimax.io/anthropic"],
       ["glm", "glm-5.2", "https://dashscope.aliyuncs.com/apps/anthropic"],
+      ["volcengine", "glm-5.2[1M]", "https://ark.cn-beijing.volces.com/api/coding"],
       ["xai", "grok-4.5", "https://api.x.ai/v1"],
     ],
   );
+});
+
+test("Volcengine Coding Plan preserves exact endpoint and glm-5.2[1M] environment", () => {
+  const definition = providerDefinition("volcengine");
+  assert.equal(definition.defaultKeychainService, "forklight.volcengine.api-key");
+  assert.deepEqual(providerVariants("volcengine")[0]?.models, ["glm-5.2[1M]"]);
+  const environment = providerEnvironment(resolveProvider("volcengine"), "transient-test-key");
+  assert.equal(environment.ANTHROPIC_BASE_URL, "https://ark.cn-beijing.volces.com/api/coding");
+  assert.equal(environment.ANTHROPIC_MODEL, "glm-5.2[1M]");
+  assert.equal(environment.ANTHROPIC_AUTH_TOKEN, "transient-test-key");
+  assert.equal(JSON.stringify(definition).includes("transient-test-key"), false);
 });
 
 test("DeepSeek providerVariants lists Flash and Pro families, not only the default (FL-D18)", () => {

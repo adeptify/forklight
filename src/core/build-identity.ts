@@ -1,12 +1,10 @@
-import { createHash } from "node:crypto";
 import {
   existsSync,
   readFileSync,
-  readdirSync,
-  statSync,
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { inspectSourceTree } from "./source-digest.js";
 
 export const PROTOCOL_VERSION = 2;
 
@@ -16,6 +14,32 @@ export interface BuildIdentity {
   buildId: string;
   builtAt: string;
   sourceRevision: string;
+  /** Digest of the exact source inputs used to produce this build. */
+  sourceDigest?: string;
+}
+
+export type VersionJourneyState =
+  | "ready"
+  | "source-needs-build"
+  | "artifact-needs-restart"
+  | "protocol-mismatch"
+  | "unavailable";
+
+export type VersionJourneyNextAction =
+  | "none"
+  | "build"
+  | "restart"
+  | "rebuild-and-restart"
+  | "inspect";
+
+export interface VersionJourney {
+  state: VersionJourneyState;
+  nextAction: VersionJourneyNextAction;
+  layers: {
+    source: { available: boolean; digest?: string; latestModifiedAt?: string };
+    artifact: { available: boolean; buildIdentity?: BuildIdentity };
+    daemon: { available: boolean; running: boolean; buildIdentity?: BuildIdentity };
+  };
 }
 
 function repositoryRoot(modulePath: string): string {
@@ -38,39 +62,15 @@ function packageVersion(root: string): string {
   return parsed.version;
 }
 
-function sourceFiles(root: string): string[] {
-  const files: string[] = [path.join(root, "package.json")];
-  const visit = (directory: string, extension: string): void => {
-    if (!existsSync(directory)) return;
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const absolute = path.join(directory, entry.name);
-      if (entry.isDirectory()) visit(absolute, extension);
-      else if (entry.isFile() && entry.name.endsWith(extension)) files.push(absolute);
-    }
-  };
-  visit(path.join(root, "src"), ".ts");
-  visit(path.join(root, "scripts"), ".mjs");
-  return files.sort();
-}
-
 function sourceIdentity(root: string): BuildIdentity {
-  const hash = createHash("sha256");
-  let latestMtimeMs = 0;
-  for (const file of sourceFiles(root)) {
-    const relative = path.relative(root, file).split(path.sep).join("/");
-    const bytes = readFileSync(file);
-    hash.update(relative);
-    hash.update("\0");
-    hash.update(bytes);
-    hash.update("\0");
-    latestMtimeMs = Math.max(latestMtimeMs, statSync(file).mtimeMs);
-  }
+  const source = inspectSourceTree(root);
   return Object.freeze({
     protocolVersion: PROTOCOL_VERSION,
     packageVersion: packageVersion(root),
-    buildId: `dev-${hash.digest("hex").slice(0, 32)}`,
-    builtAt: new Date(latestMtimeMs).toISOString(),
+    buildId: `dev-${source.digest.slice(0, 32)}`,
+    builtAt: source.latestModifiedAt,
     sourceRevision: "dev-source",
+    sourceDigest: source.digest,
   });
 }
 
@@ -82,7 +82,10 @@ export function isBuildIdentity(value: unknown): value is BuildIdentity {
     && typeof candidate.buildId === "string"
     && typeof candidate.builtAt === "string"
     && Number.isFinite(Date.parse(candidate.builtAt))
-    && typeof candidate.sourceRevision === "string";
+    && typeof candidate.sourceRevision === "string"
+    && (candidate.sourceDigest === undefined
+      || (typeof candidate.sourceDigest === "string"
+        && /^[a-f0-9]{64}$/.test(candidate.sourceDigest)));
 }
 
 function distIdentity(modulePath: string): BuildIdentity {
@@ -110,4 +113,47 @@ export function compareBuildIdentity(
     protocolCompatible,
     sameBuild: protocolCompatible && client.buildId === server.buildId,
   };
+}
+
+/** Pure three-layer truth: current source, Hub artifact, and running daemon. */
+export function projectVersionJourney(
+  source: { digest: string; latestModifiedAt: string } | undefined,
+  artifact: BuildIdentity | undefined,
+  daemon: { running: boolean; buildIdentity?: BuildIdentity },
+): VersionJourney {
+  const layers: VersionJourney["layers"] = {
+    source: source === undefined
+      ? { available: false }
+      : { available: true, digest: source.digest, latestModifiedAt: source.latestModifiedAt },
+    artifact: artifact === undefined
+      ? { available: false }
+      : { available: true, buildIdentity: artifact },
+    daemon: daemon.buildIdentity === undefined
+      ? { available: false, running: daemon.running }
+      : { available: true, running: daemon.running, buildIdentity: daemon.buildIdentity },
+  };
+
+  if (source === undefined || artifact === undefined) {
+    return { state: "unavailable", nextAction: "inspect", layers };
+  }
+  if (artifact.sourceDigest === undefined) {
+    return { state: "unavailable", nextAction: "rebuild-and-restart", layers };
+  }
+  if (source.digest !== artifact.sourceDigest) {
+    return { state: "source-needs-build", nextAction: "build", layers };
+  }
+  if (!daemon.running || daemon.buildIdentity === undefined) {
+    return {
+      state: daemon.running ? "unavailable" : "artifact-needs-restart",
+      nextAction: daemon.running ? "inspect" : "restart",
+      layers,
+    };
+  }
+  if (artifact.protocolVersion !== daemon.buildIdentity.protocolVersion) {
+    return { state: "protocol-mismatch", nextAction: "rebuild-and-restart", layers };
+  }
+  if (artifact.buildId !== daemon.buildIdentity.buildId) {
+    return { state: "artifact-needs-restart", nextAction: "restart", layers };
+  }
+  return { state: "ready", nextAction: "none", layers };
 }

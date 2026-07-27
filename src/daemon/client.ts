@@ -101,7 +101,16 @@ export function daemonRequestTimeoutMs(
   method: DaemonMethod,
   params: Record<string, unknown>,
 ): number {
-  const requested = method === "integration_wait" ? params.timeoutMs : undefined;
+  // Remediation and candidate reverification execute the Task's configured
+  // acceptance suite before they can respond. Keep the transport from timing
+  // out first; the per-command timeout remains authoritative inside the
+  // daemon. Callers may request a longer transport window when they know the
+  // suite size.
+  const requested = method === "integration_wait"
+    ? params.timeoutMs
+    : method === "remediation_verify" || method === "candidate_reverify"
+      ? (params.requestTimeoutMs ?? 6 * 60 * 60 * 1000)
+      : undefined;
   return typeof requested === "number"
     && Number.isSafeInteger(requested)
     && requested > 0
@@ -129,6 +138,8 @@ export async function ensureDaemon(home = forklightHome()): Promise<Record<strin
   );
 }
 
+// --- Daemon lifecycle ---
+
 /** Probe daemon without starting it (for Hub status / control). */
 export async function probeDaemon(home = forklightHome()): Promise<{
   running: boolean;
@@ -146,38 +157,152 @@ export async function probeDaemon(home = forklightHome()): Promise<{
   }
 }
 
-/** Request graceful daemon shutdown. No-op error if already down. */
+/** Gracefully stop the daemon after its exact PID and endpoint are both gone. */
 export async function stopDaemon(home = forklightHome()): Promise<{
   stopped: boolean;
   result?: Record<string, unknown>;
   message: string;
 }> {
+  let targetPid: number;
   try {
-    const result = await daemonRequest<Record<string, unknown>>("shutdown", {}, home);
-    return {
-      stopped: true,
-      result,
-      message: "Daemon shutdown requested",
-    };
+    const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    if (typeof health.pid !== "number" || !Number.isSafeInteger(health.pid) || health.pid <= 0) {
+      throw new Error("ForkLight daemon health did not report a valid PID");
+    }
+    targetPid = health.pid;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    // Treat "not running" as success for control UX.
-    if (/ECONNREFUSED|ENOENT|connect|not running|timed out/i.test(msg)) {
+    if (/ECONNREFUSED|ENOENT/i.test(msg)) {
       return { stopped: true, message: "Daemon was not running" };
     }
     throw error;
   }
+
+  let result: Record<string, unknown> | undefined;
+  try {
+    result = await daemonRequest<Record<string, unknown>>("shutdown", {}, home);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (!/ECONNREFUSED|ENOENT/i.test(msg)) throw error;
+  }
+
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    let pidAlive = false;
+    try {
+      process.kill(targetPid, 0);
+      pidAlive = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") pidAlive = true;
+    }
+    if (!pidAlive && !(await probeSocketAlive(home))) {
+      return {
+        stopped: true,
+        ...(result === undefined ? {} : { result }),
+        message: "Daemon stopped",
+      };
+    }
+    await sleep(100);
+  }
+  throw new Error("ForkLight daemon did not stop within 10 seconds");
 }
 
-/** Stop (if up) then ensureDaemon. */
-export async function restartDaemon(home = forklightHome()): Promise<Record<string, unknown>> {
+function probeSocketAlive(home: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(daemonSocketPath(home));
+    socket.setTimeout(200);
+    socket.once("connect", () => { socket.destroy(); resolve(true); });
+    socket.once("error", () => { socket.destroy(); resolve(false); });
+    socket.once("timeout", () => { socket.destroy(); resolve(false); });
+  });
+}
+
+/** Stop only for a validated activation handoff.  Sends a
+ *  server-validated `activation_handoff_shutdown` request carrying the
+ *  operation identity from the consumed one-use handoff.  The daemon
+ *  validates these values against its durable Integration state before
+ *  acknowledging; replay or mismatch fails.  After positive
+ *  acknowledgement this function waits for endpoint relinquishment
+ *  only — the old PID may stay alive draining existing connections.
+ *
+ *  Only call from a `forklight daemon stop` command launched inside an
+ *  activation handoff; ordinary user stop must always use `stopDaemon`.
+ *  Never returns "already stopped" — missing acknowledgement is a
+ *  hard failure. */
+export async function stopDaemonForHandoff(
+  home: string,
+  operationId: string,
+  taskId: string,
+  receiptId: string,
+): Promise<{ stopped: boolean; result?: Record<string, unknown>; message: string }> {
+  // 1. Send the server-validated shutdown request.  The daemon verifies
+  //    operationId/taskId/receiptId against its durable Integration state.
+  //    Any error (unreachable, mismatch, replay, already-complete) fails.
+  let result: Record<string, unknown>;
   try {
-    await stopDaemon(home);
-  } catch {
-    /* continue to start */
+    result = await daemonRequest<Record<string, unknown>>(
+      "activation_handoff_shutdown",
+      { operationId, taskId, receiptId },
+      home,
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `ForkLight activation handoff shutdown failed: ${msg}`,
+      { cause: error instanceof Error ? error : undefined },
+    );
   }
-  // Allow socket cleanup after shutdown.
-  await sleep(250);
+  if (result?.handoffAuthorized !== true || result?.stopping !== true) {
+    throw new Error(
+      "ForkLight daemon did not acknowledge activation handoff shutdown",
+    );
+  }
+  const targetPid = typeof result.targetPid === "number"
+    && Number.isSafeInteger(result.targetPid) && result.targetPid > 0
+    ? result.targetPid
+    : undefined;
+  if (targetPid === undefined) {
+    throw new Error(
+      "ForkLight daemon handoff acknowledgement did not identify the target PID",
+    );
+  }
+
+  // 2. Wait for endpoint relinquishment only.  The old PID may remain
+  //    alive draining existing connections (e.g. integration_wait).
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (!(await probeSocketAlive(home))) {
+      return {
+        stopped: true,
+        result,
+        message: "Daemon endpoint relinquished for activation handoff",
+      };
+    }
+    // If the socket is still reachable, distinguish same-PID draining
+    // (keep waiting) from a replacement daemon (fail closed).
+    try {
+      const currentHealth = await daemonRequest<Record<string, unknown>>(
+        "health", {}, home,
+      );
+      if (currentHealth.pid !== targetPid) {
+        throw new Error(
+          "ForkLight daemon endpoint was replaced during activation handoff; refusing to continue",
+        );
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      // ECONNREFUSED / ENOENT means the socket disappeared between our
+      // probe and health request — that's the normal relinquishment path.
+      if (!/ECONNREFUSED|ENOENT/i.test(msg)) throw error;
+    }
+    await sleep(100);
+  }
+  throw new Error("ForkLight daemon did not relinquish endpoint within 10 seconds");
+}
+
+/** Stop fully, then start a fresh daemon. */
+export async function restartDaemon(home = forklightHome()): Promise<Record<string, unknown>> {
+  await stopDaemon(home);
   return ensureDaemon(home);
 }
 
@@ -208,6 +333,27 @@ export function daemonLaunchArguments(moduleUrl: string): {
     ],
     mode: "dist",
   };
+}
+
+/** Single-dispatch routing seam: try daemon bootstrap once; if it succeeds
+ *  dispatch the mutation exactly once and propagate every outcome.  Only
+ *  when bootstrap itself fails (before any mutation request is sent) may the
+ *  local fallback run.  This prevents double-mutation when the daemon is
+ *  reachable but rejects, times out, or has a build/protocol mismatch. */
+export async function routeMutation<T>(
+  bootstrap: () => Promise<unknown>,
+  dispatch: () => Promise<T>,
+  fallback: () => Promise<T>,
+): Promise<T> {
+  let daemonBooted = false;
+  try {
+    await bootstrap();
+    daemonBooted = true;
+  } catch {
+    // Bootstrap failure — local fallback is permitted.
+  }
+  if (daemonBooted) return dispatch();
+  return fallback();
 }
 
 export function startDaemonProcess(home = forklightHome()): number {

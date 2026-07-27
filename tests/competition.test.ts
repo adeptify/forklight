@@ -857,6 +857,8 @@ test("coordinator creates byte-equivalent isolated candidates from one snapshot 
     assert.equal(taskIds.length, 2);
     const task1 = store.getTask(taskIds[0]!);
     const task2 = store.getTask(taskIds[1]!);
+    assert.equal(task1.effectivePolicy?.profileId, "global");
+    assert.equal(task2.effectivePolicy?.profileId, "global");
 
     // Different sessions, baselines, workspaces
     assert.notEqual(task1.sessionId, task2.sessionId);
@@ -909,6 +911,48 @@ test("coordinator creates byte-equivalent isolated candidates from one snapshot 
     const events1 = store.listEvents(taskIds[0]!);
     assert.ok(events1.some((e) => e.type === "task.created"));
     assert.ok(events1.some((e) => e.type === "workspace.prepared"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("competition candidates rebuild Provider identity without inheriting source billing fields", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, settings, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const sourceSpec: TaskSpec = {
+      ...baseSpec,
+      provider: {
+        ...baseSpec.provider,
+        name: "volcengine",
+        model: "glm-5.2[1M]",
+        keychainService: "forklight.volcengine.api-key",
+        keychainAccount: "source-only-account",
+        pricingRoute: "volcengine-coding-plan-subscription",
+      },
+    };
+    const sourceBefore = structuredClone(sourceSpec);
+
+    const { competition } = await coordinator.create(sourceSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "deepseek-v4-flash" },
+      { providerName: "minimax", modelName: "MiniMax-M3" },
+      { providerName: "volcengine", modelName: "glm-5.2[1M]" },
+    ]);
+
+    assert.deepEqual(sourceSpec, sourceBefore, "candidate cloning must not mutate the source spec");
+    const defaults = settings.get();
+    for (const record of store.getCompetitionCandidates(competition.id)) {
+      const provider = store.getTask(record.taskId).spec.provider;
+      const expected = defaults.providerDefaults[provider.name];
+      assert.deepEqual(Object.keys(provider).sort(), ["endpoint", "keychainService", "model", "name"]);
+      assert.equal(provider.name, record.providerName);
+      assert.equal(provider.model, record.modelName);
+      assert.equal(provider.endpoint, expected.defaultEndpoint);
+      assert.equal(provider.keychainService, expected.defaultKeychainService);
+      assert.equal(provider.pricingRoute, undefined);
+      assert.equal(provider.keychainAccount, undefined);
+    }
   } finally {
     cleanup();
   }

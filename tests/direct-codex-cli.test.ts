@@ -301,3 +301,115 @@ test("direct-codex capture errors are fixed, non-echoing, duplicate-safe, and le
     await daemon.close();
   }
 });
+
+// --- Guided capture-task CLI tests ---
+
+function captureTaskArguments(taskId: string, runRef: string, json = false): string[] {
+  return [
+    "direct-codex", "capture-task", "--task-id", taskId,
+    "--run-ref", runRef, "--usage", JSON.stringify(USAGE),
+    ...(json ? ["--json"] : []),
+  ];
+}
+
+test("direct-codex capture-task CLI succeeds with human and JSON output, receipt attribution", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-direct-cli-gc-"));
+  seedTask(home, "gc-a");
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const humanResult = await runCli(home, captureTaskArguments("gc-a", "codex-run:gc-a"));
+    assert.equal(humanResult.exitCode, 0);
+    assert.equal(humanResult.stderr, "");
+    assert.match(humanResult.stdout, /sampleId: /);
+    assert.match(humanResult.stdout, /forklightTaskId: gc-a/);
+    assert.match(humanResult.stdout, /source: codex-terminal-result/);
+    assert.match(humanResult.stdout, /complete: true/);
+    // Identity is store-derived; no metadata fields in output aside from runRef.
+    assert.match(humanResult.stdout, /directRunRef: codex-run:gc-a/);
+
+    const jsonResult = await runCli(home, captureTaskArguments("gc-a", "codex-run:gc-a-json", true));
+    assert.equal(jsonResult.exitCode, 0);
+    const parsed = JSON.parse(jsonResult.stdout);
+    assert.equal(parsed.forklightTaskId, "gc-a");
+    assert.equal(parsed.exactTaskClass, TASK_CLASS);
+    assert.equal(parsed.directCodexProfileId, PROFILE);
+    assert.equal(parsed.directRunRef, "codex-run:gc-a-json");
+    assert.equal(parsed.source, "codex-terminal-result");
+    assert.equal(parsed.schemaVersion, 1);
+    for (const raw of ["text", "content", "prompt", "response", "log", "diff", "hash", "secret"]) {
+      assert.equal(raw in parsed, false, `output must not include "${raw}"`);
+    }
+
+    withStore(home, (store) => {
+      const receipts = store.listExchangeReceipts("gc-a");
+      assert.equal(receipts.length, 2);
+      for (const receipt of receipts) {
+        assert.equal(receipt.operation, "forklight_direct_codex_capture");
+        assert.equal(receipt.taskId, "gc-a");
+        assert.equal(receipt.transport, "cli");
+      }
+    });
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("direct-codex capture-task CLI errors are fixed, privacy-safe, and leave no partial evidence", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-direct-cli-gc-err-"));
+  seedTask(home, "gc-err");
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const secret = "gc-cli-secret-GAMMA";
+    // Malformed usage JSON
+    const malformed = await runCli(home, [
+      "direct-codex", "capture-task", "--task-id", "gc-err",
+      "--run-ref", "codex-run:ref", "--usage", `{"bad":`,
+    ]);
+    assertFixedFailure(malformed, "Invalid --usage JSON object", secret);
+    // Usage JSON with extra content fields
+    const contentUsage = await runCli(home, [
+      "direct-codex", "capture-task", "--task-id", "gc-err",
+      "--run-ref", "codex-run:ref", "--usage",
+      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 }, prompt: secret }),
+    ]);
+    assertFixedFailure(contentUsage, "Invalid Codex terminal usage event", secret);
+    // Unknown task id
+    const unknown = await runCli(home, [
+      "direct-codex", "capture-task", "--task-id", `gc-unknown-${secret}`,
+      "--run-ref", "codex-run:ref", "--usage", JSON.stringify(USAGE),
+    ]);
+    assertFixedFailure(unknown, "ForkLight Task not found for guided capture", secret);
+    // Invalid runRef with content
+    const badRef = await runCli(home, [
+      "direct-codex", "capture-task", "--task-id", "gc-err",
+      "--run-ref", secret, "--usage", JSON.stringify(USAGE),
+    ]);
+    assertFixedFailure(badRef, "Invalid direct-Codex paired sample", secret);
+    // Duplicate flag
+    const dup = await runCli(home, [
+      ...captureTaskArguments("gc-err", "codex-run:ref"),
+      "--run-ref", "codex-run:other",
+    ]);
+    assertFixedFailure(dup, "Invalid direct-codex arguments", "codex-run:other");
+
+    withStore(home, (store) => {
+      assert.deepEqual(store.listDirectCodexPairedSamples(TASK_CLASS, PROFILE), []);
+      assert.equal(store.listExchangeReceipts("gc-err").length, 0);
+    });
+
+    // Successful capture writes receipt and sample
+    assert.equal((await runCli(home, captureTaskArguments("gc-err", "codex-run:ok"))).exitCode, 0);
+    // Duplicate sample via same task + runRef
+    const dupSample = await runCli(home, captureTaskArguments("gc-err", "codex-run:ok"));
+    assertFixedFailure(dupSample, "Duplicate sample identity rejected");
+
+    withStore(home, (store) => {
+      assert.equal(store.listDirectCodexPairedSamples(TASK_CLASS, PROFILE).length, 1);
+      assert.equal(store.listExchangeReceipts("gc-err").length, 1);
+    });
+  } finally {
+    await daemon.close();
+  }
+});

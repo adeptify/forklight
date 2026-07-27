@@ -12,6 +12,10 @@ import { isProviderName, providerNames } from "./providers.js";
 import { isoTimestamp as timestamp } from "./time.js";
 import { isTerminalTaskStatus } from "./task-progress.js";
 import { assertProviderRuntimePair } from "./runtime-names.js";
+import {
+  enforcementCapabilityForRuntime,
+  resolveTaskEffectivePolicy,
+} from "./advanced-policy.js";
 import type {
   CompetitionCandidateRecord,
   CompetitionCandidateScore,
@@ -19,6 +23,7 @@ import type {
   CompetitionFactorScore,
   CompletionPolicyCheck,
   CompetitionRecord,
+  ProviderSpec,
   RankingFactor,
   RankingPolicy,
   StagedTaskRegistration,
@@ -459,10 +464,16 @@ function cloneSpec(
   const name = override.providerName as TaskSpec["provider"]["name"];
   assertProviderRuntimePair(name, original.runtime.name);
   const providerDef = providerDefaults[name];
-  cloned.provider.name = name;
-  cloned.provider.model = override.modelName;
-  cloned.provider.endpoint = providerDef.defaultEndpoint;
-  cloned.provider.keychainService = providerDef.defaultKeychainService;
+  // Provider, endpoint, Keychain identity, and billing route form one identity.
+  // CandidateOverride cannot authorize source-only pricingRoute/keychainAccount
+  // fields, so rebuild instead of partially mutating the cloned ProviderSpec.
+  const rebuiltProvider: ProviderSpec = {
+    name,
+    model: override.modelName,
+    endpoint: providerDef.defaultEndpoint,
+    keychainService: providerDef.defaultKeychainService,
+  };
+  cloned.provider = rebuiltProvider;
   if (override.maxBudgetUsd !== undefined) {
     cloned.runtime.maxBudgetUsd = override.maxBudgetUsd;
   }
@@ -586,6 +597,11 @@ export class CompetitionCoordinator {
           },
           effectiveSettings.providerDefaults,
         );
+        const effectivePolicy = resolveTaskEffectivePolicy(
+          candidateSpec,
+          effectiveSettings,
+          enforcementCapabilityForRuntime(candidateSpec.runtime.name),
+        );
         const taskRecord = buildTaskRecord({
           spec: candidateSpec,
           taskFile: contractTaskFile,
@@ -593,6 +609,7 @@ export class CompetitionCoordinator {
           id: taskId,
           sessionId,
           createdAt,
+          effectivePolicy,
         });
 
         const paths = taskPaths(home, taskId);

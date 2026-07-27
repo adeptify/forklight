@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, unlink } from "node:fs/promises";
+import { chmod, link, mkdir, readFile, stat, unlink } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -127,6 +127,7 @@ export class ForkLightDaemon {
   private readonly coordinator: DaemonCoordinator;
   private readonly socketPath: string;
   private server: net.Server | undefined = undefined;
+  private ownedSocket: { dev: number; ino: number } | undefined = undefined;
   private readonly buildIdentity: BuildIdentity = currentBuildIdentity();
 
   constructor(
@@ -141,10 +142,33 @@ export class ForkLightDaemon {
 
   async start(): Promise<void> {
     await mkdir(path.dirname(this.socketPath), { recursive: true, mode: 0o700 });
+    let staleSocket: { dev: number; ino: number } | undefined;
     try {
+      const candidate = await stat(this.socketPath);
+      if (!candidate.isSocket()) {
+        throw new Error("ForkLight daemon path exists but is not a socket");
+      }
+      staleSocket = { dev: candidate.dev, ino: candidate.ino };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (staleSocket) {
+      if (await this.probeSocketEndpoint()) {
+        throw new Error("ForkLight daemon is already running on this home");
+      }
+      let current;
+      try {
+        current = await stat(this.socketPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new Error("ForkLight daemon socket changed after probing; refusing to unlink");
+        }
+        throw error;
+      }
+      if (current.dev !== staleSocket.dev || current.ino !== staleSocket.ino) {
+        throw new Error("ForkLight daemon socket changed after probing; refusing to unlink");
+      }
       await unlink(this.socketPath);
-    } catch {
-      // No stale socket.
     }
     await this.coordinator.recover();
     this.server = net.createServer((socket) => {
@@ -160,19 +184,61 @@ export class ForkLightDaemon {
       this.server?.listen(this.socketPath, resolve);
     });
     await chmod(this.socketPath, 0o600);
+    const owned = await stat(this.socketPath);
+    this.ownedSocket = { dev: owned.dev, ino: owned.ino };
+  }
+
+  private probeSocketEndpoint(): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socket = net.createConnection(this.socketPath);
+      socket.setTimeout(200);
+      socket.once("connect", () => { socket.destroy(); resolve(true); });
+      socket.once("error", () => { socket.destroy(); resolve(false); });
+      socket.once("timeout", () => { socket.destroy(); resolve(false); });
+    });
   }
 
   async close(): Promise<void> {
-    await this.coordinator.shutdown();
-    if (this.server) {
-      await new Promise<void>((resolve) => this.server?.close(() => resolve()));
-    }
     try {
-      await unlink(this.socketPath);
-    } catch {
-      // Socket may already be gone.
+      await this.coordinator.shutdown();
+      let backupPath: string | undefined;
+      if (this.server && this.ownedSocket) {
+        let current: Awaited<ReturnType<typeof stat>> | undefined;
+        try {
+          current = await stat(this.socketPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        if (current && (current.dev !== this.ownedSocket.dev || current.ino !== this.ownedSocket.ino)) {
+          backupPath = `${this.socketPath}.closing-${process.pid}-${Date.now()}`;
+          await link(this.socketPath, backupPath);
+          const preserved = await stat(backupPath);
+          if (preserved.dev === this.ownedSocket.dev && preserved.ino === this.ownedSocket.ino) {
+            await unlink(backupPath);
+            backupPath = undefined;
+          }
+        }
+      }
+      if (this.server) {
+        await new Promise<void>((resolve, reject) => {
+          this.server?.close((error) => error ? reject(error) : resolve());
+        });
+      }
+      if (backupPath) {
+        try {
+          await link(backupPath, this.socketPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const [canonical, backup] = await Promise.all([stat(this.socketPath), stat(backupPath)]);
+          if (canonical.dev !== backup.dev || canonical.ino !== backup.ino) {
+            throw new Error(`ForkLight replacement socket preserved at ${backupPath}; canonical path is occupied`);
+          }
+        }
+        await unlink(backupPath);
+      }
+    } finally {
+      this.store.close();
     }
-    this.store.close();
   }
 
   private async handleLine(line: string): Promise<DaemonResponse> {
@@ -183,7 +249,11 @@ export class ForkLightDaemon {
       const comparison = isBuildIdentity(request.clientIdentity)
         ? compareBuildIdentity(request.clientIdentity, this.buildIdentity)
         : { protocolCompatible: false, sameBuild: false };
-      if (requiresMatchingBuildIdentity(request.method)) {
+      if (request.method === "activation_handoff_shutdown") {
+        if (!comparison.protocolCompatible) {
+          throw new Error("ForkLight protocol mismatch; rebuild and restart before changes");
+        }
+      } else if (requiresMatchingBuildIdentity(request.method)) {
         if (!comparison.protocolCompatible) {
           throw new Error("ForkLight protocol mismatch; rebuild and restart before changes");
         }
@@ -283,6 +353,31 @@ export class ForkLightDaemon {
           parseAttemptAuthorization(params.authorization),
         );
       }
+      case "correct": {
+        if (params.confirm !== true) throw new Error("correct requires explicit confirm: true");
+        const correctFeedback = requiredString(params.feedback, "feedback").trim();
+        if (correctFeedback.length === 0 || correctFeedback.length > 1000) {
+          throw new Error("correction feedback must be 1-1000 characters");
+        }
+        const correctBudget = params.maxBudgetUsd === undefined || params.maxBudgetUsd === null
+          ? null
+          : (() => {
+              const value = Number(params.maxBudgetUsd);
+              if (!Number.isFinite(value) || value <= 0) {
+                throw new Error("correction maxBudgetUsd must be a positive number or null");
+              }
+              return value;
+            })();
+        return this.coordinator.correct(
+          requiredString(params.taskId, "taskId"),
+          correctFeedback,
+          correctBudget,
+          true,
+          params.candidateRevisionId,
+          params.reusablePaths,
+          params.remainingGaps,
+        );
+      }
       case "list": {
         const statuses = Array.isArray(params.statuses)
           ? params.statuses.filter((value): value is TaskStatus => typeof value === "string")
@@ -360,6 +455,12 @@ export class ForkLightDaemon {
         );
       case "integration_history":
         return this.coordinator.integrationHistory(requiredString(params.taskId, "taskId"));
+      case "activation_handoff_shutdown":
+        return this.coordinator.authorizeActivationHandoffShutdown(
+          requiredString(params.operationId, "operationId"),
+          requiredString(params.taskId, "taskId"),
+          requiredString(params.receiptId, "receiptId"),
+        );
       case "shutdown":
         setImmediate(() => process.kill(process.pid, "SIGTERM"));
         return { stopping: true };
@@ -403,8 +504,23 @@ export class ForkLightDaemon {
       }
       case "task_economics":
         return this.coordinator.taskEconomics(requiredString(params.taskId, "taskId"));
+      case "economics_summary": {
+        const filter: StatisticsFilter = {
+          ...(typeof params.providerName === "string" ? { providerName: params.providerName } : {}),
+          ...(typeof params.modelName === "string" ? { modelName: params.modelName } : {}),
+          ...(typeof params.since === "string" ? { since: params.since } : {}),
+          ...(typeof params.until === "string" ? { until: params.until } : {}),
+        };
+        return this.coordinator.economicsSummary(filter);
+      }
       case "direct_codex_capture":
         return this.coordinator.directCodexCapture(params.usage, params.metadata);
+      case "direct_codex_guided_capture":
+        return this.coordinator.directCodexGuidedCapture(
+          params.forklightTaskId,
+          params.codexRunRef,
+          params.usage,
+        );
       case "direct_codex_inbox":
         return this.coordinator.directCodexInbox(params.taskClass, params.directCodexProfileId);
       case "direct_codex_review":
@@ -413,6 +529,70 @@ export class ForkLightDaemon {
         return this.coordinator.directCodexPublicationPreview(params);
       case "direct_codex_publication_register":
         return this.coordinator.directCodexPublicationRegister(params);
+      case "adaptation_preview":
+        return this.coordinator.adaptationPreview({
+          taskId: requiredString(params.taskId, "taskId"),
+          patch: params.patch,
+          reason: typeof params.reason === "string" ? params.reason : undefined,
+        });
+      case "adaptation_apply": {
+        if (params.confirm !== true) {
+          throw new Error("adaptation_apply requires explicit confirm: true");
+        }
+        return this.coordinator.adaptationApply({
+          taskId: requiredString(params.taskId, "taskId"),
+          patch: params.patch,
+          reason: typeof params.reason === "string" ? params.reason : undefined,
+          confirm: true,
+        });
+      }
+      case "remediation_verify": {
+        if (params.confirm !== true) {
+          throw new Error("remediation_verify requires explicit confirm: true");
+        }
+        const reason = requiredString(params.reason, "reason").trim();
+        if (reason.length > 1000) throw new Error("reason must be at most 1000 characters");
+        return this.coordinator.remediationVerify(
+          requiredString(params.taskId, "taskId"),
+          reason,
+          true,
+        );
+      }
+      case "candidate_reverify": {
+        if (params.confirm !== true) {
+          throw new Error("candidate_reverify requires explicit confirm: true");
+        }
+        const reason = requiredString(params.reason, "reason").trim();
+        if (reason.length > 1000) throw new Error("reason must be at most 1000 characters");
+        return this.coordinator.reverifyCandidate(
+          requiredString(params.taskId, "taskId"),
+          reason,
+          true,
+        );
+      }
+      case "candidate_reverify_eligibility":
+        return this.coordinator.candidateReverificationEligibility(
+          requiredString(params.taskId, "taskId"),
+        );
+      case "correction_eligibility":
+        return this.coordinator.correctionEligibility(
+          requiredString(params.taskId, "taskId"),
+        );
+      case "model_routing": {
+        const taskClass = requiredBoundedString(params.taskClass, "taskClass");
+        const rawCandidates = requireArray(params.candidates, "candidates");
+        if (rawCandidates.length < 2 || rawCandidates.length > 10) {
+          throw new Error("candidates must contain 2 to 10 entries");
+        }
+        const candidates = rawCandidates.map((c, i) => {
+          const obj = strictObject(c, `candidates[${i}]`);
+          return {
+            provider: requiredBoundedString(obj.provider, `candidates[${i}].provider`),
+            model: requiredBoundedString(obj.model, `candidates[${i}].model`),
+          };
+        });
+        return this.coordinator.modelRouting(taskClass, candidates);
+      }
       default:
         throw new Error(`Unknown daemon method: ${String(request.method)}`);
     }

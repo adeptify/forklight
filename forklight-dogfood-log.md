@@ -1453,10 +1453,1435 @@ commit / push。
 
 ### 不夸大的结论
 
-- 真实 DeepSeek Pro Attempts 继续只有 Claude-side runtime estimate；当前官方
-  catalog 无 `deepseek-v4-pro[1m]` 精确报价身份，因此 official cost 保持
-  `unsupported-model`，不能用 runtime estimate 冒充 Provider 账单。
+- 当时的真实 DeepSeek Pro Attempts 只有 Claude-side runtime estimate，不能用
+  runtime estimate 冒充 Provider 账单。**此状态已被 2026-07-26 后续实现取代**：
+  本文下一节的新 Attempts 已产生独立的 quoted official-cost evidence。
 - MiniMax 的 aggregate terminal usage 仍不能解析每请求 pricing tier，保持
   `per-request-usage-required`。
-- 多波处置后：**无权威 open-engineering 行缺少 disposition**。剩余为 external 限制与
-  product-vision / ux-session backlog，不是未分类的悬空缺陷。
+- 截至该轮结束，**无权威 open-engineering 行缺少 disposition**；2026-07-26
+  self-dogfood 新发现的问题在下一节以 FL-D124–127 继续跟踪。
+
+
+## 2026-07-26 Hub 任务入口与 verifier Git 隔离 dogfood
+
+状态：使用 ForkLight + DeepSeek Pro 在真实 dirty source checkout 上完成三项
+交付；Main 独立审查、纠正并通过 Integration 写回，未 commit / push。
+
+### 任务与结果
+
+| Task | 作用 | Attempts | 最终结果 | official USD |
+| --- | --- | ---: | --- | ---: |
+| `b9af8223-5833-435f-86f1-619c27503fb6` | verifier Git 只对直接 workspace Git 注入 synthetic context，隔离普通/嵌套子进程 | 4 | succeeded；focused 32/32，full 766/766，Integration applied | 0.089518998 |
+| `beafb1d0-9892-48c5-8cd2-aa913e43e582` | macOS sandbox 测试不再写死 `/Users`，但仍精确断言真实 source root literal | 1 | succeeded；focused 4/4，Integration applied | 0.015361532 |
+| `36cfdeba-8f88-4704-8250-da3768b3fde1` | Hub Board 提交已写好的绝对路径 Task Contract | 3 | succeeded；Main revise 后 focused 18/18、full 772/772，Integration applied | 0.066690198 |
+| `3a8a96cd-3c51-45ae-a25b-d7c1fc07ffca` | Integration 顶层终态按 durable result 区分成功/失败 | 1 | MiniMax-M3 succeeded；full 773/773；Integration applied | unavailable: per-request-usage-required |
+
+三项 DeepSeek 成功链路 official quote 合计 **USD 0.171570728**；MiniMax
+保持 request-level usage 缺失，不与 USD quote 相加。另一个被放弃的早期
+Hub 尝试 `629ab85c-9c03-44e8-bf99-8c5326784cdd` 消耗 USD 0.063197148；它的
+失败证据被保留，没有把失败模型永久禁用。包含该失败尝试，本轮可归属的
+official quote 合计 USD 0.234767876。
+
+### 真实失败如何转化为产品修复
+
+1. 早期 Hub 任务的 `npm run check` 继承 verifier 的 native Git 环境，导致
+   测试创建的临时 Git 仓库被重定向；同时 `dist/**` 未声明 generated，污染
+   business patch 统计。前者已由 Git bridge 修复，后者通过 Task Contract 的
+   `workspace.generatedPaths` 明确表达。
+2. 第一轮 Integration staging 把源码复制到 `/private/var/...`，暴露
+   `tests/permissions.test.ts` 写死 `/Users` 的误报。用独立 1-file Task 修复后，
+   原 Git patch 再次 Integration 即完整通过。
+3. Hub 首轮修正后机器测试全绿，但 Main 审查发现“UI 声称绝对路径、后端接受
+   相对路径”以及“短 daemon error 仍可能泄漏合约内容”。Main 正式记录
+   `revise`；第三个 Attempt 加入 `path.isAbsolute` 和固定无内容错误后才 accept。
+4. 浏览器实测：daemon connected；Board 顶部出现 Task Contract 输入、计费确认
+   文案与提交按钮；新任务进入 Done；页面 console error 为 0。当前主要 UX
+   问题是 50 个历史任务（21 failed）让四列看板过密，进入筛选/归档 backlog。
+
+### Token 证据（不把 Worker 量冒充 Main 节省）
+
+| Task | Worker gross tokens | Main↔ForkLight exchange estimate | direct Codex savings |
+| --- | ---: | ---: | --- |
+| verifier Git isolation | 2,691,010 | 142,727–876,634（low confidence） | unavailable: direct baseline missing |
+| portable permission test | 124,122 | 2,359–14,201（low confidence） | unavailable: direct baseline missing |
+| Hub task entry | 2,500,220 | 59,001–363,079（low confidence） | unavailable: direct baseline missing |
+| Integration outcome projection | 272,793 | 77,139–475,462（low confidence） | unavailable: direct baseline missing |
+
+四项成功任务共记录 Worker gross **5,588,145 tokens**。这些数据可以证明大量
+上下文和生成发生在 Worker 侧；`boundaryReduction` 也可作为协议边界负载指标，
+但没有同 `taskClass × directCodexProfileId` 的直接 Codex 基线，所以当前不能
+严谨宣称“节约了主线程 N tokens”。下一步应为真实重复任务采集 exact-pair
+direct-Codex 样本，再发布版本化 calibration。
+
+### 策略边界：可配置 vs 不可取消
+
+- **可配置策略：** `contractQuality`（当前 12 files / 1200 lines）、
+  `integration.reviewedPatchMaxFiles/Lines`（当前 5 / 400）、Task 自身
+  `changeBudget`、`completionPolicy`、competition 权重/平局阈值、并发、时间和
+  cost 偏好。Task 创建时快照，避免运行中设置漂移改变既有任务。
+- **安全硬边界：** Hub mutation 鉴权、显式 confirm、Worker 无 source write / Git
+  commit / push 权限、Main Review、Integration receipt/source compatibility、秘密
+  不进入 Task/错误响应。这些不能被普通偏好配置取消。
+- **当前产品缺口：** 上述可配置策略尚未全部在 Hub 形成一套易懂的分层配置；
+  目前主要通过 settings/Task Contract 配置，需补 Advanced Policy UI。
+
+### 新发现、尚未关闭
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D124 | Integration operation 顶层 `status=completed`，但 stage 可为 failed，容易把“流程结束”误读成“合入成功” | **closed 2026-07-26**：MiniMax-M3 把 durable `applied` 映射为 `completed`，`rejected` / `retained-failure` / `rolled-back` 映射为 `failed`；历史真实 rolled-back operation 复验显示 `status=failed` |
+| FL-D125 | 本轮 production source patch 的 Integration 把 `artifact-built` / `runtime-activated` 标为 `not-applicable`，真实 source checkout 仍需手工 build + daemon restart 才匹配 identity | **open-engineering**：按 affected module / delivery command 推导构建激活要求，并回归自举 |
+| FL-D126 | Hub Board 历史任务过密，failed 与已纠正成功任务并列，难以快速识别当前风险 | **product backlog**：filter/search/archive + lineage grouping |
+| FL-D127 | 高级质量/Integration/competition/time-cost 策略虽可配置，但 Hub 没有统一可理解的配置面 | **product backlog**：Safety / Quality / Preference 三层 UI |
+| FL-D128 | 合同 quality wording 把代码标识符 `outcome-unknown` 中的 `unknown` 当作自然语言不确定性警告 | **product/quality backlog**：token/identifier-aware wording scan，保留真正含糊措辞 warning |
+
+
+## 2026-07-26 Guided capture 与本路径首条真实 paired calibration
+
+状态：guided capture core、CLI、MCP、Hub 已写入真实源码并通过 Main Review；
+源码 Integration 后 **785/785 tests** 全绿，dist 已重新 build，daemon build
+identity 匹配。本轮 `gpt-5.6-sol/xhigh` 成对基线已由 Main 审查并以 low
+confidence 发布。这是新 guided-capture 路径的首条真实样本；系统历史上已有
+FL-D101 的另一组 task class/profile exact-pair，两者不混并。未 commit / push。
+
+### 交付链路
+
+| Task | 作用 | 结果 |
+| --- | --- | --- |
+| `e39fedd6-a2a0-4a01-8bbe-ddc5292cb93f` | daemon guided capture core：从已存 Task 派生 calibration identity，只接收 count-only usage + opaque run ref | DeepSeek Pro 多轮纠正后 succeeded；Main 修正 unknown Task 泄漏与错误遮蔽；Integration 完成 |
+| `7fafeb49-79ca-4deb-92f9-aa9bd0ef02f4` | Hub Task detail 的 5-counter guided capture | DeepSeek Pro succeeded；Main 发现调用 shape 错误并纠正；Integration 因既有随机 receipt 顺序测试偶发失败而 retained failure，源码立即复跑全绿 |
+| `e9b9ff64-47b8-4b30-b420-b6b15fc97500` | 修复 receipt 测试把随机 UUID tie-break 当固定数组顺序 | DeepSeek Pro 1 Attempt succeeded；Integration 完成 |
+| `1829e391-5b23-41fa-b710-6424bd0ae7a9` | 第一轮 CLI/MCP guided client | MiniMax-M3 4 Attempts 后 failed；生产设计基本正确，但测试类型、错误回执与 fixture mutation 反复偏差；证据保留，不永久禁用模型 |
+| `f6a535da-5010-40d0-bdda-dcdafee680cc` | 4-file 窄化移植 | MiniMax-M3 3 Attempts 后 failed；27/27 focused 通过，但 full check 证明 `tests/mcp.test.ts` 是必需第 5 文件，原 hard contract 自相矛盾 |
+| `2c4b54ec-eb7e-49be-a21d-020f427fefd5` | 修订为 5-file client 交付 | DeepSeek Pro；首轮 attribution bug 被验收拒绝，次轮全绿后 Main 又因 MCP 把 opaque Task id 错写为 UUID 而 revise，最终 accepted；真实源码 Integration 完成 |
+| `8de01a79-91c7-4951-a8fe-24a5fac000bb` | clean baseline 上的真实 ForkLight/Direct Codex 成对实验 | DeepSeek Pro Attempt 1 因 2 个错误文案断言 + 1 个未使用变量失败；Attempt 2 succeeded，focused 53/53、full 789/789；Main 与 direct patch 对比后 accepted；不 Integration 到临时项目 |
+
+### 本轮 guided Main-token 基线
+
+两条链路从同一 clean baseline 开始，使用同一份无既有答案引用的 5-file
+Task Contract：
+
+- ForkLight：DeepSeek Pro 两个 Attempts，包含失败纠正链路；Worker gross
+  **3,417,687 tokens**，没有把失败 Attempt 排除。
+- Direct Main：`codex-cli 0.145.0 + gpt-5.6-sol + xhigh`，独立实现 5 文件；
+  Main 重新执行 focused **46/46**、full **782/782** 后确认与 Worker 交付行为
+  等价。终态 count-only usage 为 input 3,788,851（其中 cached 3,617,536）、
+  output 18,979（其中 reasoning 8,833），canonical gross
+  **3,807,830 tokens**。
+- 保存证据只有 opaque run id 与五个 usage counters；未保存 direct prompt、
+  response、diff 或 JSONL。
+- 发布 registry：
+  `forklight-guided-capture-clients-paired-calibration-v1 ×
+  codex-cli-0.145-gpt5.6-sol-xhigh-v1`，version 1，sample size 1，confidence
+  **low**。
+- 当前 Task exchange estimate 为 **18,623–113,745 tokens**；因此
+  `directCodexSavings` 为 **3,694,085–3,789,207 Main tokens**，即
+  **97.0129%–99.5109%**。这是 Main 边界负载相对 direct baseline 的节约，
+  不是 Worker token 或 Provider 账单的替代说法。
+- 两个 DeepSeek Attempts 的 quoted official cost 分别为 USD
+  0.067993893 与 0.008625818，合计 **USD 0.076619711**；Claude runtime
+  自报估算合计 USD 2.754891，继续作为另一口径分开显示。
+
+### 本轮 hard / soft 策略结论
+
+- 5 files / 400 lines 对这次已知依赖闭包是合理 hard acceptance；此前的
+  4 files / 390 lines 与 `npm run check` 冲突，证明“文件数/路径”不应在
+  发现必需依赖后继续盲重试。安全边界仍 hard，范围预算需要 Main 可修订。
+- 一次 `Edit failed` 后读取更精确 anchor 并成功恢复，属于可恢复工具摩擦；
+  连续相同 Edit failures 且 diff 不增长才应触发早停/重路由。
+- 模型某个 Task 多次失败不等于永久禁用。保留 failure category、纠正成本与
+  后续成功率，模型选择基于按 task class 的长期证据，而不是一次全局封禁。
+- 时间继续独立记录；当前默认 speed-neutral。只有用户在 settings/competition
+  显式启用时间权重后才影响选择。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D129 | calibration profile 可声明但未验证实际 Main runtime；旧标签 `gpt-5.6` 在 live Codex 被拒，真实可用模型是 `gpt-5.6-sol` | **open-engineering/product**：新增 runtime-neutral 的 detect / declare / confirm preflight；不能假设 Main 一定是 Codex |
+| FL-D130 | hard focusPaths/maxFiles 与 full acceptance 可证明互相矛盾，当前只显示普通 verification failed | **open-engineering**：识别 `contract-infeasible`，保留证据并请求 Main 修订，不消耗同条件重试 |
+| FL-D131 | supervision 将一次可恢复 Edit failure 与连续无进展 Edit failures 都投影成同类 tool failure | **product/quality backlog**：加入连续失败、diff growth、恢复成功等进展特征，供早停与模型统计使用 |
+| FL-D132 | Integration wait 完成时返回完整 acceptance stdout，单次可超过 50k tokens 并挤占 Main context | **open-engineering/product**：默认 compact stage summary；deep audit 显式请求完整 stdout |
+| FL-D125 | production Integration 仍把 artifact-built/runtime-activated 标为 not-applicable，需手工 build/restart | **仍 open-engineering**：本轮再次真实复现；Delivery Profile 优先级不变 |
+| FL-D133 | 本轮这个 exact pair 只有 1 条 accepted sample（历史 FL-D101 属于另一 pair），无法代表其他 task class / Main profile | **measurement backlog**：继续按 exact pair 收样；同 pair sample size 增长前保持 low confidence |
+
+
+## 2026-07-26 Delivery Profiles 与 daemon 生命周期自举
+
+状态：使用 ForkLight 自己调度 DeepSeek Pro 与 MiniMax-M3 完成 Delivery
+Profiles；随后在真实 Integration 激活中复现并修复 daemon Socket/PID 生命周期
+竞态。Main 多次拒绝“测试全绿但失败路径不原子”的实现，最终在源 checkout
+做窄修正并通过 **806/806 tests**。未 commit / push。
+
+### 任务、模型与处置
+
+| Task | 模型 | Attempts | 处置 |
+| --- | --- | ---: | --- |
+| `002d1696-b337-4950-a74b-9f28b482a9a5` | DeepSeek Pro | 2 | Delivery Profile settings registry、迁移、整段替换；Main accepted；Integration `ecf7f01b-f736-441f-aa1b-db495f4b8f9d` |
+| `7c472671-db17-46b2-a674-418f4c53c127` | DeepSeek Pro | 4 | Task 创建时解析并快照 profile；Main 纠正 resolution invariant；Integration `dd481ba7-2847-4770-8b05-40161d6dd6ac` |
+| `38bef8ab-1584-4075-ba7d-c821279a2e2c` | MiniMax-M3 | 3 | CLI / daemon / MCP / competition 统一消费 profile；Main 纠正 competition 调用和 `finally`；Integration `0669297c-2e04-4506-aabd-c75ea4d4744d` |
+| `b3c7387f-e6d6-41be-a98f-41155ac9c690` | DeepSeek Pro | 4 | lifecycle 原型；65 前置行为测试通过但 Main 发现 link/restore 失败仍会删替换 endpoint，review=`revise`，未 Integration |
+| `76d088e5-9406-48cd-9fd4-28ee293fc411` | DeepSeek Pro | 3 | 新 Task 复用原型；最终机器验收通过，Main 再次因失败路径原子性 revise；超额授权 bug 阻止第 4 Attempt，产物作为部分证据由 Main 窄修正 |
+
+Delivery Profile 现在遵循：Task inline commands > 显式 profile id > project
+binding > default profile > none。显式 id 不存在或 inline/profile 同时出现时
+fail closed；命令按 Task 创建时的 settings 快照冻结，后续设置漂移不会改变已创建
+Task。CLI validate/run、daemon submit、MCP submit/competition 走同一解析边界。
+
+### 真实 daemon 故障与修复证据
+
+1. 多次 Integration 显示 activation passed，随后 direct status 却得到 Socket
+   `ENOENT`。进程核对证明旧 daemon 晚关闭时删掉了替换实例路径，留下 PPID 1、
+   无可达 Socket 的 dist orphan。
+2. 新 start 先识别并探测 Unix Socket，再只删除同一 dev/inode 的 stale path；
+   active endpoint 与 probe 后被替换的 path 均 fail closed。
+3. 新 close 在 Node `server.close()` 删除 canonical path 前保存不同 inode 的
+   replacement endpoint；preserve/restore 失败不再吞掉，Store 在 outer `finally`
+   关闭。
+4. 新 stop 先读取并验证 exact PID，发送 shutdown 后等待 PID=`ESRCH` 且 endpoint
+   不再接受连接；health timeout、`EPERM` 或其他不确定性都不能变成 success。
+   Hub restart 不再吞掉 stop failure 后继续 `ensureDaemon`。
+5. 真实自举：旧 PID `87575` stop 返回后已不存在，Socket 已消失；清理一个已证实
+   的旧 dist orphan PID `5713` 后，新 daemon PID `96074` 使用 build id
+   `e03fa3c0b46aeb9b7e51284d00ded9ed6168a79cda95296028905f53c1e18523`。
+   独立后续 status 仍到达同一 PID，进程表只有这一个 dist daemon。
+6. 另发现并清理 **77 个**历史 Node test-owned source-dev daemon orphan：均为
+   `NODE_TEST_CONTEXT=child-v8`、临时 `forklight-source-daemon-*` home、PPID 1。
+   修复后单独重跑 source-dev stop/restart 测试，新增 orphan 数为 **0**。
+
+### Token 与费用（保留失败/纠正链路）
+
+上述五个 Task 共 16 个 Attempts，Worker gross **19,501,684 tokens**；按持久化
+CLI/MCP receipts 估算 Main↔ForkLight exchange 为 **79,759–483,063 tokens**，
+对应 Worker boundary reduction **19,018,621–19,421,925 tokens**，confidence
+仍为 low。这里包含未被 Main 接受的 lifecycle Attempts，不能把它冒充有效产出。
+由于这些 Task 没有同 `taskClass × directCodexProfileId` 的 direct baseline，
+`directCodexSavings` 仍明确为 **unavailable: direct-baseline-missing**。
+
+四个 DeepSeek Task 的 quoted official-cost evidence 合计 **USD 0.392190287**；
+MiniMax 三个 Attempts 只有 Claude runtime estimate 合计 **USD 1.524766**，
+official cost 仍为 `route-required`，两种口径不相加、不冒充 Provider 账单。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D134 | source patch 没有显式 build/activation 时被标为 not-applicable | **closed 2026-07-26**：Delivery Profiles 可按 project/default/Task 显式选择并快照；不从路径猜命令 |
+| FL-D135 | old daemon late-close 删除 replacement Socket，Integration activation 假阳性并泄漏 dist orphan | **closed 2026-07-26**：inode acquisition、replacement preservation、exact PID stop/restart；真实 PID/build 自举复验 |
+| FL-D136 | 超额 revise 先写入 authorization，再校验 feedback 长度；过长 feedback 失败却消耗唯一 grant | **open-engineering / high**：授权、feedback 校验、Task queue mutation 必须同一事务；失败不得留下授权副作用 |
+| FL-D137 | extra Attempt admission 写死“正好 3 Attempts + 最多一次”，第 4 Attempt 后 Main revise 无法继续 | **open-policy/product**：改为 settings/profile 可配置策略，同时保留每次超限需 Main 显式授权的安全门 |
+| FL-D138 | external runtime 初始化后可静默约 3 分钟，Task 仍 running；仅靠 tool event 会显示 quiet | **observability backlog**：区分 Provider request in-flight、进程存活、无进展；时间默认仍不参与质量评分 |
+| FL-D139 | 65/65 machine-green 仍遗漏 preservation link/restore failure atomicity | **governance evidence**：Main Review 继续是强制边界；补 fault-injection 测试后再考虑自动接受 |
+| FL-D140 | 历史测试留下 77 个 source-dev daemon orphan | **closed for reproduced path 2026-07-26**：精确清理历史 test-owned PIDs；新 exact stop/restart 回归后 orphan=0 |
+| FL-D132 | Integration wait 完成时返回完整 stdout，挤占 Main context | **仍 open-engineering/product**：Delivery/lifecycle 本轮再次产生超长监督输出，compact summary 优先级提高 |
+
+
+## 2026-07-26 M0 activation handoff 与有限自迭代
+
+状态：DeepSeek Pro 通过 ForkLight 完成 activation-handoff 实现。Task
+`ce9b4a35-8515-438d-9576-d89d7dc8ed91` 共 4 个 Attempts；前三轮分别暴露了
+可伪造环境标记、内存态一次性授权、目标 PID 误判与测试 fixture 自启动真实
+Integration 等问题。Main 在第三轮停止自动重试，完成窄修正后仅显式授权一次
+最终独立验证。最终 ForkLight focused **78/78** 通过，Main 增强 socket 生命周期
+断言后 focused **79/79**、full **850/850** 通过；Integration operation
+`6ee5a5bb-14ae-4af3-bd7a-9ccaeb0a0101` 完成 source apply、3 条 verification、
+build，runtime activation 因本 Task 明确未配置而为 not-applicable。
+
+### 最终行为
+
+1. detached activation handoff 消费后只把 operation/task/receipt identity 作为传输
+   上下文；它本身不是权限。
+2. old daemon 依据 durable pending Integration 校验并持久化一次性授权后才返回
+   acknowledgement；daemon 重启后 replay 仍被拒绝。
+3. acknowledgement 包含 exact target PID；client 在同一 PID 仍可达时继续等待，
+   endpoint 释放后允许 replacement start，不再等待正在 drain open
+   `integration_wait` 的旧 PID。
+4. 若 endpoint 已由不同 PID 接管、ack 缺少 target PID、协议不兼容、operation
+   不匹配或 daemon 不可达，均 fail closed。
+5. 普通 `daemon stop/restart` 路径未放宽，仍要求 exact PID + endpoint 同时消失。
+
+### 自迭代证据与费用
+
+- Worker gross：**21,193,887 tokens**（4 Attempts，失败轮次全部保留）。
+- Main↔ForkLight exchange estimate：**80,525–484,974 tokens**；boundary
+  reduction **20,708,913–21,113,362 tokens**，confidence low。
+- direct baseline 缺失，因此不声称 direct-Codex savings。
+- DeepSeek quoted official cost 合计 **USD 0.260687902**；Claude runtime
+  estimate 合计 **USD 14.459127**，两种口径继续分开。
+
+本轮也暴露了新的调度缺口：额外 Attempt 的 prompt 仍把旧 verification failure
+当成主要事实，即使 Main 已经修正当前 workspace，Worker 仍倾向继续“修旧失败”
+并放宽断言。后续 bounded adaptation 必须让 **当前 effective policy + 当前 workspace
++ Main delta** 成为下一轮唯一事实源，历史失败只作为 evidence；相同 failure
+category + 相同 policy 不得重复运行。
+
+M0 实现已完成，但 exit evidence 仍为 **0/3 live self-activation upgrades**。后续
+三个真实功能 Task 将统一使用 build → activation handoff stop → replacement start →
+identity check Delivery Profile，连续通过后才关闭 M0。清理了 9 个逐一确认属于
+`forklight-source-daemon-*` 临时目录的旧 PPID=1 测试进程；正式 daemon PID
+`89202` 保留，清理后无其他本项目 source-dev daemon。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D141 | Main 修正 workspace 后，下一 Attempt 仍优先消费旧 verification 摘要并重复修复 | **M1 high**：attempt context 以当前 workspace/effective policy/Main delta 为权威；历史失败降为只读 evidence |
+| FL-D142 | Worker 为追求绿灯会放宽生命周期断言，机器通过不能代替 Main 对测试强度的判断 | **governance evidence**：Main Review 保持强制；增加 test-strength / removed-assertion diff signal |
+| FL-D143 | M0 handoff 已有确定性测试但尚无连续 live activation 成功 | **open M0 exit**：接下来三个真实交付必须走 activation Delivery Profile，失败即重新计数 |
+
+
+## 2026-07-26 Worker 高级策略与有界自适应链路
+
+状态：按“一切可调策略归 Worker、开发期限制宽松、绝不无休止自迭代”的原则，
+使用 ForkLight 自身调度 DeepSeek Pro 与 MiniMax-M3，完成了运行核心、Hub 编辑器/
+生效预览和一次性 adaptation transition。Worker 原始任务失败证据全部保留；Main
+按本轮预先配置的 Attempt 上限停止重试，复核并窄修正产物，没有让模型通过“改参数
+再试”循环消耗更多轮次。源码最终 **940/940 tests**，策略/Hub focused
+**107/107**，TypeScript 与 build 通过。未 commit / push。
+
+### ForkLight 任务与处置
+
+| Task | 模型 | 结果与 Main 处置 |
+| --- | --- | --- |
+| `b113578b-3d65-46b1-918a-07789b9299c6` | DeepSeek `deepseek-v4-pro[1M]` | 3 Attempts 后失败；第 3 轮违反只验证边界并继续编辑，Main 停止 Worker、审查并手工整合可证明部分 |
+| `016eb6cb-9d54-4ff5-bc46-8059d06e3cf4` | DeepSeek `deepseek-v4-pro[1M]` | 预设 1 Attempt / 0 extra / 0 adaptation；独立验证只剩 fixture 类型缺口，Main 修正后整合；quoted official cost USD 0.098056888 |
+| `47596dfb-cbfa-45c4-bee8-77eae1f252fa` | MiniMax-M3 | 预设 1 Attempt / 0 extra / 0 adaptation；5 项测试与 TS 未通过，Main 审查并修正后整合；official cost 仍为 route-required，runtime estimate 约 USD 12.44 |
+
+### 最终模块行为
+
+1. **Worker Profile 生产策略：** UI/Settings 保存 14 个高级字段；Task 可以做
+   显式 override；解析器按 `Task > Worker > global` 生成带 provenance 的不可变
+   snapshot。空白的 duration/Token/file/line 可明确保存为 `null = unlimited`。
+2. **Runtime 消费策略：** scheduler 消费 Worker 并发和 Attempt 边界；runtime
+   消费 wall duration、no-progress、stop grace 和 Token 观测上限；verifier 消费
+   file/line、completion 与 change-budget 模式。Hub 预览使用同一核心解析器，文件/
+   行数正确显示为完成后校验，不能冒充实时终止。
+3. **有界 adaptation：** Main 只显式请求一次 `preview/apply` transition；核心检查
+   parent terminal、root round cap、forbidden/no-op patch 与 one-parent-one-child，事务
+   写入 successor + lineage + events，随后进入普通队列。没有模型调用、递归评估或
+   自动 detect/tune/retry loop；`maxAdaptationRounds=0` 时完全关闭。
+4. **UI 行为：** 预算明确区分继承、不限额、有限上限；旧顶层 no-progress 值迁入
+   高级字段，不显示重复控件；轮询期间正在编辑的表单不再被重建；Worker 卡片区分
+   inherited 与 unlimited。
+
+### 当前开发默认 Worker（已真实保存）
+
+- monetary budget / wall duration / observed Token / files / changed lines：无限制；
+- file、line、change-budget：`warn`；completion/no-change：`hard`；
+- no-progress：1,800,000 ms；stop grace：10,000 ms；并发：4；
+- base Attempts：1；extra Attempts：0；adaptation rounds：0。
+
+这套默认值允许大改动继续交付，但不会由 ForkLight 自动追加 Attempt 或 successor。
+用户以后可逐 Worker 修改；Task 创建后的 snapshot 不随设置漂移。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D144 | Hub 轮询会重建 Worker 表单，丢失展开和未保存输入 | **closed 2026-07-26**：活动表单期间只刷新状态 chrome，不重渲染表单；真实跨轮询验证通过 |
+| FL-D145 | Preview 把 file/line/completion 错标为 preemptive | **closed 2026-07-26**：统一核心映射为 terminal；Token 仍按 runtime 显示 post-observation/unsupported |
+| FL-D146 | budget 空值同时代表 inherit/null，UI 无法表达用户意图 | **closed 2026-07-26**：三态选择并持久化，卡片也分别显示 inherit/unlimited |
+| FL-D147 | adaptation daemon operation 已存在，但 Main 还不能从 MCP/CLI/Hub 完成 preview → confirm → apply | **closed 2026-07-26**：CLI、MCP、Hub 均已提供 read-only preview + 显式 confirm apply；Main 产生 delta，ForkLight 只创建一个有上限 successor |
+| FL-D148 | adapted successor 是新 Task，不是原 Worker workspace/session 的续跑 | **strategy backlog**：按 Task class 比较 clean successor 与 continuation；未有证据前不默认续跑部分 workspace |
+
+## 2026-07-26 组合经济证据与 Insights 收口
+
+状态：使用 ForkLight 自身分别调度 DeepSeek `deepseek-v4-pro[1M]` 完成组合经济
+聚合核心、MiniMax-M3 完成 Hub Insights。两个 Task 都在创建前冻结为 **1 个 base
+Attempt、0 extra、0 adaptation**，预算、时长、Token、文件数与代码行数不设硬顶；
+两次独立验收都失败，Main 没有通过调参或追加 Attempt 反复重跑，而是审查隔离
+workspace、修正可证明缺口并整合。最终源码 **975/975 tests**，严格 TypeScript、
+production build 与 `git diff --check` 通过；真实浏览器完成中英文数据渲染、Light /
+Dark、390 px 单列布局与 console error 检查。
+
+### Task、费用与停止边界
+
+| Task | 模型 | Worker 验收结果 | 费用证据 | Main 处置 |
+| --- | --- | --- | --- | --- |
+| `528cc713-6094-4e64-ad4f-8bf90fe601dd` | DeepSeek `deepseek-v4-pro[1M]` | 965/967 tests，严格 TS 暴露 4 个 fixture/type 缺口 | Provider PAYG 官网重算 **USD 0.099739149**；Claude runtime estimate **USD 3.382784**；43 turns | 只修 fixture、类型命名与区间聚合逻辑；显式 resume 被 `maxExtraAttempts=0` 拒绝，证明 Task snapshot 真正生效 |
+| `d7a86cd8-4786-454e-9121-427b732c62a1` | MiniMax-M3 | focused 49/51；TS 与 build 已通过，两个失败来自 CSS 静态断言 | Claude runtime estimate **USD 6.367686**；Provider official estimate 为 `pricing-identity:route-required`；80 turns | 不重试；Main 修正静态断言以及 11 个真实性/UI 边界后整合 |
+
+DeepSeek 与 MiniMax 的 runtime estimate 都只是 Claude 侧运行时遥测，不能与 Provider
+官网报价相加。MiniMax 当前缺精确 `pricingRoute` 与 per-request usage rows，因此
+official cost 继续显示 unavailable，而不是用价目表猜一个金额。DeepSeek、MiniMax
+PAYG 价目表已在 2026-07-26 对照官网复核；币种仍按 USD / CNY 独立聚合。
+
+### 最终模块与调用链
+
+1. `portfolio-economics` 只读取终态 Task，按 provider/model/time 过滤，生产明确
+   denominator 的不可变汇总；daemon 的 `economics_summary` 只读操作消费它。
+2. Hub `GET /api/ops/economics-summary` 只做本地桥接；独立轮询失败时只降级经济
+   面板，不拖垮总览、看板或其他 Ops 数据。
+3. Insights 分开展示 runtime cap、runtime estimate、Provider 本币报价、Worker
+   Token 执行量、Main 往返、边界缩减与直接 Codex 节省；缺失原因和样本覆盖同时
+   展示。区间按每个 Task 的 lower/upper 分别相加，不取全局极值冒充总区间。
+4. direct-Codex savings 仅消费 exact `taskClass × directCodexProfileId` 的已发布
+   calibration。当前 134 个终态 Task 中只有 2 个可配对，因此 UI 显示 low
+   confidence 和 132 个 unavailable；不把 Worker Token 或 boundary reduction
+   冒充节省。
+
+### 硬边界与可调策略
+
+- **保持硬边界：** 密钥与内容隐私、Main 决策权、来源/币种/费用口径真实性、
+  缺失不等于 0、Worker Token 不等于 direct savings、显式消费确认。
+- **逐 Worker 可调：** 预算、执行时长、观测 Token、文件数、代码行数、并发、
+  base/extra Attempt、no-progress、completion/change-budget 与 adaptation round；
+  Task 创建时按 `Task > Worker > global` 冻结并标注来源。
+- **停止规则：** 参数可被 Main 通过一次 preview/apply 改成 bounded successor，
+  但 ForkLight 不做自动 detect → tune → retry 循环；相同失败与相同 policy 不重复跑。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D149 | MiniMax 已有官网价目表，但 Task 缺精确 route/per-request rows，official cost 大面积 `route-required` | **M1 next**：在 Provider/Worker 高级配置和 Task snapshot 暴露 `pricingRoute`，并采集可验证 usage rows；证据不全继续 unavailable |
+| FL-D150 | 组合经济真相已有 daemon/Hub，但 CLI/MCP 尚无紧凑的人类可读 summary | **observability next**：复用同一只读 service，禁止另造统计口径 |
+| FL-D151 | 两个新 Task 都未携带 exact calibration identity，不能衡量本轮 direct-Codex savings | **measurement backlog**：新建适合配对的 task class/profile 时走 guided capture；不为补数字重跑本轮任务 |
+| FL-D152 | rebuild 后 MCP 进程可与 daemon 协议兼容但 build identity 过旧，mutating path 需退回 matched CLI | **M1 product**：提供安全重连/提示与 handoff，不放松 stale mutation gate |
+| FL-D153 | 竖屏截图预览看似右侧空白，DOM 实测 390 px viewport、shell/sidebar/workspace 均 390 px，卡片 362 px 单列且无横向溢出 | **closed / no-change**：不因截图工具预览误判而改 CSS，保留实测证据 |
+| FL-D154 | 进程审计发现一个运行 4 天、PPID=1 的 `tests/setup-server.test.ts` 父子测试进程 | **closed 2026-07-26**：精确终止 PID 84421/84438；正式 dist daemon 重建为 PID 90871，未受影响 |
+
+
+## 2026-07-26 Worker 定价身份与 MiniMax 官方区间闭环
+
+状态：继续使用 ForkLight 自身调度 DeepSeek `deepseek-v4-pro[1M]` 和
+MiniMax-M3，各只运行 **1 个 base Attempt、0 extra、0 adaptation**。两次 Worker
+独立验收均失败，Main 没有追加 Attempt、放宽成功标准或进入调参重试循环，而是在
+隔离 workspace 完成一次证据驱动的审查修正后整合。最终源码 **1020/1020 tests**，
+严格 TypeScript、production build 与 `git diff --check` 通过；真实 Hub 完成中英文、
+Light/Dark、390 px 单列布局和 console warning/error 验收。未 commit / push。
+
+### Task、模型、费用与处置
+
+| Task | 模型 | Worker 验收 | 费用证据 | Main 处置 |
+| --- | --- | --- | --- | --- |
+| `5c790b88-dbbb-4141-b50c-745dc1779ab0` | DeepSeek `deepseek-v4-pro[1M]` | 236/242 focused tests；严格 TS 与 diff check 通过；86 turns | 官网 PAYG **USD 0.125747857**；Claude runtime estimate **USD 5.953592** | 不重试；修正过期 fixture、错误测试前提、可能 tier 范围、0 Token 未发布价格、Provider 身份切换和 route 校验后整合 |
+| `24b24e0c-345f-40b5-851c-1cdf9ec57fb7` | MiniMax-M3 | 48/48 行为测试与 diff check 通过；严格 TS 仅 1 个测试空值错误；90 turns | 官网本币保守区间在 Hub 显示 **CNY 6.65–13.3**；精确报价仍为 `per-request-usage-required`；Claude runtime estimate **USD 10.8529** | 不重试；修正类型、可见表单标题、既有未知 route 保留和本地化金额渲染后整合 |
+
+两项 Task 的 Worker gross 合计 **20,020,828 tokens**；Main↔ForkLight exchange
+estimate 合计 **13,645–82,323 tokens**，对应 boundary reduction
+**19,938,505–20,007,183 tokens**，confidence low。两项都没有 exact
+`taskClass × directCodexProfileId` baseline，因此不声称 direct-Codex savings。
+DeepSeek 官网 USD、MiniMax 官网 CNY 区间和 Claude runtime USD 遥测是三个独立
+证据口径，不相加、不换汇、不冒充 Provider 账单。
+
+### 最终模块与调用链
+
+1. **Worker 生产定价身份：** Hub Advanced 只提供当前已知的三条 route；保存后
+   `WorkerProfile.pricingRoute` 经 `Task/MCP explicit > Worker > missing` 解析并冻结到
+   新 Task。Provider/endpoint 改变时旧 route 不继承，route 不进入环境变量。
+2. **Attempt 消费定价身份：** exact calculator 先运行。MiniMax 缺 per-request rows
+   时继续标记精确报价不可用；只有完整 terminal aggregate 且所有正 Token component
+   在所有可能 tier 都有公开价格时，才补充本币 min/max。低于阈值时不会把不可能
+   触发的高价 tier 纳入上界；0 Token 对应未公开费率保持 `null`，不伪造 0 费率。
+3. **经济证据聚合：** Task 与 portfolio 对 exact totals、ranges、unavailable
+   reason 分开聚合；lower 分别相加、upper 分别相加，各币种独立，source URL 去重。
+4. **Hub 消费证据：** Worker 卡片展示 route 或明确未配置；编辑器会保留后端已
+   存在但 UI 尚未认识的合法 route，除非用户显式改选或清空。Insights 用独立卡片
+   展示 range、Attempt 分母与官网链接，并同时保留 exact-unavailable 计数。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D155 | MiniMax Claude runtime 的逐请求 usage 记录均为 0，只有 terminal aggregate 可用，无法精确重建每个请求的 tier | **partial close / next**：route 与保守本币区间已 shipped；精确报价继续 `per-request-usage-required`，等待 runtime/Provider 级逐请求证据 |
+| FL-D156 | UI 只认识当前三条 route 时，会把后端保存的未来合法 route 显示为未配置并在普通编辑时清掉 | **closed 2026-07-26**：卡片如实显示原始 route；编辑器注入“已有 route”选项并保持，用户仍可显式改为当前已知项或未配置 |
+| FL-D157 | MiniMax 静态测试全部通过，但 route 下拉原先没有可见标题，说明字符串存在不等于真实表单可理解 | **closed 2026-07-26**：主审补可见 label 与真实 DOM 验收；保留 Main Review，不把静态测试数量当 UI 质量 |
+| FL-D158 | Worker Task 保持 failed 是真实机器证据，但 Main 修正并整合后，Board 没有“Main repaired / delivered”处置状态，容易让用户误以为功能仍未交付 | **governance/observability next**：新增不改写 Worker 验证历史的 Main remediation/disposition receipt，并在 Board 同时显示 Worker 结果与最终交付状态 |
+
+
+## 2026-07-26 有界自适应控制面与真实 UI 验收
+
+状态：继续使用 ForkLight 自身分别调度 DeepSeek 与 MiniMax，但两个 Task 都冻结为
+**1 base Attempt / 0 extra / 0 adaptation**。Worker 失败后没有调参数重试；Main 只审查
+已有 patch、修正可证明缺口并跑完整验收。最终源码 **1031/1031 tests**、严格
+TypeScript、production build 与 `git diff --check` 通过；真实 Hub 完成中文、Worker
+Advanced、Task adaptation、390 px 窄屏和 browser console 验收。未 commit / push。
+
+### Task、成本与 Main 处置
+
+| Task | 模型 | 机器结果 | 成本证据 | Main 处置 |
+| --- | --- | --- | --- | --- |
+| `805e320d-8d9a-4ccd-b5fd-bf71872fa71d` | DeepSeek `deepseek-v4-pro[1M]` | 1 Attempt / 50 turns；行为测试通过，严格 TS 因新增 CLI operation 未登记到 receipt union 而失败 | Worker gross **4,300,150**；Provider quoted **USD 0.089657125**；runtime estimate **USD 3.27901** | 不追加 Attempt；补统一 operation 类型、MCP annotation 与 confirm 负例后整合 |
+| `440c58b8-0a48-48de-b111-8c0ef456b55e` | MiniMax-M3 | 1 Attempt / 100 turns；Worker 给出终态后进程被记录为 interrupted，focused Hub 29/31 | Worker gross **11,675,753**；official exact 为 `per-request-usage-required`，保守区间 **CNY 5.47125768–10.94251536**；runtime estimate **USD 7.487937** | 不重跑；收紧 reason/patch 边界、让字段清单从 Worker inventory 派生、补表单失效与行为测试后整合 |
+
+两项合计 Worker gross **15,975,903 Tokens**。Main↔ForkLight exchange 估算合计
+**183,366–1,104,894 Tokens**，对应 boundary reduction
+**14,871,009–15,792,537 Tokens**（low confidence）。这只能证明协议边界没有把 Worker
+完整上下文灌回 Main，不能直接称为“主线程节约”；两个 Task 都缺 exact
+`taskClass × directCodexProfileId` calibration，因此 direct-Codex savings 继续明确为
+`direct-baseline-missing`，不为补数字重跑任务。
+
+### 最终调用链
+
+1. Main/用户在 CLI、MCP 或 Hub 选择具体字段并给出一个 bounded reason。
+2. `adaptation_preview` 只读返回 before/after、来源、执行阶段、下一轮与停止原因。
+3. 只有相同表单状态的 preview 为 eligible 且用户显式确认时，
+   `adaptation_apply` 才事务创建唯一 successor；表单变化会废弃旧 preview。
+4. root `maxAdaptationRounds` 只能在 Worker Advanced 创建 Task 前配置，不能在
+   successor patch 中扩张。默认值 0 会在 preview 阶段停止，绝不会自动调用模型。
+5. successor 仍走普通独立验证、Main Review 与 Integration；调参本身不算进度或成功。
+
+### 真实 UI 验收和新问题
+
+- Worker Advanced 实测 **14** 项；Task successor editor 从同一 inventory 派生
+  **13** 项，只排除不可变 root round cap。把并发从 4 临时改成 3 时，effective
+  preview 如实更新为 3；未保存并恢复为 4。
+- root cap 为 0 的真实失败 Task 上，启用 duration 并预览得到
+  `adaptation-disabled`，Apply 保持 disabled；把值从 600000 改为 700000 后旧 preview
+  被清空并提示重新预览，没有创建 Task 或产生 Provider 调用。
+- 390×844 viewport 下 Worker 高级表单和 Task adaptation 单列显示，页面
+  `scrollWidth=390`，无横向溢出；browser error/warning 为 0。
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D159 | 新 CLI operation 已实现，但 receipt operation union 未同步，Worker 行为测试通过后才被严格 TS 拒绝 | **closed by Main**：补 canonical operation；后续应由单一 operation registry 生成 CLI/MCP/receipt inventory |
+| FL-D160 | MiniMax 已产生 terminal result，随后进程消失被记录 interrupted，Verifier 仍完成 | **observability next**：区分 terminal-result 已收、runtime cleanup failure 与 delivery verification，不把三者压成一个普通模型失败 |
+| FL-D161 | Worker 新增的两个 UI 静态测试依赖源码顺序/转义，真实行为正确也失败 | **closed by Main / test policy**：桥接边界改测 HTTP 行为；静态测试只保留不可运行的资源不变量 |
+| FL-D162 | Task detail 的回调参数 `t` 遮蔽全局翻译函数，所有源码/HTTP 测试仍绿，真实页面报 `t is not a function` | **closed 2026-07-26**：重命名数据参数并加防回归断言；再次完成真实页面操作验收 |
+
+
+## 2026-07-26 双结果交付处置与 Console 闭环
+
+状态：继续使用 ForkLight 自身分别调度 DeepSeek `deepseek-v4-pro[1M]` 与
+MiniMax-M3。两个 Task 都冻结为 **1 base Attempt / 0 extra / 0 adaptation**，没有自动
+放宽参数、追加 Attempt 或循环重跑。机器失败证据完整保留；Main 只审查已有 patch、
+修正可证明的缺口，并通过新处置链路核验修复后的当前源码。最终源码
+**1057/1057 tests**、严格 TypeScript、production build 与 `git diff --check` 通过；真实
+Hub 完成双结果、统计、中文和 390 px 响应式验收。未 commit / push。
+
+### Task、机器结果、成本与 Main 处置
+
+| Task | 模型 | 机器结果 | 成本与 Token 证据 | Main 处置 |
+| --- | --- | --- | --- | --- |
+| `f1760e00-11c7-436a-8672-b013e46548ee` | DeepSeek `deepseek-v4-pro[1M]` | 1 Attempt / 81 turns；独立验收因 3 个 TypeScript 错误失败，Task 保持 `failed` | Worker gross **8,667,688**；官网 PAYG **USD 0.129997372**；Claude runtime estimate **USD 5.895992** | 不重试；修正 async 调用、原子写入、Git 环境隔离、隐私投影、transport timeout 和 focused tests；再对当前源码运行原 Task 的 3 条验收命令，**3/3 通过**，单独记录 `verified-repaired-delivered` |
+| `4b6c0e3a-78af-4a96-aed6-41995dbf2ff8` | MiniMax-M3 | 1 Attempt / 91 turns；Worker 已给 terminal result 后进程消失，Verifier 继续运行并因 1 个源码字符串测试失败，Task 保持 `failed` | Worker gross **12,425,372**；official exact 为 `per-request-usage-required`；Claude runtime estimate **USD 7.880852** | 不重跑；修正翻译函数遮蔽、静态测试错误前提、统计卡片 DOM 构造和双语 caveat，保留原机器失败 |
+
+两项 Task 的 Worker gross 合计 **21,093,060 Tokens**。Main↔ForkLight exchange
+估算合计 **1,745,437–10,493,422 Tokens**，对应 boundary reduction
+**10,599,638–19,347,623 Tokens**（low confidence）。DeepSeek 单项的宽泛 exchange
+估算甚至使 boundary reduction 下界为负，说明这组估算只能表达协议边界体量，不能
+冒充直接收益。两项 Task 都缺少相同任务、相同 Main profile 的 direct-Codex baseline，
+因此 direct Main Token savings 继续明确为 `direct-baseline-missing`；本轮不为补一个好看
+数字重新执行任务。
+
+### 最终模块、输入输出和调用链
+
+1. **Main 发起处置：** 对 `failed` / `interrupted` Task 提供 bounded reason 与显式
+   confirm；succeeded Task、重复 passing disposition 和并发中的 remediation 都拒绝。
+2. **隔离验收：** ForkLight 把当前项目复制到新的 verification copy，清理继承的 Git
+   环境，只运行 Task 已冻结的 acceptance commands，不把任意 Shell 权限交给 Worker。
+3. **原子记录：** 同一个 Store 事务同时写 remediation check 与 final disposition；
+   任一命令失败只记录 failed check，不产生“已核验交付”。Task 原始 status、Attempt、
+   Verification 与 failure category 永不改写。
+4. **公开投影：** 私有 Store 保留 reason、command、stdout/stderr 供审计；CLI、MCP、
+   daemon、Hub 只返回 id、通过数、总命令数、时间、机器状态和 final disposition。
+5. **消费结果：** Board 仍按机器状态把 Task 放在 Failed lane，同时显示“已核验交付”；
+   Task detail 分列“机器执行”和“交付”；统计分列 machine success、accepted delivery、
+   Main repaired 和 remediation checks。
+
+### 真实 UI 验收
+
+- DeepSeek Task 在 Failed lane 中同时显示 `failed` 与 `已核验交付`，没有被移动到成功列。
+- Task detail 同时显示“机器执行: failed”和“交付: 已核验最终交付”。
+- DeepSeek `deepseek-v4-pro[1M]` 统计显示 machine **63%（36 verified）**、final
+  **65%（37 accepted）**、**1 Main repaired**、**1 remediation check**。
+- 首次真实页面验收发现统计卡片出现 `[object HTMLDivElement]`；Main 修正 DOM 子节点
+  组装后，8 个结果单元格的 object-string 数为 0。
+- 390×844 viewport 下 document width 为 390 px、统计卡片单列、无横向溢出。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D163 | Worker Advanced 已设为宽松/不限，但 Task Contract quality gate 仍固定要求 `maxFiles <= 20`、`focusPaths <= 8`，形成第二层隐性硬限制 | **M1 next**：拆成不可配置 Safety、可配置 Quality、可配置 Preference；合同可行性限制必须出现在 effective preview，不能静默与 Worker Profile 冲突 |
+| FL-D164 | DeepSeek 实际 source/test patch 为 15 个文件，但 `npm run check` 生成 `dist/` 后 Verifier 报告 450 files / 53,594 lines | **measurement next**：验收后 Diff 统计按 generated-path/exclude 分类，生成物不得污染业务改动体量；原始证据仍保留 |
+| FL-D165 | MiniMax 已发送 terminal result，随后 runtime cleanup/进程消失被记录为 interrupted，Verifier 又能继续完成 | **observability next / extends FL-D160**：分开记录 terminal-result received、runtime cleanup failure、independent verification，不把三者压成普通模型失败 |
+| FL-D166 | 第一版 remediation CLI/daemon response 会返回 Main reason、验收命令和 stdout/stderr | **closed 2026-07-26**：Store 保留私有审计；统一 compact public projection 已覆盖 CLI/MCP/daemon/Hub，并有隐私回归测试 |
+| FL-D167 | source-string/static tests 同时漏掉翻译函数遮蔽和 DOM 数组被字符串化两个真实 UI bug | **closed for current bugs / policy next**：修正实现并补 focused regression；以后 material Hub change 必须包含真实 DOM/browser QA，静态字符串只测资源不变量 |
+
+
+## 2026-07-27 Worker Quality 与火山引擎 GLM 5.2 1M 接入
+
+状态：继续用 ForkLight 自身调度 DeepSeek `deepseek-v4-pro[1M]` 和 MiniMax-M3，
+每个 Task 都冻结为 **1 base Attempt / 0 extra / 0 adaptation**，预算、时长、Token、
+文件数与行数不设硬顶，未进入自动调参或循环重试。Main 保留机器失败历史，只审查、
+修正并验证当前源码。最终源码 **1068/1068 tests**、严格 TypeScript、production
+build、脚本语法与 `git diff --check` 全部通过；未 commit / push。
+
+### Task、模型、成本与处置
+
+| Task | 模型 | 机器结果 | Token / 成本证据 | Main 处置 |
+| --- | --- | --- | --- | --- |
+| `bcb9ebac-0271-4482-a6cc-1ff638378658` | DeepSeek `deepseek-v4-pro[1M]` | 1 Attempt；Worker exit 0，独立验收暴露 4 个 TypeScript 缺口，Task 保持 `failed` | Worker gross **14,642,137**；官网 PAYG **USD 0.164959685**；runtime estimate **USD 9.331285** | 不重试；Main 分离 check truth 与 admission、补逐字段 effect/来源/不可变快照并统一 assessor；原 Task 的 3 条验收命令 **3/3 通过**，另记 `verified-repaired-delivered` |
+| `0fba3279-8dbf-42d9-aa59-a4cabe2ccb9f` | MiniMax-M3 | 国际站 endpoint 配中国区 Key，执行前 `401` | 无模型 Token；official 0 仅表示零使用量，不代表免费 | 归类为配置/区域错误，不计入模型编码能力；只做一次有证据的中国区纠正 |
+| `cda7b7d9-b707-4f9e-8e87-1688cb83c0f4` | MiniMax-M3（中国区） | 1 Attempt / 222 turns；terminal result 后 cleanup 先记 interrupted，Verifier 再完成并因 2 个错误测试前提、1 个类型错误及 whitespace 失败；Task 保持 `failed` | Worker gross **39,929,423**；官网 CNY 保守区间 **17.6536479–35.3072958**，exact 仍为 `per-request-usage-required`；runtime estimate **USD 22.525755** | 不追加 Attempt；Main 复用 Provider/Hub/MCP 骨架，重写订阅费用语义、宽松 Quality 配置和测试；原 Task 的 3 条验收命令 **3/3 通过**，另记 `verified-repaired-delivered`（check `fb0ee388-3511-4425-b26b-0ddc9bed2c51`），随后做一次真实 Volcengine probe |
+
+两项实际编码 Task 合计 Worker gross **54,571,560 Tokens**；Main↔ForkLight
+exchange estimate 合计 **1,988,400–12,298,484 Tokens**，对应 boundary reduction
+**42,273,076–52,583,160 Tokens**（low confidence）。两项都缺相同任务与相同 Main
+profile 的 direct baseline，因此 direct Main Token savings 仍为
+`direct-baseline-missing`；不把 boundary reduction 改名成节省。
+
+### 最终模块与调用链
+
+1. **Quality resolver：** Global Quality 与 Worker override 逐字段解析，显式 `null`
+   表示 maximum 不限、显式 0 表示 minimum 关闭；新 Task 保存不可变值与 provenance。
+2. **Quality admission：** 检查真假始终真实；`hard/warn/score/off` 只决定
+   blocking、warning、score evidence 或 ignored。Safety 与 Main/Integration 权限不进入
+   可调 Quality 对象。
+3. **Volcengine Provider：** 独立 `volcengine` 身份生产精确 endpoint/model/Keychain
+   元数据；Claude Code adapter 只在启动子进程时消费瞬态 Key，统计不与 Alibaba
+   `glm` 合并，也不允许 model fallback。
+4. **Model/Worker/Hub：** 新安装带内置非默认 `volcengine-glm52-1m`；当前本地旧设置
+   已安全 upsert Model 与 Worker，保留原 `defaultProfileId`。Hub/MCP/status/probe 使用
+   同一 Provider registry。
+5. **费用真相：** Coding Plan route 先严格验证 endpoint、route 与精确 model，再返回
+   `subscription-plan-no-per-request-price`；Worker Token 继续显示，不借用 PAYG 表，
+   不显示虚构的 0 美元。
+6. **真实连通：** 单次显式 probe 返回 `verified`，Provider `volcengine`，模型
+   `glm-5.2[1M]`，origin `https://ark.cn-beijing.volces.com`，延迟 4929 ms。
+7. **本地 Worker roster：** 旧持久化设置已幂等补入 `minimax-m3-cn`
+   （Claude Code + 中国区 `MiniMax-M3`）与 `local-grok-builder`
+   （本地 Grok Build + `grok-4.5`），保留 `default`。两者均使用开发期宽松策略；
+   浏览器真实 DOM 已确认两张 Worker 卡片、对应运行时/模型/路由均可见，控制台无
+   error/warn。Grok 本机 OAuth seed 存在；Provider 的 Keychain-only readiness 与
+   Worker 的 OAuth fallback 仍是两个不同信号。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D168 | DeepSeek 既有 21 个机器失败中至少 12 个是旧 change-budget policy 超限，若直接按 failure rate 路由会误伤模型 | **routing next**：统计和选择分离 policy-only / authentication / runtime / behavior / verification，不能因可配置 gate 永久禁用模型 |
+| FL-D169 | Worker Advanced 宽松但旧全局 Contract gate 仍是第二层隐性 hard limit | **core closed / Hub next**：共享 Quality resolver、逐 Worker override、不可变 snapshot 已交付；下一轮补 Worker Hub 编辑与 provenance preview |
+| FL-D170 | 新内置 Model/Worker 会出现在 fresh defaults，但旧持久化数组不会自动吸收新增 built-in | **migration next**：当前本地已幂等 upsert；产品层需区分 built-in registry 与用户数组，避免升级遗漏，也避免把用户主动删除误当缺失 |
+| FL-D171 | 同一个 MiniMax Key 在国际 endpoint 返回 401、在中国区 endpoint 正常，普通 authentication 会污染模型能力统计 | **classification next**：保留原失败；增加 region/endpoint mismatch 诊断，不把它当模型编码失败，也不自动跨区回退 |
+| FL-D172 | 订阅 Coding Plan 若走普通 pricing catalog 会被标成 unsupported endpoint 或误显示 0 | **closed 2026-07-27**：严格身份后返回 `subscription-plan-no-per-request-price`；Token 与费用可用性分开 |
+| FL-D173 | Worker 已发 `worker.completed` 后仍被 cleanup 标记 interrupted，接着又进入 verifying，`wait --until terminal` 曾提前返回 | **observability/state-machine next / extends FL-D160/165**：terminal-result、process cleanup、verification 三阶段必须单调，cleanup 不能覆盖已收到的 terminal envelope，也不能让 wait 提前终止 |
+
+## 2026-07-27 Hub「发生了什么」完整链路 dogfood
+
+状态：使用 ForkLight 自身并行调度 Volcengine `glm-5.2[1M]`、MiniMax-M3、
+DeepSeek `deepseek-v4-pro[1M]` 和本地 Grok `grok-4.5`。四个 Task 都保留冻结的
+合同与机器结果；Main 不为追求绿色状态自动重试，而是审阅隔离补丁、纠正事实错误，
+再合入当前源码。最终 **1079/1079 tests**、严格 TypeScript、production build 与
+`git diff --check` 全部通过；未 commit / push。
+
+### Task 与真实处置
+
+| Task | Worker | 机器结果 | Main 处置 |
+| --- | --- | --- | --- |
+| `82dd23a3-90a6-4edd-b318-2f58c0dc1c07` | Volcengine `glm-5.2[1M]` | succeeded；41 turns；runtime estimate USD 3.8431 | 合入双语白话文案，把 Boundary Reduction 改成“留在 Worker 内部的工作量”，明确不是直接节省 Main Token |
+| `0cfc584f-4f55-44bf-93c2-e09228832abe` | MiniMax-M3 | failed；1 Attempt / 118 turns；runtime estimate USD 9.9554 | 失败来自静态测试错误前提；保留 Insights 引导和紧凑 Token 展示，拒绝“发生了什么/为什么”重复同一句的 Task story |
+| `3cb36cf2-3faa-4171-baef-5fc50a568dbf` | DeepSeek `deepseek-v4-pro[1M]` | failed；1 Attempt / 56 turns；runtime estimate USD 4.5687 | 合同误写不存在的 `npm run typecheck`，新增测试也有脆弱断言；Main 保留 journey 主体，改为真实 Attempt/diff/check 数据并移除推测性结论 |
+| `7660dee8-c134-4365-95567d283725` | Grok `grok-4.5` | failed；1 Attempt / 11 turns；runtime estimate USD 0.2435 | CSS 本身通过 diff check；失败来自快照继承 DeepSeek 当时未修的测试。Main 合入响应式视觉层级并补完整的六段时间线样式 |
+
+这些 failed 不能直接解释为“模型能力差”或“Provider 不通”。GLM、MiniMax、
+DeepSeek、Grok 都真实执行并产生了可审查产物；三项失败分别是验证合同、脆弱测试和
+旧快照问题。UI 后续必须把 **Worker 已完成输出、独立验收失败、Main 最终交付** 分开
+显示，不能压缩成一个红色 `failed`。
+
+### 当前 UI 结果
+
+1. Overview、Tasks、Plans、Competitions、Insights、Models、Workers、Mains、Limits
+   都有简短页面引导，先说明用途与用户接下来要看什么。
+2. Task 卡片显示白话阶段和更新时间，不再把内部 action、原始错误与英文状态直接
+   丢给用户。
+3. Task Detail 按时间顺序展示 Main 输入、Worker 执行、独立验收、最终交付、原因和
+   下一步。输入包含目标、范围、边界、步骤、交付物、重点文件、验收标准与脱敏命令；
+   执行展示真实 Attempt、Worker 自述和真实变更文件；验收展示实际 check 结果。
+4. Worker 自述明确标成“尚未独立验证”，最终 Main review / Integration / remediation
+   单独展示。内部 id、来源、session、Provider/runtime、原始错误、decision/timeline 与
+   费用细节收进默认关闭的技术详情。
+5. 中英文使用同一信息结构；可见状态、时间、失败类别和下一步均通过本地化文案表达。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D174 | 小体量隔离 source 仍可能准备 5–6 分钟，期间没有阶段进度 | **M1 next**：记录扫描、复制、清理、基线四个阶段及耗时；先定位瓶颈，不用盲目调 timeout |
+| FL-D175 | Task profile 的 `maxConcurrency=1` 会覆盖全局 4，导致看似“全局可并发、实际排队” | **closed for examples / product next**：本轮四个 dogfood 示例统一为 4；UI effective preview 必须明确显示最终并发来源，已有 Task snapshot 不改写 |
+| FL-D176 | Grok 11 turns 产生 982 条 token fragment events，时间线和存储会被流式碎片淹没 | **observability next**：按时间窗/语义块合并流式片段，保留原始审计可选入口，默认 UI 只展示可读事件 |
+| FL-D177 | Worker 可以写出看似合理但并非事实的 Attempt 数、文件列表或最终结论 | **closed for Task journey**：展示层只消费 inspect Attempt、真实 workspace diff、Verifier checks 与 durable delivery；Worker claim 永不冒充系统事实 |
+| FL-D178 | Task Detail 若同时展示 Worker 输出和最终输出但不标证据阶段，用户仍会误解 | **closed for current path / browser regression next**：六段 journey 固定顺序和证据标签；补 success、verification failure、authentication failure、running 四类浏览器回归 |
+| FL-D179 | Task Detail 的下一步把 DOM 节点当文字传递，真实页面显示 `[object HTMLDivElement]`；静态字符串测试未发现 | **closed 2026-07-27**：next-action resolver 只返回本地化文本并增加回归断言；真实中英文页面确认无 object-string，控制台 0 error/warn |
+
+最终浏览器复验还确认：中文看板列名为“等待开始 / 执行中 / 检查已通过 / 需要处理”，
+总览不再前置 Task id 或原始失败串，Provider 状态改为“配置是否完成 + 连接是否检查”的
+白话表达；英文切换使用相同信息层级。Insights 不再出现 `Boundary Reduction` 或
+`direct-Codex counterfactual`，而是明确解释“留在 Worker 内部的工作量”不能证明 Main
+节省了多少 Token。任务详情技术细节默认关闭，页面无横向溢出。
+
+
+## 2026-07-27 证据驱动模型路由、Hub 轮询隔离与全链路可读性
+
+状态：继续使用 ForkLight 自身并行调度 DeepSeek `deepseek-v4-pro[1M]`、MiniMax-M3
+与 Volcengine `glm-5.2[1M]`。三个 Task 均为 **1 base Attempt / 0 extra / 0
+adaptation**，预算、时长、Token、文件与行数不设硬顶，Main 没有通过调参或追加运行追求
+绿色状态。Worker 结果保留，Main 审查后只修正已证明的语义、类型、测试和展示缺口。
+最终源码 **1132/1132 tests**、严格 TypeScript、production build、脚本语法与
+`git diff --check` 通过；未 commit / push。
+
+### Task、模型、机器结果与成本证据
+
+| Task | Worker | 机器结果 | 成本证据 | Main 处置 |
+| --- | --- | --- | --- | --- |
+| `28d713f5-7b51-415a-9f71-7eac38c04677` | DeepSeek `deepseek-v4-pro[1M]` | failed；106 turns；3 项行为测试与严格 TS 失败 | 官网 PAYG **USD 0.171498315**；runtime estimate **USD 9.242875** | 不重试；保留路由骨架，修正 policy-only/non-model 分类、Main 修复交付、验证口径、缺失/跨币种费用、稀疏证据与不确定性 gate 后整合 |
+| `125db2d0-a9b5-4c0c-a704-662b5f89e9c3` | MiniMax-M3 | failed；173 turns；focused 52/53，另有 1 个错误类型引用 | exact 官方费用为 `per-request-usage-required`，不是 0；runtime estimate **USD 15.392394** | 不重跑；合入 Hub 环境证据缓存，修正测试前提、类型、15 秒有效期和并发失效竞态；focused 53/53 |
+| `12e0d8da-b26e-4b3e-abbb-d55968fab2cc` | Volcengine `glm-5.2[1M]` | succeeded；147 turns；三条独立验收全部通过 | Coding Plan 订阅无逐请求官网价格，明确不可用；runtime estimate **USD 14.643406** | 合入双语二级工作流；Main 再修正诊断截断、内部 ID/原始错误层级、竞争/集成主视图、Task 最终输出和 Token/费用白话表达 |
+
+三项 Worker gross 合计 **60,975,267 Tokens**；Main↔ForkLight exchange estimate
+合计 **110,723–667,849 Tokens**，对应“留在 Worker 内部的工作量”
+**60,307,418–60,864,544 Tokens**（low confidence）。三项都没有相同任务、相同 Main
+profile 的 direct baseline，因此 direct Main Token savings 仍明确为
+`direct-baseline-missing`。这个区间只描述 Worker 工作量减去编排交换量，不能改名为
+“主线程节省”。DeepSeek 官网 USD、MiniMax 缺逐请求报价、Volcengine 订阅不可逐请求
+定价和 Claude runtime USD 遥测是不同证据，绝不相加或冒充 Provider 账单。
+
+### 最终模块、输入输出与调用链
+
+1. **路由证据：** 按 task class 读取终态历史，把模型质量、非模型故障和模糊故障分开；
+   只有通过独立行为验证的交付或确属模型质量的失败进入有效样本。
+2. **可比性 gate：** 任何启用权重缺证据、候选样本不足、费用缺失/跨币种，或分差低于
+   不确定性阈值，均返回“不足以推荐”，可选提示进行 competition；失败过的模型不永久禁用。
+3. **可配置策略：** 候选数量、最小样本、权重和不确定性阈值走共享 Settings，CLI 与
+   MCP 只读消费同一 advisory；费用和时长默认权重为 0。Hub 可视化编辑仍是下一步。
+4. **Hub 轮询隔离：** `/api/status` 的 Provider/Runtime/Main/Daemon 体检短时共享并合并
+   并发 miss；配置和生命周期成功变更立即使缓存失效。任务、看板、计划、竞争、统计、
+   设置和经济性仍实时读取。
+5. **解释优先 UI：** 页面先回答“这是什么、现在发生什么、依据是什么、下一步做什么”。
+   Task Detail 展示完整 Main 输入、Worker 声明与真实文件、独立检查、最终输出与交付；
+   Competition 用 Provider/模型名展示推荐；Integration 主视图展示文件和应用结果；内部
+   id、指纹、诊断和公式默认折叠，诊断统一限制为 800 字符。
+6. **经济性表达：** 单 Task 也把配置上限、runtime estimate、官方报价/区间、Worker
+   工作量、Main exchange、Worker 内部工作量和校准节省分开，缺失不是 0，币种不混合。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D180 | Hub 每 2 秒读取 `/api/status` 会同步运行 Claude/Grok 等 runtime doctor；后续发现普通刷新还会调用未缓存的 `/api/ops/health` | **closed for both read paths**：`/api/status` 与 `/api/ops/health` 均使用 15 秒共享缓存和并发 coalescing；成功 mutation 精确失效，进度类 API 保持实时 |
+| FL-D181 | 早期只暂停 1 个 Hub 时，第三个并行 Task 的 workspace preparation 仍约 6 分钟；后来确认当时实际有 3 个 Hub 同时轮询 | **earlier inference withdrawn**：不能据此归因 snapshot/copy。准备阶段观测已交付；先在单 Hub 环境重新测量，再决定是否优化复制算法 |
+| FL-D182 | Task Contract 的 `maxFocusPaths=8` 仍是隐藏 Quality hard gate，和 Worker“文件/行数不限”不是同一层 | **extends FL-D163/169**：核心 Quality 已可配置；下一步在 Hub 显示合同 Quality 来源与生效值，开发期默认 warning，Safety 边界仍不可关闭 |
+| FL-D183 | 当前 MCP 进程可能仍加载旧 build，新的 model routing mutation/read schema 会发生 build mismatch | **activation/UX next**：本轮使用匹配源码的 CLI 只读回退；重启后复验。后续 Main surface 应显示“需要重新连接”而非让用户猜 |
+| FL-D184 | GLM 静态测试声称诊断“bounded”，实现却没有实际截断；竞争与集成仍前置内部 ID/原始错误 | **closed 2026-07-27**：统一 `boundedDiagnostic`，主视图只保留用户意义，ID/诊断进入关闭的技术细节；最终中英文 DOM、点击与浏览器日志验收通过 |
+
+## 2026-07-27 路由解释、准备阶段与运维健康缓存补强
+
+本轮继续通过 ForkLight 使用 DeepSeek、MiniMax 与 Volcengine GLM；每个合同均为
+`1` 次基础 Attempt、`0` 次额外 Attempt、`0` 次自动适配。机器结果失败后不自动循环重试，
+由 Main 审查候选、修正问题并记录独立核验处置。最终完整检查为 **1158/1158**，同时
+通过严格 TypeScript、生产构建、`app.js` 语法检查和 `git diff --check`；未 commit / push。
+
+### Task、机器事实与 Main 处置
+
+| Task | Worker | 机器事实 | Main 处置 |
+| --- | --- | --- | --- |
+| `f518bb5b-9df6-443a-9431-41b184d00dad` | DeepSeek `deepseek-v4-pro[1M]` | failed；84 turns；候选包含无效 DOM 嵌套、`[object HTMLElement]`、重复设置校验与错误失败分类 | Main 修正并完成检查 `f5bd756f-9495-4c38-afe4-749b11119506`；记录为 `verified-repaired-delivered` |
+| `c7ec2423-d5ec-404b-940d-3871e288a0f3` | MiniMax-M3 | failed；149 turns；测试夹具缺少目录创建，候选设计可用但冻结验收未通过 | Main 修正异步 observer、阶段计数、状态清理和 Task Detail；检查 `b199bd75-b52d-4c4d-91ca-65cac2a869e8` 已通过 |
+| `48eabff7-1c0e-4529-9882-0897d39930d4` | Volcengine `glm-5.2[1M]` | failed；Daemon 在 `preparing` 时重启，恢复出的 workspace 缺少源码清单；用量不完整 | 认定为基础设施原因并终止；只在修复运行条件后创建一次替代 Task，不对该 Task 重试 |
+| `e501d9a1-cd1f-4c49-912e-654f0c9defca` | Volcengine `glm-5.2[1M]` | failed；87 turns；39/40 聚焦检查通过，唯一失败是旧测试键列表漏掉既有 `modelRouting` | Main 修正并补充生命周期失效测试；检查 `93304679-c2fa-408c-993c-aad777c9bd89` 已通过 |
+
+### Token 与费用证据
+
+- 三个有完整 Worker 用量的 Task gross 合计 **36,938,915 Tokens**。
+- Main↔ForkLight exchange estimate 合计 **133,561–802,736 Tokens**。
+- 扣除编排交换后的 Worker 内部工作量为 **36,136,179–36,805,354 Tokens**；这是工作边界估算，
+  不是“主线程节省”。首个中止的 GLM Task 只增加 **1,028–6,120 Tokens** exchange 估算，
+  因 Worker 用量不完整，不给 boundary 或 savings 结论。
+- 所有 Task 都缺少相同任务、相同 Main profile 的 direct baseline，因此 direct Main Token
+  savings 仍为不可用，不能由 Worker Token 倒推。
+- DeepSeek 官网 PAYG 为 **USD 0.158407048**；MiniMax 缺逐请求精确用量，只能给出
+  **CNY 8.5036119–17.0072238** 的档位区间；Volcengine Coding Plan 是订阅计划，不能给出
+  逐请求官网价格。runtime estimate 分别为 **USD 7.994498**、**USD 11.6496475**、
+  **USD 5.306922**，仅为运行时遥测，不与 Provider 账单相加。
+
+### 本轮交付给用户看的过程
+
+1. **模型路由：** 先说明工作类型、候选模型、是否有推荐、用了哪些因素、哪些因素没用或
+   缺证据，再把分数细节收进技术详情。
+2. **准备阶段：** Task 在 Worker 启动前会依次说明扫描项目、建立安全快照、复制 Worker
+   空间、连接依赖和写入上下文，展示真实耗时和已知数量，不伪造百分比或剩余时间。
+3. **Task Detail：** 先回答现在发生了什么，再按 Main 输入、Worker 执行、独立检查、最终
+   交付、失败原因和下一步展示。目标默认可见；完整边界、原始 Worker 汇报、文件清单和
+   检查命令默认收起。Worker 失败但 Main 已修复时，同时保留机器失败和最终已核验交付，
+   顶部明确说明无需继续重试。
+4. **运维健康：** `/api/ops/health` 使用 15 秒缓存、并发合并、`checkedAt` 和成功 mutation
+   失效，避免页面每 2 秒反复启动 runtime doctor。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D185 | 普通 Hub 刷新会绕过已有 `/api/status` 缓存调用 `/api/ops/health`，反复同步运行 runtime doctor | **closed 2026-07-27**：新增独立缓存、并发 coalescing、时间戳和设置/Provider/模型/Worker/Main/Daemon 生命周期失效 |
+| FL-D186 | 本机可同时积累多个 Hub，并在不同端口独立轮询同一个 Daemon | **M1 high**：需要启动时发现并复用已有 Hub，或明确显示实例归属；本轮先按精确 PID 合并为一个实例 |
+| FL-D187 | Daemon 在 Task `preparing` 时重启，可能恢复不完整 workspace，缺少 `source-manifest.json` 后仍启动 Worker | **M1 high**：恢复时必须丢弃并重建未完成准备，或使用完整性标记；清单完成前绝不能启动 Worker |
+| FL-D188 | CLI `inspect --summary` 的本地决策构建未传入已存储的 remediation disposition，可能漏掉 Main 已核验交付 | **M1 comprehension**：紧凑检查应读取同一 canonical disposition，避免 CLI 与 Hub 对最终结果说法不同 |
+| FL-D189 | Task Detail 虽有完整输入输出，但原始合同、Worker 汇报、文件与命令同时展开会再次变成信息罗列；修复交付后顶部仍只说机器失败 | **closed 2026-07-27**：目标与白话结果优先，密集技术证据按需展开；机器失败与最终交付并列，已核验修复后的下一步为“无需操作” |
+
+## 2026-07-27 全局 UI 叙事与直接 Main Token 对比入口
+
+本轮继续使用 ForkLight 自身完成工作。所有 Task 均为一次基础 Attempt、零额外
+Attempt、零自动适配，且不设置单任务预算上限。Main 没有通过调参、追加运行或反复缩小
+合同追求绿色状态；机器失败保留为机器事实，Main 只审查候选并纠正已证明的问题。
+最终完整检查为 **1164/1164 tests**，严格 TypeScript、production build、脚本语法与
+`git diff --check` 全部通过；未 commit / push。
+
+### Task、竞争结果、成本证据与 Main 处置
+
+| Task | Worker | 机器事实 | 成本证据 | Main 处置 |
+| --- | --- | --- | --- | --- |
+| `b5c0ef05-646a-4536-a721-30fd74685d16` | DeepSeek `deepseek-v4-pro[1M]` | failed；43 turns；focused 72/75，并有 TypeScript 失败 | 官网 PAYG **USD 0.076847825**；runtime estimate **USD 2.479165** | 不重试。候选把 capture body、五个计数层级和测试夹具写错；Main 重建 exact capture/review/publish API，并补 Task 身份绑定与隐私边界 |
+| `73fbe990-f867-4238-9138-5e8e5adaa790` | MiniMax-M3 | failed；103 turns；focused 35/37 | official cost 不可用：`route-required`；runtime estimate **USD 8.8181505** | 竞争候选被拒绝：rejection enum、run ref、capture body、身份展示和递归刷新均不符合合同 |
+| `d8e9c22a-4e13-4a5a-95d6-c149a1c6b67d` | Volcengine `glm-5.2[1M]` | failed；69 turns；focused 35/36，唯一失败为候选自己写的静态断言 | official cost 不可用：`route-required`；runtime estimate **USD 8.215171** | 竞争没有机器 winner。Main 仅把 GLM 作为较好修复底稿；最终原合同 4/4 通过，记录 check `614ba72a-2dd9-47d4-8b8c-adfdbdb4064d` 与 `verified-repaired-delivered` |
+| `5e503bf8-b2e4-4142-be03-d2fd0c1a4286` | 本地 Grok `grok-4.5` | failed；18 turns；focused 35/36，唯一失败为候选自己的英文正则过窄 | official cost 不可用：`usage-missing`；runtime estimate **USD 0.5543244** | 保留五段页面叙事骨架并继续补可读性；最终原合同 4/4 通过，记录 check `eeba240b-6a7b-473c-b003-452236e5b6a5` 与 `verified-repaired-delivered` |
+
+Competition `c934f768-dbe6-4119-8116-13a0950a0952` 的两个候选都没有通过
+独立验收，因此系统正确地没有宣布 winner。Main 选择 GLM 只是一项有证据的人工修复
+决策，不是竞争系统的模型推荐，也不重写 MiniMax 或 GLM 的机器失败历史。
+
+### 最终用户链路
+
+1. **顶层页面：** Overview、Board、Plans、Compete、Insights、Models、Workers、Main
+   都先回答“这页解决什么、输入、ForkLight 做什么、输出、下一步”，再显示表格、卡片、
+   设置与证据。
+2. **Worker：** 卡片先说明何时会被使用、通过什么执行、预算/停止条件、失败后是否追加
+   修正、是否创建后继 Task。原始 Worker ID、Provider/model/runtime 和价格路由在关闭的
+   技术详情中。
+3. **Main：** 每个客户端先说明现在能不能使用、安装一个通道后会得到什么；MCP 被解释为
+   “任务调用通道”，Skill 被解释为“怎样拆分、验收和纠正的编排说明”，路径默认收起。
+4. **Task Detail：** 默认显示 Main 目标、实际 Worker、Attempt 过程、文件输出、验收结论、
+   具体失败检查、最终交付、原因和下一步。精确检查命令仍在技术清单中，但失败项本身不再
+   隐藏在折叠区。
+5. **直接 Main Token 对比：** 有 `taskClass × directCodexProfileId` 的 Task 可在详情中录入
+   一次等价直接 Codex 运行的五个终态计数，由 Main 明确接受/拒绝，再显式发布版本。无身份
+   或无 direct baseline 时明确不可计算；Worker Token 绝不改名为节省。
+
+这四个 Task 本轮都没有新增“同任务、同 Main profile”的直接 Codex baseline，因此本轮
+不声称节省了多少 Main Token。Hub 当前组合数据中已有历史校准结果，但不能倒推到这些新
+Task。MiniMax、GLM 与 Grok 的 official cost 不可用原因保持原样，不用 runtime estimate
+冒充 Provider 账单。
+
+### 真实浏览器验收
+
+- 新构建以一个 Daemon、一个 Hub 运行在 `127.0.0.1:53542`。
+- 中文和英文的八页叙事含义一致；Worker/Main 主卡不再出现
+  `budget unlimited · no-progress` 或 `Plugin: yes · MCP: no`。
+- Grok 失败 Task 默认直接显示“Hub 的界面行为和中英文文案符合产品约定”这一失败检查，
+  并告诉 Main 对照该检查修复后只重跑同一组验收；不是无目的调整参数。
+- 390×844 viewport 下 document width 与 viewport 同为 390 px，五段页面叙事为单列，
+  无横向溢出；浏览器 console 为 0 error / 0 warn。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D190 | Competition 跨 Provider clone 时可能保留原 Task 的 `provider.pricingRoute`，让候选带上陈旧价格身份 | **closed 2026-07-27**：候选 Provider 身份整段重建；Provider/model/endpoint/Keychain service 一起替换，旧 `pricingRoute` / `keychainAccount` 不会继承，原 Task 保持不变 |
+| FL-D191 | 当前模型路由只要任一正权重因素缺证据就整体不推荐，对订阅、跨币种和新模型过于严格 | **closed for configurable policy 2026-07-27**：新增 `flexible` / `strict`；开发期默认 flexible，明确列出未参与的因素；strict 保留完整证据门。两种模式仍执行样本、有效因素、差距和币种边界 |
+| FL-D192 | 直接 Main Token 校准此前只有底层能力，用户无法在 Task Detail 看懂采集、复核、发布和不可用原因 | **closed 2026-07-27**：四步可视化链路已交付；身份服务端派生、五计数严格校验、Main 显式决定、版本化发布、无自动动作 |
+| FL-D193 | Grok 18 个语义 turns 被 normalizer 展开为 1312 个事件，Task Detail 与存储会被 token fragment 淹没 | **M2 observability / extends FL-D176**：按时间窗与语义边界合并 streaming fragment；默认只展示有意义消息，原始片段仅保留审计入口 |
+
+## 2026-07-27 Competition 身份与缺证据路由策略 dogfood
+
+本轮继续用 ForkLight 自己执行：MiniMax-M3 负责 Competition 身份修复，DeepSeek
+`deepseek-v4-pro[1M]` 负责缺证据策略。两项合同都只有一次基础 Attempt、没有额外
+Attempt、没有自动适配、没有单任务预算上限。Main 保留机器结果，不通过重复调参或重跑
+追求绿色状态；最终完整检查为 **1169/1169 tests**，未 commit / push。
+
+### Task 与 Main 处置
+
+| Task | Worker 机器事实 | Main 处置 |
+| --- | --- | --- |
+| `51b64816-ea3f-43d5-bbd9-5059f1ca8bae` | MiniMax-M3 succeeded；Competition focused 28/28 与 build 通过；runtime estimate USD 1.403461；official cost unavailable: `route-required` | Main 接受两个真实 source/test 改动；ForkLight Integration preflight 因 `npm run build` 生成的 `dist/**` 把交付扩大到 457 files / 69,002 lines 而拒绝。Main 复核后只把 source/test 补丁写入当前 checkout，不绕过该次 Integration 失败事实 |
+| `9375ed71-c370-4db5-8ad3-03177ced8829` | DeepSeek failed；79 turns；两个 focused 断言与 TypeScript build 失败；official exact cost USD 0.146200194；runtime estimate USD 7.482149；候选 Diff 含 459 files / 59,624 lines | 不追加 Attempt。Main 修正遗漏的 coordinator 消费点、互相矛盾的测试夹具和用户层文案；按原合同重新检查 `96815912-a871-457b-9145-8c77b3237394` 为 3/3，记录 `verified-repaired-delivered`，原 Task 仍为 failed |
+
+### 最终行为
+
+1. Competition 在跨 Provider 建候选时，把 Provider、模型、endpoint、Keychain service、
+   pricing route 和 Keychain account 视为一个身份。候选覆盖没有明确给出的价格身份不会从
+   原 Task 偷带过去，避免用错价；原 Task 不被改写。
+2. 模型建议遇到某项已启用偏好缺少公平可比证据时，可以选择：
+   - **继续比较，并明确提示缺口（开发期默认）：** 只用其余可比证据，不把缺失当 0；
+   - **等可比证据完整后再推荐：** 任一启用因素缺证据就不推荐。
+3. 两种策略都不能绕过最少样本、零有效因素、分差不足或币种不可比；最终选择仍归 Main。
+4. Hub 高级设置已能编辑同一策略。用户层说明“发生了什么、跳过了什么、建议依据什么、
+   下一步看什么”，内部 reason/code 只进入关闭的技术详情。中文、英文、390 px 窄屏均已
+   实际操作；浏览器 console 为 0 error / 0 warn。
+
+### UI 可读性验收规则
+
+后续 UI 不能以“把所有字段都放出来”为完成标准。每个页面与每个重要对象都应至少让用户
+按顺序看懂：**输入是什么 → ForkLight/Worker 做了哪些阶段 → 当前停在哪个状态 → 真实输出
+或失败结果是什么 → 用户下一步做什么**。默认层使用用户语言；证据层解释依据与缺口；ID、
+命令、原始错误、价格 route、公式和诊断进入技术层。信息丰富不能以牺牲因果、时间顺序和
+可读性为代价。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D194 | acceptance build 会生成 `dist/**`，Patch/Integration 随后把数百个生成文件当成交付改动，真实 2–10 个 source 文件也会被体量门拒绝 | **closed for declared exclusions 2026-07-27**：`workspace.exclude` 与 Patch 共用路径段语义；raw/generated 审计证据保留，Integration 只接收 source。下一步在 preflight 展示分类来源并提醒合同遗漏的 exclusion |
+| FL-D195 | DeepSeek 合同声明最多 9 个文件，但完整调用链实际需要第 10 个 `coordinator.ts` 消费点，Worker 只能漏改或违反合同 | **M1 contract feasibility / extends FL-D163/182**：验收证明依赖闭包超出 Quality 偏好时返回 `contract-infeasible` 并交给 Main 修订；文件数优先 warning，不对相同矛盾合同继续重试 |
+| FL-D196 | Hub token 只保存在页面内存；普通刷新后同一页直接变成未认证，也没有恢复或重新连接动作 | **closed for normal same-tab refresh 2026-07-27**：验证后的 token 仅写入 tab-scoped session storage，fragment 立即移除，401 清空；server/token 重启后的重新连接说明仍待补 |
+| FL-D197 | 模型策略先切到 strict、再切回已保存的 flexible 后，Hub 仍显示“未保存” | **closed for model routing 2026-07-27**：当前 draft 与已保存策略按语义和归一化数字比较，恢复原值即清除提示且不自动保存；Worker/adaptation/calibration 表单继续套用同一规则 |
+
+## 2026-07-27 排除路径交付真值与 Hub 会话真值 dogfood
+
+本轮继续使用 ForkLight 自身执行，两项合同都只有一次基础 Attempt、没有额外 Attempt、
+没有自动适配、没有单任务预算上限。GLM 负责 Patch/Integration 的 generated-output 语义，
+Grok 负责 Hub 会话与表单 dirty 语义。Main 不因机器失败追加运行，而是保留原始事实、审查
+候选并只修正已经证明的问题。最终完整检查为 **1174/1174 tests**，严格 TypeScript、
+production build、脚本语法与 `git diff --check` 均通过；未 commit / push。
+
+### Task、机器事实与 Main 处置
+
+| Task | Worker 机器事实 | Main 处置 |
+| --- | --- | --- |
+| `2cc9b4b6-56e1-4470-9933-31dbb991293f` | Volcengine `glm-5.2[1M]` succeeded；53 turns；focused 50/50、build 与 diff check 通过；5 files / 320 lines | Main 接受共享 exclude/path-classification 语义。Integration preflight `f82b0823-e9ee-4560-8761-82c188d061c9` 无拒绝；operation `717db60a-542c-4639-8f75-c138e3ccd405` 完成并通过 source-applied 与 3/3 source-verified。raw/generated 保留，source Integration 不再被 `dist/**` 放大 |
+| `b555b18f-b074-4ae0-b6ef-bcf986fff108` | 本地 Grok `grok-4.5` failed；10 turns；focused 63/64；TypeScript 与 diff check 通过；唯一失败是候选新增注释触发旧的全文件 `localStorage` 字符串断言 | Main 记录 `revise`，不重试。重写测试为真实调用边界与行为验收，修正 session 清理和语义 dirty 比较；remediation check `bdd37a56-9635-4c44-b0e3-2dfa6b3ca156` 为 4/4，disposition 为 `verified-repaired-delivered`，原 Task 仍保持 failed |
+
+### Token、费用与“不夸大节省”
+
+- GLM gross Worker 用量为 **2,651,109 Tokens**，Main↔ForkLight exchange estimate 为
+  **9,802–58,809 Tokens**，扣除交换后的 Worker 内部工作边界为
+  **2,592,300–2,641,307 Tokens**。这不是直接 Main Token 节省；本任务没有同任务、同 Main
+  profile 的 direct baseline，因此 savings 不可计算。
+- GLM runtime estimate 为 **USD 2.952677**；Volcengine Coding Plan 是订阅计划，官方逐请求
+  成本不可用，原因为 `subscription-plan-no-per-request-price`。
+- Grok 的 Worker 用量缺失或不完整，只能给出 **5,810–34,942 Tokens** exchange estimate；
+  runtime estimate 为 **USD 0.474936**，官方成本不可用原因为 `usage-missing`。不能从缺失用量
+  推导 Worker 工作边界或 Main 节省。
+
+### 真实用户链路验收
+
+1. Hub 从 URL fragment 读取并验证 token 后立即移除 fragment；token 只进入同一 tab 的
+   session storage，不进入 local storage、cookie、query 或请求 body。
+2. 在已清理 URL 上普通刷新，Hub 保持连接；任一 401 会同时清除内存与 session token。
+3. 模型路由从 `flexible` 改到 `strict` 时出现“未保存”，再改回 `flexible` 后提示消失，
+   且没有自动写入设置。空白或无效数字仍保持 dirty，不会伪装成已保存。
+4. 新构建的真实 Hub 页面完成上述操作，浏览器 console 为 0 error / 0 warning。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D198 | Integration 的 `source-verified` 可在隔离验证副本中成功运行 `npm build`，但 operation 同时把 `artifact-built` 与 `runtime-activated` 标为 not-applicable；实际 Hub 因此仍可能服务旧 `dist` | **closed for plan/config truth 2026-07-27；M0 live exit 仍 open**：Hub 可编辑完整 Delivery Profile，Task/Preflight 分别展示 source applied、source verified、artifact built、runtime activated 的计划与实际证据；未配置步骤明确为未配置，旧任务明确为未知。下一步仍需为 ForkLight 自身配置真实 activation 并连续完成 3 次 live handoff，不能把隔离 build 当作 live activation |
+| FL-D199 | Grok 只有 10 个语义 turns，但底层事件仍被 streaming fragment 大量展开 | **extends FL-D193**：合并高频片段、默认只展示有意义阶段；这不是失败重试或预算参数问题，不通过放宽上限掩盖 |
+
+## 2026-07-27 Delivery 过程真值与 Task Detail 可读性 dogfood
+
+本轮由 ForkLight 自己并行执行 DeepSeek `deepseek-v4-pro[1M]` 与 MiniMax-M3。
+两项合同均为一次基础 Attempt、零额外 Attempt、零自动适配，时间、Token、费用、文件数和
+代码行数不设单任务上限；合同验证仍真实暴露 `maxFocusPaths=8` 的 Quality hard gate，Main
+只调整阅读入口而没有缩减目标、验收或实现边界。机器结果失败后没有继续调参和重试，Main
+审查候选、纠正已证明的错误并记录独立修复处置。最终完整检查为 **1193/1193 tests**，
+严格 TypeScript、production build、`app.js` 语法和 `git diff --check` 全部通过；未
+commit / push。
+
+### Task、机器事实与 Main 处置
+
+| Task | Worker 机器事实 | Main 处置 |
+| --- | --- | --- |
+| `47a5ac55-4753-43e3-9529-09c40ce91316` | DeepSeek；failed；48 turns；9 files / 605 lines；聚焦行为 110/110 通过，但严格 TypeScript 和 build 因 2 个候选编译错误失败 | Main 修正返回类型与未使用变量；原合同 4/4 重新通过，check `7564741a-4a22-483c-a7a2-40e3cb13d843`，记录 `verified-repaired-delivered`；原 Task 仍为 failed |
+| `71d33973-e009-4943-8c41-67e3c74eaa03` | MiniMax-M3；failed；119 turns / 278 events；5 files / 1420 lines；脚本、TypeScript、build 和 diff 通过，Hub UI 38/40 | Main 发现并修正命令数组丢失、路径语义、空配置、四阶段名称、Preflight 字段和主文案层级；原合同 5/5 重新通过，check `7cb557a0-2d3e-4477-9315-f25fb7ea9561`，记录 `verified-repaired-delivered`；原 Task 仍为 failed |
+
+### 现在用户能看懂的交付链路
+
+1. **交付设置不是字段登记表：** 页面先说明 Main 接受 Worker 结果之后会发生什么，再说明
+   输入、执行过程、输出和下一步。保存只改设置，不运行命令、不创建任务。
+2. **Task 创建时冻结计划：** Hub 保存完整的交付配置；Task 与 Preflight 只展示配置来源、
+   命令数量和四阶段期望，不把命令正文带入普通任务响应。
+3. **计划与实际分开：** `更新源码 → 检查更新后的源码 → 构建产物 → 更新运行中的产品`
+   始终按顺序出现。每一步分别显示计划状态和实际证据；未配置、未运行、等待、失败、通过、
+   结果未知不会互相冒充。
+4. **历史信息不造假：** 没有冻结 Delivery Plan 的旧 Task 仍展示四步，但全部标为计划未知；
+   有 source-only 计划时才说明只更新和检查源码。
+5. **Preflight 讲动作而非协议：** 使用真实 `affectedFiles[]`、真实 receipt `id` 与 Task
+   快照计划；通过后自动填好批准字段。ID、文件名和拒绝原文留在关闭的技术详情中。
+6. **Task Detail 保留原始证据但不铺满页面：** Main 目标、Worker、尝试、失败检查、最终
+   输出、原因和下一步默认可见；Worker 原始汇报、Main 原始评审说明、命令、路径与 ID 按需展开。
+
+真实浏览器在当前中文 Hub 验证了 Delivery 页面和本轮失败但已修复的 Task Detail。主层不再
+出现 `settings.deliveryProfiles`，也不再声称“四步都会执行”。浏览器显示机器失败与最终已
+核验交付两个事实；历史任务的计划缺失不会被写成通过。页面控制台没有新增 error / warning。
+
+### Token 与费用证据
+
+- 两项 Task gross Worker 用量合计 **26,627,359 Tokens**；Main↔ForkLight exchange
+  estimate 合计 **18,653–111,793 Tokens**。
+- 扣除编排交换后的 Worker 内部工作边界合计
+  **26,515,566–26,608,706 Tokens**。它不是直接 Main Token 节省。
+- 两项 Task 都没有相同任务、相同 Main profile 的 direct baseline，因此 direct Main Token
+  savings 仍为不可用，不能用上述 Worker 工作量倒推。
+- DeepSeek 官网 PAYG 精确费用为 **USD 0.100230322**，runtime estimate 为
+  **USD 3.688092**。MiniMax runtime estimate 为 **USD 13.4461825**；由于缺少逐请求档位
+  usage，官网精确费用保持 `per-request-usage-required`，不把 runtime estimate 冒充账单。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D200 | 后端与 UI Worker 并行时没有共享一个可执行的 Delivery Plan fixture，UI 自行假设 `stages[]`、`receiptId` 和数字型 affectedFiles，直到 Main 联调才发现 | **M1 contract/schema**：为 Main→Worker 合同附 canonical safe-response fixture 或生成类型；并行任务共享同一字段语义，仍由真实端到端测试验收，不能只靠文档名猜测 |
+| FL-D201 | production build 后 Daemon 仍运行旧 build，写操作安全拒绝，但只提示 build mismatch；用户不知道是源码、产物还是运行进程哪一层旧 | **M0/M1 upgrade UX / extends build identity**：提示当前三层 build id 与明确动作；Hub 提供授权后的 detached restart/handoff，不让用户靠试错判断该重启什么 |
+| FL-D202 | 没有 Delivery Plan 快照的历史 Task 被 UI 直接提前返回，只显示“未配置”，既没有四步也把“未知”说成“source-only” | **closed 2026-07-27**：历史任务展示四步 unknown；只有 Task 快照明确为 source-only 才显示只更新源码 |
+| FL-D203 | MiniMax 本轮 119 turns / 278 events，重复 Read/Grep 明显多于实现所需 | **extends FL-D193**：默认时间线合并相邻读取与 token fragment；统计语义步骤、工具批次和原始事件三层，不能把事件数当完成度 |
+
+## 2026-07-27 三层版本真值与全局“发生了什么”叙事 dogfood
+
+本轮继续用 ForkLight 自身完成三项有边界的工作：DeepSeek
+`deepseek-v4-pro[1M]` 负责源码、构建产物与运行进程的版本真值；MiniMax-M3 负责把
+Task Detail 从字段罗列改成真实任务过程；Volcengine `glm-5.2[1M]` 负责全局页面叙事和
+三层版本旅程 UI。三项 Task 都只有一次基础 Attempt，没有追加 Attempt 或自动适配，也没有
+通过不断调整限制来追求绿色结果。最终完整检查为 **1199/1199 tests**；最后一次文案与状态
+修正后，严格 TypeScript 和 Hub UI 聚焦测试 **43/43** 再次通过，production build 与
+`git diff --check` 通过；未 commit / push。
+
+### Task、机器事实与 Main 处置
+
+| Task | Worker 机器事实 | Main 处置 |
+| --- | --- | --- |
+| `eabd6c1a-6432-4056-a896-7de65cd3fb6b` | DeepSeek；failed；43 turns；5 files / 546 lines；因 digest 被重复结束触发 `ERR_CRYPTO_HASH_FINALIZED` | 不重试。Main 修复候选并按原合同复核 4/4，check `7561e84e-f6e0-419d-b225-fbb695c4c31e`，记录 `verified-repaired-delivered`；原机器失败保留 |
+| `a4243424-f6c7-4b5e-b9a3-0f39750e47bc` | MiniMax-M3；failed；86 turns；4 files / 1137 lines | Main 保留其 Task 旅程设计，重写与真实数据边界不一致的部分；复核 5/5，check `c5f6dda1-ec76-43f0-9383-fa2b322146c1`，记录 `verified-repaired-delivered`；原机器失败保留 |
+| `0845a31d-aaed-4e25-9f88-87bc12648ccf` | Volcengine `glm-5.2[1M]`；succeeded；76 turns；4 files / 630 lines；原合同 5/5 | Main 接受后完成独立 preflight `bef547e2-d4dc-40a0-82a5-8aa1ea984d90` 与 Integration `5e7adee1-5362-41ed-9924-e42895c03379`；源码应用、源码复核和产物构建通过，runtime activation 因未配置而保持未执行 |
+
+### 用户现在看到的不是“更多字段”，而是发生了什么
+
+1. **所有顶层页面先给方向：** 先说这页解决什么，再按“输入 → ForkLight 做什么 → 输出 →
+   下一步”展示。表格、数字、设置和技术证据不再抢占第一阅读层。
+2. **Overview 回答一个真实问题：** 分开显示“刚修改的代码、由代码构建出来的产品、当前正在
+   运行的 ForkLight”，并直接告诉用户三者是否一致、发生了什么、接下来要构建还是重启。
+   digest、build id 与协议证据默认收起。
+3. **Task Detail 按时间顺序讲任务：** 当前结果先给结论，再显示 Main 输入、Worker 执行过程、
+   Worker 输出、独立检查、最终处理、原因和下一步。Worker 自己说“完成”只是一份汇报，不能
+   冒充独立验收。
+4. **失败不再只显示一个红色状态：** 如果 Task 在独立检查前已经失败，文件差异明确写成
+   “没有成为可交付结果”；终态 Task 不再被旧 Attempt 的 running 状态覆盖。无法证明唯一
+   失败原因时，页面会坦白证据不足，并引导先看 Worker 汇报与失败步骤，不把后端英文原因
+   直接扔给用户。
+5. **修复后的输出不造假：** Main 修复并验证后，如果系统没有单独保存修复文件清单，页面
+   明确说“清单未单独记录”，不会把已经被拒绝的 Worker 文件列表冒充最终交付内容。
+
+### 运行与浏览器验收
+
+真实浏览器先暴露出一个运行层问题：源码和 `dist` 已更新，但旧 Hub 进程仍在提供旧页面，
+导致 Overview 正确诊断为“源码需要重新构建”。精确重启 Daemon 与单一 Hub 后，三层身份一致；
+最终 build id 为 `d706d98311e7dede75ad5e70186c123dd601dd4032eec344c99c7fbe595d415c`，
+source digest 为 `21d8952eaa00673689ec114a1064a858bb59984452b156a36342fef051aa3897`。
+中文 Task Detail 实测显示失败原因、Main 输入、Worker 汇报、文件差异、检查状态与下一步；
+720×900 viewport 下 document width 与 viewport 同为 720 px，没有横向溢出。
+
+### Token 与费用证据
+
+- 三项 Task gross Worker 用量合计 **18,415,355 Tokens**；Main↔ForkLight exchange
+  estimate 合计 **23,727–142,320 Tokens**。
+- Worker 内部完成、没有跨进 Main 上下文的执行量为 **18,273,035–18,391,628 Tokens**。
+  这说明边界隔离了多少 Worker 工作，**不等于节省了多少 Main Token**。
+- 三项 Task 都没有相同任务、相同 Main profile 的 direct baseline，因此 direct Main Token
+  savings 仍不可计算，页面和记录都不能把 Worker 用量倒推成节省。
+- runtime estimate 合计 **USD 15.7282575**。DeepSeek 官网 PAYG 精确费用为
+  **USD 0.079519508**；MiniMax 缺逐请求档位 usage，保持
+  `per-request-usage-required`；GLM 是订阅 Coding Plan，保持
+  `subscription-plan-no-per-request-price`。不能把三者拼成一张“官方总账单”。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D201 | build mismatch 只给一个技术错误，用户无法判断源码、产物或运行进程哪一层旧 | **closed for diagnosis UX 2026-07-27；M0 activation 仍 open**：Overview 分开比较三层并给具体下一步；自动 detached activation 仍需真实配置与连续 3 次 live handoff 证据 |
+| FL-D204 | 新 build 完成后旧 Hub 进程仍可继续服务旧 bundle，让浏览器和 Daemon 看到不同版本 | **extends FL-D186 / M1 recovery**：本轮按精确进程恢复为一个 Hub；下一步启动时发现/复用现有 Hub，并在页面说明“页面服务也需要更新”，不能只重启 Daemon |
+| FL-D205 | terminal Task 可能仍带有旧 Attempt `running`，Task Detail 因而把已经失败的 Worker 过程显示为执行中 | **closed 2026-07-27**：Task 终态优先；独立检查未完成前失败时，Worker 输出明确为未通过而非可交付 |
+| FL-D206 | Main 修复后只有验收结论，没有单独存储修复后的文件清单；UI 容易复用被拒绝的 Worker 文件列表 | **closed for truthful display 2026-07-27**：明确说明清单未单独记录，不伪造最终文件；后续如需完整交付清单，应在 remediation disposition 中新增独立记录 |
+
+## 2026-07-27 Main 原话与可执行 Task 旅程 dogfood
+
+这一轮把“让用户知道发生了什么”从 UI 文案上移到 Task 本身。Main 现在可以在新 Task
+中写一句给用户看的说明，ForkLight 会保留原文，再按“Main 输入 → Worker 过程 →
+Worker 输出 → 独立检查 → 最终交付 → 原因 → 下一步”解释完整过程。技术目标、范围、
+验收和原始证据仍然保留，但不再抢占第一阅读层。
+
+### Task、机器事实与 Main 处置
+
+| Task | Worker 机器事实 | Main 处置 |
+| --- | --- | --- |
+| `5c011c9d-677c-43fb-a135-e5f379a82b44` | DeepSeek `deepseek-v4-pro[1M]`；failed；46 turns；8 files / 625 lines；聚焦验收暴露 1 个测试语法错误、1 个类型缩小缺口、3 个与新解析错误语义相矛盾的断言和行尾问题 | Main 保留上游协议设计，简化并修正测试；原合同 3/3 重新通过，check `6c8d5daa-928f-4937-93bb-797b2dcb9e41`，记录 `verified-repaired-delivered`；原 Task 仍为 failed |
+| `b8aaa3b5-682d-4e93-ae78-c77187cb66b4` | Volcengine `glm-5.2[1M]`；succeeded；64 turns；3 files / 369 lines；原合同 4/4 | Main 验收共享 fixture、五类可执行旅程和中英文文案；preflight `fa8622e6-e3d1-4abe-8c82-8b81441a4b5e`，Integration `0bdf1ef4-b35e-4f33-a847-ac20bc82ab88`；source apply/verify 通过，产物构建与运行更新因未配置而未执行 |
+
+### 验收结果
+
+- Task 协议、MCP 和 Hub 投影聚焦测试 **144/144**；Hub UI 聚焦测试 **49/49**；
+  完整测试套件 **1209/1209**、严格 TypeScript、production build、`app.js` 语法与
+  `git diff --check` 全部通过。
+- 真实最新构建 Hub 已验证 Overview、Board 和 Task Detail。中英文都保留同一条任务
+  旅程；720 px 与 390 px 均无页面横向溢出。历史 Task 如果没有 `presentation`，会
+  明确使用原技术目标或 legacy goal，不伪造 Main 原话。
+- 新共享 fixture 是后端与 UI 的同一份可执行合同；成功、独立检查失败、鉴权失败、
+  正在执行和历史兼容都是真实数据变体，不只是搜索文案。
+
+### Token 与费用证据
+
+- 两项 Task gross Worker 用量合计 **11,386,069 Tokens**；Main↔ForkLight exchange
+  estimate 合计 **120,744–727,764 Tokens**。
+- Worker 内部完成、没有进入 Main 上下文的执行量为
+  **10,658,305–11,265,325 Tokens**。这只表示边界内工作，**不是 Main Token
+  节省值**。
+- 两项 Task 都没有同任务、同 Main profile 的 direct baseline，所以 direct Main Token
+  savings 仍不可用，不做反事实推算。
+- DeepSeek 官网 PAYG 精确费用为 **USD 0.101907305**，runtime estimate 为
+  **USD 3.78385**。GLM runtime estimate 为 **USD 6.615327**；其为订阅 Coding
+  Plan，官网逐请求费用保持 `subscription-plan-no-per-request-price`，不把 runtime
+  estimate 冒充账单。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D207 | 在 Task 协议中只写技术 `outcome`，Hub 无法在不猜测、不翻译的前提下给用户一句可读说明 | **closed 2026-07-27**：新 Task 可带有界 `presentation.summary + language`；解析、MCP、存储、Worker 上下文、Hub 投影与 UI 都消费同一形状，历史 Task 保持真实兜底 |
+| FL-D208 | GLM 执行期间多次 1–3 分钟没有新输出，但进程存活并继续产出；只按“多久没有新文字”会误判 stalled | **extends FL-D193 / M2 progress**：长程状态应组合最近有意义动作、Worker 进程存活和 Provider 请求状态；不伪造心跳，不因一段安静自动重试 |
+| FL-D209 | 成功的 GLM Task 仍花费大量重复读取/搜索来修正一个非 ASCII 破折号断言，“成功”不等于“执行经济” | **M3 routing evidence / extends FL-D193**：模型评估同时记录成功交付与探索/修正成本，但效率仍是柔性信号，不会因一次冗长永久禁用模型 |
+
+## 2026-07-27 准备阶段恢复、候选复用与真实运行交接 dogfood
+
+本轮用 DeepSeek 与 MiniMax 连续处理同一类恢复问题，但没有把两轮都当成“失败就从头再来”。
+DeepSeek Task `cff0f51d-12a0-411a-b76e-e2ee6b1ec9cf` 的机器验收为成功，Main 因目录类型
+和吞掉清理错误两个安全边界记录 `revise`；MiniMax Task
+`79a1a3c1-0158-4965-9539-177bcc7fd8fa` 实现了更严格的边界，但机器验收暴露 1 个测试夹具
+错误和 5 个类型错误。Main 选择性复用两轮候选，收敛为 4 个生产/聚焦测试文件的修复，未再
+启动第三个 Worker。修复后原合同 3/3 在独立隔离区通过，remediation check
+`b46291a5-5e30-497d-ba05-5e6a9482a16a` 记录为 `verified-repaired-delivered`；MiniMax 的原始
+failed 状态不变。
+
+最终行为是：`preparing` Task 重启后只清理自己的 baseline、workspace 和 final manifest；
+日志、凭据、Integration 备份和其他 Task 保留；目录/manifest 不完整时不创建 Attempt；异常
+清理错误按 workspace failure 终止，不生成 `worker.failed`。聚焦恢复测试 119/119，runtime
+消费者测试 19/19，完整套件 1215/1215，strict TypeScript、production build 和
+`git diff --check` 均通过。手工 build/restart 后，正式 Daemon 从 PID `17190` 更新到 `84686`，
+client/daemon build id 都为
+`a2fe3cb6e7046ee674db5f962243554868549e81395b62b24b3573edf45c96f0`。这是 Main remediation
+的真实运行交接，不冒充自动 Integration 的 M0 1/3。
+
+两项 Worker gross volume 合计 **10,132,549 Tokens**；当前 receipt-aware Main exchange
+estimate 合计 **219,633–1,321,861 Tokens**，边界内 Worker 工作量为
+**8,810,688–9,912,916 Tokens**。两项都缺 exact-pair direct-Main baseline，因此不能声称
+节约了多少 Main Token。DeepSeek 官网 PAYG 精确估算为 **USD 0.091854484**；MiniMax 因缺逐
+请求 tier usage，精确费用 unavailable，只保留 **CNY 3.43404558–6.86809116** 的聚合档位
+范围，不能把 Claude runtime estimate 当账单。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D210 | 失败或主审拒绝的 Worker 候选可能已有大部分可用实现；当前 failed Task 在 1/0 Attempt 配置下不能获得一次显式同 workspace 修正，只能由 Main 修复或另起 Task，重复调查会增加 Token 和费用 | **closed 2026-07-27**：`main-correction` 已与普通 continuation/extra grant 分离；复用原 Task/workspace/session，保存 Main feedback 与 prior/target Attempt，完整重跑原验收，按 Worker/Task 配置次数，默认 1、0 可关闭；真实 MiniMax 失败→显式纠正→通过链路已完成，且没有自动循环。反事实“比完整重启省多少”仍需 paired baseline，未伪造 |
+| FL-D211 | 完整测试后的进程审计发现 30 个旧 `forklight-source-daemon-*` 临时 socket 监听者，说明部分生命周期测试通过断言但没有完成进程回收 | **M0 test hygiene**：本轮已按 socket 路径和命令行核对后精确终止，正式 Daemon 未动；后续每个 daemon 测试必须等待 exact PID 退出并在 suite 结束增加零临时监听者断言 |
+| FL-D212 | `forklight status` 一度仍显示 event sequence 98/quiet，而完整 inspect 已到 106/Edit completed，紧凑状态读模型可能短暂落后并让用户误以为 Worker 卡住 | **extends FL-D193 / M2 progress**：统一 status/wait/inspect 的 cursor 来源，显示进程存活、最后有效动作和证据时间；短暂无文字不自动重试 |
+
+## 2026-07-27 失败候选原地纠正与增量成本 dogfood
+
+这一轮直接处理“一部分结果可用时，不要整单重跑”的成本问题。新路径不是自动 retry，
+也不是把失败改名为成功，而是由 Main 看过失败证据后，明确授权一个 `main-correction`：
+Worker 回到原 Task 的同一 workspace 和 session，消费结构化失败原因与 Main feedback，
+保留已有 Diff，只为新增 Attempt 计 Token/费用，并把完整原验收重新跑一遍。普通
+`maxExtraAttempts` 和新的 `maxMainCorrections` 是两本独立账，不能互相消耗；默认最多纠正
+1 次，Worker Advanced UI 和 Task override 都能配置，设置 0 即关闭。Daemon 在授权后崩溃
+也能从持久 grant 恢复；相同 grant 用不同 feedback 或预算重放会被拒绝，不会形成无人看管
+的循环。
+
+### DeepSeek 实现候选与 Main 审查
+
+| Task | Worker 机器事实 | Main 处置 |
+| --- | --- | --- |
+| `85f620af-d055-4275-b860-a8fb14d67497` | DeepSeek `deepseek-v4-pro[1M]`；1 Attempt / 123 turns；18 files / 1005 lines；机器验收 failed；core 307/310、Hub/MCP 133/138，strict TypeScript 11 errors | Main 记录 `revise`，明确拒绝直接 Integration：普通 resume 会误消费 correction grant、feedback 暴露且重启不能恢复、冲突 replay 被绕过、plan 语义偏离合同。Main 只复用端到端骨架，修正授权、恢复、隐私、计划与 UI 语义，未为得到绿色 Task 追加 Worker Attempt |
+
+DeepSeek gross Worker volume 为 **21,160,943 Tokens**；receipt-aware Main exchange
+estimate 为 **355,079–2,147,919 Tokens**，边界内 Worker 工作量为
+**19,013,024–20,805,864 Tokens**。官网 PAYG 估算为 **USD 0.202126781**，Claude runtime
+estimate 为 **USD 12.606251**；两者口径不同，不能互换。该 Task 没有 exact-pair direct-Main
+baseline，因此不声称节省 Main Token。
+
+Main 修复后，core/Task/strategy/daemon 聚焦检查 **310/310**，Hub/MCP/settings/assets
+聚焦检查 **138/138**，完整 `npm test`、strict TypeScript、production build、
+`app.js` syntax 与 `git diff --check` 均通过。正式 Daemon 手工更新到 PID `54182`；client 与
+daemon build id 同为
+`a98f014256965d5c6b70b85debe467fde1dd1aa986b76db475c9f393f21f140d`，source digest 为
+`89a2e72f4b97e2c22726ef221699944f6d6296dfdf701b0b02676c8363c6bc31`。这是手工 Main
+repair handoff，不计入 automatic Integration 的 M0 证据，M0 仍为 **0/3**。
+
+### MiniMax 真实“失败 → 原地纠正 → 通过”
+
+第一份夹具 Task `ca91a168-5e9f-4503-9ea1-d70f4902328f` 因验收计数设计与 MiniMax 实际
+执行顺序不匹配而直接 succeeded，只证明 Provider/runtime 可用，不冒充 correction 证据。
+夹具只调整一次，让第一次真正的独立验收稳定失败；没有为了制造结果继续调参或循环重跑。
+
+最终 Task `199a3913-6b9f-4dee-9d49-80dd02455e6b` 使用 MiniMax-M3、
+`baseMaxAttempts=1`、`maxExtraAttempts=0`、`maxMainCorrections=1`：
+
+1. Attempt 1 创建正确的 `feature.txt`，独立验收按设计 exit 1；Task 保持 failed，系统没有
+   自动开始 Attempt 2。候选仍是 1 file / 1 line。
+2. Main 明确授权 ordinal 2，并写入“保留 feature.txt、不改 harness、重跑原验收”的反馈。
+   grant 记录 `kind=correction`、prior Attempt、target ordinal 和 uncapped-for-authorized-attempt。
+3. Attempt 2 继续使用 session `fb5b59b7-f699-417d-bd4f-b5eb378dc472` 和原 workspace；
+   原命令 `node verify.mjs` 输出 `candidate reuse fixture passed on verification invocation 2`，
+   Task 最终 succeeded。业务 Diff 仍只有原来的 `feature.txt`，不是重新生成一份候选。
+
+| Attempt | 结果 | gross Worker Tokens | runtime estimate |
+| --- | --- | ---: | ---: |
+| 1 | useful candidate，独立验收失败 | 29,275 | USD 0.075244 |
+| 2 | Main correction，完整原验收通过 | 37,711 | USD 0.083897 |
+| 合计 | Task succeeded | 66,986 | USD 0.159141 |
+
+这里能精确回答的是：**纠正本身新增了 37,711 Worker Tokens 和 USD 0.083897 runtime
+estimate**，并且确实复用了原候选、session、workspace 和 Diff。不能回答的是“相对一次完整
+重启到底省了多少”：本轮没有同合同、同模型、同 profile 的 full-restart 对照，direct savings
+保持 `direct-baseline-missing`。两次 Attempt 的 Main exchange estimate 为 **6,994–42,039
+Tokens**，边界内 Worker 工作量为 **24,947–59,992 Tokens**；这仍不是直接节省。MiniMax
+该 route 的官方 exact request cost 不可用，runtime estimate 也不冒充账单。
+
+### 用户可见结果
+
+- Task Detail 把普通继续、通过后修订、失败候选纠正分开解释；纠正按钮只出现在有可复用
+  候选并且仍有 allowance 时。
+- 用户能看到 Main 纠正输入、前后 Attempt、当前状态、剩余次数、真实新增 Token/运行费用
+  估算，以及“完整原验收会重跑”。没有 paired baseline 时明确说无法计算完整重启节省。
+- CLI `forklight correct`、MCP `forklight_correct`、Hub mutation 与 Daemon 使用同一授权语义；
+  budget 留空/`none` 表示这一次授权不设上限，不会改变 Worker 的其他冻结策略。
+- 未 commit / push。
+
+## 2026-07-27 失败候选“只重新验收”与零增量 Worker 成本 dogfood
+
+这一轮把候选复用从两档补成三档。Main 不再只在“让 Worker 继续修”和“整单新建”之间选：
+
+1. 候选已正确、只有临时行为验收失败：保留 workspace，只重新运行完整原验收；
+2. 大部分正确、少量代码必须改：保留 workspace/session/Diff，显式授权一次 Worker 修正；
+3. 候选不可用、合同变化或上下文不可信：新建 Task。
+
+三条路互不混账。`maxMainReverifications`、`maxMainCorrections`、普通
+`maxExtraAttempts` 分别冻结；前两项默认 1、设为 0 可关闭。任何路径都不会自动启动或形成
+循环。Reverify-only 只接受 behavior-only failure、policy/source pass、非空业务 Diff、没有
+running Attempt、非 Competition candidate 且 allowance 未耗尽的 failed Task。授权与开始先持久
+化；Daemon 崩溃也不会把它当 Worker 恢复。通过只改变 Task，原 Attempt 记录/状态保持不变，
+而且 Integration 前仍需绑定新 verification 的 fresh Main accept。
+
+### GLM 实现候选与 Main 修复
+
+| Task | Worker 机器事实 | Main 处置 |
+| --- | --- | --- |
+| `54e2dc29-b603-4e92-b657-66ebda5d8917` | Volcengine `glm-5.2[1M]`；1 Attempt / 171 turns；18 files / 1832 lines；focused **335/338**，strict TypeScript 通过；Task failed | Main 记录 `revise`，保留核心架构；修正单候选 Competition fixture、非 ASCII 破折号、原 Attempt 文案和计划依赖唤醒。原合同 3/3 通过，check `b50a4540-ea2f-4c53-aa80-5bd410d13564`，记录 `verified-repaired-delivered`；原机器失败保持不变 |
+
+GLM 顶层 terminal usage 为 input 378,237、output 126,836、cache read 40,756,800，
+即 **41,261,873 gross Worker Tokens**；runtime estimate 为 **USD 26.515**。该 Task 冻结的
+pricing route 错写为 `volcengine-coding-plan`，所以官方费用事实为
+`pricing-identity:unsupported-route`，不是 0。后续 Task 文件已修正为
+`volcengine-coding-plan-subscription`；订阅路线仍应显示“无逐请求价”，不能把 runtime estimate
+冒充账单。
+
+Main 修复后的聚焦核心/daemon/Hub/MCP 批次 **339/339**；最终完整套件 **1274/1274**、strict
+TypeScript、production build、Hub JavaScript syntax 和 `git diff --check` 通过。Reverify 成功
+后会立即 reconcile plans，等待或 blocked 的依赖项不必等另一次事件或 Daemon 重启才恢复。
+
+### MiniMax 真实“失败 → 不再调用 Worker → 通过”
+
+Task `c34d98f5-fa7b-4821-8cfb-1ffc321b957d` 使用 MiniMax-M3，并冻结为
+`baseMaxAttempts=1`、`maxExtraAttempts=0`、`maxMainCorrections=0`、
+`maxMainReverifications=1`、`maxAdaptationRounds=0`：
+
+1. 唯一 Worker Attempt 读取 fixture，创建正确的 `feature.txt`，没有自行运行验收。独立命令
+   `node verify.mjs` 按受控夹具第一次 exit 1；policy/source 均通过，Diff 为 1 file / 1 line，
+   Task 停在 failed，没有自动出现第二个 Attempt。
+2. Main 判断候选已经满足合同，以 bounded reason + confirm 授权 reverify-only。相同 workspace
+   中完整原命令第二次通过；命令 80ms、操作 wall 149ms。
+3. Task 转为 succeeded；Attempt count 仍为 1，原 Attempt 仍为 failed。事件明确记录
+   `workerInvoked=false`、`incrementalWorkerTokens=0`、
+   `incrementalModelRuntimeCostUsd=0`。Preflight 在 fresh Main accept 前以
+   `Main agent review acceptance is required` 拒绝；Main 审查一行 Diff 并接受后，Preflight
+   rejectionReasons 为空。测试 fixture 没有 Integration apply。
+
+| 阶段 | Attempt 数 | gross Worker Tokens | Worker/runtime 增量 | 本地验收时间 |
+| --- | ---: | ---: | ---: | ---: |
+| MiniMax 候选 + 第一次受控失败 | 1 | 30,239 | runtime estimate USD 0.111575 | 76ms |
+| Main reverify-only 后 | 1 | 30,239 | **0 Tokens / USD 0** | 80ms command / 149ms wall |
+
+这里能精确说的是：reverify-only 没有新增 Worker 或 Provider 模型调用，因此新增 Worker Token
+和模型运行成本为 0。不能说的是“比完整重启节约 30,239 Tokens”或“比前一轮 correction
+节约 37,711 Tokens”：没有同合同、同模型、同 profile 的配对 full-restart/correction 对照。
+Main exchange receipt 在操作后从 5 增至 7，本地时间也不是 0，所以不能说整个动作免费。
+
+该 Task 也暴露了一个配置事实：endpoint 是中国区 `api.minimaxi.com`，Task 却沿用了国际站
+pricing route，因此持久官方费用为 `pricing-identity:no-match`。Task 历史不回写；两份 fixture
+已修正为 `minimax-china-direct-payg`。若以修正后的中国区官方价表对同一聚合 usage 计算，
+得到 **CNY 0.0469896** 的保守聚合档位估算（本次上下界相同）；它仍是
+`providerBillClaim=false`，不是账单，也不是这条已冻结 Task 的官方报价。
+
+### Hub 和配置闭环
+
+- Worker Advanced UI 已加入 `maxMainReverifications`，可保存、回读、显示有效值来源；
+  Task override > Worker > global 的冻结链路不变。
+- Task-time adaptation 明确排除 `maxMainReverifications`，运行中的 Task 不能扩大自己的验收
+  次数。
+- Task Detail 把 reverify-only、Worker correction、新 Task 三条选择讲清楚；展示输入、原
+  Attempt、完整命令结果、0 Worker Token 事实、本地时间与 fresh Main accept 要求。
+- malformed reverification event 不再默认渲染成 passed/0 Token/0 cost，而是 fail-closed 不展示。
+- 未 commit / push；手工 build/restart 不计入 automatic Integration M0，仍为 0/3。
+- 最终正式 Daemon 已手工更新到 PID `57557`；client/daemon build id 同为
+  `3f416dde500d518f414922b8cebf532f80170e86248b0512e467e629f641295b`，source digest 为
+  `94b4313749ad7cdc6b65442a7c826524ee9bf48fa579b213ffe81de7edcd533a`，active/queued 均为空。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D213 | 候选已正确但 behavior acceptance 临时失败时，旧流程只能再叫 Worker 或新建 Task，重复上下文和推理会额外烧 Token | **closed 2026-07-27**：Main-authorized reverify-only 完整上线并 live 证明；0 Worker、0 Attempt 增量、原历史不改、fresh Main accept 保留、失败后不循环 |
+| FL-D214 | `maxMainReverifications` 后端和 Task override 已支持，但 Worker Advanced UI 漏字段，不能算用户可配置 | **closed 2026-07-27**：加入高级表单、development default、保存/回读、有效预览和双语文案；adaptation 明确排除该 immutable allowance |
+| FL-D215 | 两个 dogfood Task 的 Provider endpoint 与 pricingRoute 不匹配，费用显示 `no-match` / `unsupported-route` | **closed for future Task config 2026-07-27**：MiniMax 中国区统一 `minimax-china-direct-payg`，Volcengine 统一 `volcengine-coding-plan-subscription`；历史 Task 保留原错误证据，不回写 |
+| FL-D216 | GLM terminal 顶层 usage gross 41,261,873，但 `perModel` gross 43,144,768，相差 1,882,895；当前报告以规范顶层计数为准但没有显式展示不一致 | **closed 2026-07-27**：Task report、CLI、Task Detail、portfolio/Insights 已显示 matched/mismatch/partial/unavailable、顶层与逐模型总量和差值；官方 Worker volume 始终取 terminal 顶层，逐模型只作诊断，mismatch 不触发重试、不阻塞 Integration、不改变模型评分、不冒充额外费用或节省 |
+| FL-D217 | MiniMax reverify Task 已有 fresh Main accept 且 Integration preflight 通过，但 Board 与 Task Detail 仍显示“等待 Main 评审”，把机器状态文案误当成端到端流程状态 | **closed 2026-07-27**：紧凑 Task surface 携带 canonical decision stage；Board 分辨待 Main、Main 要求修订/拒绝、待用户授权、合入中、已合入未激活、已激活与合入失败；Task Detail 的 ready-for-integration 文案同步改为“Main 已接受，等待用户授权”，浏览器实测通过 |
+
+## 2026-07-27 Token 计数对账与失败候选局部复用 dogfood
+
+本轮继续验证“一部分可用就不整单重试”。DeepSeek Task
+`b5a35d03-3d26-436c-962f-bb02826a29ab` 使用 `deepseek-v4-pro[1M]`、Claude Code
+high、单 Task 不设 Token 上限。唯一 Attempt
+`690ddf5a-4612-4d47-96ee-3a87b4e996c7` 在独立验收中通过 112/114 个聚焦检查，strict
+TypeScript 因一个未使用 import 失败。Main 审查发现候选为了命中 GLM gross 总数而构造了并
+不存在的模型/组件拆分，同时漏掉部分 safe-integer 和 unavailable 边界；因此保留有用的
+reconciliation、CLI 和 Hub 骨架，删除伪造前提并以真实持久数据修正，没有启动 Worker
+correction，也没有新建 Task。原机器 Task 继续保持 failed；Main remediation check
+`4092d4b9-4a27-4ee8-9070-bdaa6c36b2a3` 记录
+`verified-repaired-delivered`，不改写 Worker 历史。
+
+这一次 Worker gross volume 为 **9,330,055 Tokens**（input 147,372、output 35,547、
+cache read 9,147,136、cache creation 0）；receipt-aware Main exchange estimate 为
+**87,045–526,066 Tokens**，边界内工作量为 **8,803,989–9,243,010 Tokens**。runtime
+estimate 为 **USD 6.199103**，DeepSeek 官网 PAYG 估算为 **USD 0.128191078**，后者仍是
+估算而非 Provider 账单。没有同合同、同模型、同 Main profile 的 exact-pair baseline，
+所以 direct Main Token savings 明确 unavailable；不能把复用的候选体积或边界内工作量直接
+叫做“节省”。
+
+真实 GLM Task `54e2dc29-b603-4e92-b657-66ebda5d8917` 用于检验计数分歧：terminal 顶层
+usage 是 input 378,237、output 126,836、cache read 40,756,800、cache creation 0，gross
+**41,261,873**；唯一真实 `perModel` 行是 `glm-5.2[1m]`，input 378,658、output 132,190、
+cache read 42,633,920、cache creation 0，gross **43,144,768**；逐模型比顶层多
+**+1,882,895**。ForkLight 现在把这个事实显示为 soft telemetry warning：官方 Worker
+volume 仍为顶层 41,261,873，逐模型只诊断，不额外计费、不算 savings/waste、不触发 retry、
+不阻塞 Integration，也不改变模型能力统计。跨 Task 的 Insights 只合计可比较 Task，并把
+unavailable Task 单独计数，不当作 0。
+
+浏览器实测确认 Insights 和真实 GLM Task Detail 都能用白话解释“发生了什么、哪个数用于
+计算、差值不代表什么”。实测还发现正差值一度显示为 `++1882895`；现已让 i18n 独占正号，
+并增加静态回归断言，避免再次出现重复符号。
+
+最终完整回归 **1300/1300**，strict TypeScript、production build、Hub JavaScript syntax
+和 `git diff --check` 全部通过；浏览器控制台无 error。正式 Daemon 已手工重建为 PID
+`90090`，client/daemon build id 都是
+`280c047bb4d57de91741d43da4138edb8b6170a3d2b25086578d747b65320dfd`，source digest
+都是 `87451683cff9ade42d865dd29e63a5fcf292affcdfe6f5225db58669a1d8efcb`；Hub 继续运行在
+本机 `53542`。这是 Main 手工交接，不计入 automatic Integration 的 M0 证据；未 commit / push。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D218 | Worker 可以通过编造多个 component/model 行让 gross 总量看似符合目标；只验聚合相等无法证明数据来自真实持久证据 | **closed for current path 2026-07-27**：测试改用一条真实 GLM `perModel` 行和精确 component counters；Main 拒绝伪造夹具并独立复核。后续同类合同优先传入只读序列化 fixture 或强制 provenance，不让 Worker自行“凑数” |
+
+## 2026-07-27 MiniMax 预算可靠性与“部分成果不整单重试”dogfood
+
+Task `2c76bec3-ecdb-4441-989d-87812bd320df` 使用 MiniMax-M3、Claude Code high，
+并明确关闭自动扩张路径：`baseMaxAttempts=1`、`maxExtraAttempts=0`、
+`maxMainCorrections=0`、`maxMainReverifications=0`、`maxAdaptationRounds=0`。
+Worker 产出 12 files / 783 changed lines；机器验收 205/208 通过，source compatible、
+`app.js` syntax 和 `git diff --check` 通过，但 statistics fixture 多余结尾、strict 模式断言
+与策略矛盾、中文 copy 断言不匹配，因此 Task 保持 failed。Main 记录 `revise`，没有启动
+第二个 Worker，而是保留设置、路由和 UI 骨架，只增量重写错误的证据口径和可读性。
+
+唯一 Attempt 的真实用量为 input 229,396、output 59,312、cache read 26,624,256、
+cache creation 0，即 **26,912,964 gross Worker Tokens**；runtime estimate 为
+**USD 15.941908**。MiniMax 该 route 的官网逐请求精确费用仍为
+`per-request-usage-required`。receipt-aware Main exchange estimate 为
+**77,153–466,173 Tokens**，边界内 Worker 工作量为
+**26,446,791–26,835,811 Tokens**；置信度低，且没有 exact-pair direct-Main baseline，
+所以都不叫“节省”。
+
+最终实现把预算证据从“每个 Task 最终状态”改为“每个终态 Attempt”：早期触顶不会被后续
+成功遮蔽，Main correction 的独立金额上限不会被 Task 默认值覆盖，Token 上限通过
+`policy.token.exceeded` 识别，`worker.failed.payload.failureCategory=budget` 后即使还有一条
+无 payload 的失败事件也不会丢失。文件数/行数的 change-budget failure 只属于验收策略，
+不算金额或 Token 耗尽。每次 Attempt 还冻结 runtime 是否真正支持 USD budget flag；
+unsupported/unknown 证据排除，不把“配置过”误写成“执行过”。没有可比样本时 rate 为 null。
+
+Hub 的新说明不再使用 “bounded envelope” 作为主文案，而是回答：同样且真正生效的上限下，
+几次运行中有几次在触顶前到达可验收结果；展示本次比较的美元/Token 上限、未设上限、
+上限未确认生效和其他原因结束的排除数量，并明确这不是任务成功率、模型质量、账单或费用
+节省，也不会拉黑模型。浏览器 QA 同时发现 failed + Main revise 的总览卡错误声称“独立检查
+已通过”；已改成同时呈现“机器验收失败”和“Main 保留候选要求定向修正”，并提示查看当前
+修正额度。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D219 | Task 级预算证据会让“前一次触顶、后一次纠正成功”只剩一个成功，还会忽略 correction 的 Attempt 预算覆盖与 observed-token 事件 | **closed 2026-07-27**：改为 Attempt 级冻结证据，补齐 budget event、per-Attempt override、change-budget 排除、Runtime enforcement 与 strict/flexible 回归 |
+| FL-D220 | failed Task 在 Main 记录 `revise` 后，Board 只看 decision stage，错误显示“独立检查已通过” | **closed 2026-07-27**：卡片先保留机器状态，再叠加 Main 处置；failed+revise/reject 使用独立双事实文案，不再改写机器验收 |
+| FL-D221 | `correct/reverify` 能复用当前 workspace，但没有每 Attempt 不可变候选版本、结构化已保留范围与 gap、跨 Worker 接手和 review→Integration patch digest 绑定；额度为 0 时只能点击后才知道 | **M1 candidate revision / gap contract**：下一阶段新增 immutable Candidate Revision、Gap Contract、preflight eligibility、cross-Worker correction 与增量成本；每轮显式授权、完整最终验收、次数/预算/无进展停止，不做自动修复循环 |
+
+## 2026-07-27 Candidate Revision 与结构化局部修正 dogfood
+
+本轮直接把“Worker 有一部分可用时，不要整单重跑”升级成可审计的数据边界，而不是只靠
+Main 临时记住哪些代码可用。ForkLight Task
+`ded44c43-3b62-4a01-bd89-82d3aa583f39` 使用 DeepSeek
+`deepseek-v4-pro[1M]`、Claude Code high、单 Task 不设 Token 上限。唯一 Attempt 运行 75
+turns，产出 16 files / 1,809 changed lines，Worker 进程 exit 0，但独立验收发现 1 个核心断言、
+8 个 daemon/MCP/Hub 兼容问题和 5 个 strict TypeScript 问题，因此机器 Task 保持 failed。
+
+Main 记录 `revise` 后没有启动第二个 Worker，也没有新建完整 Task。Main 先逐文件确认候选
+相对 Task baseline 没有混入外部变更，再保留 16 文件候选，只修正以下缺口：候选证据写入
+失败不能被吞掉；空 Diff 也需要不可变证据但不可启动修正；最新 Attempt、当前 Diff 和授权
+revision 必须一致；旧 correction grant 仍可读取；结构化 grant 必须精确持久化并可崩溃恢复；
+Main accept 与 Integration 必须绑定被审查补丁 digest；Hub/MCP 必须真正提交 gap，而不是只
+展示一张信息卡。
+
+### 已落地的执行逻辑
+
+1. 每次独立验收后创建一个 immutable Candidate Revision：保存 Attempt、验收 event、Diff
+   SHA-256、文件/行数和经过校验的相对路径；精确 patch 复制到 Task 私有目录，Hub/MCP 不
+   暴露该路径和 Diff 内容。
+2. 修正前先返回 canonical eligibility：Task 状态、running Attempt、Competition、最新
+   revision、空候选、当前 Diff digest、冻结 allowance 与 pending grant 均在任何 durable
+   mutation 前检查。按钮点击前即可解释为什么不可用。
+3. Main 的 Gap Contract 只标记“已经确认做对、尽量别动”的文件，并写出 1–8 个剩余问题
+   和各自验收方式。所有候选文件本身仍留在 workspace；未勾选不等于删除。
+4. 授权 event 保存完整 canonical contract 与 digest。Daemon 重启可恢复同一授权；反馈、
+   预算、revision 或 gap 任一不同都不能冒充幂等 replay。
+5. Worker 执行前再次验证 live Diff；每个 gap 只做这一轮，遇到无法推进就交回 Main，不
+   自行追加 Attempt。完成后仍完整运行原 acceptance。
+6. Main `accept` 保存 candidate revision id 与 patch digest；Integration preflight 再次核对
+   当前 Diff，审查后补丁发生变化就拒绝合入。
+
+### 成本与验收事实
+
+该 Attempt 的 terminal usage 为 input 199,456、output 46,001、cache read 11,501,312、
+cache creation 0，即 **11,746,769 gross Worker Tokens**。Claude runtime estimate 为
+**USD 7.897961**；DeepSeek 官网 PAYG 估算为 **USD 0.168476486**，不是账单。17 个
+exchange receipts 得到 **18,077–109,109 Tokens** 的 Main exchange envelope；算术边界
+范围为 **11,637,660–11,728,692 Tokens**，但它不是 direct-Main 或 full-restart 节省。
+本 Task 没有 exact-pair baseline，direct savings 保持 `direct-baseline-missing`。
+
+Main 修复后完整 `npm run check` 为 **1,354/1,354**；strict TypeScript、production build、
+Hub JavaScript syntax 与 `git diff --check` 全部通过。没有 commit / push。跨 Worker 接手
+尚未在本轮伪造：当前冻结 Task 的 provider/runtime 仍不可变；下一步先新增每 Attempt Worker
+identity，再让另一 Worker 以显式 handoff 消费同一个 Candidate Revision。
+
+最终本地 Daemon 为 PID `80330`；client/daemon build id 均为
+`f80521c034f75d006c796a4f42c25b8610acd513a9c37ed469dc9376fcbbe62a`，source digest
+均为 `bb7321bf57de5bca15d6f5c1d667df6c9c3c7965d017821d302fdc6b7b52d6fd`；Hub 在
+`127.0.0.1:53542`。真实浏览器复核确认：Overview 不再承诺历史 Task 有可用修正额度；Task
+Detail 会说明“没有 immutable snapshot，无法确认接到哪一版”，禁用不安全按钮并给出新建
+Task 或 Main 手工审查两条路径；浏览器 console 无 warning/error。此次仍是手工 restart，
+不计入 automatic Integration M0 的 0/3 live-exit 证据。
+
+### 新发现与 disposition
+
+| ID | 问题 | 当前 disposition |
+| --- | --- | --- |
+| FL-D221 | 候选复用缺少不可变版本、结构化 gap、点击前 eligibility 和 review→Integration digest binding | **partial closed 2026-07-27**：Candidate Revision、Gap Contract、共享 eligibility、授权/执行双重 stale check、Main accept 与 Integration digest binding 已完成；cross-Worker handoff 单列 FL-D225 |
+| FL-D222 | Worker 首版吞掉 Candidate Revision capture 失败，可能出现代码验收成功但复用证据缺失 | **closed 2026-07-27**：capture failure 写入 bounded event，并把 Attempt/Task 置 failed；空 Diff 仍留 revision 证据但 category 为 `empty-revision`，不会启动 Worker |
+| FL-D223 | Worker 首版 Hub 只展示 eligibility，没有让用户填写并提交 revision/reusable paths/remaining gaps；MCP schema 同样缺结构化输入 | **closed 2026-07-27**：Hub、CLI、MCP、Daemon 共用 all-or-none Gap Contract；Hub 用白话说明所有文件都会保留，勾选只代表已确认可用 |
+| FL-D224 | 新的结构化修正若直接要求所有历史 Task 都有 Candidate Revision，会让旧 grant 与旧任务失去兼容 | **closed 2026-07-27**：历史记录继续可读，低层 legacy correction 保持原语义；带 revision 的新 Task 必须走结构化 fail-closed 路径 |
+| FL-D225 | 当前 Provider/runtime 冻结在 Task 上，还没有可审计的 per-Attempt Worker identity，不能安全宣称另一个 Worker 接手同一候选 | **M1 next / cross-Worker handoff**：先新增 Attempt Worker snapshot，再增加显式 handoff grant、目标 Worker preflight、同 revision workspace 或安全派生 workspace 与独立最终验收；不能通过改写 frozen Task 身份伪装完成 |

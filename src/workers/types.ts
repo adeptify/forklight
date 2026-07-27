@@ -42,9 +42,12 @@ export interface WorkerExecutionResult {
   error?: string;
   usage?: AttemptTokenUsage;
   runtimeCostEstimateUsd?: number;
+  /** Content-free evidence for a limit enforced inside the Worker adapter. */
+  policyLimit?: import("../core/types.js").PolicyLimitEvidence;
 }
 
 export interface WorkerRunHooks {
+  /** Every adapter that spawns a child must call this immediately after spawn. */
   onSpawn?: (child: ChildProcess) => void;
   onEvent?: (event: NormalizedWorkerEvent) => void;
   wasInterrupted?: () => boolean;

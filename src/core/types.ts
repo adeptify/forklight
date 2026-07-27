@@ -14,12 +14,14 @@ export type TaskStatus =
   | "interrupted";
 
 export type AttemptStatus = "running" | "succeeded" | "failed" | "interrupted";
+export type RuntimeBudgetEnforcement = "supported" | "partial" | "unsupported";
 
 export type EventType =
   | "task.created"
   | "task.waiting"
   | "task.blocked"
   | "task.ready"
+  | "workspace.preparation.stage"
   | "workspace.prepared"
   | "worker.started"
   | "worker.resumed"
@@ -44,10 +46,24 @@ export type EventType =
   | "integration.apply.started"
   | "integration.apply.completed"
   | "integration.rollback.completed"
-  | "task.revise.requested";
+  | "integration.handoff.authorized"
+  | "task.revise.requested"
+  | "policy.duration.exceeded"
+  | "policy.token.exceeded"
+  | "policy.noprogress.exceeded"
+  | "policy.size.exceeded"
+  | "task.adaptation.transitioned"
+  | "task.adaptation.rejected"
+  | "remediation.check.started"
+  | "remediation.check.completed"
+  | "candidate.revision.captured"
+  | "candidate.revision.capture.failed"
+  | "candidate.reverification.authorized"
+  | "candidate.reverification.started"
+  | "candidate.reverification.completed";
 
 export interface ProviderSpec {
-  name: "deepseek" | "qwen" | "minimax" | "glm" | "xai";
+  name: "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai";
   model: string;
   endpoint?: string;
   /** Explicit billing route — never forwarded to Worker environment or persisted as a credential. */
@@ -69,6 +85,14 @@ export interface DeliverySpec {
   activationCheckCommands: string[];
 }
 
+/** Persistent delivery resolution provenance snapshot.
+ *  Presence means delivery was resolved at Task creation;
+ *  absence means no delivery or a legacy stored Task.
+ *  Discriminated: inline has no profileId; explicit/project/default require one. */
+export type DeliveryResolution =
+  | { source: "inline" }
+  | { source: "explicit" | "project" | "default"; profileId: string };
+
 export interface TaskModuleContract {
   name: string;
   responsibility: string;
@@ -84,8 +108,17 @@ export interface TaskScenarioContract {
   then: string;
 }
 
+/** A Main-authored explanation for the user, kept separate from the technical
+ * execution outcome. ForkLight stores and displays it exactly; it never
+ * generates or translates this text. */
+export interface TaskPresentation {
+  summary: string;
+  language: string;
+}
+
 export interface TaskContract {
   outcome: string;
+  presentation?: TaskPresentation;
   context: string[];
   inScope: string[];
   outOfScope: string[];
@@ -116,11 +149,21 @@ interface SharedTaskSpec {
     focusPaths: string[];
   };
   delivery?: DeliverySpec;
+  /** Resolved delivery provenance snapshot.
+   *  Absent on legacy stored Tasks and Tasks with no delivery. */
+  deliveryResolution?: DeliveryResolution;
   taskClass?: string;
   /** Exact direct-Codex execution-profile identity selected by the operator.
    *  Must be a canonical profile id validated by the shared normalizer.
    *  Absent for legacy tasks; never inferred from provider, model, or runtime. */
   directCodexProfileId?: string;
+  /** Selected Worker Profile id at Task creation time.
+   *  Absent on legacy tasks without a profile selection.
+   *  Required for effective policy resolution. */
+  workerProfileId?: string;
+  /** Task-level advanced-policy override. Absent on legacy tasks.
+   *  Resolved at Task creation: Task override > Worker Profile > global defaults. */
+  advancedPolicyOverride?: TaskAdvancedPolicyOverride;
   /** Snapped completion policy at Task creation time.
    *  Absent in legacy stored Tasks; runtime code must fall back to hard. */
   completionPolicy?: {
@@ -128,6 +171,9 @@ interface SharedTaskSpec {
     /** How changeBudget overruns affect Task success. Defaults to hard when absent. */
     changeBudgetMode?: PolicyMode;
   };
+  /** Creation-time snapshot of the Task Contract Quality layer.
+   *  Absent only on legacy Task records created before per-Worker Quality policy. */
+  qualityPolicy?: EffectiveQualityPolicySnapshot;
 }
 
 export interface LegacyTaskSpec extends SharedTaskSpec {
@@ -155,6 +201,8 @@ export interface QualityCheck {
   label: string;
   passed: boolean;
   detail: string;
+  /** How this check affects admission under the resolved Quality mode. */
+  effect?: QualityCheckEffect;
 }
 
 /**
@@ -171,10 +219,22 @@ export interface QualityWarning {
 }
 
 export interface QualityReport {
+  /** Whether every quality check passed. This remains check truth, not admission. */
   passed: boolean;
+  /** Whether the Task may be admitted after applying the configured Quality mode. */
+  admitted?: boolean;
   score: number;
+  /** Resolved Quality enforcement mode. Absent only on legacy reports. */
+  mode?: PolicyMode;
+  /** Overall admission effect. Absent only on legacy reports. */
+  effect?: QualityAdmissionEffect;
   checks: QualityCheck[];
+  /** Every failed Quality check, whether blocking or not. */
   issues: string[];
+  /** Failed checks that block submission. */
+  blockingIssues?: string[];
+  /** Failed checks retained as non-blocking review evidence. */
+  advisories?: string[];
   warnings: QualityWarning[];
 }
 
@@ -203,6 +263,10 @@ export interface TaskRecord {
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  /** Immutable effective advanced-policy snapshot stored at Task creation.
+   *  Absent on legacy stored Tasks predating advanced-policy snapshots;
+   *  runtime code must derive compatible defaults without inventing new ceilings. */
+  effectivePolicy?: EffectivePolicySnapshot;
 }
 
 export interface AttemptOfficialCostQuoted {
@@ -256,6 +320,9 @@ export interface AttemptRecord {
   runtimeCostEstimateUsd?: number;
   /** Effective Claude runtime budget for this Attempt. Absent only on legacy Attempts. */
   runtimeBudgetUsd?: number | null;
+  /** Frozen evidence of whether this Attempt's runtime could enforce the USD
+   * budget flag. Absent on legacy Attempts and therefore not assumed. */
+  runtimeBudgetEnforcement?: RuntimeBudgetEnforcement;
   officialCost?: AttemptOfficialCost;
 }
 
@@ -279,6 +346,10 @@ export interface MainReviewDecision {
   reason: string;
   attemptId: string;
   verificationEventSequence: number;
+  /** Candidate revision id bound to this accept decision. */
+  candidateRevisionId?: string;
+  /** SHA-256 patch digest from the accepted CandidateRevision. */
+  acceptedPatchDigest?: string;
 }
 
 export interface DeliveryLineage {
@@ -389,6 +460,16 @@ export interface VerificationResult {
   /** Structured completion policy evaluation.
    *  Absent for legacy verification stored before this field was introduced. */
   completionPolicy?: CompletionPolicyCheck;
+  /**
+   * Present when independent acceptance proves the Task Contract cannot be
+   * satisfied under the current boundary. Same-policy retry is forbidden.
+   */
+  failureCategory?: "contract-infeasible";
+  /** Privacy-safe contract-infeasible detail when failureCategory is set. */
+  contractInfeasibility?: {
+    reason: "undeclared-dependency" | "contradictory-acceptance" | "scope-boundary-conflict";
+    summary: string;
+  };
 }
 
 /** Derived retry guidance from the latest authoritative verification event. */
@@ -453,6 +534,21 @@ export interface NormalizedWorkerEvent {
   };
 }
 
+/** Privacy-safe typed evidence when a policy limit triggers.
+ *  Never contains raw prompt, result text, diff content, or credentials. */
+export interface PolicyLimitEvidence {
+  category: "duration" | "observed-token" | "no-progress" | "file-limit" | "changed-line-limit";
+  enforcementPhase: EnforcementPhase;
+  /** The configured limit that triggered. null when unlimited (should not fire). */
+  configured: number | null;
+  /** The observed value that exceeded the limit. */
+  observed: number;
+  /** How this limit affects the Task: hard-fail, warn, score, or off (no effect). */
+  effect: "hard-fail" | "warning" | "score-evidence" | "ignored";
+  /** Human-readable detail with no private content. */
+  detail: string;
+}
+
 export interface PlanRecord {
   id: string;
   name: string;
@@ -486,6 +582,173 @@ export type CompetitionStatus = "pending" | "running" | "completed";
 export type RankingFactor = "verification" | "diffFocus" | "retries" | "cost" | "duration" | "delivery";
 
 export type PolicyMode = "hard" | "warn" | "score" | "off";
+
+// --- Task Contract Quality policy ---
+
+export type QualityCheckEffect =
+  | "satisfied"
+  | "blocking"
+  | "warning"
+  | "score-evidence"
+  | "ignored";
+
+export type QualityAdmissionEffect =
+  | "passed"
+  | "blocked"
+  | "admitted-with-warnings"
+  | "admitted-with-score"
+  | "admitted-ignored";
+
+/** Partial per-Worker Quality override. `null` maximums are explicitly
+ * unlimited; zero minimums explicitly disable that minimum. */
+export interface ContractQualityOverrides {
+  mode?: PolicyMode;
+  maxFiles?: number | null;
+  maxDiffLines?: number | null;
+  maxFocusPaths?: number | null;
+  minScenarios?: number;
+  minCallChainSteps?: number;
+  minOutcomeCharacters?: number;
+  minModuleResponsibilityCharacters?: number;
+}
+
+export interface ResolvedContractQualityValues {
+  maxFiles: number | null;
+  maxDiffLines: number | null;
+  maxFocusPaths: number | null;
+  minScenarios: number;
+  minCallChainSteps: number;
+  minOutcomeCharacters: number;
+  minModuleResponsibilityCharacters: number;
+}
+
+/** Immutable Quality policy resolved before Task admission and stored with the
+ * Task. Runtime/settings changes cannot reinterpret existing work. */
+export interface EffectiveQualityPolicySnapshot {
+  readonly profileId: string;
+  readonly mode: PolicyMode;
+  readonly modeSource: ProvenanceSource;
+  readonly values: Readonly<ResolvedContractQualityValues>;
+  readonly provenance: Readonly<
+    Record<keyof ResolvedContractQualityValues, ProvenanceSource>
+  >;
+}
+
+export interface QualityPolicyPreviewRow {
+  field: "mode" | keyof ResolvedContractQualityValues;
+  value: PolicyMode | number | null;
+  source: ProvenanceSource;
+  layer: "quality";
+}
+
+// --- Advanced execution policy ---
+// Per-Worker Profile advanced policy. Every field is permissive-by-default
+// (unlimited duration / Token ceilings) so development is unbrittle.
+// null means explicitly unlimited — never replaced with a finite default.
+
+export type EnforcementPhase = "preemptive" | "terminal" | "post-observation" | "unsupported";
+
+export type ProvenanceSource = "task" | "worker" | "global";
+
+export interface AdvancedPolicyFields {
+  /** Maximum wall-clock duration in ms for a single Attempt. null = unlimited. */
+  maxDurationMs: number | null;
+  /** Observed gross Token ceiling. null = unlimited.
+   *  Enforced truthfully: terminal/post-observation unless runtime supports preemptive. */
+  observedTokenCeiling: number | null;
+  /** No-progress timeout in ms. null = unlimited (no watchdog). */
+  noProgressTimeoutMs: number | null;
+  /** Grace period after SIGINT before SIGTERM in ms. */
+  workerStopGraceMs: number;
+  /** Business-patch file limit. null = unlimited. */
+  fileLimit: number | null;
+  /** Enforcement mode for fileLimit overruns. */
+  fileLimitMode: PolicyMode;
+  /** Business-patch changed-line limit. null = unlimited. */
+  changedLineLimit: number | null;
+  /** Enforcement mode for changedLineLimit overruns. */
+  changedLineLimitMode: PolicyMode;
+  /** Base maximum Attempts (before extra-authorization grants). */
+  baseMaxAttempts: number;
+  /** Maximum additional Attempts beyond baseMaxAttempts that require explicit authorization. */
+  maxExtraAttempts: number;
+  /** Per-profile concurrency cap. The scheduler intersects it with the live global cap. */
+  maxConcurrency: number;
+  /** No-change completion policy mode. */
+  completionMode: PolicyMode;
+  /** Change-budget overrun policy mode. */
+  changeBudgetMode: PolicyMode;
+  /** Maximum adaptation rounds for the bounded adaptation service (0 = no adaptation). */
+  maxAdaptationRounds: number;
+  /** Maximum Main-authorized candidate corrections for a failed or interrupted Task.
+   *  Independent from maxExtraAttempts; setting maxExtraAttempts zero does not block an allowed correction.
+   *  Default 1 (development-friendly); 0 disables. */
+  maxMainCorrections: number;
+  /** Maximum Main-authorized candidate reverifications for a failed Task whose
+   *  latest independent verification failed only behavior acceptance. Reruns the
+   *  original acceptance suite against the retained candidate WITHOUT launching
+   *  a Worker or creating an Attempt. Independent from maxMainCorrections and
+   *  maxExtraAttempts. Default 1; 0 disables. */
+  maxMainReverifications: number;
+}
+
+/** Task-level per-field override for advanced execution policy.
+ *  null for nullable fields means explicitly unlimited (not "use worker default"). */
+export interface TaskAdvancedPolicyOverride {
+  maxDurationMs?: number | null;
+  observedTokenCeiling?: number | null;
+  noProgressTimeoutMs?: number | null;
+  workerStopGraceMs?: number;
+  fileLimit?: number | null;
+  fileLimitMode?: PolicyMode;
+  changedLineLimit?: number | null;
+  changedLineLimitMode?: PolicyMode;
+  baseMaxAttempts?: number;
+  maxExtraAttempts?: number;
+  maxConcurrency?: number;
+  completionMode?: PolicyMode;
+  changeBudgetMode?: PolicyMode;
+  maxAdaptationRounds?: number;
+  maxMainCorrections?: number;
+  maxMainReverifications?: number;
+}
+
+/** Runtime enforcement capability truthfully derived from the Worker adapter.
+ *  Never claims preemptive control for a runtime that only measures at completion. */
+export interface EnforcementCapability {
+  /** How duration limits are enforced by this runtime. */
+  durationEnforcement: EnforcementPhase;
+  /** How Token limits are enforced by this runtime.
+   *  "post-observation" = usage is reported at completion; was never prevented.
+   *  "unsupported" = runtime provides no gross Token data. */
+  tokenEnforcement: EnforcementPhase;
+  /** Whether the runtime supports a live no-progress watchdog. */
+  progressWatchdog: "live" | "terminal";
+}
+
+/** Immutable effective-policy snapshot stored with the Task at creation.
+ *  Later settings edits must not alter queued, running, resumed, revised, or recovered Tasks. */
+export interface EffectivePolicySnapshot {
+  /** Selected Worker Profile id at Task creation time, or "global" when none was selected. */
+  readonly profileId: string;
+  /** Resolved effective values for every advanced-policy field. */
+  readonly values: Readonly<AdvancedPolicyFields>;
+  /** Per-field provenance: which layer supplied the effective value. */
+  readonly provenance: Readonly<Record<keyof AdvancedPolicyFields, ProvenanceSource>>;
+  /** Truthful enforcement capability for the selected Worker runtime. */
+  readonly enforcementCapability: Readonly<EnforcementCapability>;
+}
+
+/** Pure preview row for a single policy field — suitable for Hub UI consumption. */
+export interface EffectivePolicyPreviewRow {
+  field: keyof AdvancedPolicyFields;
+  value: number | PolicyMode | null;
+  source: ProvenanceSource;
+  enforcementPhase: EnforcementPhase;
+  unlimited: boolean;
+}
+
+export type EffectivePolicyPreview = EffectivePolicyPreviewRow[];
 
 export interface CompletionPolicyCheck {
   /** The evidence outcome and configured effect remain separate. */
@@ -559,6 +822,43 @@ export interface CompetitionEvaluationRecord {
   createdAt: string;
 }
 
+// --- Delivery plan ---
+
+/** One of four immutable stage expectations derived from the Task delivery snapshot.
+ *  "required" = stage is configured and will be executed during Integration.
+ *  "not-configured" = no commands were bound; Integration will record not-applicable. */
+export type DeliveryStageExpectation = "required" | "not-configured";
+
+/** How delivery was resolved for this Task. Mirrors DeliveryResolution.source plus none. */
+export type DeliveryPlanResolutionSource = "inline" | "explicit" | "project" | "default" | "none";
+
+/** Safe immutable delivery plan projected from one Task delivery snapshot.
+ *  No command text, no settings lookup, no execution. */
+export interface DeliveryPlanView {
+  /** The resolution provenance: how delivery was configured for this Task. */
+  resolutionSource: DeliveryPlanResolutionSource;
+  /** Optional profile id when resolution came from explicit/project/default. */
+  profileId?: string;
+  /** Count of build commands in the snapshot (never command text). */
+  buildCommandCount: number;
+  /** Count of activation commands in the snapshot (never command text). */
+  activationCommandCount: number;
+  /** Count of activation check commands in the snapshot (never command text). */
+  activationCheckCommandCount: number;
+  /** Planned outcome derived from the delivery configuration. */
+  outcome: "source-only" | "build" | "activation" | "none";
+  /** Four immutable stage expectations derived from the Task snapshot.
+   *  These describe what Integration is configured to do, not what has already happened. */
+  stages: {
+    sourceApply: DeliveryStageExpectation;
+    sourceVerify: DeliveryStageExpectation;
+    artifactBuild: DeliveryStageExpectation;
+    runtimeActivation: DeliveryStageExpectation;
+  };
+}
+
+// --- Integration records ---
+
 export interface IntegrationReceiptRecord {
   id: string;
   taskId: string;
@@ -569,6 +869,9 @@ export interface IntegrationReceiptRecord {
   createdAt: string;
   expiresAt: string;
   consumed: boolean;
+  /** Safe immutable delivery plan visible to Main before authorizing Integration.
+   *  Absent on legacy receipts stored before delivery plan support. */
+  deliveryPlan?: DeliveryPlanView;
 }
 
 export interface IntegrationResultRecord {
@@ -603,7 +906,7 @@ export interface IntegrationOperationView {
   operationId: string;
   taskId: string;
   receiptId: string;
-  status: "running" | "completed" | "outcome-unknown";
+  status: "running" | "completed" | "failed" | "outcome-unknown";
   stages: IntegrationStageEvidence[];
   result?: IntegrationResultRecord;
 }
@@ -643,9 +946,21 @@ export interface TaskDecisionView {
     latestAction?: string;
     /** Real store event type for the latest event (not a synthetic label). */
     lastEventType?: string;
+    /** Current structured workspace-preparation stage. Never contains paths,
+     *  file names, credentials, command text, or raw errors. */
+    preparationStage?: {
+      stage: string;
+      phase: "start" | "complete";
+      elapsedMs: number;
+      countKind?: "files" | "dependencies";
+      count?: number;
+    };
   };
-  /** Latest Worker terminal failure class when task is failed|interrupted. */
-  failureCategory?: "authentication" | "budget" | "runtime";
+  /** Latest terminal failure class when task is failed|interrupted.
+   *  Includes Worker classes and contract-infeasible (verification/Main). */
+  failureCategory?: "authentication" | "budget" | "runtime" | "contract-infeasible";
+  /** Independent final-delivery outcome after Main repaired a machine-failed Task. */
+  remediationDisposition?: RemediationDisposition;
 }
 
 export interface ActivationHandoff {
@@ -685,4 +1000,189 @@ export interface ProviderStatus {
   keychainExists: boolean;
   status: ProviderHealthStatus;
   evidence?: ProbeEvidence;
+}
+
+// --- Bounded policy adaptation transition chain ---
+//
+// A bounded, evidence-backed successor-creation service for terminal Tasks.
+// One parent -> at most one successor. Round number is bounded by the root
+// snapshot's maxAdaptationRounds. Settings drift cannot expand the root limit.
+// Only flexible advanced-policy fields may change; maxAdaptationRounds itself
+// and authority-bearing fields are forbidden in the patch.
+
+/** Bounded reason category for adaptation transitions.
+ *  Stable, privacy-safe enum shared by preview and apply paths. */
+export type AdaptationReasonCategory =
+  | "eligible"
+  | "adaptation-disabled"
+  | "round-limit-reached"
+  | "parent-not-found"
+  | "parent-not-terminal"
+  | "missing-effective-policy"
+  | "successor-already-created"
+  | "no-effective-change"
+  | "forbidden-field"
+  | "invalid-patch"
+  /** Parent terminal is contract-infeasible; Main must revise the contract. */
+  | "contract-infeasible";
+
+/** Bounded reason category supplied by the caller to describe the intent
+ *  of the proposed patch. Stable, privacy-safe, finite. Persisted on the
+ *  lineage edge and surfaced in events. */
+export type AdaptationProposedReasonCategory =
+  | "duration-budget"
+  | "size-policy"
+  | "attempt-budget"
+  | "completion-policy"
+  | "concurrency-cap"
+  | "no-progress-timeout"
+  | "other-flexible-policy";
+
+/** Status discriminator for the gate output. */
+export type AdaptationGateStatus = "eligible" | "stopped";
+
+/** Per-field before/after view in an adaptation preview row.
+ *  Always includes enforcementPhase and provenance from the parent snapshot. */
+export interface AdaptationPreviewField {
+  field: keyof AdvancedPolicyFields;
+  before: number | PolicyMode | null;
+  after: number | PolicyMode | null;
+  changed: boolean;
+  source: ProvenanceSource;
+  enforcementPhase: EnforcementPhase;
+}
+
+/** Pure content-free adaptation preview produced by the eligibility gate.
+ *  When status is "stopped", fields is empty and stoppedReason is set. */
+export interface AdaptationPreview {
+  status: AdaptationGateStatus;
+  rootTaskId: string;
+  parentTaskId: string;
+  /** The next round that would be assigned to the successor (1-based, parentDepth+1). */
+  nextRound: number;
+  /** Immutable maxAdaptationRounds read from the root snapshot. */
+  maxAdaptationRounds: number;
+  /** Child's worker profile id carried through from the parent/root snapshot. */
+  profileId: string;
+  /** Reason category, always set. */
+  reason: AdaptationReasonCategory;
+  stoppedReason?: AdaptationReasonCategory;
+  /** Per-field before/after rows for the proposed patch (empty when stopped). */
+  fields: AdaptationPreviewField[];
+  /** Privacy-safe human-readable summary of the transition. */
+  summary: string;
+}
+
+/** Durable persisted lineage record. Recovery-safe; UNIQUE(parent_task_id)
+ *  enforces one-successor-per-parent. */
+export interface AdaptationTransitionRecord {
+  id: string;
+  rootTaskId: string;
+  parentTaskId: string;
+  childTaskId: string;
+  round: number;
+  reason: AdaptationReasonCategory;
+  proposedReason: AdaptationProposedReasonCategory;
+  createdAt: string;
+}
+
+// --- Main remediation verification ---
+
+export type RemediationCheckStatus = "failed" | "passed";
+
+export interface RemediationCheckRecord {
+  id: string;
+  taskId: string;
+  status: RemediationCheckStatus;
+  /** Private audit context. Compact task/list/event projections must not expose it. */
+  reason?: string;
+  commands: VerificationCommandResult[];
+  createdAt: string;
+}
+
+export interface RemediationDisposition {
+  status: "verified-repaired-delivered";
+  checkId: string;
+  createdAt: string;
+}
+
+// --- Candidate revision evidence ---
+
+/** Immutable per-Attempt candidate revision snapshot.
+ *  The private artifact path is never exposed in Hub, MCP, or CLI output. */
+export interface CandidateRevision {
+  id: string;
+  taskId: string;
+  attemptId: string;
+  attemptOrdinal: number;
+  verificationEventSequence: number;
+  /** SHA-256 hex digest of the exact integration Diff bytes at capture time. */
+  patchDigest: string;
+  affectedPaths: string[];
+  filesChanged: number;
+  changedLines: number;
+  verificationPassed: boolean;
+  createdAt: string;
+}
+
+/** Control-surface revision summary. It exposes only validated relative
+ *  affected paths so Main can mark known-good files; it never contains the
+ *  private artifact path or Diff content. */
+export interface CandidateRevisionSummary {
+  id: string;
+  attemptOrdinal: number;
+  digestPrefix: string;
+  affectedPathCount: number;
+  /** Safe relative paths only; bounded by the CandidateRevision validator. */
+  affectedPaths: string[];
+  filesChanged: number;
+  changedLines: number;
+  verificationPassed: boolean;
+}
+
+/** A single bounded repair gap with description and concrete acceptance expectation. */
+export interface GapEntry {
+  /** 10–500 character description of what is missing or wrong (trimmed, no newlines). */
+  description: string;
+  /** 10–500 character concrete acceptance expectation (trimmed, no newlines). */
+  acceptanceExpectation: string;
+}
+
+/** Structured bounded Gap Contract for Main correction.
+ *  Bound to one CandidateRevision and one correction grant. */
+export interface CandidateGapContract {
+  schemaVersion: 1;
+  candidateRevisionId: string;
+  /** 0–20 reusable relative paths validated against the revision affected set. */
+  reusablePaths: string[];
+  /** 1–8 remaining gaps. */
+  remainingGaps: GapEntry[];
+}
+
+/** Stable eligibility category — shared by daemon, MCP, and Hub. */
+export type CorrectionEligibilityCategory =
+  | "eligible"
+  | "not-failed-or-interrupted"
+  | "competition-candidate"
+  | "running-attempt"
+  | "no-revision"
+  | "no-latest-attempt-revision"
+  | "empty-revision"
+  | "allowance-zero"
+  | "allowance-exhausted"
+  | "pending-incompatible-grant"
+  | "stale-revision";
+
+/** Canonical read-only correction eligibility projection.
+ *  Never exposes private artifact paths, Diff content, or gap text. */
+export interface CorrectionEligibility {
+  eligible: boolean;
+  category: CorrectionEligibilityCategory;
+  allowance: {
+    max: number;
+    consumed: number;
+    remaining: number;
+    source: ProvenanceSource;
+  };
+  latestRevision?: CandidateRevisionSummary;
 }

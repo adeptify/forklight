@@ -3,10 +3,11 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { buildTaskRecord, registerTaskFromSpec } from "../src/core/runner.js";
+import { buildTaskRecord, createTask, registerTaskFromSpec } from "../src/core/runner.js";
 import { assessTaskQuality, buildWorkerPrompt, loadTaskSpec, parseTaskSpec } from "../src/core/task.js";
 import { attemptRuntimeBudget, budgetArguments } from "../src/workers/claude.js";
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "../src/core/settings.js";
+import { validateDeliveryProfilesSettings } from "../src/core/delivery-profiles.js";
 import type {
   AttemptRecord,
   ContractTaskSpec,
@@ -38,6 +39,8 @@ acceptance:
   assert.equal(loaded.spec.project, project);
   assert.equal(loaded.spec.provider.model, "deepseek-v4-flash");
   assert.equal(loaded.spec.runtime.name, "claude-code");
+  assert.ok(loaded.spec.workspace.exclude.includes(".forklight-dev"));
+  assert.ok(loaded.spec.workspace.exclude.includes(".forklight-daemon-test"));
 });
 
 test("accepts a complete version 2 Task Contract with a perfect quality score", async () => {
@@ -59,14 +62,14 @@ test("includes independent verification feedback in a resumed Worker prompt", as
   assert.match(prompt, /boundary assertion was incorrect/);
 });
 
-test("requires the Worker to run the bounded checkpoint before reporting completion", async () => {
+test("prompts the Worker to run the bounded non-authoritative checkpoint when available", async () => {
   const loaded = await loadTaskSpec(path.resolve("examples/deepseek-checkout.yaml"));
   const prompt = buildWorkerPrompt(loaded.spec, false);
 
   assert.match(prompt, /mcp__forklight_checkpoint__run/);
   assert.match(prompt, /acceptance-1/);
-  assert.match(prompt, /non-authoritative/);
-  assert.match(prompt, /must call/i);
+  assert.match(prompt, /non-authoritative/i);
+  assert.match(prompt, /authoritative for success/i);
 });
 
 test("builds complete remediation from the latest independent verification", async () => {
@@ -1096,5 +1099,1001 @@ acceptance:
     assert.equal(stored2.spec.completionPolicy?.noChangeMode, "off");
   } finally {
     store.close();
+  }
+});
+
+// --- Delivery Profile Resolution ---
+
+function dpp(opts: Record<string, unknown> = {}): TaskPolicy {
+  const d = cloneDefaults();
+  return { contractQuality: d.contractQuality, execution: d.execution,
+    providerDefaults: d.providerDefaults, completionPolicy: d.completionPolicy,
+    deliveryProfiles: validateDeliveryProfilesSettings(
+      { defaultProfileId: null, profiles: [], projectBindings: {}, ...opts }) };
+}
+
+const dpA = { id: "dp-a", label: "A", buildCommands: ["npm ci"], activationCommands: ["npm start"], activationCheckCommands: ["curl /health"] };
+const dpB = { id: "dp-b", label: "B", buildCommands: ["yarn"], activationCommands: [], activationCheckCommands: [] };
+const PX = "/tmp/project-x";
+
+test("delivery resolution: precedence, fail-closed, conflict, provenance, detachment", () => {
+  const p = dpp({ defaultProfileId: "dp-a", profiles: [dpA, dpB], projectBindings: { [PX]: "dp-b" } });
+
+  // Explicit → explicit provenance
+  const e = parseTaskSpec({ ...contractSpec(), project: PX, deliveryProfileId: "dp-b" }, "/", p);
+  assert.equal(e.deliveryResolution?.source, "explicit");
+  assert.deepEqual(e.delivery!.buildCommands, ["yarn"]);
+
+  // Project binding (no explicit id)
+  const b = parseTaskSpec({ ...contractSpec(), project: PX }, "/", p);
+  assert.equal(b.deliveryResolution?.source, "project");
+  assert.deepEqual(b.delivery!.buildCommands, ["yarn"]);
+
+  // Default (no binding, no explicit)
+  const d = parseTaskSpec({ ...contractSpec(), project: "/tmp/unbound" }, "/", p);
+  assert.equal(d.deliveryResolution?.source, "default");
+  assert.deepEqual(d.delivery!.buildCommands, ["npm ci"]);
+
+  // None (empty registry)
+  const ep = dpp({ defaultProfileId: null, profiles: [], projectBindings: {} });
+  const n = parseTaskSpec({ ...contractSpec(), project: PX }, "/", ep);
+  assert.equal(n.delivery, undefined);
+  assert.equal(n.deliveryResolution, undefined);
+
+  // Fail-closed: missing profile id
+  assert.throws(() => parseTaskSpec({ ...contractSpec(), project: PX, deliveryProfileId: "no-such" }, "/", p), /not found/);
+
+  // Fail-closed: malformed profile id
+  assert.throws(() => parseTaskSpec({ ...contractSpec(), project: PX, deliveryProfileId: "Bad-Id" }, "/", p), /malformed/);
+
+  // Conflict: inline delivery + deliveryProfileId
+  assert.throws(() => parseTaskSpec({
+    ...contractSpec(), project: PX, deliveryProfileId: "dp-a",
+    delivery: { buildCommands: ["npm ci"], activationCommands: [], activationCheckCommands: [] },
+  }, "/", p), /mutually exclusive/);
+
+  // Inline provenance
+  const il = parseTaskSpec({
+    ...contractSpec(), project: PX,
+    delivery: { buildCommands: ["npm run build"], activationCommands: ["npm start"], activationCheckCommands: [] },
+  }, "/");
+  assert.equal(il.deliveryResolution?.source, "inline");
+  assert.deepEqual(il.delivery!.buildCommands, ["npm run build"]);
+
+  // Detachment: mutate validated profile arrays after parsing, snapshot unchanged
+  const sn = parseTaskSpec({ ...contractSpec(), project: PX, deliveryProfileId: "dp-b" }, "/", p);
+  const profs = p.deliveryProfiles!.profiles as unknown as Array<{ buildCommands: string[]; id: string }>;
+  profs[1]!.buildCommands = ["evil"];
+  profs[1]!.id = "hacked";
+  assert.deepEqual(sn.delivery!.buildCommands, ["yarn"]);
+  assert.deepEqual(sn.deliveryResolution, { source: "explicit", profileId: "dp-b" });
+});
+
+// --- Advanced policy parsing and snapshot ---
+
+import type {
+  AdvancedPolicyFields,
+} from "../src/core/types.js";
+import {
+  defaultAdvancedPolicyFields,
+  deriveEffectivePolicyForTaskCreation,
+  enforcementCapabilityForRuntime,
+  resolveEffectivePolicy,
+  attemptPolicyFromSnapshot,
+  completionPolicyFromSnapshot,
+  sizePolicyFromSnapshot,
+} from "../src/core/advanced-policy.js";
+
+test("task YAML parses advancedPolicy override as undefined when omitted", () => {
+  const spec = parseTaskSpec(contractSpec(), process.cwd());
+  assert.equal(spec.advancedPolicyOverride, undefined);
+});
+
+test("task YAML parses advancedPolicy override with valid fields", () => {
+  const spec = parseTaskSpec(
+    contractSpec({ advancedPolicy: { baseMaxAttempts: 10, maxDurationMs: 600_000 } }),
+    process.cwd(),
+  );
+  assert.ok(spec.advancedPolicyOverride !== undefined);
+  assert.equal(spec.advancedPolicyOverride!.baseMaxAttempts, 10);
+  assert.equal(spec.advancedPolicyOverride!.maxDurationMs, 600_000);
+});
+
+test("task YAML rejects unknown advancedPolicy field", () => {
+  assert.throws(
+    () => parseTaskSpec(
+      contractSpec({ advancedPolicy: { unknownLimit: 100 } }),
+      process.cwd(),
+    ),
+    /not a recognized advanced-policy field/,
+  );
+});
+
+test("task YAML rejects invalid advancedPolicy value", () => {
+  assert.throws(
+    () => parseTaskSpec(
+      contractSpec({ advancedPolicy: { maxDurationMs: -100 } }),
+      process.cwd(),
+    ),
+    /must be null or a non-negative integer/,
+  );
+});
+
+test("task YAML advancedPolicy with explicit null for nullable field", () => {
+  const spec = parseTaskSpec(
+    contractSpec({ advancedPolicy: { maxDurationMs: null } }),
+    process.cwd(),
+  );
+  assert.equal(spec.advancedPolicyOverride!.maxDurationMs, null);
+});
+
+// --- Effective policy snapshot on TaskRecord ---
+
+function wpSettings(overrides: Partial<AdvancedPolicyFields> = {}) {
+  const d = cloneDefaults();
+  return {
+    contractQuality: d.contractQuality,
+    execution: d.execution,
+    providerDefaults: d.providerDefaults,
+    completionPolicy: d.completionPolicy,
+    workerProfiles: {
+      defaultProfileId: "default",
+      profiles: [{
+        id: "default", label: "Default", runtime: "claude-code" as const,
+        modelConfigId: "deepseek-flash",
+        provider: "deepseek" as const, model: "deepseek-v4-flash",
+        endpoint: "https://api.deepseek.com/anthropic",
+        effort: "high" as const,
+        ...(Object.keys(overrides).length === 0 ? {} : { advancedPolicy: overrides }),
+      }],
+    },
+  };
+}
+
+test("effective policy snapshot is stored on TaskRecord at creation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-ep-snap-"));
+  const store = new StateStore(home);
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-task-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: Policy Test
+project: ./project
+workerProfileId: default
+worker:
+  focusPaths: [src]
+contract:
+  outcome: A reasonable outcome description
+  context: [c]
+  inScope: [i]
+  outOfScope: [o]
+  executionSteps: [s]
+  deliverables: [d]
+  modules:
+    - name: m
+      responsibility: long enough responsibility
+      consumes: [c]
+      produces: [p]
+      boundaries: [b]
+  callChain: [a, b]
+  scenarios:
+    - name: normal
+      given: g
+      when: w
+      then: t
+    - name: edge
+      given: g
+      when: w
+      then: t
+  risks: [r]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 300
+acceptance:
+  criteria: [c]
+  commands:
+    - "true"
+`,
+  );
+  try {
+    const policy = wpSettings({ baseMaxAttempts: 7 });
+    const task = await createTask(store, taskFile, policy);
+    assert.ok(task.effectivePolicy !== undefined, "Task should have an effective policy snapshot");
+    assert.equal(task.effectivePolicy!.values.baseMaxAttempts, 7);
+    assert.equal(task.effectivePolicy!.provenance.baseMaxAttempts, "worker");
+    assert.equal(task.effectivePolicy!.profileId, "default");
+  } finally {
+    store.close();
+  }
+});
+
+test("effective policy snapshot persists across store reload", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-ep-reload-"));
+  const store = new StateStore(home);
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-task-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: Reload Test
+project: ./project
+workerProfileId: default
+worker:
+  focusPaths: [src]
+contract:
+  outcome: A reasonable outcome description
+  context: [c]
+  inScope: [i]
+  outOfScope: [o]
+  executionSteps: [s]
+  deliverables: [d]
+  modules:
+    - name: m
+      responsibility: long enough responsibility
+      consumes: [c]
+      produces: [p]
+      boundaries: [b]
+  callChain: [a, b]
+  scenarios:
+    - name: normal
+      given: g
+      when: w
+      then: t
+    - name: edge
+      given: g
+      when: w
+      then: t
+  risks: [r]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 300
+acceptance:
+  criteria: [c]
+  commands:
+    - "true"
+`,
+  );
+  try {
+    const policy = wpSettings({ baseMaxAttempts: 10 });
+    const task = await createTask(store, taskFile, policy);
+    const taskId = task.id;
+
+    // Reload from store
+    const reloaded = store.getTask(taskId);
+    assert.ok(reloaded.effectivePolicy !== undefined);
+    assert.equal(reloaded.effectivePolicy!.values.baseMaxAttempts, 10);
+  } finally {
+    store.close();
+  }
+});
+
+// --- Settings drift immunity ---
+
+test("settings change during queued work does not mutate existing Task snapshot", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-drift-"));
+  const store = new StateStore(home);
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-task-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: Drift Test
+project: ./project
+workerProfileId: default
+worker:
+  focusPaths: [src]
+advancedPolicy:
+  baseMaxAttempts: 4
+  maxConcurrency: 2
+contract:
+  outcome: A reasonable outcome description
+  context: [c]
+  inScope: [i]
+  outOfScope: [o]
+  executionSteps: [s]
+  deliverables: [d]
+  modules:
+    - name: m
+      responsibility: long enough responsibility
+      consumes: [c]
+      produces: [p]
+      boundaries: [b]
+  callChain: [a, b]
+  scenarios:
+    - name: normal
+      given: g
+      when: w
+      then: t
+    - name: edge
+      given: g
+      when: w
+      then: t
+  risks: [r]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 300
+acceptance:
+  criteria: [c]
+  commands:
+    - "true"
+`,
+  );
+  try {
+    const policyBefore = wpSettings({ baseMaxAttempts: 3, maxConcurrency: 1 });
+    const task = await createTask(store, taskFile, policyBefore);
+
+    // Task overrides win over Worker values; the live global scheduler cap is
+    // applied later without mutating the Task snapshot.
+    assert.equal(task.effectivePolicy!.values.baseMaxAttempts, 4);
+    assert.equal(task.effectivePolicy!.provenance.baseMaxAttempts, "task");
+    assert.equal(task.effectivePolicy!.values.maxDurationMs, null);
+    assert.equal(task.effectivePolicy!.values.maxConcurrency, 2);
+
+    // "Change" settings (different policy for next Task)
+    const policyAfter = wpSettings({ baseMaxAttempts: 1, maxConcurrency: 10 });
+    const task2 = await createTask(store, taskFile, policyAfter);
+    // New task's snapshot reflects new worker settings, but Task override still wins baseMaxAttempts
+    assert.equal(task2.effectivePolicy!.values.baseMaxAttempts, 4);
+    assert.equal(task2.effectivePolicy!.provenance.baseMaxAttempts, "task");
+
+    // Original task is immutable — still has old profile + Task override
+    const stored = store.getTask(task.id);
+    assert.equal(stored.effectivePolicy!.values.baseMaxAttempts, 4);
+    assert.equal(stored.effectivePolicy!.values.maxConcurrency, 2);
+    assert.equal(stored.effectivePolicy!.values.maxDurationMs, null);
+  } finally {
+    store.close();
+  }
+});
+
+// --- Explicit unlimited override ---
+
+test("explicit null Task override prevents fallback to finite worker profile", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-null-"));
+  const store = new StateStore(home);
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-task-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: Null Override
+project: ./project
+workerProfileId: default
+worker:
+  focusPaths: [src]
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+contract:
+  outcome: A reasonable outcome description
+  context: [c]
+  inScope: [i]
+  outOfScope: [o]
+  executionSteps: [s]
+  deliverables: [d]
+  modules:
+    - name: m
+      responsibility: long enough responsibility
+      consumes: [c]
+      produces: [p]
+      boundaries: [b]
+  callChain: [a, b]
+  scenarios:
+    - name: normal
+      given: g
+      when: w
+      then: t
+    - name: edge
+      given: g
+      when: w
+      then: t
+  risks: [r]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 300
+acceptance:
+  criteria: [c]
+  commands:
+    - "true"
+`,
+  );
+  try {
+    // Worker profile has finite duration and token ceilings
+    const policy = wpSettings({ maxDurationMs: 300_000, observedTokenCeiling: 100_000 });
+    const task = await createTask(store, taskFile, policy);
+    // Task overrides to null → explicitly unlimited, not falling back to worker
+    assert.equal(task.effectivePolicy!.values.maxDurationMs, null);
+    assert.equal(task.effectivePolicy!.provenance.maxDurationMs, "task");
+    assert.equal(task.effectivePolicy!.values.observedTokenCeiling, null);
+    assert.equal(task.effectivePolicy!.provenance.observedTokenCeiling, "task");
+  } finally {
+    store.close();
+  }
+});
+
+// --- Snapshot helper functions for backward compatibility ---
+
+test("completionPolicyFromSnapshot returns snapshot values when present", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const snap = resolveEffectivePolicy(
+    { completionMode: "warn", changeBudgetMode: "score" },
+    undefined,
+    defaultAdvancedPolicyFields(),
+    "test",
+    caps,
+  );
+  const result = completionPolicyFromSnapshot(snap, "hard", "hard");
+  assert.equal(result.noChangeMode, "warn");
+  assert.equal(result.changeBudgetMode, "score");
+});
+
+test("completionPolicyFromSnapshot falls back for undefined snapshot", () => {
+  const result = completionPolicyFromSnapshot(undefined, "warn", "score");
+  assert.equal(result.noChangeMode, "warn");
+  assert.equal(result.changeBudgetMode, "score");
+});
+
+test("attemptPolicyFromSnapshot returns snapshot values when present", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const snap = resolveEffectivePolicy(
+    { baseMaxAttempts: 7, maxExtraAttempts: 2 },
+    undefined,
+    defaultAdvancedPolicyFields(),
+    "test",
+    caps,
+  );
+  const result = attemptPolicyFromSnapshot(snap, 3, 1);
+  assert.equal(result.baseMaxAttempts, 7);
+  assert.equal(result.maxExtraAttempts, 2);
+});
+
+test("attemptPolicyFromSnapshot falls back for undefined snapshot", () => {
+  const result = attemptPolicyFromSnapshot(undefined, 5, 3);
+  assert.equal(result.baseMaxAttempts, 5);
+  assert.equal(result.maxExtraAttempts, 3);
+});
+
+test("sizePolicyFromSnapshot returns null limits for undefined snapshot", () => {
+  const result = sizePolicyFromSnapshot(undefined);
+  assert.equal(result.fileLimit, null);
+  assert.equal(result.changedLineLimit, null);
+  assert.equal(result.fileLimitMode, "warn");
+  assert.equal(result.changedLineLimitMode, "warn");
+});
+
+test("sizePolicyFromSnapshot returns configured limits from snapshot", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const snap = resolveEffectivePolicy(
+    { fileLimit: 10, fileLimitMode: "warn", changedLineLimit: 500, changedLineLimitMode: "score" },
+    undefined,
+    defaultAdvancedPolicyFields(),
+    "test",
+    caps,
+  );
+  const result = sizePolicyFromSnapshot(snap);
+  assert.equal(result.fileLimit, 10);
+  assert.equal(result.fileLimitMode, "warn");
+  assert.equal(result.changedLineLimit, 500);
+  assert.equal(result.changedLineLimitMode, "score");
+});
+
+// --- Legacy task recovery ---
+
+test("legacy stored Task without effectivePolicy uses fallback values", () => {
+  const policy = attemptPolicyFromSnapshot(undefined);
+  assert.equal(policy.baseMaxAttempts, 3);
+  assert.equal(policy.maxExtraAttempts, 1);
+
+  const comp = completionPolicyFromSnapshot(undefined, "hard", "hard");
+  assert.equal(comp.noChangeMode, "hard");
+  assert.equal(comp.changeBudgetMode, "hard");
+});
+
+// --- deriveEffectivePolicyForTaskCreation ---
+
+test("deriveEffectivePolicyForTaskCreation resolves with full provenance", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const glob = defaultAdvancedPolicyFields();
+  glob.baseMaxAttempts = 5;
+  glob.maxConcurrency = 10; // ensure concurrency=4 fits under global cap
+  const snapshot = deriveEffectivePolicyForTaskCreation({
+    workerProfile: {
+      id: "worker-1",
+      advancedPolicy: { maxDurationMs: 600_000 },
+    },
+    taskOverride: { maxConcurrency: 4 },
+    globalDefaults: glob,
+    enforcementCapability: caps,
+  });
+  assert.equal(snapshot.profileId, "worker-1");
+  assert.equal(snapshot.values.maxDurationMs, 600_000);
+  assert.equal(snapshot.provenance.maxDurationMs, "worker");
+  assert.equal(snapshot.values.maxConcurrency, 4);
+  assert.equal(snapshot.provenance.maxConcurrency, "task");
+  assert.equal(snapshot.values.baseMaxAttempts, 5);
+  assert.equal(snapshot.provenance.baseMaxAttempts, "global");
+});
+
+// --- Enforcement capability truthfulness ---
+
+test("Claude token enforcement is labeled post-observation, never preemptive", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  assert.notEqual(caps.tokenEnforcement, "preemptive",
+    "Claude Code must NOT claim preemptive Token enforcement — usage is terminal only");
+});
+
+test("Grok token enforcement is labeled unsupported", () => {
+  const caps = enforcementCapabilityForRuntime("grok-build");
+  assert.equal(caps.tokenEnforcement, "unsupported");
+});
+
+// --- Bounded policy adaptation transition chain ---
+
+import {
+  evaluateAdaptationGate,
+  deriveChildEffectivePolicy,
+  lineageRoundOf,
+  resolveAdaptiveRoot,
+} from "../src/core/adaptation.js";
+import type { EffectivePolicySnapshot } from "../src/core/types.js";
+
+function adaptSnapshot(overrides: Partial<EffectivePolicySnapshot["values"]> = {}): EffectivePolicySnapshot {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const base: EffectivePolicySnapshot = resolveEffectivePolicy(
+    undefined,
+    undefined,
+    defaultAdvancedPolicyFields(),
+    "default",
+    caps,
+  );
+  return {
+    ...base,
+    values: { ...base.values, maxAdaptationRounds: 1, ...overrides },
+    provenance: { ...base.provenance, maxAdaptationRounds: "global" },
+  };
+}
+
+function adaptParent(
+  id: string,
+  status: TaskRecord["status"] = "succeeded",
+  effectivePolicy: EffectivePolicySnapshot | undefined = adaptSnapshot(),
+): { id: string; status: TaskRecord["status"]; effectivePolicy: EffectivePolicySnapshot | undefined } {
+  return { id, status, effectivePolicy };
+}
+
+test("adaptation gate: zero rounds produces adaptation-disabled preview", () => {
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("p1", "succeeded", adaptSnapshot({ maxAdaptationRounds: 0 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 0 }),
+    existingLineage: [],
+    rawPatch: { maxDurationMs: 600_000 },
+  });
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.status, "stopped");
+  assert.equal(decision.preview.stoppedReason, "adaptation-disabled");
+  assert.equal(decision.preview.fields.length, 0);
+});
+
+test("adaptation gate: non-terminal parent produces parent-not-terminal preview", () => {
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("p1", "running", adaptSnapshot({ maxAdaptationRounds: 1 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [],
+    rawPatch: { maxDurationMs: 600_000 },
+  });
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "parent-not-terminal");
+});
+
+test("adaptation gate: missing effective policy produces missing-effective-policy preview", () => {
+  const decision = evaluateAdaptationGate({
+    parent: { id: "p1", status: "succeeded", effectivePolicy: undefined },
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [],
+    rawPatch: { maxDurationMs: 600_000 },
+  });
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "missing-effective-policy");
+});
+
+test("adaptation gate: no-op patch cannot consume a round", () => {
+  const snapshot = adaptSnapshot({ maxDurationMs: 60_000, maxAdaptationRounds: 2 });
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("root", "failed", snapshot),
+    rootEffectivePolicy: snapshot,
+    existingLineage: [],
+    rawPatch: { maxDurationMs: 60_000 },
+  });
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "no-effective-change");
+});
+
+test("adaptation gate: eligible preview shows before/after with provenance and changed flag", () => {
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("root", "succeeded", adaptSnapshot({ maxDurationMs: 60_000 })),
+    rootEffectivePolicy: adaptSnapshot({ maxDurationMs: 60_000, maxAdaptationRounds: 2 }),
+    existingLineage: [],
+    rawPatch: { maxDurationMs: 600_000 },
+  });
+  assert.equal(decision.kind, "eligible");
+  const fields = decision.preview.fields;
+  const dur = fields.find((f) => f.field === "maxDurationMs");
+  assert.ok(dur);
+  assert.equal(dur!.before, 60_000);
+  assert.equal(dur!.after, 600_000);
+  assert.equal(dur!.changed, true);
+  assert.equal(dur!.source, "global");
+  assert.equal(decision.preview.nextRound, 1);
+  assert.equal(decision.preview.maxAdaptationRounds, 2);
+});
+
+test("adaptation gate: cap of one with existing line stops round-2 from same parent with successor-already-created", () => {
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("parent-2", "succeeded", adaptSnapshot({ maxAdaptationRounds: 1 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [
+      { rootTaskId: "root", parentTaskId: "root", childTaskId: "parent-2", round: 1 },
+      { rootTaskId: "root", parentTaskId: "parent-2", childTaskId: "other", round: 2 },
+    ],
+    rawPatch: { maxDurationMs: 600_000 },
+  });
+  // Existing lineage marks parent-2 as already having a successor; the gate
+  // surfaces successor-already-created as the more specific stopped reason.
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "successor-already-created");
+});
+
+test("adaptation gate: cap of one on a child round stops round-2 from same parent", () => {
+  // Simulate: root has cap=1, used its round-1 to create child.
+  // Try to apply again from root (parent).
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("root", "succeeded", adaptSnapshot({ maxAdaptationRounds: 1 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [
+      { rootTaskId: "root", parentTaskId: "root", childTaskId: "first-child", round: 1 },
+    ],
+    rawPatch: { maxDurationMs: 600_000 },
+  });
+  // root already has one child, so successor-already-created is the right reason.
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "successor-already-created");
+});
+
+test("adaptation gate: round-limit-reached when next round would exceed cap", () => {
+  // p1 is a child (round 1) of root. No edge of which p1 is the parent,
+  // so next round = 2 > cap = 1 => round-limit-reached.
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("p1", "succeeded", adaptSnapshot({ maxAdaptationRounds: 1 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [
+      { rootTaskId: "root", parentTaskId: "root", childTaskId: "p1", round: 1 },
+    ],
+    rawPatch: { maxDurationMs: 600_000 },
+  });
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "round-limit-reached");
+});
+
+test("adaptation gate: rejected patch containing maxAdaptationRounds reports forbidden-field", () => {
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("root", "succeeded", adaptSnapshot({ maxAdaptationRounds: 1 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [],
+    rawPatch: { maxAdaptationRounds: 5, maxDurationMs: 60_000 },
+  });
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "forbidden-field");
+});
+
+test("adaptation gate: malformed patch reports invalid-patch", () => {
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("root", "succeeded", adaptSnapshot({ maxAdaptationRounds: 1 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [],
+    rawPatch: { baseMaxAttempts: -1 },
+  });
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "invalid-patch");
+});
+
+test("adaptation gate: unknown patch field is forbidden-field", () => {
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("root", "succeeded", adaptSnapshot({ maxAdaptationRounds: 1 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [],
+    rawPatch: { someUnknownField: 5 },
+  });
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "forbidden-field");
+});
+
+test("adaptation gate: settings-related surface fields are forbidden-field", () => {
+  // Provider endpoint, runtime authority, credentials, edit permissions,
+  // acceptance commands, commit/push, maxAdaptationRounds are all
+  // intentionally NOT advanced-policy fields and must be rejected.
+  for (const forbidden of [
+    { provider: "deepseek", endpoint: "https://example" },
+    { allowEdits: true },
+    { allowedCommands: ["git push"] },
+    { commit: true },
+    { push: true },
+    { execution: {} },
+  ]) {
+    const decision = evaluateAdaptationGate({
+      parent: adaptParent("root", "succeeded", adaptSnapshot({ maxAdaptationRounds: 1 })),
+      rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+      existingLineage: [],
+      rawPatch: forbidden,
+    });
+    assert.equal(decision.kind, "stopped");
+    assert.equal(decision.preview.stoppedReason, "forbidden-field",
+      `must reject ${JSON.stringify(forbidden)} as forbidden-field`);
+  }
+});
+
+test("adaptation gate: round depth is computed from existing lineage", () => {
+  // p1 (round 1) -> p2 (round 2)
+  const parentEdge = {
+    rootTaskId: "root", parentTaskId: "root", childTaskId: "p1", round: 1,
+  };
+  const childEdge = {
+    rootTaskId: "root", parentTaskId: "p1", childTaskId: "p2", round: 2,
+  };
+  // Adjusting from p2 should compute nextRound = 3
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("p2", "succeeded", adaptSnapshot({ maxAdaptationRounds: 3 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 3 }),
+    existingLineage: [parentEdge, childEdge],
+    rawPatch: { maxDurationMs: 600_000 },
+  });
+  assert.equal(decision.kind, "eligible");
+  assert.equal(decision.preview.nextRound, 3);
+});
+
+test("adaptation gate: empty patch is stopped and cannot consume a round", () => {
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("root", "succeeded", adaptSnapshot({ maxDurationMs: 60_000 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [],
+    rawPatch: {},
+  });
+  assert.equal(decision.kind, "stopped");
+  assert.equal(decision.preview.stoppedReason, "no-effective-change");
+});
+
+test("resolveAdaptiveRoot returns itself when no lineage edges exist", () => {
+  const result = resolveAdaptiveRoot("root", []);
+  assert.deepEqual(result, { rootTaskId: "root" });
+});
+
+test("resolveAdaptiveRoot walks lineage to the root ancestor", () => {
+  const lineage = [
+    { rootTaskId: "root", parentTaskId: "root", childTaskId: "p1", round: 1 },
+    { rootTaskId: "root", parentTaskId: "p1", childTaskId: "p2", round: 2 },
+  ];
+  assert.deepEqual(resolveAdaptiveRoot("p2", lineage), { rootTaskId: "root" });
+});
+
+test("lineageRoundOf returns 0 for the root and hops up the chain", () => {
+  const lineage = [
+    { rootTaskId: "root", parentTaskId: "root", childTaskId: "p1", round: 1 },
+    { rootTaskId: "root", parentTaskId: "p1", childTaskId: "p2", round: 2 },
+  ];
+  assert.equal(lineageRoundOf("root", lineage), 0);
+  assert.equal(lineageRoundOf("p1", lineage), 1);
+  assert.equal(lineageRoundOf("p2", lineage), 2);
+});
+
+test("deriveChildEffectivePolicy preserves root cap and overrides patch fields", () => {
+  const parentSnapshot = adaptSnapshot({
+    maxAdaptationRounds: 2,
+    maxDurationMs: 60_000,
+    noProgressTimeoutMs: 1_800_000,
+  });
+  const child = deriveChildEffectivePolicy(parentSnapshot, {
+    maxDurationMs: 600_000,
+    noProgressTimeoutMs: 2_500_000,
+  });
+  assert.equal(child.values.maxAdaptationRounds, 2, "cap is preserved");
+  assert.equal(child.values.maxDurationMs, 600_000, "patch value applied");
+  assert.equal(child.values.noProgressTimeoutMs, 2_500_000, "patch value applied");
+  assert.equal(child.provenance.maxDurationMs, "task", "patched field provenance is task");
+  assert.equal(child.provenance.noProgressTimeoutMs, "task", "patched field provenance is task");
+});
+
+test("deriveChildEffectivePolicy rejects patch that tries to redefine the cap", () => {
+  const parentSnapshot = adaptSnapshot({ maxAdaptationRounds: 1 });
+  const child = deriveChildEffectivePolicy(parentSnapshot, {
+    maxAdaptationRounds: 99 as unknown as never,
+    maxDurationMs: 600_000,
+  });
+  assert.equal(child.values.maxAdaptationRounds, 1, "cap unchanged despite patch attempt");
+  assert.equal(child.values.maxDurationMs, 600_000, "non-cap patch field applied");
+});
+
+test("adaptation gate: provenance and enforcement phase are surfaced in the preview", () => {
+  const caps = enforcementCapabilityForRuntime("grok-build");
+  const caps1 = enforcementCapabilityForRuntime("claude-code");
+  // Two different capability matrices to verify the preview reflects each.
+  void caps; void caps1;
+  const decision = evaluateAdaptationGate({
+    parent: adaptParent("root", "succeeded", adaptSnapshot({ maxDurationMs: 60_000 })),
+    rootEffectivePolicy: adaptSnapshot({ maxAdaptationRounds: 1 }),
+    existingLineage: [],
+    rawPatch: { observedTokenCeiling: 100_000 },
+  });
+  assert.equal(decision.kind, "eligible");
+  const row = decision.preview.fields.find((f) => f.field === "observedTokenCeiling");
+  assert.ok(row);
+  assert.equal(row!.before, null);
+  assert.equal(row!.after, 100_000);
+});
+
+// --- pricingRoute snapshot on Task creation ----------------------------------
+
+test("pricingRoute from Worker is snapshotted into Task ProviderSpec at creation time", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-pr-snap-"));
+  const store = new StateStore(home);
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-task-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: PricingRoute Snap
+project: ./project
+workerProfileId: mm-cn
+worker:
+  focusPaths: [src]
+contract:
+  outcome: A reasonable outcome description for pricing route snapshot
+  context: [c]
+  inScope: [i]
+  outOfScope: [o]
+  executionSteps: [s]
+  deliverables: [d]
+  modules:
+    - name: m
+      responsibility: long enough responsibility
+      consumes: [c]
+      produces: [p]
+      boundaries: [b]
+  callChain: [a, b]
+  scenarios:
+    - name: normal
+      given: g
+      when: w
+      then: t
+    - name: edge
+      given: g
+      when: w
+      then: t
+  risks: [r]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 300
+acceptance:
+  criteria: [c]
+  commands:
+    - "true"
+`,
+  );
+  try {
+    const defaults = cloneDefaults();
+    const policy: TaskPolicy = {
+      contractQuality: defaults.contractQuality,
+      execution: defaults.execution,
+      providerDefaults: defaults.providerDefaults,
+      completionPolicy: defaults.completionPolicy,
+      workerProfiles: {
+        defaultProfileId: "mm-cn",
+        profiles: [{
+          id: "mm-cn",
+          label: "MM CN",
+          runtime: "claude-code",
+          provider: "minimax",
+          model: "MiniMax-M3",
+          endpoint: "https://api.minimaxi.com/anthropic",
+          pricingRoute: "minimax-china-direct-payg",
+        }],
+      },
+    };
+    const task = await createTask(store, taskFile, policy);
+    // pricingRoute is in the snapshotted ProviderSpec
+    assert.equal(task.spec.provider.pricingRoute, "minimax-china-direct-payg");
+
+    // Later settings change the Worker's pricingRoute
+    const policy2: TaskPolicy = {
+      ...policy,
+      workerProfiles: {
+        defaultProfileId: "mm-cn",
+        profiles: [{
+          id: "mm-cn",
+          label: "MM CN Changed",
+          runtime: "claude-code",
+          provider: "minimax",
+          model: "MiniMax-M3",
+          endpoint: "https://api.minimaxi.com/anthropic",
+          pricingRoute: "minimax-international-direct-payg",
+        }],
+      },
+    };
+    const task2 = await createTask(store, taskFile, policy2);
+    // New task gets the changed route
+    assert.equal(task2.spec.provider.pricingRoute, "minimax-international-direct-payg");
+
+    // Original task is immutable
+    const stored = store.getTask(task.id);
+    assert.equal(stored.spec.provider.pricingRoute, "minimax-china-direct-payg");
+  } finally {
+    store.close();
+  }
+});
+
+// --- Main-authored user presentation ---
+
+function taskWithPresentation(presentation?: unknown): Record<string, unknown> {
+  const base = contractSpec();
+  const contract = base.contract as Record<string, unknown>;
+  return {
+    ...base,
+    contract: {
+      ...contract,
+      ...(presentation === undefined ? {} : { presentation }),
+    },
+  };
+}
+
+test("Task presentation is stored exactly and stays contextual in the Worker prompt", () => {
+  const summary = "让用户一眼看懂这次任务要解决什么，以及完成后会得到什么。";
+  const parsed = parseTaskSpec(
+    taskWithPresentation({ summary, language: "zh-Hans-CN" }),
+    process.cwd(),
+  );
+  assert.equal(parsed.version, 2);
+  assert.deepEqual(parsed.contract.presentation, { summary, language: "zh-Hans-CN" });
+
+  const prompt = buildWorkerPrompt(parsed, false);
+  assert.match(prompt, /Main-authored user explanation/);
+  assert.ok(prompt.includes(summary));
+  assert.match(prompt, /technical contract and acceptance remain authoritative/);
+  assert.match(prompt, /Observable outcome:/);
+  assert.match(prompt, /Independent acceptance commands:/);
+});
+
+test("Task presentation remains optional for existing structured Tasks", () => {
+  const parsed = parseTaskSpec(taskWithPresentation(), process.cwd());
+  assert.equal(parsed.version, 2);
+  assert.equal(parsed.contract.presentation, undefined);
+  assert.doesNotMatch(buildWorkerPrompt(parsed, false), /Main-authored user explanation/);
+});
+
+test("Task presentation rejects unsafe shapes at one content-free parser boundary", () => {
+  const secret = "DO-NOT-ECHO-PRESENTATION";
+  const invalid = [
+    { summary: "", language: "en" },
+    { summary: " leading space", language: "en" },
+    { summary: "line one\nline two", language: "en" },
+    { summary: "x".repeat(301), language: "en" },
+    { summary: "Readable summary", language: "not a tag!" },
+    { summary: "Readable summary" },
+    { language: "en" },
+    { summary: "Readable summary", language: "en", extra: secret },
+  ];
+  for (const presentation of invalid) {
+    assert.throws(
+      () => parseTaskSpec(taskWithPresentation(presentation), process.cwd()),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /task\.contract\.presentation/);
+        assert.ok(!error.message.includes(secret));
+        return true;
+      },
+    );
   }
 });

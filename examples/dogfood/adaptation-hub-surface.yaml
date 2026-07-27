@@ -1,0 +1,145 @@
+version: 2
+name: Add a bounded adaptation panel to Hub Task details
+project: ../..
+contract:
+  outcome: A user can select one or more Worker-policy fields, preview the exact effective change, and explicitly create one bounded successor Task from Hub without editing JSON or starting an autonomous retry loop.
+  context:
+    - Worker Advanced settings already expose the durable per-Worker policy and effective-policy preview.
+    - CLI and MCP now expose the existing one-step adaptation preview/apply operations.
+    - Hub Task details still lack a friendly control for the same transition.
+    - The immutable root maxAdaptationRounds cap and one-successor-per-parent rule are the anti-loop authority.
+  inScope:
+    - Add strict Hub routes for adaptation preview and confirmed apply that delegate to the existing daemon operations.
+    - Include the Task effective-policy snapshot in the safe Task-detail response so the UI can explain the current values and root cap.
+    - Add a terminal-Task panel with an explicit enable control for every adaptable policy field except maxAdaptationRounds.
+    - Support numeric, explicit-unlimited, and mode values without requiring JSON knowledge.
+    - Require preview before apply; invalidate the preview whenever any input changes.
+    - Render only canonical changed rows, provenance, enforcement phase, next round, cap, stopped reason, and child Task id.
+    - Add English and Chinese copy, responsive styling, and focused route/UI asset tests.
+  outOfScope:
+    - Do not automatically diagnose failures, choose values, call a model, preview on page load, apply on preview, or recursively adapt a child.
+    - Do not make maxAdaptationRounds editable on an existing Task; it remains the immutable root cap chosen in Worker Advanced settings before Task creation.
+    - Do not change the adaptation gate, lineage transaction, scheduler, Worker execution, verification authority, Integration, commit, or push.
+    - Do not expose raw prompt, source, Diff, logs, secrets, or arbitrary daemon payloads.
+  executionSteps:
+    - Reuse the current Worker advanced-field inventory and labels while excluding the immutable adaptation-round cap.
+    - Add strict Hub adapter routes with bounded reason validation, object-only patch validation, and literal confirmation for apply.
+    - Build an opt-in field editor where unchecked fields are absent rather than silently reset.
+    - Show the server-returned before/after preview and keep Apply disabled until an eligible preview matches the current form.
+    - Prove preview is non-mutating, apply is confirmation-gated, stopped states are visible, and compact/mobile layout does not overflow.
+    - Run focused tests, TypeScript, and whitespace checks once; report unresolved UI uncertainty instead of repeated parameter tuning.
+  deliverables:
+    - Hub Task-detail one-step strategy-adjustment panel.
+    - Safe Hub API bridges to canonical daemon preview/apply.
+    - Regression evidence for confirmation, field omission, preview invalidation, bilingual copy, and responsive structure.
+  modules:
+    - name: Hub adaptation bridge
+      responsibility: Validate the HTTP body and delegate to canonical daemon operations without duplicating policy logic.
+      consumes:
+        - Task id, object-only patch, bounded reason, and literal confirmation on apply.
+      produces:
+        - Canonical preview or successor summary.
+      boundaries:
+        - It never infers a patch, loops, or rewrites the Task result.
+    - name: Task adaptation editor
+      responsibility: Let a user opt into concrete policy changes and understand their effect before confirmation.
+      consumes:
+        - Safe effective-policy snapshot, shared labels, user-enabled fields, and canonical preview response.
+      produces:
+        - One preview request followed by at most one explicitly confirmed apply request.
+      boundaries:
+        - Unchecked fields are omitted; maxAdaptationRounds is display-only; editing invalidates prior preview authority.
+    - name: Adaptation evidence view
+      responsibility: Explain eligibility, stopped reason, round cap, source, enforcement timing, and successor identity.
+      consumes:
+        - Canonical content-free daemon result.
+      produces:
+        - Bilingual, responsive evidence rows and a link to the created child Task.
+      boundaries:
+        - It does not label a policy change as Task success or independent verification.
+  callChain:
+    - Hub loads one Task detail and receives its immutable effective-policy snapshot.
+    - The user explicitly enables and edits one or more adaptable fields.
+    - Preview POST delegates to adaptation_preview and returns canonical before/after evidence without mutation.
+    - Hub enables Apply only for the unchanged eligible preview and asks for confirmation.
+    - Apply POST delegates to adaptation_apply with confirm true; the daemon creates at most one queued successor.
+    - Hub renders the child Task id and refreshes the Board without automatically adapting again.
+  scenarios:
+    - name: opt-in omission
+      given: The user changes only maximum duration.
+      when: Hub builds the patch.
+      then: Every unchecked field is absent and no other Worker setting is reset.
+    - name: preview then confirm
+      given: A terminal Task allows one round and the preview is eligible.
+      when: The user confirms Apply without changing the form.
+      then: Hub creates exactly one successor and shows its id.
+    - name: form changed after preview
+      given: An eligible preview is visible.
+      when: The user changes any enabled field, value, or reason.
+      then: Apply becomes disabled until a new preview is obtained.
+    - name: cap exhausted
+      given: The Task cap is zero, exhausted, or the parent already has a successor.
+      when: The user previews or applies.
+      then: Hub shows the stable stopped reason and never retries automatically.
+    - name: narrow viewport
+      given: Hub is viewed at a 390-pixel width.
+      when: The adaptation rows and preview are visible.
+      then: Controls wrap inside the card without horizontal document overflow.
+  risks:
+    - Reusing the Worker editor collector could serialize blank fields as null; this panel must require per-field opt-in.
+    - Apply could use a stale preview after form edits; all controls and reason changes must invalidate it.
+    - Presenting the transition as self-healing could imply success; copy must say it creates a next Task that still needs normal independent verification.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 4000
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/app.css
+    - src/hub/public/i18n.js
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Every adaptable field is available through an explicit opt-in control and unchecked fields are omitted.
+    - Preview never mutates; apply requires literal confirmation and an unchanged eligible preview.
+    - Exhausted or disabled adaptation stops visibly without an automatic follow-up.
+    - English, Chinese, TypeScript, route tests, asset tests, and whitespace checks pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

@@ -17,11 +17,28 @@ import {
   resolveModelEndpoint,
   type ModelCatalogSettings,
 } from "./model-catalog.js";
+import type {
+  AdvancedPolicyFields,
+  ContractQualityOverrides,
+  PolicyMode,
+} from "./types.js";
+import {
+  validateAdvancedPolicyPatch as validateAdvancedPolicyRaw,
+} from "./advanced-policy.js";
 
 const PROFILE_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 const MODEL_PATTERN = /^[A-Za-z0-9._+:/\[\]-]{1,128}$/;
 const ENDPOINT_PATTERN = /^https:\/\/[^\s]{4,512}$/;
+const ROUTE_PATTERN = /^[a-zA-Z][a-zA-Z0-9._-]{0,63}$/;
 const EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"]);
+const QUALITY_MODES = new Set<string>(["hard", "warn", "score", "off"]);
+const QUALITY_MAX_FIELDS = new Set<string>(["maxFiles", "maxDiffLines", "maxFocusPaths"]);
+const QUALITY_MIN_FIELDS = new Set<string>([
+  "minScenarios",
+  "minCallChainSteps",
+  "minOutcomeCharacters",
+  "minModuleResponsibilityCharacters",
+]);
 
 export interface WorkerProfile {
   id: string;
@@ -39,7 +56,18 @@ export interface WorkerProfile {
   effort?: EffortLevel;
   /** Soft per-task budget for this Worker (null = unlimited soft default). */
   maxBudgetUsd?: number | null;
+  /** Legacy top-level no-progress timeout. Superseded by advancedPolicy.noProgressTimeoutMs when set.
+   *  Kept for backward-compatible reading of stored profiles. */
   noProgressTimeoutMs?: number;
+  /** Per-Worker advanced execution policy. Permissive-by-default: duration and Token ceilings
+   *  are unlimited unless explicitly set. */
+  advancedPolicy?: Partial<AdvancedPolicyFields>;
+  /** Per-Worker Task Contract Quality override. It cannot contain Safety or
+   * authority settings. */
+  contractQuality?: ContractQualityOverrides;
+  /** Optional billing-route identifier for official pricing resolution.
+   *  Bounded non-empty identifier; never a credential. Explicit Task/MCP override wins. */
+  pricingRoute?: string;
 }
 
 export interface WorkerProfilesSettings {
@@ -59,10 +87,17 @@ export interface ResolvedWorkerSelection {
   /** Soft budget from worker profile when set; else execution.defaultMaxBudgetUsd. */
   maxBudgetUsd: number | null;
   noProgressTimeoutMs: number;
+  /** Resolved billing route. Explicit Task/MCP override wins;
+   *  otherwise inherited from the selected Worker profile. */
+  pricingRoute?: string;
 }
 
 export function isWorkerProfileId(value: string): boolean {
   return PROFILE_ID_PATTERN.test(value);
+}
+
+export function isPricingRouteId(value: unknown): value is string {
+  return typeof value === "string" && ROUTE_PATTERN.test(value);
 }
 
 export function defaultWorkerProfiles(
@@ -111,6 +146,52 @@ function parseOptionalBudget(
     throw new Error(`${label} must be a positive number or null`);
   }
   return raw;
+}
+
+export function validateContractQualityOverride(
+  raw: unknown,
+  label = "contractQuality",
+): ContractQualityOverrides {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const input = raw as Record<string, unknown>;
+  const result: ContractQualityOverrides = {};
+  for (const [field, value] of Object.entries(input)) {
+    if (field === "mode") {
+      if (typeof value !== "string" || !QUALITY_MODES.has(value)) {
+        throw new Error(`${label}.mode must be hard, warn, score, or off`);
+      }
+      result.mode = value as PolicyMode;
+      continue;
+    }
+    if (QUALITY_MAX_FIELDS.has(field)) {
+      if (value !== null && (
+        typeof value !== "number"
+        || !Number.isFinite(value)
+        || !Number.isInteger(value)
+        || value <= 0
+      )) {
+        throw new Error(`${label}.${field} must be null or a positive integer`);
+      }
+      (result as Record<string, unknown>)[field] = value;
+      continue;
+    }
+    if (QUALITY_MIN_FIELDS.has(field)) {
+      if (
+        typeof value !== "number"
+        || !Number.isFinite(value)
+        || !Number.isInteger(value)
+        || value < 0
+      ) {
+        throw new Error(`${label}.${field} must be a non-negative integer`);
+      }
+      (result as Record<string, unknown>)[field] = value;
+      continue;
+    }
+    throw new Error(`${label}.${field} is not a recognized contract-quality field`);
+  }
+  return result;
 }
 
 /**
@@ -198,6 +279,27 @@ export function validateWorkerProfile(
     noProgressTimeoutMs = o.noProgressTimeoutMs as number;
   }
 
+  let advancedPolicy: Partial<AdvancedPolicyFields> | undefined;
+  if (o.advancedPolicy !== undefined) {
+    advancedPolicy = validateAdvancedPolicyRaw(o.advancedPolicy, `${label}.advancedPolicy`);
+  }
+
+  let contractQuality: ContractQualityOverrides | undefined;
+  if (o.contractQuality !== undefined) {
+    contractQuality = validateContractQualityOverride(
+      o.contractQuality,
+      `${label}.contractQuality`,
+    );
+  }
+
+  let pricingRoute: string | undefined;
+  if (o.pricingRoute !== undefined) {
+    if (!isPricingRouteId(o.pricingRoute)) {
+      throw new Error(`${label}.pricingRoute must be a bounded non-empty identifier`);
+    }
+    pricingRoute = o.pricingRoute;
+  }
+
   return {
     id: o.id,
     label: o.label.trim(),
@@ -209,6 +311,9 @@ export function validateWorkerProfile(
     ...(effort === undefined ? {} : { effort }),
     ...(maxBudgetUsd === undefined ? {} : { maxBudgetUsd }),
     ...(noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs }),
+    ...(advancedPolicy === undefined ? {} : { advancedPolicy }),
+    ...(contractQuality === undefined ? {} : { contractQuality }),
+    ...(pricingRoute === undefined ? {} : { pricingRoute }),
   };
 }
 
@@ -304,6 +409,7 @@ export function resolveWorkerSelection(
     endpoint?: string;
     effort?: string;
     maxBudgetUsd?: number | null;
+    pricingRoute?: string;
   },
   settings: {
     execution: ForkLightSettings["execution"];
@@ -389,6 +495,17 @@ export function resolveWorkerSelection(
   const noProgressTimeoutMs = base?.noProgressTimeoutMs
     ?? settings.execution.noProgressTimeoutMs;
 
+  if (input.pricingRoute !== undefined && !isPricingRouteId(input.pricingRoute)) {
+    throw new Error("pricingRoute must be a bounded non-empty identifier");
+  }
+  // Explicit Provider/endpoint changes make the Worker's billing identity stale.
+  // A caller can still provide a new explicit pricingRoute for the new identity.
+  const baseIdentityStillApplies = baseModel === undefined
+    || ((input.provider === undefined || input.provider === baseModel.provider)
+      && (input.endpoint === undefined || input.endpoint === baseModel.endpoint));
+  const pricingRoute = input.pricingRoute
+    ?? (baseIdentityStillApplies ? base?.pricingRoute : undefined);
+
   return {
     profileId,
     modelConfigId: baseModel?.modelConfigId,
@@ -400,6 +517,7 @@ export function resolveWorkerSelection(
     keychainService: pd.defaultKeychainService,
     maxBudgetUsd,
     noProgressTimeoutMs,
+    ...(pricingRoute === undefined ? {} : { pricingRoute }),
   };
 }
 

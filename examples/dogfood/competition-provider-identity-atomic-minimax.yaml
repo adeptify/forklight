@@ -1,0 +1,114 @@
+version: 2
+name: Competition provider identity is atomic
+project: ../..
+contract:
+  outcome: Competition candidate Tasks rebuild billing and Provider identity atomically, so a candidate never inherits pricingRoute or keychainAccount from the source Task after its Provider, model, and endpoint are replaced.
+  context:
+    - Competition cloneSpec currently clones the full source Task, replaces only several Provider fields, and can leave optional billing identity behind.
+    - A stale pricingRoute corrupts official price attribution; missing cost evidence is safer than false price evidence.
+    - CandidateOverride has no explicit pricing-route field, so this task must not invent one.
+  inScope:
+    - Rebuild the cloned ProviderSpec from the candidate override and configured Provider defaults.
+    - Clear source-only Provider identity fields that the candidate did not explicitly supply.
+    - Add regression coverage using CompetitionCoordinator-created candidate Tasks.
+  outOfScope:
+    - Do not add new competition API fields.
+    - Do not change pricing tables, pricing calculations, or competition scoring.
+    - Do not commit or push.
+  executionSteps:
+    - Inspect cloneSpec and coordinator creation tests.
+    - Implement an atomic candidate ProviderSpec replacement.
+    - Add a regression starting from a source spec with a Volcengine pricingRoute and keychainAccount, then inspect the persisted candidates.
+    - Run focused tests and build once.
+  deliverables:
+    - Atomic Provider identity clone logic.
+    - Regression proof that stale billing route and account data cannot cross candidates.
+  modules:
+    - name: Competition candidate cloning
+      responsibility: Produce each candidate TaskSpec from one source contract plus candidate and Provider defaults.
+      consumes:
+        - Source TaskSpec.
+        - CandidateOverride.
+        - ProviderDefaultsSettings.
+      produces:
+        - Candidate TaskSpec with internally consistent Provider identity.
+      boundaries:
+        - Does not infer pricing routes.
+        - Does not mutate the source TaskSpec.
+        - Does not change the public candidate input.
+    - name: Competition regression tests
+      responsibility: Observe persisted candidate Task specs created by the coordinator.
+      consumes:
+        - Temporary source project.
+        - Candidate list.
+      produces:
+        - Proof that candidate identity fields cannot leak from the source.
+      boundaries:
+        - No live Provider calls.
+        - No daemon dependency.
+  callChain:
+    - CompetitionCoordinator.create receives the source TaskSpec and candidates.
+    - cloneSpec constructs the Provider identity for each candidate.
+    - StateStore persists candidate Task records.
+    - Regression tests read the records and verify Provider, model, endpoint, Keychain identity, and pricing route.
+  scenarios:
+    - name: Cross-Provider candidate clears stale billing route
+      given: A source Task uses Volcengine, a subscription pricingRoute, and a keychainAccount.
+      when: A DeepSeek or MiniMax competition candidate is created.
+      then: Its Task uses only that candidate Provider defaults and has no inherited pricingRoute or keychainAccount.
+    - name: Source Task remains unchanged
+      given: The source TaskSpec contains an explicit pricingRoute.
+      when: Multiple candidates are cloned.
+      then: The source object retains its original fields and candidates do not mutate each other.
+  risks:
+    - Clearing a legitimate route loses cost evidence, but CandidateOverride has no route authority; unavailable evidence is safer than misattribution.
+    - Tests must inspect persisted candidate Task specs rather than relying on private cloneSpec.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 260
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 2
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/competition.ts
+    - tests/competition.test.ts
+acceptance:
+  criteria:
+    - Every candidate Provider object is internally consistent with the candidate and Provider defaults.
+    - No candidate inherits pricingRoute or keychainAccount from the source Task.
+    - The source TaskSpec is not mutated.
+    - Existing competition behavior remains passing.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/competition.test.ts
+    - npm run build
+    - git diff --check

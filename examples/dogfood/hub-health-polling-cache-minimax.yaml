@@ -1,0 +1,130 @@
+version: 2
+name: Hub observation must not starve Worker execution
+project: ../..
+contract:
+  outcome: Keep Task and Board progress responsive while preventing Hub polling from repeatedly running expensive synchronous runtime and environment checks that delay workspace preparation and Worker event processing.
+  context:
+    - Dogfood showed two Tasks remaining in preparing while one or more open Hub tabs polled every two seconds.
+    - Sampling the daemon showed repeated synchronous child-process checks, including Claude Code version and Grok help, while workspace copying advanced very slowly.
+    - Pausing the Hub processes immediately allowed the first Task to run and the second workspace snapshot to advance.
+    - Task, Board, Competition, and statistics reads are inexpensive and should remain fresh; runtime, Main-installation, prerequisite, and daemon-health inspection may be cached briefly.
+  inScope:
+    - Add one bounded Hub-server cache for expensive setup/status and daemon-health snapshots, shared across browser tabs.
+    - Coalesce concurrent cache misses so multiple tabs cause one underlying inspection rather than duplicate work.
+    - Keep Task, Board, Plan, Competition, statistics, settings, and economics reads uncached and current.
+    - Preserve explicit daemon lifecycle and Provider probe actions as real operations; a user-requested status action may bypass or refresh cached evidence.
+    - Invalidate relevant cached setup or health evidence after successful daemon lifecycle, settings, Provider key, model catalog, Worker profile, or Main installation mutations.
+    - Include a safe checked-at timestamp or age signal in cached health/setup responses when feasible, without exposing credentials, commands, paths beyond existing responses, or internal errors.
+    - Add deterministic tests proving cache hits, expiry, concurrent request coalescing, invalidation, and continued freshness of Task reads.
+  outOfScope:
+    - Do not edit browser app.js, i18n.js, CSS, daemon coordinator, runtime adapters, Provider probes, task execution, routing, or settings schema.
+    - Do not reduce Task progress polling frequency, hide stale evidence as live, auto-restart anything, or add a retry loop.
+    - Do not commit, push, or call a live Provider.
+  executionSteps:
+    - Trace Hub GET status, ops health, lifecycle mutations, settings/provider/model/worker/Main mutations, and existing Hub server test seams.
+    - Implement a small in-memory monotonic-TTL cache with one in-flight Promise per evidence class and no persistence.
+    - Apply it only to expensive setup/status and daemon-health reads; make invalidation explicit after relevant successful mutations.
+    - Add focused tests with counted dependencies and fake time where practical.
+    - Run the stored acceptance commands once and report any remaining freshness tradeoff.
+  deliverables:
+    - Expensive Hub environment and health inspection no longer runs every two-second poll or once per tab.
+    - Concurrent Hub tabs share one in-flight inspection.
+    - Operational progress endpoints remain current.
+    - Focused regression tests document cache lifetime and invalidation behavior.
+  modules:
+    - name: Expensive evidence cache
+      responsibility: Reuse recent setup and daemon-health snapshots and coalesce simultaneous misses.
+      consumes:
+        - Existing Hub dependency functions and a bounded monotonic lifetime.
+      produces:
+        - The same privacy-safe response shapes plus optional freshness metadata.
+      boundaries:
+        - No persistent state, credentials, task data, Provider calls, or execution mutation.
+    - name: Mutation invalidation
+      responsibility: Clear only affected evidence after a successful configuration or lifecycle mutation.
+      consumes:
+        - Existing mutation success paths.
+      produces:
+        - A later read performs one fresh inspection.
+      boundaries:
+        - Failed mutations do not replace known-good evidence or trigger retry loops.
+  callChain:
+    - One or more Hub tabs request setup status and daemon health.
+    - The Hub server returns a recent safe snapshot or shares one in-flight inspection.
+    - Task and Board requests continue through their existing direct read path.
+    - A relevant successful mutation invalidates the corresponding snapshot.
+    - The next read refreshes once and becomes the new shared snapshot.
+  scenarios:
+    - name: Multiple open tabs
+      given: Three Hub tabs refresh within one cache lifetime.
+      when: They request setup status and daemon health concurrently.
+      then: Each receives a response while each expensive underlying inspection runs at most once.
+    - name: Active Worker
+      given: A Worker is preparing or streaming events.
+      when: Hub continues normal progress polling.
+      then: Task and Board state stays current and repeated runtime doctor subprocesses do not occupy every polling cycle.
+    - name: Settings changed
+      given: A cached setup snapshot exists.
+      when: A settings, Provider, model, Worker, or Main mutation succeeds.
+      then: A subsequent setup read refreshes instead of serving evidence from before the change.
+    - name: Daemon lifecycle changed
+      given: A cached health snapshot exists.
+      when: Start, stop, or restart succeeds.
+      then: The cached health state is invalidated and the next health read reflects the new lifecycle state.
+  risks:
+    - Excessive cache lifetime could hide a runtime change, so keep it bounded and attach safe freshness evidence where possible.
+    - Incomplete invalidation could serve stale setup state, so centralize invalidation and test every mutation family.
+    - Caching Task data would make the UI misleading, so explicitly exclude all progress and result endpoints.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 1000
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-health-cache.test.ts
+acceptance:
+  criteria:
+    - Expensive setup and daemon-health inspection is shared across tabs and bounded by a short cache lifetime.
+    - Concurrent misses invoke each underlying inspection once.
+    - Task, Board, Plan, Competition, statistics, settings, and economics reads are not cached.
+    - Relevant successful mutations invalidate cached evidence while failures do not invent a new state.
+    - No credentials, raw commands, or new internal diagnostics enter public responses.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-health-cache.test.ts tests/hub-settings.test.ts tests/hub-ops-mutations.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

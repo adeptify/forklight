@@ -1,0 +1,144 @@
+version: 2
+name: Hub guided direct-Main Token savings backend
+project: ../..
+taskClass: hub-calibration-backend
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: Expose one bounded, privacy-safe Hub backend workflow that turns a stored Task's direct-run Token evidence into reviewed, published calibration evidence, so the existing economics report can truthfully calculate direct Main Token savings without CLI knowledge.
+  context:
+    - The canonical direct-Codex workflow already exists in core, daemon, CLI, and MCP as guided capture, inbox, immutable review, publication preview, and confirmed publication registration.
+    - The Hub currently renders savings when a calibration exists but provides no HTTP workflow to create that evidence. PROJECT_STATUS currently overstates Hub support.
+    - This task adds only a Hub transport and safe projection. It must call canonical daemon operations rather than reimplementing identity, Token arithmetic, review immutability, publication versioning, or savings math.
+    - A direct-run sample contains Token counts and opaque references only. Raw prompts, responses, diffs, logs, paths, credentials, and model output must never enter the Hub response or persisted metadata.
+    - Mutations are user initiated. Review and publication require explicit confirm true; no endpoint runs a model, starts a Task, launches Codex, or publishes automatically.
+  inScope:
+    - Add GET /api/ops/tasks/:id/calibration that derives taskClass and directCodexProfileId from the stored Task and returns one bounded safe state.
+    - "The GET response contract is: state identity-missing or ready; optional identity with taskClass and directCodexProfileId; samples capped at 50 with sampleId, capturedAt, grossTokens, and reviewState pending/accepted/rejected; optional publicationPreview with ready, reason, pendingCount, acceptedCount, rejectedCount, nextVersion, and acceptedSampleIds capped at 50."
+    - When identity is missing, return state identity-missing without calling inbox or publication preview and explain no Token savings can be calculated until future Tasks carry both fields.
+    - When identity exists, call only daemon direct_codex_inbox and direct_codex_publication_preview, calculate grossTokens from the already validated five counters once, and strip all unlisted fields.
+    - Add POST /api/ops/tasks/:id/calibration/capture with strict body runRef plus the exact canonical turn.completed usage shape. Derive pairing identity from the Task by calling direct_codex_guided_capture.
+    - Add POST /api/ops/tasks/:id/calibration/review with strict sampleId, accepted/rejected decision, optional bounded enum rejectionReason, and confirm true. Server supplies reviewer main-codex, schemaVersion 1, and current canonical timestamp.
+    - Add POST /api/ops/tasks/:id/calibration/publish with exact body confirm true. Use method hub-guided-exact-pair, confidence low, server timestamp, and Task-derived identity. Low is conservative and truthful until a later versioned confidence policy exists.
+    - Return fixed, privacy-safe errors. Unknown body fields, invalid counters, padded ids, missing confirmation, identity mismatch, and unavailable daemon operations fail closed without echoing untrusted content.
+    - Invalidate only the Task-detail/economics view naturally by leaving those reads uncached; do not touch the environment-health cache.
+    - Add behavior tests for every route, exact daemon operation and payload, identity-missing behavior, projection bounds, confirmation gates, privacy, and no calls to submit/compete/probe/settings/integration.
+  outOfScope:
+    - Do not change direct-Codex core arithmetic, Store schema, daemon protocol, CLI, MCP, economics formulas, Task schema, calibration selection, confidence semantics outside this Hub path, or official Provider pricing.
+    - Do not build UI, launch a direct Codex run, infer a runtime profile, accept raw prompt/output/log content, auto-accept a sample, auto-publish, retry, adapt, commit, or push.
+    - Do not expose raw canonical daemon objects wholesale; the Hub response is an explicit allowlist.
+  executionSteps:
+    - Trace the Task detail bridge and all direct_codex daemon operations and canonical validators.
+    - Define exported safe Hub calibration response types and a small allowlisted projection helper.
+    - Implement the read route, then the three strict mutation routes using existing body parsing, confirmation, and daemon bridge patterns.
+    - Add focused fake-daemon tests that assert operation names, exact payloads, state immutability on rejection, projection bounds, and privacy.
+    - Run the stored acceptance commands once and report any contract mismatch instead of inventing an alternate API.
+  deliverables:
+    - Safe calibration state projection for one Task.
+    - Guided capture, immutable review, and conservative publication Hub endpoints.
+    - Deterministic regression tests proving the workflow delegates to canonical daemon operations.
+    - No change to existing CLI/MCP behavior or savings arithmetic.
+  modules:
+    - name: Calibration state projection
+      responsibility: Turn canonical Task identity, inbox, and publication preview into a bounded Hub-safe status.
+      consumes:
+        - Stored Task calibration identity and canonical daemon read responses.
+      produces:
+        - One allowlisted state that tells the UI what happened and what is possible next.
+      boundaries:
+        - No raw content, credentials, paths, model execution, or savings recomputation.
+    - name: Calibration Hub operations
+      responsibility: Validate explicit user actions and relay them to existing canonical daemon operations.
+      consumes:
+        - Task id, count-only usage, opaque run reference, review decision, and explicit confirmations.
+      produces:
+        - Canonical capture, review, or publication result with fixed safe errors.
+      boundaries:
+        - No automatic mutation, no identity supplied by the browser, and no alternate workflow rules.
+  callChain:
+    - Hub requests a Task calibration state.
+    - Server reads the stored Task and derives exact taskClass and directCodexProfileId.
+    - If ready, server reads canonical inbox and publication preview and returns only bounded user-safe fields.
+    - User explicitly submits count-only usage from an equivalent direct run; Hub calls direct_codex_guided_capture.
+    - User explicitly accepts or rejects the pending sample; Hub calls direct_codex_review with confirmation.
+    - User explicitly publishes accepted evidence; Hub calls direct_codex_publication_register with conservative low confidence.
+    - Existing task_economics reads the new publication and calculates savings through unchanged canonical math.
+  scenarios:
+    - name: Historical Task lacks identity
+      given: A Task has no taskClass or directCodexProfileId.
+      when: Hub requests calibration state.
+      then: The response says identity-missing, calls no workflow operation, and never suggests fabricating a baseline.
+    - name: Pending direct-run sample
+      given: An eligible Task and a valid turn.completed usage event.
+      when: The user explicitly captures it.
+      then: One pending sample is created through guided capture and no review or publication occurs automatically.
+    - name: Review requires confirmation
+      given: A pending sample exists.
+      when: Review is requested without confirm true or with an unknown reason.
+      then: Hub rejects before calling the daemon and does not echo the supplied value.
+    - name: Publish accepted evidence
+      given: Publication preview reports at least one accepted new sample and ready true.
+      when: The user explicitly confirms publication.
+      then: Hub registers one low-confidence hub-guided-exact-pair publication using the Task-derived identity.
+    - name: Privacy attack
+      given: Daemon fixtures or browser body contain extra prompt, output, path, secret, or log fields.
+      when: A route validates or projects the data.
+      then: Extra input is rejected and extra daemon fields are absent from the response.
+  risks:
+    - Hub and CLI could diverge if business rules are duplicated, so every mutation must delegate to the canonical daemon operation.
+    - A raw daemon response could leak more fields later, so project explicit keys and cap every list.
+    - Publishing weak evidence can overstate confidence, so the first Hub workflow always publishes low confidence and keeps sample size visible.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 1400
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: xhigh
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - tests/hub-calibration.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-settings.test.ts
+acceptance:
+  criteria:
+    - The Hub exposes the exact read, capture, review, and publish workflow described by the contract and delegates mutations to canonical daemon operations.
+    - Task calibration identity is derived from stored evidence; the browser cannot supply or override it.
+    - Every response is bounded and allowlisted; prompt, output, log, path, diff, credential, and unknown fields never appear.
+    - Capture stays pending; review and publication require explicit confirm true; no model, Task, competition, Provider probe, settings, integration, retry, commit, or push operation is called.
+    - Existing direct-Codex arithmetic, publication versioning, economics, and CLI/MCP behavior remain unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-calibration.test.ts tests/hub-ops-mutations.test.ts tests/hub-settings.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

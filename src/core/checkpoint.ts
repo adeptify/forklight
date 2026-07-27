@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import type { StateStore } from "../state/store.js";
+import type { CapabilitySupport } from "../workers/types.js";
 import { runCaptured } from "./process.js";
 import type {
   AttemptRecord,
@@ -20,11 +21,39 @@ export interface CheckpointLaunch {
   env: Record<string, string>;
 }
 
+export type CheckpointGapReason =
+  | "runtime-unsupported"
+  | "missing-or-failed-non-authoritative";
+
+export interface TerminalAfterVerification {
+  status: "succeeded" | "failed";
+  /** Present only when status is failed. */
+  failureReason?: string;
+  /**
+   * Record a non-blocking `checkpoint.skipped` audit event
+   * (unsupported runtime, or supported/partial without a valid checkpoint).
+   */
+  recordCheckpointGap: boolean;
+  gapReason?: CheckpointGapReason;
+}
+
+/**
+ * Whether the given attempt has a complete, well-formed non-authoritative
+ * checkpoint for every acceptance command id (`acceptance-1` … `acceptance-N`).
+ *
+ * Only events with matching `attemptId` count (multi-attempt isolation).
+ * Wrong authority, partial command sets, non-zero exit, or timedOut reject.
+ */
 export function checkpointSatisfied(
   events: readonly EventRecord[],
   attemptId: string,
   commandCount: number,
 ): boolean {
+  if (!Number.isSafeInteger(commandCount) || commandCount < 0) return false;
+  if (commandCount === 0) {
+    // No acceptance commands → no checkpoint payload required.
+    return true;
+  }
   const completed = [...events].reverse().find(
     (event) => event.attemptId === attemptId && event.type === "checkpoint.completed",
   );
@@ -57,6 +86,49 @@ export function checkpointSatisfied(
     }
   }
   return expected.size === 0;
+}
+
+/**
+ * Terminal status after Worker finish + independent verification.
+ *
+ * Independent verification is authoritative for `succeeded` / `failed`.
+ * Worker bounded checkpoint is a non-authoritative self-check: missing or
+ * failed checkpoint must not force `failed` when verification passed.
+ *
+ * `unsupported` → always treat as skipped (gap audit).
+ * `supported` / `partial` → gap audit only when checkpoint not satisfied.
+ */
+export function resolveTerminalAfterVerification(input: {
+  verificationPassed: boolean;
+  checkpointCapability: CapabilitySupport;
+  checkpointSatisfied: boolean;
+}): TerminalAfterVerification {
+  if (!input.verificationPassed) {
+    return {
+      status: "failed",
+      failureReason: "Independent verification failed",
+      recordCheckpointGap: false,
+    };
+  }
+  if (input.checkpointCapability === "unsupported") {
+    return {
+      status: "succeeded",
+      recordCheckpointGap: true,
+      gapReason: "runtime-unsupported",
+    };
+  }
+  // supported | partial: checkpoint optional for terminal success
+  if (!input.checkpointSatisfied) {
+    return {
+      status: "succeeded",
+      recordCheckpointGap: true,
+      gapReason: "missing-or-failed-non-authoritative",
+    };
+  }
+  return {
+    status: "succeeded",
+    recordCheckpointGap: false,
+  };
 }
 
 export function checkpointLaunch(
@@ -114,10 +186,10 @@ export async function runCheckpoint(
   );
 
   const commands: CheckpointReport["commands"] = [];
-  const verifierEnvironment = await verifierProcessEnvironment(task);
+  const { env: verifierEnvironment, shellGitPrefix } = await verifierProcessEnvironment(task);
   for (const commandId of selected) {
     const command = catalog.get(commandId)!;
-    const captured = await runCaptured("/bin/zsh", ["-lc", command], {
+    const captured = await runCaptured("/bin/zsh", ["-lc", shellGitPrefix + command], {
       cwd: task.paths.workspace,
       env: verifierEnvironment,
     });

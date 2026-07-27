@@ -22,6 +22,10 @@ export interface HubSettingsView {
   /** Effective default model/endpoint for the selected default provider. */
   defaultModel: string;
   defaultEndpoint: string;
+  /** Evidence-aware model routing advisory settings. */
+  modelRouting: ForkLightSettings["modelRouting"];
+  /** Reusable Delivery Profile registry (profiles, project bindings, default). */
+  deliveryProfiles: ForkLightSettings["deliveryProfiles"];
 }
 
 export interface HubSettingsPatch {
@@ -35,6 +39,41 @@ export interface HubSettingsPatch {
   /** When set with defaultProvider (or current), updates that provider's defaults. */
   defaultModel?: string;
   defaultEndpoint?: string;
+  /** Bounded modelRouting policy patch. Weights can be partially provided. */
+  modelRouting?: {
+    minRelevantSamples?: number;
+    uncertaintyThreshold?: number;
+    competitionOnUncertainty?: boolean;
+    missingEvidenceMode?: "strict" | "flexible";
+    weights?: {
+      acceptedDelivery?: number;
+      verifiedBehavior?: number;
+      modelQualityFailure?: number;
+      correctionChurn?: number;
+      officialCost?: number;
+      duration?: number;
+      budgetReliability?: number;
+    };
+  };
+  /** Complete Delivery Profile registry replacement. Validated atomically;
+   *  invalid profiles, references, paths, or unknown fields reject the whole update. */
+  deliveryProfiles?: Record<string, unknown>;
+}
+
+export interface HubModelRoutingView {
+  minRelevantSamples: number;
+  uncertaintyThreshold: number;
+  competitionOnUncertainty: boolean;
+  missingEvidenceMode: "strict" | "flexible";
+  weights: {
+    acceptedDelivery: number;
+    verifiedBehavior: number;
+    modelQualityFailure: number;
+    correctionChurn: number;
+    officialCost: number;
+    duration: number;
+    budgetReliability: number;
+  };
 }
 
 const MODEL_PATTERN = /^[A-Za-z0-9._+:/\[\]-]{1,128}$/;
@@ -53,12 +92,26 @@ export function viewHubSettings(settings: ForkLightSettings): HubSettingsView {
     defaultEffort: settings.execution.defaultEffort,
     defaultModel: pd.defaultModel,
     defaultEndpoint: pd.defaultEndpoint,
+    modelRouting: viewModelRoutingSettings(settings),
+    deliveryProfiles: settings.deliveryProfiles,
+  };
+}
+
+/** Project only the flexible modelRouting policy, no secrets or hard invariants. */
+export function viewModelRoutingSettings(settings: ForkLightSettings): HubModelRoutingView {
+  return {
+    minRelevantSamples: settings.modelRouting.minRelevantSamples,
+    uncertaintyThreshold: settings.modelRouting.uncertaintyThreshold,
+    competitionOnUncertainty: settings.modelRouting.competitionOnUncertainty,
+    missingEvidenceMode: settings.modelRouting.missingEvidenceMode,
+    weights: { ...settings.modelRouting.weights },
   };
 }
 
 /**
  * Build a settings.update patch for Hub fields with fail-closed pairing.
  * Throws Error with a user-facing message on invalid input.
+ * When modelRouting is included, validates and returns it as a separate section.
  */
 export function buildHubSettingsPatch(
   current: ForkLightSettings,
@@ -66,6 +119,8 @@ export function buildHubSettingsPatch(
 ): {
   execution: Record<string, unknown>;
   providerDefaults?: Record<string, Record<string, unknown>>;
+  modelRouting?: Record<string, unknown>;
+  deliveryProfiles?: Record<string, unknown>;
 } {
   const nextProvider = patch.defaultProvider ?? current.execution.defaultProvider;
   const nextRuntime = patch.defaultRuntime ?? current.execution.defaultRuntime;
@@ -155,7 +210,44 @@ export function buildHubSettingsPatch(
     throw new Error("defaultMaxBudgetUsd must not exceed maximumBudgetUsd");
   }
 
-  return providerDefaults === undefined
-    ? { execution }
-    : { execution, providerDefaults };
+  let modelRouting: Record<string, unknown> | undefined;
+  if (patch.modelRouting !== undefined) {
+    modelRouting = buildModelRoutingPatch(patch.modelRouting);
+  }
+
+  let deliveryProfiles: Record<string, unknown> | undefined;
+  if (patch.deliveryProfiles !== undefined) {
+    if (patch.deliveryProfiles === null || typeof patch.deliveryProfiles !== "object" || Array.isArray(patch.deliveryProfiles)) {
+      throw new Error("deliveryProfiles must be an object");
+    }
+    // Validation is deferred to SettingsService.update which calls the canonical
+    // validateDeliveryProfilesSettings. No duplicated validation here.
+    deliveryProfiles = structuredClone(patch.deliveryProfiles) as Record<string, unknown>;
+  }
+
+  const base: {
+    execution: Record<string, unknown>;
+    providerDefaults?: Record<string, Record<string, unknown>>;
+    modelRouting?: Record<string, unknown>;
+    deliveryProfiles?: Record<string, unknown>;
+  } = { execution };
+  if (providerDefaults !== undefined) base.providerDefaults = providerDefaults;
+  if (modelRouting !== undefined) base.modelRouting = modelRouting;
+  if (deliveryProfiles !== undefined) base.deliveryProfiles = deliveryProfiles;
+  return base;
+}
+
+/**
+ * Preserve the bounded Hub object for SettingsService, which is the single
+ * authority for model-routing field names, value ranges and deep-merge rules.
+ * This layer checks only the transport shape; duplicating canonical bounds
+ * here would let Hub validation drift from CLI/MCP settings validation.
+ */
+export function buildModelRoutingPatch(
+  patch: unknown,
+): Record<string, unknown> {
+  if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new Error("modelRouting must be an object");
+  }
+  return structuredClone(patch as Record<string, unknown>);
 }

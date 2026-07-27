@@ -1,6 +1,8 @@
-import { writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import type { WriteStream } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import path from "node:path";
-import { runCaptured } from "../core/process.js";
 import type {
   PatchEvidence,
   TaskPaths,
@@ -63,30 +65,36 @@ export function parseAffectedPathsFromWorkspaceDiff(diff: string): string[] {
   return [...files].sort();
 }
 
-function splitPatchSections(diff: string): string[] {
-  const starts = [...diff.matchAll(/^diff --git /gm)].map((match) => match.index);
-  if (starts.length === 0) return [];
-  if (diff.slice(0, starts[0]).trim().length > 0) {
-    throw new Error("Workspace patch contains unsupported content before the first file section");
+function sectionHeaderAffectedPaths(headerLine: string): string[] {
+  const tokens = diffHeaderTokens(headerLine);
+  if (!tokens) return [];
+  const paths = new Set<string>();
+  for (const token of tokens) {
+    const relative = relativeWorkspacePath(token);
+    if (relative !== undefined) paths.add(relative);
   }
-  return starts.map((start, index) => diff.slice(start, starts[index + 1] ?? diff.length));
+  return [...paths].sort();
 }
 
-function changedLines(diff: string): number {
-  return diff.split("\n").filter(
-    (line) =>
-      (line.startsWith("+") && !line.startsWith("+++"))
-      || (line.startsWith("-") && !line.startsWith("---")),
-  ).length;
+function isChangedLine(line: string): boolean {
+  return (
+    (line.startsWith("+") && !line.startsWith("+++"))
+    || (line.startsWith("-") && !line.startsWith("---"))
+  );
 }
 
-function evidence(artifactPath: string, sections: readonly string[]): PatchEvidence {
-  const patch = sections.join("");
+interface SectionAccumulator {
+  filesChanged: number;
+  changedLines: number;
+  affectedPaths: Set<string>;
+}
+
+function toEvidence(artifactPath: string, acc: SectionAccumulator): PatchEvidence {
   return {
     path: artifactPath,
-    filesChanged: sections.length,
-    changedLines: changedLines(patch),
-    affectedPaths: parseAffectedPathsFromWorkspaceDiff(patch),
+    filesChanged: acc.filesChanged,
+    changedLines: acc.changedLines,
+    affectedPaths: [...acc.affectedPaths].sort(),
   };
 }
 
@@ -94,57 +102,163 @@ export async function writeWorkspacePatchReport(
   paths: TaskPaths,
   policy: PathPolicy,
 ): Promise<WorkspacePatchReport> {
-  const result = await runCaptured(
-    "git",
-    [
-      "-c",
-      "core.quotePath=false",
-      "diff",
-      "--no-index",
-      "--no-ext-diff",
-      "--binary",
-      "--",
-      "baseline",
-      "workspace",
-    ],
-    { cwd: paths.root },
-  );
-  if (result.exitCode !== 0 && result.exitCode !== 1) {
-    throw new Error(`Unable to generate workspace patch: ${result.stderr.trim()}`);
-  }
-
   const artifacts = workspacePatchPaths(paths);
-  const sections = splitPatchSections(result.stdout);
-  const businessSections: string[] = [];
-  const generatedSections: string[] = [];
-  for (const section of sections) {
-    const affectedPaths = parseAffectedPathsFromWorkspaceDiff(section);
-    if (affectedPaths.length !== 1) {
-      throw new Error("Workspace patch section must identify exactly one safe relative path");
-    }
-    switch (policy.classify(affectedPaths[0]!)) {
-      case "business":
-        businessSections.push(section);
-        break;
-      case "generated":
-        generatedSections.push(section);
-        break;
-      case "internal":
-        break;
-    }
-  }
+  const rawStream = createWriteStream(artifacts.rawDiff, { mode: 0o600 });
+  const generatedStream = createWriteStream(artifacts.generatedDiff, { mode: 0o600 });
+  const integrationStream = createWriteStream(artifacts.integrationDiff, { mode: 0o600 });
 
-  const businessPatch = businessSections.join("");
-  const generatedPatch = generatedSections.join("");
-  await Promise.all([
-    writeFile(artifacts.rawDiff, result.stdout, { mode: 0o600 }),
-    writeFile(artifacts.generatedDiff, generatedPatch, { mode: 0o600 }),
-    writeFile(artifacts.integrationDiff, businessPatch, { mode: 0o600 }),
-  ]);
-
-  return {
-    business: evidence(artifacts.integrationDiff, businessSections),
-    generated: evidence(artifacts.generatedDiff, generatedSections),
-    integration: evidence(artifacts.integrationDiff, businessSections),
+  const businessAcc: SectionAccumulator = {
+    filesChanged: 0, changedLines: 0, affectedPaths: new Set(),
   };
+  const generatedAcc: SectionAccumulator = {
+    filesChanged: 0, changedLines: 0, affectedPaths: new Set(),
+  };
+
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", [
+      "-c", "core.quotePath=false",
+      "diff", "--no-index", "--no-ext-diff", "--binary",
+      "--", "baseline", "workspace",
+    ], {
+      cwd: paths.root,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+
+    const decoder = new StringDecoder("utf8");
+    let stderr = "";
+    let settled = false;
+
+    const fail = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      rawStream.destroy();
+      generatedStream.destroy();
+      integrationStream.destroy();
+      reject(err);
+    };
+
+    const draining = new Set<WriteStream>();
+    const write = (stream: WriteStream, data: string | Buffer): void => {
+      if (stream.write(data) || draining.has(stream)) return;
+      if (draining.size === 0) child.stdout.pause();
+      draining.add(stream);
+      stream.once("drain", () => {
+        draining.delete(stream);
+        if (draining.size === 0 && !settled) child.stdout.resume();
+      });
+    };
+
+    let lineBuffer = "";
+    let preambleChecked = false;
+    let preambleHadContent = false;
+    let classification: "business" | "generated" | "internal" | null = null;
+    let affectedPath: string | null = null;
+    let sectionChangedLines = 0;
+
+    const flushSection = (): void => {
+      if (classification !== null && classification !== "internal") {
+        const acc = classification === "business" ? businessAcc : generatedAcc;
+        acc.filesChanged += 1;
+        acc.changedLines += sectionChangedLines;
+        if (affectedPath !== null) acc.affectedPaths.add(affectedPath);
+      }
+      classification = null;
+      affectedPath = null;
+      sectionChangedLines = 0;
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      write(rawStream, chunk);
+      lineBuffer += decoder.write(chunk);
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop()!;
+
+      for (const line of lines) {
+        if (line.startsWith("diff --git ")) {
+          if (!preambleChecked) {
+            if (preambleHadContent) {
+              fail(new Error("Workspace patch contains unsupported content before the first file section"));
+              return;
+            }
+            preambleChecked = true;
+          } else {
+            flushSection();
+          }
+          const paths = sectionHeaderAffectedPaths(line);
+          if (paths.length !== 1) {
+            fail(new Error("Workspace patch section must identify exactly one safe relative path"));
+            return;
+          }
+          affectedPath = paths[0]!;
+          classification = policy.classify(affectedPath);
+        } else if (!preambleChecked) {
+          if (line.trim().length > 0) preambleHadContent = true;
+          continue;
+        } else {
+          if (isChangedLine(line)) sectionChangedLines += 1;
+        }
+        if (preambleChecked && classification !== null && classification !== "internal") {
+          write(
+            classification === "business" ? integrationStream : generatedStream,
+            line + "\n",
+          );
+        }
+      }
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length >= 100_000) return;
+      const next = stderr + chunk.toString();
+      stderr = next.length <= 100_000 ? next : next.slice(0, 100_000);
+    });
+
+    rawStream.on("error", (err) => fail(err));
+    generatedStream.on("error", (err) => fail(err));
+    integrationStream.on("error", (err) => fail(err));
+    child.once("error", (err) => fail(err));
+
+    child.once("close", (code, signal) => {
+      if (settled) return;
+      lineBuffer += decoder.end();
+      if (!preambleChecked) {
+        if (preambleHadContent || lineBuffer.trim().length > 0) {
+          fail(new Error("Workspace patch contains unsupported content before the first file section"));
+          return;
+        }
+      } else {
+        if (lineBuffer.length > 0 && classification !== null) {
+          if (isChangedLine(lineBuffer)) sectionChangedLines += 1;
+          if (classification !== "internal") {
+            write(
+              classification === "business" ? integrationStream : generatedStream,
+              lineBuffer,
+            );
+          }
+        }
+        flushSection();
+      }
+      const exitCode = code ?? (signal ? 128 : 1);
+      if (exitCode !== 0 && exitCode !== 1) {
+        fail(new Error(`Unable to generate workspace patch: ${stderr.trim()}`));
+        return;
+      }
+      let finished = 0;
+      const done = (): void => {
+        if (++finished === 3) {
+          settled = true;
+          resolve({
+            business: toEvidence(artifacts.integrationDiff, businessAcc),
+            generated: toEvidence(artifacts.generatedDiff, generatedAcc),
+            integration: toEvidence(artifacts.integrationDiff, businessAcc),
+          });
+        }
+      };
+      rawStream.end(done);
+      generatedStream.end(done);
+      integrationStream.end(done);
+    });
+  });
 }

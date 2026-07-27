@@ -1,0 +1,143 @@
+version: 2
+name: Show machine outcome and final delivery separately in Hub
+project: ../..
+contract:
+  outcome: A Hub user can see that a Worker machine run failed while Main later verified the repaired product as delivered, without either result hiding or relabeling the other.
+  context:
+    - Core Task summaries and TaskDecisionView now expose an optional compact remediationDisposition.
+    - Provider/model statistics now expose acceptedDeliveryCount, acceptedDeliveryRate, mainRepairedDeliveryCount, and remediationCheckCount alongside unchanged machine success and failure fields.
+    - The Console currently drops remediationDisposition from its Task-list adapter and only renders machine successRate in statistics.
+    - This is a presentation task. Do not create another retry, repair, policy-tuning, or model-selection loop.
+  inScope:
+    - Preserve remediationDisposition in the safe Hub Task-list adapter.
+    - Render machine outcome and verified final-delivery outcome as two explicitly named facts on Task cards and Task detail.
+    - Keep failed or interrupted Main-repaired Tasks in the failed lane while adding a distinct compact delivery badge.
+    - Render machine success rate, accepted final-delivery rate, Main-repaired count, remediation-check count, and unchanged failure distribution together in Provider/model statistics.
+    - Add concise English and Chinese explanations that a Main-repaired delivery does not rewrite Worker success or failure.
+    - Add focused server projection and UI asset tests, plus responsive styling only where needed.
+  outOfScope:
+    - Do not add a remediation action form, run acceptance commands, resume a Worker, call a model, adjust policy, or infer whether a repair is needed.
+    - Do not change core remediation persistence, statistics arithmetic, Task status, failure categories, daemon protocol, Integration, source activation, commit, or push.
+    - Do not expose remediation reason, command text/output, prompt, Diff, source contents, or arbitrary inspect payloads.
+    - Do not redesign the whole Console or tune visual parameters repeatedly; make one coherent pass using the existing design system.
+  executionSteps:
+    - Inspect the current Hub Task-list adapter, cards, Task detail, statistics cards, bilingual copy, and existing UI asset tests.
+    - Thread only the compact remediationDisposition through the existing safe adapter.
+    - Add a reusable final-delivery presentation that never changes lane selection or machine badges.
+    - Extend statistics cards with side-by-side machine and final-delivery evidence and a short semantic caveat.
+    - Add focused route and asset assertions for dual truths, privacy boundaries, bilingual copy, and narrow layouts.
+    - Run the focused acceptance suite once and report unresolved uncertainty instead of tuning in a loop.
+  deliverables:
+    - Hub Board and Task detail dual-outcome presentation.
+    - Provider/model statistics dual-rate and remediation-count presentation.
+    - English/Chinese copy and focused regression coverage.
+  modules:
+    - name: Hub safe Task adapter
+      responsibility: Preserve the compact final-delivery disposition already produced by the daemon.
+      consumes:
+        - SafeTaskSummary fields including optional remediationDisposition.
+      produces:
+        - Console Task list entries containing only status, checkId, and createdAt for remediation.
+      boundaries:
+        - It does not return reasons, commands, outputs, source content, or change machine status.
+    - name: Task outcome presentation
+      responsibility: Show machine execution and accepted final delivery as simultaneous facts.
+      consumes:
+        - Machine Task status, failure category, and optional verified-repaired-delivered disposition.
+      produces:
+        - Existing machine badge plus a separately named final-delivery badge and detail explanation.
+      boundaries:
+        - A repaired Task remains in the failed lane and is never presented as Worker success.
+    - name: Model statistics presentation
+      responsibility: Explain both machine reliability and usable final delivery for each Provider/model.
+      consumes:
+        - Existing statistics plus acceptedDeliveryRate, acceptedDeliveryCount, mainRepairedDeliveryCount, and remediationCheckCount.
+      produces:
+        - Parallel rates, counts, failure distribution, and a semantic caveat.
+      boundaries:
+        - It performs no arithmetic other than formatting canonical numbers from the daemon.
+  callChain:
+    - Hub requests list_summaries and statistics from the daemon.
+    - The server preserves only the compact remediation disposition on Task entries.
+    - Board cards retain the machine lane and badge, then optionally add the final-delivery badge.
+    - Task detail reads the same compact disposition from TaskDecisionView and explains both facts.
+    - Statistics render unchanged machine evidence beside canonical accepted-delivery evidence.
+  scenarios:
+    - name: failed and repaired
+      given: A failed Task has a verified-repaired-delivered disposition.
+      when: Board and Task detail render it.
+      then: It stays in the failed lane, shows failed as the machine outcome, and separately shows verified final delivery.
+    - name: failed and not repaired
+      given: A failed Task has no remediation disposition.
+      when: It renders.
+      then: Existing failure presentation remains unchanged and no delivery claim appears.
+    - name: machine success
+      given: A succeeded Task has no remediation disposition.
+      when: It renders.
+      then: Existing succeeded presentation remains unchanged and no Main-repair badge appears.
+    - name: model statistics
+      given: A model has one machine success and one machine failure later repaired by Main.
+      when: Statistics render.
+      then: Machine success is 50 percent, accepted final delivery is 100 percent, Main-repaired count is one, and the failure remains visible.
+    - name: privacy and mobile
+      given: A compact remediation disposition is shown at a narrow viewport.
+      when: The user views the card and detail.
+      then: No reason or command output is present and labels wrap without document overflow.
+  risks:
+    - Calling accepted delivery success would erase the distinction; labels must say machine outcome versus final delivery.
+    - Moving repaired failures into Done would corrupt operational reliability; lane selection remains based only on Task status.
+    - Duplicating statistics arithmetic in JavaScript could drift from the daemon; format canonical fields only.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 2200
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/app.css
+    - src/hub/public/i18n.js
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Failed Main-repaired Tasks remain machine failures and stay in the failed lane.
+    - Final delivery is a separate compact fact in Board, Task detail, and Provider/model statistics.
+    - Existing failure distribution remains visible and no private remediation content is exposed.
+    - English, Chinese, focused route/UI tests, TypeScript, and whitespace checks pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

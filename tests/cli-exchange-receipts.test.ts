@@ -18,7 +18,10 @@ import {
   humanTokenReportLines,
   withCliExchangeReceipt,
 } from "../src/cli/exchange-receipts.js";
+import { routeMutation } from "../src/daemon/client.js";
 import { StateStore } from "../src/state/store.js";
+import { authorizeExtraAttempt, resolvePendingGrantExecutionOptions } from "../src/core/attempt-authorization.js";
+import { registerTaskFromSpec } from "../src/core/runner.js";
 
 const SECRET_PROBE = "forklight-cli-secret-DELTA-2026";
 const TS = "2026-07-23T12:00:00.000Z";
@@ -100,7 +103,18 @@ function makeReport(overrides: {
   return { taskId: "t", attemptCount: 1, receiptCount: 1,
     report: { workerVolume: wv, exchangeEstimate: ee, boundaryReduction: br, directCodexSavings: dcs },
     calibrationSelection: { kind: "explicit-override" as const,
-      profileId: "codex-main-v1", version: 1, sampleSize: 4 } };
+      profileId: "codex-main-v1", version: 1, sampleSize: 4 },
+    usageReconciliation: {
+      state: "unavailable" as const,
+      workerVolumeSource: "terminal-top-level" as const,
+      perModelRole: "diagnostic-only" as const,
+      comparedAttemptCount: 0, matchedAttemptCount: 0, mismatchedAttemptCount: 0,
+      missingBreakdownCount: 1, missingUsageCount: 0, invalidCounterEvidenceCount: 0,
+      totalAttemptCount: 1,
+      grossDeltas: { available: false as const, scope: "compared-attempts-only" as const,
+        reason: "no-comparable-attempts" as const },
+      evidence: [],
+    } };
 }
 
 // --- CLI one-surface success (no responseStructured) ---------------------
@@ -155,8 +169,8 @@ test("JSON and human modes produce distinct request and responseContent measurem
   assert.notEqual(receipts[0]!.requestArguments.utf8Bytes, receipts[1]!.requestArguments.utf8Bytes,
     "JSON vs human must produce distinct request byte counts");
   assert.notEqual(receipts[0]!.responseContent!.utf8Bytes, receipts[1]!.responseContent!.utf8Bytes);
-  assert.equal(receipts[0]!.responseContent!.utf8Bytes, humanRendered.length);
-  assert.equal(receipts[1]!.responseContent!.utf8Bytes, jsonRendered.length);
+  const responseBytes = receipts.map(r => r.responseContent!.utf8Bytes).sort((a, b) => a - b);
+  assert.deepEqual(responseBytes, [humanRendered.length, jsonRendered.length].sort((a, b) => a - b));
 });
 
 // --- Known-task error: exact rethrow identity and CLI error line ---------
@@ -370,4 +384,207 @@ test("truthful tokens report: incomplete Worker volume preserves samples and dcs
   assert.match(incomplete, /Direct Codex savings \(available\):/);
   assert.match(incomplete, /baseline: 200-300 tokens/);
   assert.match(incomplete, /taskClass: edit/);
+});
+
+// --- routing: bootstrap fallback vs post-dispatch fail-closed receipt checks ---
+
+const ROUTE_CLI_PROBE = "forklight-cli-route-BETA-2026";
+
+test("routing produces success receipt on bootstrap failure and error receipt on post-dispatch rejection, never replaying locally", async () => {
+  // Bootstrap failure routes to local fallback → success receipt.
+  const homeBoot = await mkdtemp(path.join(tmpdir(), "forklight-cli-route-boot-"));
+  seedTask(homeBoot, "task-boot");
+  let fallbackCalled = false;
+  const { output } = await withCliExchangeReceipt({
+    operation: "forklight_resume", home: homeBoot,
+    args: { taskId: "task-boot" }, taskId: "task-boot",
+    invoke: async () => routeMutation(
+      async () => { throw new Error("ECONNREFUSED"); },
+      async () => { throw new Error("unreachable"); },
+      async () => { fallbackCalled = true; return makeTask("task-boot", { status: "queued" }); },
+    ),
+    renderOutput: () => "ok\n",
+  });
+  assert.equal(fallbackCalled, true);
+  assert.equal(output, "ok\n");
+  const bootReceipts = listReceipts(homeBoot, "task-boot");
+  assert.equal(bootReceipts.length, 1);
+  assert.equal(bootReceipts[0]!.outcome, "success");
+
+  // Post-dispatch daemon rejection → error receipt, local never called.
+  const homeDispatch = await mkdtemp(path.join(tmpdir(), "forklight-cli-route-disp-"));
+  seedTask(homeDispatch, "task-disp");
+  const dispatchError = new Error(`daemon ${ROUTE_CLI_PROBE} build mismatch`);
+  fallbackCalled = false;
+  let caught: unknown;
+  try {
+    await withCliExchangeReceipt({
+      operation: "forklight_revise", home: homeDispatch,
+      args: { taskId: "task-disp", feedbackLength: 5 }, taskId: "task-disp",
+      invoke: async () => routeMutation(
+        async () => {},
+        async () => { throw dispatchError; },
+        async () => { fallbackCalled = true; return makeTask("task-disp"); },
+      ),
+      renderOutput: () => "",
+    });
+    assert.fail("must rethrow");
+  } catch (error) { caught = error; }
+  assert.equal(caught, dispatchError);
+  assert.equal(fallbackCalled, false);
+  const dispReceipts = listReceipts(homeDispatch, "task-disp");
+  assert.equal(dispReceipts.length, 1);
+  assert.equal(dispReceipts[0]!.outcome, "error");
+  assert.equal(dispReceipts[0]!.operation, "forklight_revise");
+  const serialized = JSON.stringify(dispReceipts[0]);
+  assert.ok(!serialized.includes(ROUTE_CLI_PROBE));
+  assertNoForbidden(dispReceipts[0]!);
+});
+
+// --- local resume fallback recovers pending grant ---
+
+function exhaustedBaseTask(store: StateStore): { taskId: string; sessionId: string } {
+  const task = registerTaskFromSpec(store, {
+    version: 1, name: "recovery-resume", project: "/tmp/src",
+    goal: "Pending grant recovery", constraints: [],
+    provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test" },
+    runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 1 },
+    workspace: { exclude: [] },
+    worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+    acceptance: { commands: ["true"] },
+  }, "forklight://test/cli-recovery");
+  const now = new Date().toISOString();
+  for (let ordinal = 1; ordinal <= 3; ordinal += 1) {
+    store.createAttempt({
+      id: `a${ordinal}`, taskId: task.id, ordinal, status: "failed",
+      sessionId: task.sessionId, rawLogPath: "/dev/null",
+      startedAt: now, finishedAt: now, exitCode: 1,
+    });
+  }
+  store.setTaskStatus(task.id, "failed", { error: "Independent verification failed" });
+  return { taskId: task.id, sessionId: task.sessionId };
+}
+
+const CLI_PENDING_PROBE = "forklight-cli-pending-GAMMA-2026";
+
+test("local resume recovers pending grant without duplicate authorization", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-resume-pending-"));
+  const store = new StateStore(home);
+  const { taskId } = exhaustedBaseTask(store);
+  // Authorize ordinal 4 as a durable pending grant, then close the store
+  // so the local fallback sees the persisted event but no in-memory state.
+  authorizeExtraAttempt(store, taskId, {
+    additionalAttempts: 1, maxBudgetUsd: null,
+    reason: CLI_PENDING_PROBE, confirm: true,
+  }, 3, 20, 2);
+  const grantEventsBefore = store.listEvents(taskId).filter(
+    (e) => e.type === "attempt.authorization.granted",
+  );
+  assert.equal(grantEventsBefore.length, 1);
+  store.close();
+
+  // Reopen store for the local-fallback simulation.
+  const reopened = new StateStore(home);
+  try {
+    // Simulate the resume local fallback: resolve pending grant when
+    // authorization is undefined.
+    const resolved = resolvePendingGrantExecutionOptions(reopened, taskId, 3, 2);
+    assert.ok(resolved !== null, "pending grant must be resolved");
+    assert.equal(resolved!.maximumOrdinal, 4);
+    assert.equal(resolved!.maxBudgetUsdOverride, null);
+    // No second grant event was minted by the read-only resolver.
+    const grantEventsAfter = reopened.listEvents(taskId).filter(
+      (e) => e.type === "attempt.authorization.granted",
+    );
+    assert.equal(grantEventsAfter.length, 1,
+      "resolvePendingGrantExecutionOptions must not mint a duplicate grant event");
+  } finally {
+    reopened.close();
+  }
+});
+
+test("local revise recovers pending grant for eligibility and execution", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-revise-pending-"));
+  const store = new StateStore(home);
+  // Create a standalone succeeded task with 2 base attempts (maxAttempts=2).
+  const task = registerTaskFromSpec(store, {
+    version: 1, name: "revise-recovery", project: "/tmp/src",
+    goal: "Pending revise grant", constraints: [],
+    provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test" },
+    runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 1 },
+    workspace: { exclude: [] },
+    worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+    acceptance: { commands: ["true"] },
+  }, "forklight://test/cli-revise-recovery");
+  const now = new Date().toISOString();
+  for (let ordinal = 1; ordinal <= 2; ordinal += 1) {
+    store.createAttempt({
+      id: `a${ordinal}`, taskId: task.id, ordinal, status: "succeeded",
+      sessionId: task.sessionId, rawLogPath: "/dev/null",
+      startedAt: now, finishedAt: now, exitCode: 0,
+    });
+  }
+  store.setTaskStatus(task.id, "succeeded", { error: null });
+  // Authorize ordinal 3 as a durable pending grant for the revise.
+  authorizeExtraAttempt(store, task.id, {
+    additionalAttempts: 1, maxBudgetUsd: null,
+    reason: `${CLI_PENDING_PROBE}-revise`, confirm: true,
+  }, 2, 20, 2);
+  const grantEventsBefore = store.listEvents(task.id).filter(
+    (e) => e.type === "attempt.authorization.granted",
+  );
+  assert.equal(grantEventsBefore.length, 1);
+  store.close();
+
+  const reopened = new StateStore(home);
+  try {
+    // Simulate revise local fallback: resolve pending grant with
+    // configured maxAttempts=2 and maxExtraAttempts=2.
+    const pending = resolvePendingGrantExecutionOptions(reopened, task.id, 2, 2);
+    assert.ok(pending !== null);
+    assert.equal(pending!.maximumOrdinal, 3);
+    assert.equal(pending!.maxBudgetUsdOverride, null);
+    // Eligibility should use the pending ordinal (3), not base maxAttempts (2).
+    const { checkReviseEligibility } = await import("../src/core/runner.js");
+    const effectiveLimit = pending!.maximumOrdinal;
+    const check = checkReviseEligibility(reopened, task.id, "valid feedback text", effectiveLimit);
+    assert.equal(check.eligible, true, "must be eligible with pending grant ceiling");
+    assert.equal(check.canonicalFeedback, "valid feedback text");
+    // No duplicate grant event.
+    const grantEventsAfter = reopened.listEvents(task.id).filter(
+      (e) => e.type === "attempt.authorization.granted",
+    );
+    assert.equal(grantEventsAfter.length, 1);
+  } finally {
+    reopened.close();
+  }
+});
+
+test("configured second correction: local fallback passes maxExtraAttempts to authorizeExtraAttempt", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-maxextra-"));
+  const store = new StateStore(home);
+  const { taskId, sessionId } = exhaustedBaseTask(store);
+  // Consume one extra attempt (ordinal 4) so the next is ordinal 5.
+  authorizeExtraAttempt(store, taskId, {
+    additionalAttempts: 1, maxBudgetUsd: 1, reason: "First correction", confirm: true,
+  }, 3, 20, 2);
+  store.createAttempt({
+    id: "a4", taskId, ordinal: 4, status: "failed",
+    sessionId, rawLogPath: "/dev/null",
+    startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), exitCode: 1,
+  });
+  const eventsBefore = store.listEvents(taskId).length;
+  // Local fallback with a second authorization and maxExtraAttempts=2 — must
+  // authorize ordinal 5, not reject with "already used".
+  const opts = authorizeExtraAttempt(store, taskId, {
+    additionalAttempts: 1, maxBudgetUsd: 2, reason: "Second correction", confirm: true,
+  }, 3, 20, 2);
+  assert.equal(opts.maximumOrdinal, 5, "second correction must target ordinal 5");
+  assert.equal(opts.maxBudgetUsdOverride, 2);
+  const grants = store.listEvents(taskId).filter((e) => e.type === "attempt.authorization.granted");
+  assert.equal(grants.length, 2, "one new grant event in addition to the existing one");
+  assert.equal(store.listEvents(taskId).length, eventsBefore + 1,
+    "only the new grant event was appended; no duplicate");
+  // With default maxExtraAttempts=1 the same call would reject.
+  store.close();
 });

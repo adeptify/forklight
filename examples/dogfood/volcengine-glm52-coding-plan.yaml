@@ -1,0 +1,164 @@
+version: 2
+name: Volcengine Coding Plan GLM 5.2 1M Worker
+project: ../..
+contract:
+  outcome: Add Volcengine Coding Plan as a first-class ForkLight Provider and ship a ready-to-select Claude Code Worker that uses the exact model id glm-5.2[1M].
+  context:
+    - The user has stored a Volcengine Coding Plan API key in macOS Keychain under forklight.volcengine.api-key.
+    - Volcengine documents an Anthropic Messages compatible Claude Code endpoint at https://ark.cn-beijing.volces.com/api/coding.
+    - Existing glm means GLM through Alibaba Model Studio, so Volcengine must have a distinct provider identity for truthful routing, readiness, statistics, and diagnostics.
+    - The exact requested model id is glm-5.2[1M]; it must not be normalized to glm-5.2 or silently fall back to another model.
+    - Coding Plan is subscription-style, so ForkLight must not invent a zero-dollar or PAYG per-request cost when no applicable public price row is configured.
+  inScope:
+    - Add volcengine to the canonical Provider registry, public types, settings defaults, validation, runtime compatibility, MCP schemas, health, provider status, and provider probe paths.
+    - Configure the exact endpoint, keychain service, model id, and Claude Code Anthropic environment without ever reading or persisting the credential value.
+    - Add a built-in model catalog item and a non-default Worker Profile for Volcengine GLM 5.2 1M so a new installation can select it immediately after storing a key.
+    - Give the built-in Worker development-friendly advanced settings with one base attempt, no automatic extra attempt, no adaptation loop, and unlimited duration, observed tokens, files, and changed lines where the schema supports null.
+    - Expose Volcengine in Hub setup, model, Worker, and Provider controls with concise English and Chinese labels.
+    - Add a bounded pricing-route identity for the subscription plan, while reporting exact request cost as unavailable with a stable reason unless an applicable official per-request price exists.
+    - Preserve all existing providers, persisted settings migrations, custom models, custom Workers, and legacy records.
+    - Add focused automated tests for registry defaults, exact environment variables, settings migration, UI availability, MCP enum acceptance, runtime compatibility, and truthful pricing availability.
+    - Update concise setup and operations documentation, including the existing secure Keychain helper script.
+  outOfScope:
+    - Do not access, print, copy, test, or delete the user's API key; Main will run one explicit live provider probe after review and rebuild.
+    - Do not change the existing glm provider or reuse its identity for Volcengine.
+    - Do not add fallback model ids, provider fallback, automatic retry, automatic parameter tuning, or autonomous Worker resubmission.
+    - Do not claim Coding Plan quota is free, convert subscription fees into per-request cost, scrape account quota, or guess token prices.
+    - Do not commit, push, install packages, mutate source outside the ForkLight sandbox, or change unrelated Main/Integration authority controls.
+  executionSteps:
+    - Trace the canonical Provider list through settings, model catalog, Worker resolution, Claude Code environment, MCP schemas, Hub controls, health, probe, and pricing projection.
+    - Add one distinct volcengine definition using endpoint https://ark.cn-beijing.volces.com/api/coding, keychain service forklight.volcengine.api-key, and exact model glm-5.2[1M].
+    - Add migration-safe defaults for the model and optional Worker without replacing the existing default Worker.
+    - Thread the provider through every bounded selector and status surface using the shared registry where possible.
+    - Represent Coding Plan cost as measured tokens plus explicit exact-cost unavailability rather than a fabricated USD value.
+    - Add focused tests and documentation, then run the independent acceptance commands once.
+  deliverables:
+    - First-class volcengine Provider and Claude Code environment wiring.
+    - Built-in Volcengine GLM 5.2 1M model configuration and selectable Worker Profile.
+    - Hub, MCP, health, status, probe, setup, and documentation coverage.
+    - Truthful Coding Plan cost semantics and focused regression tests.
+  modules:
+    - name: Provider identity and runtime bridge
+      responsibility: Resolve Volcengine into an exact Claude Code Anthropic environment.
+      consumes:
+        - Provider name, endpoint, exact model id, Keychain service name, and transient credential supplied only at process launch.
+      produces:
+        - ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL, and bounded readiness/probe metadata.
+      boundaries:
+        - No credential value is persisted or returned, and no model/provider fallback is allowed.
+    - name: Settings, models, and Workers
+      responsibility: Make the Provider selectable on both new and migrated installations.
+      consumes:
+        - Built-in defaults, legacy stored settings, model catalog edits, and Worker Profile resolution.
+      produces:
+        - A Volcengine model configuration and non-default development Worker with exact identity and loose finite-control policy.
+      boundaries:
+        - Existing defaults and user-created configurations remain unchanged.
+    - name: Hub and MCP control surfaces
+      responsibility: Show and accept the same Volcengine identity across setup and daily operations.
+      consumes:
+        - Canonical Provider metadata and settings projections.
+      produces:
+        - Selectors, labels, setup guidance, MCP validation, health, status, and probe support.
+      boundaries:
+        - UI and MCP never receive the API key or silently mutate Provider settings.
+    - name: Economics projection
+      responsibility: Keep token usage measurable while stating why exact Coding Plan request cost is unavailable.
+      consumes:
+        - Provider, endpoint, model, pricing route, and Worker token evidence.
+      produces:
+        - Stable pricing-route identity and explicit unavailable reason instead of zero-dollar cost.
+      boundaries:
+        - No guessed subscription allocation, PAYG conversion, or routing-score side effect.
+  callChain:
+    - User stores the key through the secure helper script and selects the Volcengine GLM 5.2 1M Worker.
+    - Settings resolve the Worker to the volcengine model configuration and immutable Task Provider snapshot.
+    - The Claude Code adapter reads the credential transiently from Keychain and launches with the exact endpoint and model environment.
+    - Provider status and a user-triggered probe return bounded readiness evidence without leaking the credential.
+    - Task statistics retain provider and exact model identity; economics shows measured tokens and explicit exact-cost unavailability for the subscription route.
+  scenarios:
+    - name: Fresh local setup
+      given: ForkLight has built-in defaults and the user stored a valid Volcengine Coding Plan key.
+      when: The user opens Hub and selects the Volcengine GLM 5.2 1M Worker.
+      then: The exact endpoint, provider, model, Keychain service, and development policy are resolved without changing the default Worker.
+    - name: Exact model routing
+      given: A Task selects the Volcengine Worker.
+      when: Claude Code is launched.
+      then: ANTHROPIC_MODEL is exactly glm-5.2[1M] and no fallback model id is added or attempted.
+    - name: Existing installation migration
+      given: Stored settings predate the volcengine Provider, model, and Worker.
+      when: Settings are loaded after upgrade.
+      then: Required Provider defaults are synthesized safely, existing custom data survives, and built-in availability is deterministic.
+    - name: Missing or invalid credential
+      given: The Keychain entry is absent or the remote service rejects it.
+      when: The user explicitly runs Provider probe.
+      then: ForkLight reports a bounded authentication/readiness failure and does not retry with another Provider or model.
+    - name: Subscription economics
+      given: A Volcengine Coding Plan Task records Worker token usage.
+      when: Main inspects Task economics.
+      then: Tokens remain visible, while exact cost is unavailable with a stable explanation rather than displayed as zero dollars.
+  risks:
+    - Reusing glm would merge unrelated routes in statistics, so volcengine is a separate canonical Provider.
+    - Adding defaults only to fresh settings would hide the Worker from existing users, so migration behavior needs explicit coverage.
+    - Hard-coded Provider lists can drift across Hub and MCP; tests must enumerate every control surface or consume the shared registry.
+    - Subscription pricing can be misrepresented as free; the unavailable reason must be explicit and stable.
+    - Brackets in glm-5.2[1M] can be normalized accidentally; exact-string tests are required.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 4800
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/providers.ts
+    - src/core/settings.ts
+    - src/core/types.ts
+    - src/core/worker-profiles.ts
+    - src/mcp/server.ts
+    - src/hub
+    - tests
+    - docs
+acceptance:
+  criteria:
+    - Volcengine is a distinct Provider using the exact endpoint, Keychain service, and glm-5.2[1M] model id.
+    - A new or migrated installation can select the built-in non-default Volcengine Worker in Hub and through programmatic settings.
+    - Claude Code receives the exact Anthropic-compatible environment and never receives a fallback model id.
+    - Existing Provider, settings, Worker, MCP, Hub, and runtime behavior remains compatible.
+    - Coding Plan token evidence remains visible and exact request cost is explicitly unavailable rather than invented or shown as zero.
+    - No credential is read, emitted, persisted, committed, or exposed to Worker context.
+    - No automatic retry, adaptation, fallback, commit, or push is introduced.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/providers.test.ts tests/settings.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts tests/mcp.test.ts
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

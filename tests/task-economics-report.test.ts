@@ -20,6 +20,7 @@ import type {
 } from "../src/core/types.js";
 import type { PricingCurrency, PricingSourceEvidence } from "../src/core/pricing.js";
 import type {
+  BoundedEstimate,
   PricingIdentitySnapshot,
   QuotedCost,
   UnavailableEvidence,
@@ -49,9 +50,12 @@ function makeTask(id: string, status = "succeeded", maxBudgetUsd: number | null 
   } as TaskRecord;
 }
 
-function makeUsage(i: number, o: number, cr: number, cc: number): AttemptTokenUsage {
-  return { inputTokens: i, outputTokens: o, cacheReadInputTokens: cr, cacheCreationInputTokens: cc,
-    source: "terminal-result", complete: true };
+function makeUsage(i: number, o: number, cr: number, cc: number, perModel?: AttemptTokenUsage["perModel"]): AttemptTokenUsage {
+  return {
+    inputTokens: i, outputTokens: o, cacheReadInputTokens: cr, cacheCreationInputTokens: cc,
+    source: "terminal-result", complete: true,
+    ...(perModel ? { perModel } : {}),
+  };
 }
 
 function makeAttempt(id: string, taskId: string, ordinal: number, overrides?: Partial<AttemptRecord>): AttemptRecord {
@@ -592,5 +596,220 @@ test("calibration selection: economics facade calls real Store exactly once for 
     assert.equal(attemptCalls, 1);
     assert.equal(pubLookupCalls, 1);
     assert.equal(r.tokenReport.calibrationSelection.kind, "exact-registry-hit");
+  } finally { store.close(); }
+});
+
+// --- 15. Official cost range evidence from bounded estimates -------------------
+
+function makeBoundedEstimate(currency: PricingCurrency = "USD", min = 0.10, max = 0.30): BoundedEstimate {
+  return {
+    currency,
+    min,
+    max,
+    components: [
+      { component: "input", tokens: 100_000, minRatePerMillion: 0.30, maxRatePerMillion: 0.60, minAmount: 0.03, maxAmount: 0.06 },
+      { component: "output", tokens: 50_000, minRatePerMillion: 1.20, maxRatePerMillion: 2.40, minAmount: 0.06, maxAmount: 0.12 },
+      { component: "cacheRead", tokens: 20_000, minRatePerMillion: 0.06, maxRatePerMillion: 0.12, minAmount: 0.0012, maxAmount: 0.0024 },
+      { component: "cacheCreation", tokens: 0, minRatePerMillion: 0, maxRatePerMillion: 0, minAmount: 0, maxAmount: 0 },
+    ],
+    pricing: psnap(currency),
+    method: "aggregate-tier-bounds",
+    usageSource: "terminal-result",
+    providerBillClaim: false,
+  };
+}
+
+function calcUAWithRange(reason = "per-request-usage-required", be?: BoundedEstimate): AttemptOfficialCostCalculationUnavailable {
+  return {
+    stage: "calculation", quoted: false,
+    result: {
+      quoted: false,
+      reason,
+      evidence: emptyEv("mm", "USD"),
+      ...(be === undefined ? {} : { boundedEstimate: be }),
+    },
+  } as AttemptOfficialCostCalculationUnavailable;
+}
+
+test("single ranged Attempt: bounded estimate flows into ranges section, still counted as unavailable", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "ec-range-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("rng"));
+    store.createAttempt(makeAttempt("a1", "rng", 1, {
+      usage: makeUsage(100_000, 50_000, 20_000, 0),
+    }));
+    store.createAttempt(makeAttempt("a2", "rng", 2, {
+      officialCost: calcUAWithRange("per-request-usage-required", makeBoundedEstimate("USD", 0.10, 0.30)),
+    }));
+
+    const r = getTaskEconomicsReport(store, "rng");
+    // Unavailable count: a1 missing officialCost, a2 per-request-usage-required
+    assert.equal(r.officialCost.unavailable.unavailableCount, 2);
+    // Range section holds a2's bounded estimate
+    assert.equal(r.officialCost.ranges.length, 1);
+    assert.equal(r.officialCost.ranges[0]!.currency, "USD");
+    assert.ok(Math.abs(r.officialCost.ranges[0]!.min - 0.10) < 1e-12);
+    assert.ok(Math.abs(r.officialCost.ranges[0]!.max - 0.30) < 1e-12);
+    assert.equal(r.officialCost.ranges[0]!.rangedAttemptCount, 1);
+  } finally { store.close(); }
+});
+
+test("multiple ranged Attempts in same currency: additive min/max", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "ec-range2-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("rng2"));
+    store.createAttempt(makeAttempt("a1", "rng2", 1, {
+      officialCost: calcUAWithRange("per-request-usage-required", makeBoundedEstimate("USD", 0.10, 0.30)),
+    }));
+    store.createAttempt(makeAttempt("a2", "rng2", 2, {
+      officialCost: calcUAWithRange("per-request-usage-required", makeBoundedEstimate("USD", 0.20, 0.50)),
+    }));
+
+    const r = getTaskEconomicsReport(store, "rng2");
+    assert.equal(r.officialCost.ranges.length, 1);
+    assert.ok(Math.abs(r.officialCost.ranges[0]!.min - 0.30) < 1e-12);
+    assert.ok(Math.abs(r.officialCost.ranges[0]!.max - 0.80) < 1e-12);
+    assert.equal(r.officialCost.ranges[0]!.rangedAttemptCount, 2);
+  } finally { store.close(); }
+});
+
+test("mixed USD and CNY ranges: separate per-currency aggregation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "ec-range3-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("rng3"));
+    store.createAttempt(makeAttempt("a1", "rng3", 1, {
+      officialCost: calcUAWithRange("per-request-usage-required", makeBoundedEstimate("USD", 0.10, 0.30)),
+    }));
+    store.createAttempt(makeAttempt("a2", "rng3", 2, {
+      officialCost: calcUAWithRange("per-request-usage-required", makeBoundedEstimate("CNY", 3.00, 8.00)),
+    }));
+
+    const r = getTaskEconomicsReport(store, "rng3");
+    assert.equal(r.officialCost.ranges.length, 2);
+    // Sorted: CNY before USD
+    assert.equal(r.officialCost.ranges[0]!.currency, "CNY");
+    assert.ok(Math.abs(r.officialCost.ranges[0]!.min - 3.00) < 1e-12);
+    assert.ok(Math.abs(r.officialCost.ranges[0]!.max - 8.00) < 1e-12);
+    assert.equal(r.officialCost.ranges[1]!.currency, "USD");
+    assert.ok(Math.abs(r.officialCost.ranges[1]!.min - 0.10) < 1e-12);
+  } finally { store.close(); }
+});
+
+test("exact total and range total stay separate; no mixing", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "ec-range4-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("rng4"));
+    store.createAttempt(makeAttempt("a1", "rng4", 1, {
+      officialCost: quotedOC(makeQuotedCost("USD", 0.07)),
+    }));
+    store.createAttempt(makeAttempt("a2", "rng4", 2, {
+      officialCost: calcUAWithRange("per-request-usage-required", makeBoundedEstimate("USD", 0.10, 0.30)),
+    }));
+
+    const r = getTaskEconomicsReport(store, "rng4");
+    // Exact totals: only a1
+    assert.equal(r.officialCost.totals.length, 1);
+    assert.equal(r.officialCost.totals[0]!.total, 0.07);
+    assert.equal(r.officialCost.totals[0]!.quotedCount, 1);
+    // Ranges: only a2
+    assert.equal(r.officialCost.ranges.length, 1);
+    assert.ok(Math.abs(r.officialCost.ranges[0]!.min - 0.10) < 1e-12);
+    // a2 is in unavailable (per-request-usage-required)
+    assert.equal(r.officialCost.unavailable.unavailableCount, 1);
+    assert.equal(r.officialCost.unavailable.breakdown["calculation:per-request-usage-required"], 1);
+    // No grand total anywhere
+    const json = JSON.stringify(r.officialCost);
+    assert.ok(!json.includes("grandTotal"));
+  } finally { store.close(); }
+});
+
+test("unavailable Attempt without bounded estimate: no range entry, only unavailable count", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "ec-range5-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("rng5"));
+    store.createAttempt(makeAttempt("a1", "rng5", 1, {
+      officialCost: calcUA("rate-unpublished"),
+    }));
+
+    const r = getTaskEconomicsReport(store, "rng5");
+    assert.equal(r.officialCost.ranges.length, 0);
+    assert.equal(r.officialCost.unavailable.unavailableCount, 1);
+  } finally { store.close(); }
+});
+
+// --- 16. Token usage reconciliation: present and flows from task-economics ---
+
+test("economics report carries usageReconciliation through tokenReport unchanged", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "ec-rec-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("rec"));
+    store.createAttempt(makeAttempt("a1", "rec", 1, {
+      usage: makeUsage(100, 50, 20, 10, [{ model: "m1", inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 20, cacheCreationInputTokens: 10 }]),
+      runtimeCostEstimateUsd: 0.5,
+      officialCost: quotedOC(makeQuotedCost("USD", 0.01)),
+    }));
+
+    const r = getTaskEconomicsReport(store, "rec");
+    assert.ok(r.tokenReport.usageReconciliation, "usageReconciliation present");
+    assert.equal(r.tokenReport.usageReconciliation.state, "matched");
+    assert.equal(r.tokenReport.usageReconciliation.comparedAttemptCount, 1);
+    assert.equal(r.tokenReport.usageReconciliation.matchedAttemptCount, 1);
+
+    //Deeply frozen
+    assert.ok(Object.isFrozen(r.tokenReport.usageReconciliation));
+    assert.ok(Object.isFrozen(r.tokenReport.usageReconciliation.grossDeltas));
+    assert.ok(Object.isFrozen(r.tokenReport.usageReconciliation.evidence));
+    assert.throws(() => { (r.tokenReport.usageReconciliation as any).state = "hacked"; }, TypeError);
+  } finally { store.close(); }
+});
+
+// --- 17. GLM mismatch through task-economics --------------------------------
+
+test("economics report: GLM mismatch does not change official cost or runtime estimate", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "ec-glm-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("glm"));
+    const glmUsage: AttemptTokenUsage = {
+      inputTokens: 378_237,
+      outputTokens: 126_836,
+      cacheReadInputTokens: 40_756_800,
+      cacheCreationInputTokens: 0,
+      source: "terminal-result" as const, complete: true as const,
+      serviceTier: "standard",
+      perModel: [
+        { model: "glm-5.2[1m]", inputTokens: 378_658, outputTokens: 132_190, cacheReadInputTokens: 42_633_920, cacheCreationInputTokens: 0 },
+      ],
+    };
+    store.createAttempt(makeAttempt("a1", "glm", 1, {
+      usage: glmUsage,
+      runtimeCostEstimateUsd: 1.5,
+      officialCost: quotedOC(makeQuotedCost("USD", 0.10)),
+    }));
+
+    const r = getTaskEconomicsReport(store, "glm");
+    // Reconciliation mismatch
+    assert.equal(r.tokenReport.usageReconciliation.state, "mismatch");
+    assert.equal(r.tokenReport.usageReconciliation.mismatchedAttemptCount, 1);
+    const gd = r.tokenReport.usageReconciliation.grossDeltas;
+    assert.equal(gd.available, true);
+    if (!gd.available) assert.fail("GLM gross comparison unavailable");
+    assert.equal(gd.topLevelGross, 41_261_873);
+    assert.equal(gd.perModelGross, 43_144_768);
+    assert.equal(gd.delta, 1_882_895);
+
+    // Official cost, runtime estimate unchanged
+    assert.equal(r.runtimeEstimate.observedTotalUsd, 1.5);
+    assert.equal(r.officialCost.totals[0]!.total, 0.10);
+    assert.equal(r.officialCost.totals[0]!.quotedCount, 1);
+
+    // Worker volume uses top-level
+    assert.equal(r.tokenReport.report.workerVolume.grossWorkerTokens, 41_261_873);
   } finally { store.close(); }
 });

@@ -17,14 +17,34 @@ import { providerProbeBatchFailed } from "./core/provider-probe.js";
 import { providerReadiness } from "./core/providers.js";
 import type { ProviderModelSummary } from "./core/statistics.js";
 import type {
-  AttemptAuthorization, AttemptRecord, EventRecord, NormalizedWorkerEvent, TaskDecisionView, TaskRecord,
+  AttemptAuthorization, AttemptExecutionOptions, AttemptRecord, EventRecord,
+  NormalizedWorkerEvent, TaskDecisionView, TaskRecord,
 } from "./core/types.js";
 import { loadWorkPlan } from "./core/plan.js";
-import { reconcileTask, resumeTask, reviseTask, runNewTask } from "./core/runner.js";
-import { authorizeExtraAttempt } from "./core/attempt-authorization.js";
+import {
+  checkReviseEligibility, correctTask, describeReviseRejection, prepareMainCorrectionTask,
+  reconcileTask, resumeTask, reviseTask, runNewTask,
+} from "./core/runner.js";
+import {
+  authorizeExtraAttempt,
+  authorizeMainCorrection,
+  resolvePendingGrantExecutionOptions,
+} from "./core/attempt-authorization.js";
 import { recordMainReview } from "./core/main-review.js";
+import {
+  describeCorrectionRejection,
+  resolveCorrectionEligibility,
+  resolveLatestRevision,
+  validateStructuredCorrectionInput,
+} from "./core/candidate-revision.js";
 import { assessIntegrationFeasibility } from "./core/integration-feasibility.js";
-import { assessTaskQuality, loadTaskSpec } from "./core/task.js";
+import { buildCompactIntegrationOperationView } from "./core/integration-operation.js";
+import type { IntegrationOperationView } from "./core/types.js";
+import { loadTaskSpec } from "./core/task.js";
+import {
+  assessTaskQualityWithPolicy,
+  effectiveQualityPolicyFromGlobal,
+} from "./core/contract-quality.js";
 import { createKeychainStore } from "./core/secrets.js";
 import { SettingsService, type TaskPolicy } from "./core/settings.js";
 import {
@@ -32,8 +52,11 @@ import {
   ensureDaemon,
   probeDaemon,
   restartDaemon,
+  routeMutation,
   stopDaemon,
+  stopDaemonForHandoff,
 } from "./daemon/client.js";
+import { readActivationHandoffContext } from "./activation/runner.js";
 import type { DaemonMethod } from "./daemon/protocol.js";
 import { createSystemInspector, SetupService } from "./setup/service.js";
 import { HubServer } from "./hub/server.js";
@@ -83,21 +106,24 @@ Usage:
       # change = status/attempt/event-sequence/updatedAt cursor (not status-only)
   forklight resume <task-id> [--feedback <text>] [--authorize-extra --max-budget-usd <number|none> --reason <text> --confirm]
   forklight revise <task-id> --feedback <text>
+  forklight correct <task-id> --feedback <text> [--max-budget-usd <number|none>] [--candidate-revision <id> --reusable-paths <json-array> --remaining-gaps <json-array>] --confirm
   forklight main-review <task-id> --decision <accept|revise|reject> --reason <text> --confirm
   forklight inspect <task-id> [--summary] [--events <nonnegative integer>] [--json]
       # prefer --summary for main-thread supervision; full inspect is for deep audit
   forklight list [--json]
   forklight stats [--json] [--provider <name>] [--model <name>] [--since <ISO>] [--until <ISO>]
+  forklight routing <task-class> --candidates <json> [--json]
   forklight daemon <start|status|stop>
   forklight health [--json]
   forklight settings <get|set|apply|reset> [...]
   forklight integration preflight <task-id> [--json]
   forklight integration apply <task-id> --receipt <receipt-id> --confirm [--json]
-  forklight integration status <operation-id> [--json]
-  forklight integration wait <operation-id> --timeout-ms <positive integer> [--json]
+  forklight integration status <operation-id> [--json] [--deep-audit]
+  forklight integration wait <operation-id> --timeout-ms <positive integer> [--json] [--deep-audit]
   forklight integration history <task-id> [--json]
   forklight tokens <task-id> [--json]
   forklight direct-codex capture --usage <json-object> --metadata <json-object> [--json]
+  forklight direct-codex capture-task --task-id <id> --run-ref <ref> --usage <json-object> [--json]
   forklight direct-codex inbox --task-class <class> --profile-id <id> [--json]
   forklight direct-codex review --sample-id <id> --decision <accepted|rejected> [--rejection-reason <reason>] --reviewer <reviewer> --reviewed-at <canonical-ISO> --schema-version <version> --confirm [--json]
   forklight direct-codex publication-preview --task-class <class> --profile-id <id> [--json]
@@ -108,6 +134,12 @@ Usage:
   forklight competition compare <id> [--json] [--weights <json>]
   forklight providers status [<name>] [--json]
   forklight providers probe [<name>] [--json]
+  forklight adapt preview <task-id> --patch <json> --reason <category> [--json]
+  forklight adapt apply <task-id> --patch <json> --reason <category> --confirm [--json]
+      # category: duration-budget | size-policy | attempt-budget | completion-policy | concurrency-cap | no-progress-timeout | other-flexible-policy
+  forklight remediate verify <task-id> --reason <text> --confirm [--json]
+  forklight reverify <task-id> --reason <text> --confirm [--json]
+      # rerun a failed candidate's original acceptance suite without a Worker or new Attempt
   forklight hub [--no-open] [--port <port>]
       # starts backend daemon + Hub UI (only control-center UI)
   forklight doctor [--json]
@@ -216,7 +248,16 @@ function humanIntegrationApplyLines(result: Record<string, unknown>): string {
   return `${lines.join("\n")}\n`;
 }
 
-function humanIntegrationOperationLines(view: Record<string, unknown>): string {
+interface HumanReadableIntegrationView {
+  operationId: unknown;
+  taskId: unknown;
+  status: unknown;
+  receiptId: unknown;
+  stages: unknown;
+  result?: unknown;
+}
+
+function humanIntegrationOperationLines(view: HumanReadableIntegrationView): string {
   const lines = [
     `operationId: ${view.operationId}`,
     `taskId: ${view.taskId}`,
@@ -228,11 +269,28 @@ function humanIntegrationOperationLines(view: Record<string, unknown>): string {
     lines.push("stages:");
     for (const stage of stages) {
       const value = stage as Record<string, unknown>;
-      lines.push(`  ${value.stage}: ${value.status}`);
+      let detail = `${value.stage}: ${value.status}`;
+      if (typeof value.commandCount === "number") {
+        const parts = [`${value.commandCount} cmd`];
+        if (typeof value.failedCount === "number" && value.failedCount > 0) {
+          parts.push(`${value.failedCount} failed`);
+        }
+        if (typeof value.timedOutCount === "number" && value.timedOutCount > 0) {
+          parts.push(`${value.timedOutCount} timedOut`);
+        }
+        if (typeof value.totalDurationMs === "number") {
+          parts.push(`${value.totalDurationMs}ms`);
+        }
+        detail += ` (${parts.join(", ")})`;
+      }
+      if (value.error) detail += ` — ${value.error}`;
+      lines.push(`  ${detail}`);
     }
   }
   const result = view.result as Record<string, unknown> | undefined;
   if (result?.error) lines.push(`error: ${result.error}`);
+  if (result?.appliedAt) lines.push(`appliedAt: ${result.appliedAt}`);
+  if (result?.createdAt) lines.push(`createdAt: ${result.createdAt}`);
   return `${lines.join("\n")}\n`;
 }
 
@@ -246,6 +304,46 @@ function humanIntegrationHistoryLines(history: {
   for (const result of history.results) {
     const r = result as Record<string, unknown>;
     lines.push(`  ${r.status} — ${r.receiptId}${r.error ? ` (${r.error})` : ""}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** Render the human adaptation preview block as a single exact string.
+ *  Never contains raw prompt, source, Diff, log, or secret content. */
+function humanAdaptationPreviewLines(preview: Record<string, unknown>): string {
+  const lines: string[] = [];
+  lines.push(`status: ${preview.status}`);
+  lines.push(`parentTaskId: ${preview.parentTaskId}`);
+  lines.push(`rootTaskId: ${preview.rootTaskId}`);
+  lines.push(`nextRound: ${preview.nextRound}`);
+  lines.push(`maxAdaptationRounds: ${preview.maxAdaptationRounds}`);
+  lines.push(`reason: ${preview.reason ?? "none"}`);
+  if (preview.stoppedReason !== undefined) lines.push(`stoppedReason: ${preview.stoppedReason}`);
+  lines.push(`summary: ${preview.summary}`);
+  const fields = preview.fields as Array<Record<string, unknown>> | undefined;
+  if (Array.isArray(fields) && fields.length > 0) {
+    lines.push("fields:");
+    for (const field of fields) {
+      const marker = field.changed ? "*" : " ";
+      lines.push(
+        `  ${marker} ${field.field}: ${String(field.before)} -> ${String(field.after)} (${field.changed ? "changed" : "unchanged"}, ${field.source ?? "unknown"}, ${field.enforcementPhase ?? "preemptive"})`,
+      );
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** Render the human adaptation apply result block as a single exact string.
+ *  Never contains raw prompt, source, Diff, log, or secret content. */
+function humanAdaptationApplyLines(result: Record<string, unknown>): string {
+  const lines: string[] = [];
+  lines.push(`status: ${result.status}`);
+  if (result.childTaskId !== undefined) lines.push(`childTaskId: ${result.childTaskId}`);
+  if (result.lineageId !== undefined) lines.push(`lineageId: ${result.lineageId}`);
+  const preview = result.preview as Record<string, unknown> | undefined;
+  if (preview !== undefined) {
+    lines.push(`preview: ${preview.status}`);
+    if (preview.summary !== undefined) lines.push(`summary: ${preview.summary}`);
   }
   return `${lines.join("\n")}\n`;
 }
@@ -474,6 +572,12 @@ function printStatistics(summaries: ProviderModelSummary[]): void {
         ? "  turns: unavailable\n"
         : `  turns: avg ${summary.avgTurns.toFixed(1)} (${summary.turnsSampleSize} samples)\n`,
     );
+    process.stdout.write(
+      `  delivery: ${summary.acceptedDeliveryCount} accepted (${(summary.acceptedDeliveryRate * 100).toFixed(1)}%), ${summary.mainRepairedDeliveryCount} main-repaired\n`,
+    );
+    process.stdout.write(
+      `  remediation checks: ${summary.remediationCheckCount}\n`,
+    );
     const failures = Object.entries(summary.failureDistribution)
       .map(([category, count]) => `${category}=${count}`)
       .join(", ");
@@ -669,6 +773,37 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (subcommand === "capture-task") {
+      const options = parseDirectCodexOptions(rest, ["--task-id", "--run-ref", "--usage"]);
+      const taskId = requiredDirectCodexOption(options, "--task-id");
+      const codexRunRef = requiredDirectCodexOption(options, "--run-ref");
+      const usageEvent = parseDirectCodexJsonObject(
+        requiredDirectCodexOption(options, "--usage"), "--usage",
+      );
+      const displayJson = options.switches.has("--json");
+      let capturedTaskId: string | undefined;
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_direct_codex_capture",
+        home: forklightHome(),
+        args: { taskId, codexRunRef, usage: usageEvent, json: displayJson },
+        taskId: () => capturedTaskId,
+        invoke: async () => {
+          await ensureDaemon();
+          const sample = await daemonRequest<DirectCodexPairedSample>(
+            "direct_codex_guided_capture",
+            { forklightTaskId: taskId, codexRunRef, usage: usageEvent },
+          );
+          capturedTaskId = sample.forklightTaskId;
+          return sample;
+        },
+        renderOutput: (sample) => displayJson
+          ? `${JSON.stringify(sample, null, 2)}\n`
+          : humanDirectCodexSampleLines(sample),
+      });
+      process.stdout.write(output);
+      return;
+    }
+
     if (subcommand === "inbox") {
       const options = parseDirectCodexOptions(rest, ["--task-class", "--profile-id"]);
       const taskClass = requiredDirectCodexOption(options, "--task-class");
@@ -748,7 +883,7 @@ async function main(): Promise<void> {
     }
 
     throw new Error(
-      "Unknown direct-codex subcommand. Use: capture, inbox, review, publication-preview, or publication-register.",
+      "Unknown direct-codex subcommand. Use: capture, capture-task, inbox, review, publication-preview, or publication-register.",
     );
   }
 
@@ -761,9 +896,14 @@ async function main(): Promise<void> {
         execution: settings.execution,
         providerDefaults: settings.providerDefaults,
         completionPolicy: settings.completionPolicy,
+        deliveryProfiles: settings.deliveryProfiles,
       };
       const loaded = await loadTaskSpec(required(positional, "task file"), policy);
-      const report = assessTaskQuality(loaded.spec, settings.contractQuality);
+      const report = assessTaskQualityWithPolicy(
+        loaded.spec,
+        loaded.spec.qualityPolicy
+          ?? effectiveQualityPolicyFromGlobal(settings.contractQuality),
+      );
       const integration = assessIntegrationFeasibility(loaded.spec, settings.integration);
       if (json) {
         process.stdout.write(`${JSON.stringify({
@@ -811,6 +951,7 @@ async function main(): Promise<void> {
         execution: settings.execution,
         providerDefaults: settings.providerDefaults,
         completionPolicy: settings.completionPolicy,
+        deliveryProfiles: settings.deliveryProfiles,
       };
       const report = await loadWorkPlan(required(positional, "plan file"), policy);
       if (json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -895,7 +1036,16 @@ async function main(): Promise<void> {
       return;
     }
     if (operation === "stop") {
-      const result = await daemonRequest("shutdown");
+      const handoffContext = readActivationHandoffContext();
+      if (handoffContext !== undefined) {
+        const { operationId, taskId, receiptId } = handoffContext;
+        const result = await stopDaemonForHandoff(
+          forklightHome(), operationId, taskId, receiptId,
+        );
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return;
+      }
+      const result = await stopDaemon();
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return;
     }
@@ -936,6 +1086,77 @@ async function main(): Promise<void> {
     const summaries = await daemonRequest<ProviderModelSummary[]>("statistics", filter);
     if (json) process.stdout.write(`${JSON.stringify(summaries, null, 2)}\n`);
     else printStatistics(summaries);
+    return;
+  }
+
+  if (command === "routing") {
+    const taskClass = required(positional, "task class");
+    const rawCandidates = required(option(rest, "--candidates"), "--candidates JSON array");
+    let candidates: Array<{ provider: string; model: string }>;
+    try {
+      const parsed: unknown = JSON.parse(rawCandidates);
+      if (!Array.isArray(parsed)) throw new Error("not an array");
+      candidates = (parsed as Array<Record<string, unknown>>).map((c, i) => {
+        if (typeof c.provider !== "string" || !c.provider.trim()) {
+          throw new Error(`candidates[${i}].provider must be a non-empty string`);
+        }
+        if (typeof c.model !== "string" || !c.model.trim()) {
+          throw new Error(`candidates[${i}].model must be a non-empty string`);
+        }
+        return { provider: c.provider.trim(), model: c.model.trim() };
+      });
+    } catch (e) {
+      throw new Error(`Invalid --candidates JSON: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await ensureDaemon();
+    const advisory = await daemonRequest<Record<string, unknown>>("model_routing", {
+      taskClass,
+      candidates,
+    });
+    if (json) {
+      process.stdout.write(`${JSON.stringify(advisory, null, 2)}\n`);
+    } else {
+      process.stdout.write(`Task class: ${advisory.taskClass}\n`);
+      process.stdout.write(`Should run competition: ${advisory.shouldRunCompetition}\n`);
+      if (advisory.recommendation) {
+        const rec = advisory.recommendation as Record<string, unknown>;
+        process.stdout.write(
+          `Recommendation: ${rec.provider}/${rec.model} (confidence ${rec.confidence})\n  ${rec.reasoning}\n`,
+        );
+      } else {
+        process.stdout.write("Recommendation: none (insufficient or incompatible evidence)\n");
+      }
+      const cands = advisory.candidates as Array<Record<string, unknown>>;
+      for (const cand of cands) {
+        process.stdout.write(
+          `${cand.provider}/${cand.model}: score=${cand.totalScore}\n`,
+        );
+        const ev = cand.evidence as Record<string, unknown>;
+        process.stdout.write(`  samples: ${ev.relevantSampleCount} | model-quality failures: ${ev.modelQualityFailureCount} | accepted delivery: ${ev.acceptedDeliveryRate !== undefined ? (Number(ev.acceptedDeliveryRate) * 100).toFixed(1) + "%" : "0%"}\n`);
+        const nonModel = ev.ignoredNonModelFailures as Record<string, number> | undefined;
+        if (nonModel) {
+          const entries = Object.entries(nonModel);
+          if (entries.length > 0) {
+            process.stdout.write(`  ignored non-model failures: ${entries.map(([k, v]) => `${k}=${v}`).join(", ")}\n`);
+          }
+        }
+        const unc = cand.uncertainty as Record<string, boolean>;
+        if (unc.insufficientSamples || unc.insufficientGap || unc.incompatibleCost) {
+          const reasons: string[] = [];
+          if (unc.insufficientSamples) reasons.push("insufficient samples");
+          if (unc.insufficientGap) reasons.push("score gap too small");
+          if (unc.incompatibleCost) reasons.push("cost evidence not comparable");
+          process.stdout.write(`  uncertainty: ${reasons.join(", ")}\n`);
+        }
+        const factors = cand.factors as Array<Record<string, unknown>>;
+        for (const f of factors) {
+          const avail = f.available ? "✓" : "✗";
+          process.stdout.write(
+            `  ${avail} ${f.factor}: raw=${f.rawValue ?? "—"} norm=${Number(f.normalizedScore).toFixed(3)} weighted=${Number(f.weightedScore).toFixed(3)} [w=${f.weight}]${!f.available && f.unavailableReason ? ` — ${f.unavailableReason}` : ""}\n`,
+          );
+        }
+      }
+    }
     return;
   }
 
@@ -1054,6 +1275,7 @@ async function main(): Promise<void> {
       ) {
         throw new Error("Integration wait timeout must be an integer from 1 to 3600000");
       }
+      const deepAudit = rest.includes("--deep-audit");
       const operation = subcommand === "wait"
         ? "forklight_integration_wait" as const
         : "forklight_integration_status" as const;
@@ -1063,20 +1285,28 @@ async function main(): Promise<void> {
       const { output } = await withCliExchangeReceipt({
         operation,
         home: forklightHome(),
-        args: { operationId, ...(timeoutMs === undefined ? {} : { timeoutMs }), json },
+        args: { operationId, ...(timeoutMs === undefined ? {} : { timeoutMs }), json, deepAudit },
         taskId: () => taskId,
         invoke: async () => {
           await ensureDaemon();
-          const view = await daemonRequest<Record<string, unknown>>(
+          const view = await daemonRequest<IntegrationOperationView>(
             method,
             { operationId, ...(timeoutMs === undefined ? {} : { timeoutMs }) },
           );
           if (typeof view.taskId === "string") taskId = view.taskId;
           return view;
         },
-        renderOutput: (view) => json
-          ? `${JSON.stringify(view, null, 2)}\n`
-          : humanIntegrationOperationLines(view),
+        renderOutput: (view) => {
+          if (deepAudit) {
+            return json
+              ? `${JSON.stringify(view, null, 2)}\n`
+              : humanIntegrationOperationLines(view);
+          }
+          const compact = buildCompactIntegrationOperationView(view);
+          return json
+            ? `${JSON.stringify(compact, null, 2)}\n`
+            : humanIntegrationOperationLines(compact);
+        },
       });
       process.stdout.write(output);
       return;
@@ -1185,6 +1415,182 @@ async function main(): Promise<void> {
       return;
     }
     throw new Error(`Unknown providers subcommand: ${subcommand}. Use: status or probe.`);
+  }
+
+  function humanRemediationVerifyLines(result: Record<string, unknown>): string {
+    const lines: string[] = [];
+    const check = result.check as Record<string, unknown> | undefined;
+    if (check !== undefined) {
+      lines.push(`checkId: ${check.id}`);
+      lines.push(`status: ${check.status}`);
+    }
+    lines.push(`taskStatus: ${result.taskStatus}`);
+    const disp = result.disposition as Record<string, unknown> | undefined;
+    if (disp !== undefined) {
+      lines.push(`disposition: ${disp.status}`);
+    }
+    if (typeof check?.commandCount === "number") {
+      lines.push(`commandsPassed: ${check.passedCommandCount}/${check.commandCount}`);
+    }
+    return `${lines.join("\n")}\n`;
+  }
+
+  function humanCandidateReverifyLines(result: Record<string, unknown>): string {
+    const lines: string[] = [];
+    lines.push(`status: ${result.status}`);
+    lines.push(`taskId: ${result.taskId}`);
+    lines.push(`taskStatus: ${result.taskStatus}`);
+    lines.push(`attemptId: ${result.attemptId}`);
+    lines.push(`attemptStatus: ${result.attemptStatus}`);
+    lines.push(`verificationEventSequence: ${result.verificationEventSequence}`);
+    const allowance = result.allowance as Record<string, unknown> | undefined;
+    if (allowance !== undefined) {
+      lines.push(
+        `allowance: ${allowance.remaining} of ${allowance.max} left (consumed ${allowance.consumed}, source ${allowance.source})`,
+      );
+    }
+    const cost = result.costFacts as Record<string, unknown> | undefined;
+    if (cost !== undefined) {
+      lines.push(`workerInvoked: ${cost.workerInvoked}`);
+      lines.push(`incrementalWorkerTokens: ${cost.incrementalWorkerTokens}`);
+      lines.push(`incrementalModelRuntimeCostUsd: ${cost.incrementalModelRuntimeCostUsd}`);
+      lines.push(`commandsPassed: ${cost.passedCommandCount}/${cost.commandCount}`);
+      lines.push(`commandDurationMs: ${cost.commandDurationMs}`);
+      lines.push(`wallDurationMs: ${cost.wallDurationMs}`);
+    }
+    lines.push(`requiresFreshMainAccept: ${result.requiresFreshMainAccept}`);
+    return `${lines.join("\n")}\n`;
+  }
+
+  if (command === "remediate") {
+    const subcommand = required(positional, "remediate subcommand (verify)");
+    if (subcommand !== "verify") {
+      throw new Error(`Unknown remediate subcommand: ${subcommand}. Use: verify.`);
+    }
+    const taskId = required(rest[0], "task id");
+    const reason = required(option(rest, "--reason"), "remediation reason");
+    if (!rest.includes("--confirm")) {
+      throw new Error("remediate verify requires explicit --confirm\n\n" + usage());
+    }
+    const { output } = await withCliExchangeReceipt({
+      operation: "forklight_remediation_verify",
+      home: forklightHome(),
+      args: { taskId, reasonLength: reason.length, confirm: true, json },
+      taskId,
+      invoke: async () => {
+        await ensureDaemon();
+        return daemonRequest<Record<string, unknown>>("remediation_verify", {
+          taskId,
+          reason,
+          confirm: true,
+        });
+      },
+      renderOutput: (result) => json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanRemediationVerifyLines(result),
+    });
+    process.stdout.write(output);
+    return;
+  }
+
+  if (command === "reverify") {
+    const taskId = required(positional, "task id");
+    const reason = required(option(rest, "--reason"), "reverification reason");
+    if (!rest.includes("--confirm")) {
+      throw new Error("reverify requires explicit --confirm\n\n" + usage());
+    }
+    const { output } = await withCliExchangeReceipt({
+      operation: "forklight_candidate_reverify",
+      home: forklightHome(),
+      args: { taskId, reasonLength: reason.length, confirm: true, json },
+      taskId,
+      invoke: async () => {
+        await ensureDaemon();
+        return daemonRequest<Record<string, unknown>>("candidate_reverify", {
+          taskId,
+          reason,
+          confirm: true,
+        });
+      },
+      renderOutput: (result) => json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanCandidateReverifyLines(result),
+    });
+    process.stdout.write(output);
+    return;
+  }
+
+  if (command === "adapt") {
+    const ADAPTATION_REASONS = new Set([
+      "duration-budget", "size-policy", "attempt-budget", "completion-policy",
+      "concurrency-cap", "no-progress-timeout", "other-flexible-policy",
+    ]);
+    const subcommand = required(positional, "adapt subcommand (preview or apply)");
+    const taskId = required(rest[0], "task id");
+    const rawPatch = required(option(rest, "--patch"), "JSON policy patch (--patch)");
+    let patch: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(rawPatch);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("shape");
+      }
+      patch = parsed as Record<string, unknown>;
+    } catch {
+      throw new Error("adapt --patch must be a valid JSON object");
+    }
+    const reason = required(option(rest, "--reason"), "adaptation reason category (--reason)");
+    if (!ADAPTATION_REASONS.has(reason)) {
+      throw new Error(
+        `adapt --reason must be a bounded category: ${[...ADAPTATION_REASONS].join(", ")}`,
+      );
+    }
+
+    if (subcommand === "preview") {
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_adaptation_preview",
+        home: forklightHome(),
+        args: { taskId, reason, json },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon();
+          return daemonRequest<Record<string, unknown>>("adaptation_preview", {
+            taskId, patch, reason,
+          });
+        },
+        renderOutput: (preview) => json
+          ? `${JSON.stringify(preview, null, 2)}\n`
+          : humanAdaptationPreviewLines(preview),
+      });
+      process.stdout.write(output);
+      return;
+    }
+
+    if (subcommand === "apply") {
+      if (!rest.includes("--confirm")) {
+        throw new Error("adapt apply requires explicit --confirm\n\n" + usage());
+      }
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_adaptation_apply",
+        home: forklightHome(),
+        args: { taskId, reason, confirm: true, json },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon();
+          return daemonRequest<Record<string, unknown>>("adaptation_apply", {
+            taskId, patch, reason, confirm: true,
+          });
+        },
+        renderOutput: (result) => json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : humanAdaptationApplyLines(result),
+      });
+      process.stdout.write(output);
+      return;
+    }
+
+    throw new Error(
+      `Unknown adapt subcommand: ${subcommand}. Use: preview or apply.`,
+    );
   }
 
   if (command === "doctor") {
@@ -1337,6 +1743,7 @@ async function main(): Promise<void> {
         execution: settings.execution,
         providerDefaults: settings.providerDefaults,
         completionPolicy: settings.completionPolicy,
+        deliveryProfiles: settings.deliveryProfiles,
       };
       const result = await runNewTask(
         store,
@@ -1380,40 +1787,194 @@ async function main(): Promise<void> {
         },
         taskId,
         invoke: async () => {
-          try {
-            await ensureDaemon();
-            const task = await daemonRequest<TaskRecord>("resume", {
-              taskId,
-              ...(feedback === undefined ? {} : { feedback }),
-              ...(authorization === undefined ? {} : { authorization }),
-            });
-            renderedOutput = `queued: ${task.id}\n`;
-            return task;
-          } catch {
-            const executionOptions = authorization === undefined
-              ? undefined
-              : authorizeExtraAttempt(
+          const exec = resumeSettings.execution;
+          return routeMutation(
+            () => ensureDaemon(),
+            async () => {
+              const task = await daemonRequest<TaskRecord>("resume", {
+                taskId,
+                ...(feedback === undefined ? {} : { feedback }),
+                ...(authorization === undefined ? {} : { authorization }),
+              });
+              renderedOutput = `queued: ${task.id}\n`;
+              return task;
+            },
+            async () => {
+              let executionOptions: AttemptExecutionOptions | undefined;
+              if (authorization !== undefined) {
+                executionOptions = authorizeExtraAttempt(
                   store,
                   taskId,
                   authorization,
-                  resumeSettings.execution.maxAttempts,
-                  resumeSettings.execution.maximumBudgetUsd,
+                  exec.maxAttempts,
+                  exec.maximumBudgetUsd,
+                  exec.maxExtraAttempts,
                 );
-            const result = await resumeTask(store, taskId, (event) => {
-              const line = progressLine(event);
-              if (line !== undefined) progressLines.push(line);
-            }, feedback, resumeSettings.execution, resumeSettings.providerDefaults, executionOptions);
-            const statusBlock = humanStatusLines(
-              result.task,
-              undefined,
-              failureCategoryForTask(result.task.status, store.listEvents(result.task.id)),
-            );
-            renderedOutput = `${progressLines.join("")}${statusBlock}`;
-            if (result.task.status !== "succeeded") {
-              process.exitCode = result.task.status === "interrupted" ? 130 : 1;
-            }
-            return result.task;
-          }
+              } else {
+                executionOptions = resolvePendingGrantExecutionOptions(
+                  store, taskId, exec.maxAttempts, exec.maxExtraAttempts,
+                ) ?? undefined;
+              }
+              const result = await resumeTask(store, taskId, (event) => {
+                const line = progressLine(event);
+                if (line !== undefined) progressLines.push(line);
+              }, feedback, exec, resumeSettings.providerDefaults, executionOptions);
+              const statusBlock = humanStatusLines(
+                result.task,
+                undefined,
+                failureCategoryForTask(result.task.status, store.listEvents(result.task.id)),
+              );
+              renderedOutput = `${progressLines.join("")}${statusBlock}`;
+              if (result.task.status !== "succeeded") {
+                process.exitCode = result.task.status === "interrupted" ? 130 : 1;
+              }
+              return result.task;
+            },
+          );
+        },
+        renderOutput: () => renderedOutput,
+      });
+      process.stdout.write(output);
+      return;
+    }
+    if (command === "correct") {
+      const taskId = required(positional, "task id");
+      const feedbackIndex = rest.indexOf("--feedback");
+      if (feedbackIndex === -1) {
+        throw new Error("correct requires --feedback\n\n" + usage());
+      }
+      const feedback = required(rest[feedbackIndex + 1], "feedback text");
+      const rawBudget = option(rest, "--max-budget-usd");
+      const maxBudgetUsd = rawBudget === undefined
+        ? null
+        : rawBudget === "none" || rawBudget === "null"
+          ? null
+          : Number(rawBudget);
+      if (
+        maxBudgetUsd !== null
+        && (!Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0)
+      ) {
+        throw new Error("--max-budget-usd must be a positive number or none");
+      }
+      if (!rest.includes("--confirm")) {
+        throw new Error("correct requires --confirm");
+      }
+      const candidateRevisionId = option(rest, "--candidate-revision");
+      const rawReusablePaths = option(rest, "--reusable-paths");
+      const rawRemainingGaps = option(rest, "--remaining-gaps");
+      const structuredCount = [candidateRevisionId, rawReusablePaths, rawRemainingGaps]
+        .filter((value) => value !== undefined).length;
+      if (structuredCount !== 0 && structuredCount !== 3) {
+        throw new Error(
+          "--candidate-revision, --reusable-paths, and --remaining-gaps must be provided together",
+        );
+      }
+      let reusablePaths: unknown;
+      let remainingGaps: unknown;
+      if (structuredCount === 3) {
+        try {
+          reusablePaths = JSON.parse(rawReusablePaths!);
+          remainingGaps = JSON.parse(rawRemainingGaps!);
+        } catch {
+          throw new Error("--reusable-paths and --remaining-gaps must be valid JSON arrays");
+        }
+        if (!Array.isArray(reusablePaths) || !Array.isArray(remainingGaps)) {
+          throw new Error("--reusable-paths and --remaining-gaps must be JSON arrays");
+        }
+      }
+      const correctSettings = new SettingsService(store).get();
+      const progressLines: string[] = [];
+      let renderedOutput = "";
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_correct",
+        home: forklightHome(),
+        args: {
+          taskId,
+          feedbackLength: feedback.trim().length,
+          maxBudgetUsd,
+          structuredGapContract: structuredCount === 3,
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          const exec = correctSettings.execution;
+          return routeMutation(
+            () => ensureDaemon(),
+            async () => {
+              const task = await daemonRequest<TaskRecord>("correct", {
+                taskId,
+                feedback,
+                ...(maxBudgetUsd !== null ? { maxBudgetUsd } : {}),
+                ...(structuredCount === 3 ? {
+                  candidateRevisionId,
+                  reusablePaths,
+                  remainingGaps,
+                } : {}),
+                confirm: true,
+              });
+              renderedOutput = `queued: ${task.id}\n`;
+              return task;
+            },
+            async () => {
+              const task = store.getTask(taskId);
+              const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
+              const maxMainCorrections = task.effectivePolicy?.values.maxMainCorrections ?? 1;
+              const latestRevision = resolveLatestRevision(store.listEvents(taskId));
+              let gapContract: ReturnType<typeof validateStructuredCorrectionInput>["contract"] | undefined;
+              if (structuredCount === 3) {
+                const eligibility = resolveCorrectionEligibility(store, taskId);
+                if (!eligibility.eligible) {
+                  throw new Error(describeCorrectionRejection(eligibility.category));
+                }
+                if (latestRevision === undefined) {
+                  throw new Error(describeCorrectionRejection("no-revision"));
+                }
+                gapContract = validateStructuredCorrectionInput({
+                  feedback,
+                  maxBudgetUsd,
+                  candidateRevisionId: candidateRevisionId!,
+                  reusablePaths,
+                  remainingGaps,
+                  confirm: true,
+                }, latestRevision).contract;
+              } else if (latestRevision !== undefined) {
+                throw new Error(
+                  "correction for a revisioned Task requires the three structured correction flags",
+                );
+              }
+              authorizeMainCorrection(
+                store,
+                taskId,
+                {
+                  feedback: feedback.trim(),
+                  maxBudgetUsd,
+                  confirm: true,
+                  ...(gapContract === undefined ? {} : { gapContract }),
+                },
+                baseMaxAttempts,
+                maxMainCorrections,
+                exec.maximumBudgetUsd,
+              );
+              prepareMainCorrectionTask(store, taskId);
+              const result = await correctTask(
+                store, taskId, (event) => {
+                  const line = progressLine(event);
+                  if (line !== undefined) progressLines.push(line);
+                },
+                exec, correctSettings.providerDefaults,
+              );
+              const statusBlock = humanStatusLines(
+                result.task,
+                undefined,
+                failureCategoryForTask(result.task.status, store.listEvents(result.task.id)),
+              );
+              renderedOutput = `${progressLines.join("")}${statusBlock}`;
+              if (result.task.status !== "succeeded") {
+                process.exitCode = result.task.status === "interrupted" ? 130 : 1;
+              }
+              return result.task;
+            },
+          );
         },
         renderOutput: () => renderedOutput,
       });
@@ -1492,45 +2053,78 @@ async function main(): Promise<void> {
         },
         taskId,
         invoke: async () => {
-          try {
-            await ensureDaemon();
-            const task = await daemonRequest<TaskRecord>("revise", {
-              taskId,
-              feedback,
-              ...(authorization === undefined ? {} : { authorization }),
-            });
-            renderedOutput = `queued: ${task.id}\n`;
-            return task;
-          } catch {
-            const executionOptions = authorization === undefined
-              ? undefined
-              : authorizeExtraAttempt(
+          const exec = reviseSettings.execution;
+          return routeMutation(
+            () => ensureDaemon(),
+            async () => {
+              const task = await daemonRequest<TaskRecord>("revise", {
+                taskId,
+                feedback,
+                ...(authorization === undefined ? {} : { authorization }),
+              });
+              renderedOutput = `queued: ${task.id}\n`;
+              return task;
+            },
+            async () => {
+              // Resolve durable pending grant before eligibility so the
+              // exact maximum ordinal is authoritative — same as the
+              // daemon coordinator path.  A pending grant permits
+              // admission without duplicate authorization.
+              const pendingGrant = resolvePendingGrantExecutionOptions(
+                store, taskId, exec.maxAttempts, exec.maxExtraAttempts,
+              );
+              const effectiveLimit = pendingGrant?.maximumOrdinal
+                ?? (authorization !== undefined ? exec.maxAttempts + exec.maxExtraAttempts : exec.maxAttempts);
+              // Validate non-attempt eligibility and canonicalize feedback
+              // BEFORE recording any authorization grant.  Attempt-count
+              // eligibility is enforced by authorizeExtraAttempt and
+              // re-validated by reviseTask with its authoritative bound.
+              const precheck = checkReviseEligibility(
+                store, taskId, feedback, effectiveLimit,
+              );
+              if (!precheck.eligible && precheck.reason !== "exhausted-attempts") {
+                throw new Error(precheck.reason !== undefined
+                  ? describeReviseRejection(precheck.reason)
+                  : "revise rejected");
+              }
+              if (!precheck.eligible && authorization === undefined && !pendingGrant) {
+                throw new Error(describeReviseRejection("exhausted-attempts"));
+              }
+              const canonicalFeedback = precheck.canonicalFeedback ?? feedback.trim();
+              let executionOptions: AttemptExecutionOptions | undefined;
+              if (authorization !== undefined) {
+                executionOptions = authorizeExtraAttempt(
                   store,
                   taskId,
                   authorization,
-                  reviseSettings.execution.maxAttempts,
-                  reviseSettings.execution.maximumBudgetUsd,
+                  exec.maxAttempts,
+                  exec.maximumBudgetUsd,
+                  exec.maxExtraAttempts,
                 );
-            const result = await reviseTask(
-              store, taskId, feedback, (event) => {
-                const line = progressLine(event);
-                if (line !== undefined) progressLines.push(line);
-              },
-              reviseSettings.execution,
-              reviseSettings.providerDefaults,
-              executionOptions,
-            );
-            const statusBlock = humanStatusLines(
-              result.task,
-              undefined,
-              failureCategoryForTask(result.task.status, store.listEvents(result.task.id)),
-            );
-            renderedOutput = `${progressLines.join("")}${statusBlock}`;
-            if (result.task.status !== "succeeded") {
-              process.exitCode = result.task.status === "interrupted" ? 130 : 1;
-            }
-            return result.task;
-          }
+              } else if (pendingGrant) {
+                executionOptions = pendingGrant;
+              }
+              const result = await reviseTask(
+                store, taskId, canonicalFeedback, (event) => {
+                  const line = progressLine(event);
+                  if (line !== undefined) progressLines.push(line);
+                },
+                exec,
+                reviseSettings.providerDefaults,
+                executionOptions,
+              );
+              const statusBlock = humanStatusLines(
+                result.task,
+                undefined,
+                failureCategoryForTask(result.task.status, store.listEvents(result.task.id)),
+              );
+              renderedOutput = `${progressLines.join("")}${statusBlock}`;
+              if (result.task.status !== "succeeded") {
+                process.exitCode = result.task.status === "interrupted" ? 130 : 1;
+              }
+              return result.task;
+            },
+          );
         },
         renderOutput: () => renderedOutput,
       });
@@ -1552,9 +2146,13 @@ async function main(): Promise<void> {
             task.status,
             store.listEvents(taskId),
           );
+          const preparationStage = task.status === "preparing"
+            ? store.latestPreparationStageMeta(taskId)
+            : undefined;
           const summary = projectTaskSurface(task, {
             ...(latestEvent === undefined ? {} : { latestEvent }),
             ...(failureCategory === undefined ? {} : { failureCategory }),
+            ...(preparationStage === undefined ? {} : { preparationStage }),
             nowMs: Date.now(),
             quietAfterMs,
           });
@@ -1691,9 +2289,13 @@ async function main(): Promise<void> {
           task.status,
           store.listEvents(task.id),
         );
+        const preparationStage = task.status === "preparing"
+          ? store.latestPreparationStageMeta(task.id)
+          : undefined;
         return projectTaskSurface(task, {
           ...(latestEvent === undefined ? {} : { latestEvent }),
           ...(failureCategory === undefined ? {} : { failureCategory }),
+          ...(preparationStage === undefined ? {} : { preparationStage }),
           nowMs,
           quietAfterMs: DEFAULT_QUIET_AFTER_MS,
         });

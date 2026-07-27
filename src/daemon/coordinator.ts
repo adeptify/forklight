@@ -3,12 +3,16 @@ import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type {
+  AdaptationPreview,
+  AdaptationProposedReasonCategory,
+  AdaptationTransitionRecord,
   CompetitionRecord,
   AttemptAuthorization,
   AttemptExecutionOptions,
   CheckpointReport,
   CheckpointRequest,
   DependencyRecord,
+  EffectivePolicySnapshot,
   IntegrationResultRecord,
   IntegrationOperationView,
   IntegrationStageEvidence,
@@ -24,7 +28,13 @@ import type {
   TaskStatus,
 } from "../core/types.js";
 import { runCheckpoint } from "../core/checkpoint.js";
-import { authorizeExtraAttempt } from "../core/attempt-authorization.js";
+import {
+  authorizeExtraAttempt,
+  authorizeMainCorrection,
+  resolvePendingCorrectionGrant,
+  resolvePendingGrantExecutionOptions,
+  type MainCorrectionAuthorization,
+} from "../core/attempt-authorization.js";
 import { latestMainReview, recordMainReview } from "../core/main-review.js";
 import type { ProviderName } from "../core/providers.js";
 import { providerNames } from "../core/providers.js";
@@ -41,8 +51,10 @@ import { assertWorkPlan, type WorkPlan } from "../core/plan.js";
 import {
   buildTaskRecord,
   checkReviseEligibility,
+  correctTask,
   describeReviseRejection,
   executeAttempt,
+  prepareMainCorrectionTask,
   prepareReviseTask,
   prepareTaskWorkspace,
   registerTaskFromSpec,
@@ -70,18 +82,24 @@ import {
   type StatisticsFilter,
 } from "../core/statistics.js";
 import {
+  provideRoutingAdvice,
+  type RoutingAdvisoryResponse,
+  type RoutingPolicySettings,
+} from "../core/model-routing.js";
+import {
   SettingsService,
   type ForkLightSettings,
   type TaskPolicy,
 } from "../core/settings.js";
 import type { StateStore } from "../state/store.js";
-import { assertWorkspaceExists } from "../workspace/copy.js";
+import { clearTaskPreparationArtifacts, isWorkspaceReady } from "../workspace/copy.js";
 import {
   applyIntegration,
   preflightIntegration,
   type PreflightReceipt,
 } from "../core/integration.js";
 import { getTaskEconomicsReport, type TaskEconomicsReport } from "../core/task-economics-report.js";
+import { getPortfolioEconomicsSummary, type PortfolioEconomicsSummary } from "../core/portfolio-economics.js";
 import {
   captureDirectCodexSample,
   listDirectCodexInbox,
@@ -93,6 +111,7 @@ import {
 import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
 import type { DirectCodexSampleReview } from "../core/direct-codex-review.js";
 import type { DirectCodexPublicationPreview, DirectCodexRegistrationResult } from "../core/direct-codex-publication-service.js";
+import { guidedDirectCodexCapture } from "../core/direct-codex-guided-capture-service.js";
 import { currentBuildIdentity } from "../core/build-identity.js";
 import {
   buildIntegrationOperationView,
@@ -106,6 +125,40 @@ import {
   launchActivationRunner,
   writeActivationHandoff,
 } from "../activation/runner.js";
+import {
+  deriveEnforcementCapability,
+  enforcementCapabilityForRuntime,
+  resolveTaskEffectivePolicy,
+} from "../core/advanced-policy.js";
+import {
+  deriveChildEffectivePolicy,
+  evaluateAdaptationGate,
+  type AdaptationEligibleContext,
+  type AdaptationGateDecision,
+  type AdaptationLineageEdgeProjection,
+  type AdaptationParentProjection,
+} from "../core/adaptation.js";
+import { getWorkerAdapter } from "../workers/registry.js";
+import {
+  verifyMainRemediation,
+  projectRemediationVerifyResult,
+  type RemediationVerifyView,
+} from "../core/main-remediation.js";
+import {
+  reverifyCandidate,
+  resolveCandidateReverificationEligibility,
+  projectCandidateReverificationResult,
+  type CandidateReverificationView,
+  type CandidateReverificationEligibility,
+} from "../core/candidate-reverification.js";
+import { maxMainReverificationsFromSnapshot } from "../core/advanced-policy.js";
+import {
+  resolveCorrectionEligibility,
+  resolveLatestRevision,
+  describeCorrectionRejection,
+  validateStructuredCorrectionInput,
+} from "../core/candidate-revision.js";
+import type { CorrectionEligibility } from "../core/types.js";
 
 export interface PlanRegistrationResult {
   planId: string;
@@ -116,6 +169,7 @@ interface QueuedJob {
   taskId: string;
   resuming: boolean;
   revising?: boolean;
+  correcting?: boolean;
   feedback?: string;
   executionOptions?: AttemptExecutionOptions;
 }
@@ -158,6 +212,7 @@ function taskPolicy(settings: ForkLightSettings): TaskPolicy {
     completionPolicy: settings.completionPolicy,
     workerProfiles: settings.workerProfiles,
     modelCatalog: settings.modelCatalog,
+    deliveryProfiles: settings.deliveryProfiles,
   };
 }
 
@@ -197,6 +252,7 @@ export class DaemonCoordinator {
   private readonly active = new Map<string, Promise<void>>();
   private readonly activeIntegrations = new Map<string, Promise<void>>();
   private readonly integrationOperations = new Map<string, IntegrationOperationContext>();
+  private readonly authorizedHandoffShutdowns = new Set<string>();
   private closing = false;
 
   constructor(
@@ -259,10 +315,26 @@ export class DaemonCoordinator {
     return runCheckpoint(this.store, request);
   }
 
+  /** Resolve the effective advanced policy for a newly created Task.
+   *  Uses the exact selected workerProfileId from the spec; never guesses by runtime. */
+  private resolveEffectivePolicy(spec: TaskSpec): EffectivePolicySnapshot | undefined {
+    const settings = this.settings.get();
+    let capabilities = enforcementCapabilityForRuntime(spec.runtime.name);
+    try {
+      const adapter = getWorkerAdapter(spec.runtime.name);
+      capabilities = deriveEnforcementCapability(adapter.capabilities());
+    } catch {
+      // Conservative defaults for unknown runtimes
+    }
+
+    return resolveTaskEffectivePolicy(spec, settings, capabilities);
+  }
+
   async submitFile(taskFile: string): Promise<TaskRecord> {
     const settings = this.settings.get();
     const loaded = await loadTaskSpec(taskFile, taskPolicy(settings));
-    const task = registerTaskFromSpec(this.store, loaded.spec, loaded.taskFile);
+    const effectivePolicy = this.resolveEffectivePolicy(loaded.spec);
+    const task = registerTaskFromSpec(this.store, loaded.spec, loaded.taskFile, effectivePolicy);
     this.queueTask(task.id);
     return this.store.getTask(task.id);
   }
@@ -270,7 +342,8 @@ export class DaemonCoordinator {
   async submit(rawTask: unknown, baseDirectory: string): Promise<TaskRecord> {
     const settings = this.settings.get();
     const spec = parseTaskSpec(rawTask, baseDirectory, taskPolicy(settings));
-    const task = registerTaskFromSpec(this.store, spec, "forklight://mcp/inline-task");
+    const effectivePolicy = this.resolveEffectivePolicy(spec);
+    const task = registerTaskFromSpec(this.store, spec, "forklight://mcp/inline-task", effectivePolicy);
     this.queueTask(task.id);
     return this.store.getTask(task.id);
   }
@@ -412,6 +485,7 @@ export class DaemonCoordinator {
 
     plan.items.forEach((item, itemIndex) => {
       const taskId = randomUUID();
+      const effectivePolicy = this.resolveEffectivePolicy(item.task);
       taskIdsByItemId[item.id] = taskId;
       registrations.push({
         task: buildTaskRecord({
@@ -421,6 +495,7 @@ export class DaemonCoordinator {
           id: taskId,
           sessionId: randomUUID(),
           createdAt,
+          ...(effectivePolicy === undefined ? {} : { effectivePolicy }),
         }),
         creationEvent: {
           summary: `Task created: ${item.task.name}`,
@@ -477,24 +552,31 @@ export class DaemonCoordinator {
     if (task.status !== "interrupted" && task.status !== "failed") {
       throw new Error(`Task ${taskId} cannot resume from status ${task.status}`);
     }
-    const maxAttempts = this.settings.get().execution.maxAttempts;
+    const execution = this.settings.get().execution;
+    const maxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? execution.maxAttempts;
+    const maxExtraAttempts = task.effectivePolicy?.values.maxExtraAttempts ?? execution.maxExtraAttempts;
     const attemptCount = this.store.listAttempts(taskId).length;
-    if (attemptCount >= maxAttempts && authorization === undefined) {
+    // Resolve pending grant read-only first — may fail-closed on corrupt
+    const pendingGrant = resolvePendingGrantExecutionOptions(
+      this.store, taskId, maxAttempts, maxExtraAttempts,
+    );
+    if (attemptCount >= maxAttempts && authorization === undefined && !pendingGrant) {
       throw new Error(`Task ${taskId} has reached maximum attempts (${maxAttempts})`);
     }
+    // Verify queue admission BEFORE creating any durable grant event
     if (this.closing) throw new Error("ForkLight daemon is shutting down");
     if (this.active.has(taskId) || this.queue.some((job) => job.taskId === taskId)) {
       throw new Error(`Task ${taskId} is already queued or running`);
     }
-    const executionOptions = authorization === undefined
-      ? undefined
-      : authorizeExtraAttempt(
-          this.store,
-          taskId,
-          authorization,
-          maxAttempts,
-          this.settings.get().execution.maximumBudgetUsd,
-        );
+    let executionOptions: AttemptExecutionOptions | undefined;
+    if (authorization !== undefined) {
+      executionOptions = authorizeExtraAttempt(
+        this.store, taskId, authorization, maxAttempts,
+        execution.maximumBudgetUsd, maxExtraAttempts,
+      );
+    } else if (pendingGrant) {
+      executionOptions = pendingGrant;
+    }
     this.enqueue({
       taskId,
       resuming: attemptCount > 0,
@@ -523,13 +605,22 @@ export class DaemonCoordinator {
     feedback: string,
     authorization?: AttemptAuthorization,
   ): TaskRecord {
+    const task = this.store.getTask(taskId);
     const execution = this.settings.get().execution;
-    const maxAttempts = execution.maxAttempts;
+    const maxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? execution.maxAttempts;
+    const maxExtraAttempts = task.effectivePolicy?.values.maxExtraAttempts ?? execution.maxExtraAttempts;
+    // Always resolve pending grant first — may fail-closed on corrupt
+    const pendingGrant = resolvePendingGrantExecutionOptions(
+      this.store, taskId, maxAttempts, maxExtraAttempts,
+    );
+    const effectiveLimit = pendingGrant
+      ? pendingGrant.maximumOrdinal
+      : (authorization !== undefined ? maxAttempts + maxExtraAttempts : maxAttempts);
     const check = checkReviseEligibility(
       this.store,
       taskId,
       feedback,
-      authorization === undefined ? maxAttempts : maxAttempts + 1,
+      effectiveLimit,
     );
     if (!check.eligible) {
       throw new Error(check.reason !== undefined
@@ -545,15 +636,19 @@ export class DaemonCoordinator {
     if (this.active.has(taskId) || this.queue.some((job) => job.taskId === taskId)) {
       throw new Error(`Task ${taskId} is already queued or running`);
     }
-    const executionOptions = authorization === undefined
-      ? undefined
-      : authorizeExtraAttempt(
-          this.store,
-          taskId,
-          authorization,
-          maxAttempts,
-          execution.maximumBudgetUsd,
-        );
+    let executionOptions: AttemptExecutionOptions | undefined;
+    if (authorization !== undefined) {
+      executionOptions = authorizeExtraAttempt(
+        this.store,
+        taskId,
+        authorization,
+        maxAttempts,
+        execution.maximumBudgetUsd,
+        maxExtraAttempts,
+      );
+    } else if (pendingGrant) {
+      executionOptions = pendingGrant;
+    }
     recordMainReview(this.store, taskId, {
       decision: "revise",
       reason: check.canonicalFeedback!,
@@ -569,6 +664,108 @@ export class DaemonCoordinator {
       feedback: check.canonicalFeedback!,
       ...(executionOptions === undefined ? {} : { executionOptions }),
     }, true);
+    return queued;
+  }
+
+  /** Authorize one explicit Main correction for a failed or interrupted Task.
+   *  Reuses the same id, workspace, baseline, logs, and runtime session.
+   *  Limited by the Task's frozen maxMainCorrections, independent from maxExtraAttempts.
+   *  Records a correction grant, then enqueues a resume job with the canonical feedback.
+   *
+   *  When structured gap contract fields (reusablePaths, remainingGaps) are supplied,
+   *  the correction is bound to the latest CandidateRevision and the contract is
+   *  validated before any durable grant or queue mutation. */
+  correct(
+    taskId: string,
+    feedback: string,
+    maxBudgetUsd: number | null,
+    confirm: boolean,
+    candidateRevisionId?: unknown,
+    reusablePaths?: unknown,
+    remainingGaps?: unknown,
+  ): TaskRecord {
+    if (confirm !== true) throw new Error("Main correction requires confirm: true");
+    const task = this.store.getTask(taskId);
+    if (task.status !== "failed" && task.status !== "interrupted") {
+      throw new Error(`Task ${taskId} cannot be corrected from status ${task.status}`);
+    }
+    const execution = this.settings.get().execution;
+    const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? execution.maxAttempts;
+    const maxMainCorrections = task.effectivePolicy?.values.maxMainCorrections ?? 1;
+
+    const trimmed = feedback.trim();
+    if (trimmed.length === 0 || trimmed.length > 1000) {
+      throw new Error("correction feedback must be 1-1000 characters");
+    }
+
+    // Verify queue admission before creating any durable grant event.
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    if (this.active.has(taskId) || this.queue.some((job) => job.taskId === taskId)) {
+      throw new Error(`Task ${taskId} is already queued or running`);
+    }
+
+    const latestRevision = resolveLatestRevision(this.store.listEvents(taskId));
+    const structuredRequested = candidateRevisionId !== undefined
+      || reusablePaths !== undefined
+      || remainingGaps !== undefined;
+    let gapContract: ReturnType<typeof validateStructuredCorrectionInput>["contract"] | undefined;
+
+    if (structuredRequested) {
+      const eligibility = resolveCorrectionEligibility(this.store, taskId);
+      if (!eligibility.eligible) {
+        throw new Error(describeCorrectionRejection(eligibility.category));
+      }
+      if (eligibility.latestRevision === undefined) {
+        throw new Error(describeCorrectionRejection("no-revision"));
+      }
+      if (latestRevision === undefined || latestRevision.id !== eligibility.latestRevision.id) {
+        throw new Error(describeCorrectionRejection("no-revision"));
+      }
+      if (typeof candidateRevisionId !== "string") {
+        throw new Error("structured correction requires candidateRevisionId");
+      }
+      if (!Array.isArray(reusablePaths) || !Array.isArray(remainingGaps)) {
+        throw new Error("structured correction requires reusablePaths and remainingGaps arrays");
+      }
+      const result = validateStructuredCorrectionInput({
+        feedback: trimmed,
+        maxBudgetUsd,
+        candidateRevisionId,
+        reusablePaths,
+        remainingGaps,
+        confirm: true,
+      }, latestRevision);
+      gapContract = result.contract;
+    } else if (latestRevision !== undefined) {
+      throw new Error(
+        "correction for a revisioned Task requires candidateRevisionId, reusablePaths, and remainingGaps",
+      );
+    }
+
+    const authorization: MainCorrectionAuthorization = {
+      feedback: trimmed,
+      maxBudgetUsd,
+      confirm: true,
+      ...(gapContract === undefined ? {} : { gapContract }),
+    };
+
+    // Calling the authorizer even when a grant is pending makes replay
+    // idempotent only when feedback, budget, revision and contract match.
+    authorizeMainCorrection(
+      this.store,
+      taskId,
+      authorization,
+      baseMaxAttempts,
+      maxMainCorrections,
+      execution.maximumBudgetUsd,
+    );
+
+    const queued = prepareMainCorrectionTask(this.store, taskId);
+    this.enqueue({
+      taskId,
+      resuming: true,
+      correcting: true,
+    });
     return queued;
   }
 
@@ -598,6 +795,10 @@ export class DaemonCoordinator {
     return captureDirectCodexSample(this.store, usage, metadata);
   }
 
+  directCodexGuidedCapture(forklightTaskId: unknown, codexRunRef: unknown, usage: unknown): DirectCodexPairedSample {
+    return guidedDirectCodexCapture(this.store, forklightTaskId, codexRunRef, usage);
+  }
+
   directCodexInbox(taskClass: unknown, profileId: unknown): readonly DirectCodexInboxItem[] {
     return listDirectCodexInbox(this.store, taskClass, profileId);
   }
@@ -621,18 +822,36 @@ export class DaemonCoordinator {
   /**
    * List Task surfaces with latest-event progress (and failureCategory only
    * for failed|interrupted). Shared by MCP list and Console Board data.
+   * Also surfaces the latest preparation stage so list/status can explain
+   * what is happening while a Task is preparing.
    */
   listTaskSurfaces(statuses?: TaskStatus[], limit = 20): SafeTaskSummary[] {
     const nowMs = Date.now();
     return this.list(statuses, limit).map((task) => {
+      const events = this.store.listEvents(task.id);
       const latestEvent = toLatestEventMeta(this.store.latestEventMeta(task.id));
       const failureCategory = failureCategoryForTask(
         task.status,
-        this.store.listEvents(task.id),
+        events,
       );
+      const remediationDisposition = this.store.getRemediationDisposition(task.id);
+      const decisionStage = buildTaskDecisionView({
+        task,
+        attempts: this.store.listAttempts(task.id),
+        events,
+        integrationResults: this.store.listIntegrationResults(task.id),
+        ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+        nowMs,
+      }).stage;
+      const preparationStage = task.status === "preparing"
+        ? this.store.latestPreparationStageMeta(task.id)
+        : undefined;
       return projectTaskSurface(task, {
         ...(latestEvent === undefined ? {} : { latestEvent }),
         ...(failureCategory === undefined ? {} : { failureCategory }),
+        ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+        decisionStage,
+        ...(preparationStage === undefined ? {} : { preparationStage }),
         nowMs,
       });
     });
@@ -648,6 +867,86 @@ export class DaemonCoordinator {
 
   statistics(filter: StatisticsFilter = {}): ProviderModelSummary[] {
     return new StatisticsService(this.store).summarize(filter);
+  }
+
+  /** Read-only evidence-aware model-routing advisory.  Derives routing
+   *  evidence from terminal Tasks matching the exact taskClass, resolves
+   *  the current flexible routing policy, and returns a privacy-safe
+   *  advisory with per-candidate factors, uncertainty flags, competition
+   *  guidance, and an optional recommendation.  Never launches work,
+   *  switches a Worker, disables a model, mutates settings, retries,
+   *  commits, or pushes. */
+  modelRouting(
+    taskClass: string,
+    candidates: Array<{ provider: string; model: string }>,
+  ): RoutingAdvisoryResponse {
+    if (
+      typeof taskClass !== "string"
+      || taskClass.trim().length === 0
+      || taskClass.trim().length > 200
+    ) {
+      throw new Error("modelRouting requires a taskClass of 1 to 200 characters");
+    }
+    if (!Array.isArray(candidates) || candidates.length < 2 || candidates.length > 10) {
+      throw new Error("modelRouting requires 2 to 10 provider/model candidates");
+    }
+    const seen = new Set<string>();
+    for (const c of candidates) {
+      if (
+        typeof c.provider !== "string"
+        || c.provider.trim().length === 0
+        || c.provider.trim().length > 100
+      ) {
+        throw new Error("Each candidate provider must contain 1 to 100 characters");
+      }
+      if (
+        typeof c.model !== "string"
+        || c.model.trim().length === 0
+        || c.model.trim().length > 200
+      ) {
+        throw new Error("Each candidate model must contain 1 to 200 characters");
+      }
+      const key = c.provider.trim() + "\0" + c.model.trim();
+      if (seen.has(key)) throw new Error("modelRouting candidates must be unique");
+      seen.add(key);
+    }
+
+    const stats = new StatisticsService(this.store);
+    const evidenceMap = stats.routingEvidence(taskClass.trim());
+    const settings = this.settings.get();
+    const policy: RoutingPolicySettings = {
+      minRelevantSamples: settings.modelRouting.minRelevantSamples,
+      uncertaintyThreshold: settings.modelRouting.uncertaintyThreshold,
+      competitionOnUncertainty: settings.modelRouting.competitionOnUncertainty,
+      missingEvidenceMode: settings.modelRouting.missingEvidenceMode,
+      weights: {
+        acceptedDelivery: settings.modelRouting.weights.acceptedDelivery,
+        verifiedBehavior: settings.modelRouting.weights.verifiedBehavior,
+        modelQualityFailure: settings.modelRouting.weights.modelQualityFailure,
+        correctionChurn: settings.modelRouting.weights.correctionChurn,
+        officialCost: settings.modelRouting.weights.officialCost,
+        duration: settings.modelRouting.weights.duration,
+        budgetReliability: settings.modelRouting.weights.budgetReliability ?? 0,
+      },
+    };
+
+    return provideRoutingAdvice({
+      taskClass: taskClass.trim(),
+      candidates: candidates.map((c) => ({
+        provider: c.provider.trim(),
+        model: c.model.trim(),
+      })),
+      evidenceMap,
+      policy,
+    });
+  }
+
+  /** Return a detached deeply-frozen portfolio economics summary for all
+   *  terminal Tasks matching the optional provider/model/time filter.
+   *  Never reads legacy costUsd, never combines currencies, never calls
+   *  a Provider, and never mutates state. */
+  economicsSummary(filter: StatisticsFilter = {}): PortfolioEconomicsSummary {
+    return getPortfolioEconomicsSummary(this.store, filter);
   }
 
   taskTimeline(
@@ -687,6 +986,7 @@ export class DaemonCoordinator {
     }
     const attempts = this.store.listAttempts(taskId);
     const events = this.store.listEvents(taskId);
+    const remediationDisposition = this.store.getRemediationDisposition(taskId);
     return {
       task,
       attempts,
@@ -697,6 +997,7 @@ export class DaemonCoordinator {
         attempts,
         events,
         integrationResults: this.store.listIntegrationResults(taskId),
+        ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
       }),
       diff,
     };
@@ -704,11 +1005,13 @@ export class DaemonCoordinator {
 
   taskDecision(taskId: string): import("../core/types.js").TaskDecisionView {
     const task = this.store.getTask(taskId);
+    const remediationDisposition = this.store.getRemediationDisposition(taskId);
     return buildTaskDecisionView({
       task,
       attempts: this.store.listAttempts(taskId),
       events: this.store.listEvents(taskId),
       integrationResults: this.store.listIntegrationResults(taskId),
+      ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
     });
   }
 
@@ -850,6 +1153,46 @@ export class DaemonCoordinator {
       this.activeIntegrations.has(operationId),
       !completed,
     );
+  }
+
+  /** Server-validated, operation-bound, one-use activation shutdown
+   *  authorization.  The daemon verifies that the operation exists and is
+   *  still activation-pending (no stored result) before acknowledging.
+   *  Replay or mismatch fails with a fixed privacy-safe error.
+   *
+   *  Authorization is durable: an event is persisted before the ack so
+   *  recovery after daemon restart can reconstruct the authorized set and
+   *  reject replays.  After successful authorization the old daemon
+   *  schedules its own shutdown.  This method never calls any live model
+   *  or provider. */
+  authorizeActivationHandoffShutdown(
+    operationId: string,
+    taskId: string,
+    receiptId: string,
+  ): { stopping: true; handoffAuthorized: true; targetPid: number } {
+    const context = this.integrationOperations.get(operationId);
+    if (context === undefined) {
+      throw new Error("Unknown Integration operation; activation handoff shutdown rejected");
+    }
+    if (context.taskId !== taskId || context.receiptId !== receiptId) {
+      throw new Error("Activation handoff shutdown does not match the Integration operation");
+    }
+    if (this.authorizedHandoffShutdowns.has(operationId)) {
+      throw new Error("Activation handoff shutdown already authorized for this operation");
+    }
+    if (this.store.getIntegrationResult(operationId) !== undefined) {
+      throw new Error("Integration activation is already complete; activation handoff shutdown rejected");
+    }
+    this.store.addEvent(
+      taskId,
+      undefined,
+      "integration.handoff.authorized",
+      "Activation handoff shutdown authorized",
+      { operationId, taskId, receiptId, targetPid: process.pid },
+    );
+    this.authorizedHandoffShutdowns.add(operationId);
+    setImmediate(() => process.kill(process.pid, "SIGTERM"));
+    return { stopping: true, handoffAuthorized: true, targetPid: process.pid };
   }
 
   completeIntegrationActivation(
@@ -1005,6 +1348,40 @@ export class DaemonCoordinator {
     const recovered: string[] = [];
     const stale = this.store.listTasks(["preparing", "running", "verifying"]);
     for (const task of stale) {
+      if (task.status === "preparing") {
+        if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) {
+          recovered.push(task.id);
+          continue;
+        }
+        this.store.addEvent(
+          task.id,
+          undefined,
+          "workspace.preparation.stage",
+          "Preparation recovery started",
+          { stage: "init", phase: "start", elapsedMs: 0 },
+        );
+        try {
+          await clearTaskPreparationArtifacts(task.paths);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.store.setTaskStatus(task.id, "failed", {
+            finishedAt: timestamp(),
+            workerPid: null,
+            error: `Workspace preparation failed: recovery cleanup: ${message}`,
+          });
+          recovered.push(task.id);
+          continue;
+        }
+        this.store.setTaskStatus(task.id, "preparing", {
+          finishedAt: null,
+          workerPid: null,
+          error: null,
+        });
+        this.enqueue({ taskId: task.id, resuming: false }, true);
+        recovered.push(task.id);
+        continue;
+      }
+
       if (task.workerPid !== undefined) await stopOrphanWorker(task.workerPid);
       if (task.currentAttemptId) {
         try {
@@ -1034,6 +1411,35 @@ export class DaemonCoordinator {
         "Daemon restart detected; task queued for recovery",
       );
       this.enqueue({ taskId: task.id, resuming: hasAttempts }, true);
+      recovered.push(task.id);
+    }
+    // A Main correction grant is durable before its in-memory queue entry.
+    // Recover failed/interrupted tasks from the narrow post-grant crash window,
+    // and recover already-queued corrections without inventing new feedback.
+    for (const task of this.store.listTasks(["failed", "interrupted", "queued"])) {
+      if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) continue;
+      const exec = this.settings.get().execution;
+      const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
+      let pending: ReturnType<typeof resolvePendingCorrectionGrant>;
+      try {
+        pending = resolvePendingCorrectionGrant(this.store, task.id, baseMaxAttempts);
+      } catch {
+        // Corrupt authorization evidence remains fail-closed and inspectable;
+        // it must not prevent unrelated Tasks from recovering.
+        continue;
+      }
+      if (pending === null) continue;
+      if (task.status !== "queued") prepareMainCorrectionTask(this.store, task.id);
+      this.enqueue({ taskId: task.id, resuming: true, correcting: true });
+      recovered.push(task.id);
+    }
+    // An adaptation transition commits its lineage edge and queued child in
+    // one transaction before the in-memory enqueue. A crash in that narrow
+    // window must not strand the durable successor.
+    for (const task of this.store.listTasks(["queued"])) {
+      if (this.store.getAdaptationLineageEdgeForChild(task.id) === undefined) continue;
+      if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) continue;
+      this.enqueue({ taskId: task.id, resuming: false }, true);
       recovered.push(task.id);
     }
     this.reconcilePlans();
@@ -1105,12 +1511,394 @@ export class DaemonCoordinator {
           );
         }
       }
+      // Reconstruct durable handoff authorization state.
+      for (const event of events) {
+        if (
+          event.type !== "integration.handoff.authorized"
+          || event.payload === null
+          || typeof event.payload !== "object"
+        ) {
+          continue;
+        }
+        const payload = event.payload as { operationId?: unknown };
+        if (typeof payload.operationId === "string") {
+          this.authorizedHandoffShutdowns.add(payload.operationId);
+        }
+      }
     }
   }
 
   queueTask(taskId: string): TaskRecord {
     this.enqueue({ taskId, resuming: false });
     return this.store.getTask(taskId);
+  }
+
+  // --- Bounded policy adaptation ---
+
+  /** Bounded set of caller-supplied reason categories. */
+  private static readonly ADAPTATION_PROPOSED_REASONS: ReadonlySet<string> = new Set<string>([
+    "duration-budget",
+    "size-policy",
+    "attempt-budget",
+    "completion-policy",
+    "concurrency-cap",
+    "no-progress-timeout",
+    "other-flexible-policy",
+  ]);
+
+  private normalizeAdaptationProposedReason(reason: unknown): AdaptationProposedReasonCategory {
+    if (typeof reason !== "string" || !DaemonCoordinator.ADAPTATION_PROPOSED_REASONS.has(reason)) {
+      throw new Error("adaptation reason must be a bounded reason category");
+    }
+    return reason as AdaptationProposedReasonCategory;
+  }
+
+  /** Build a deterministic parent projection and root snapshot for the gate.
+   *  All lineage edges under the rootTaskId are passed in for next-round
+   *  computation and idempotency checks. The root's immutable effective
+   *  policy is required; if it is missing the gate returns a stopped decision
+   *  without reading live settings. */
+  private projectionForAdaptation(taskId: string): {
+    parent: AdaptationParentProjection;
+    rootTaskId: string;
+    rootEffectivePolicy: EffectivePolicySnapshot | undefined;
+    existingLineage: readonly AdaptationLineageEdgeProjection[];
+  } {
+    const parentRecord = this.store.getTask(taskId);
+    const rootEdge = this.store.getAdaptationLineageEdgeForChild(taskId);
+    let rootTaskId: string | undefined;
+    let rootEffectivePolicy: EffectivePolicySnapshot | undefined;
+    if (rootEdge !== undefined) {
+      rootTaskId = rootEdge.rootTaskId;
+      try {
+        const rootRecord = this.store.getTask(rootEdge.rootTaskId);
+        rootEffectivePolicy = rootRecord.effectivePolicy;
+      } catch {
+        rootEffectivePolicy = undefined;
+      }
+    } else {
+      rootTaskId = taskId;
+      rootEffectivePolicy = parentRecord.effectivePolicy;
+    }
+    const lineage = rootTaskId === undefined
+      ? []
+      : this.store.listAdaptationLineageForRoot(rootTaskId).map((edge): AdaptationLineageEdgeProjection => ({
+        rootTaskId: edge.rootTaskId,
+        parentTaskId: edge.parentTaskId,
+        childTaskId: edge.childTaskId,
+        round: edge.round,
+      }));
+    const failureCategory = failureCategoryForTask(
+      parentRecord.status,
+      this.store.listEvents(taskId),
+    );
+    return {
+      parent: {
+        id: parentRecord.id,
+        status: parentRecord.status,
+        effectivePolicy: parentRecord.effectivePolicy,
+        ...(failureCategory === undefined ? {} : { failureCategory }),
+      },
+      rootTaskId,
+      rootEffectivePolicy,
+      existingLineage: lineage,
+    };
+  }
+
+  /** Run the eligibility gate against the supplied patch. Always returns
+   *  the canonical preview object; never throws on gate-level rejection. */
+  private runAdaptationGate(taskId: string, rawPatch: unknown): {
+    preview: AdaptationPreview;
+    decision: AdaptationGateDecision;
+  } {
+    const projection = this.projectionForAdaptation(taskId);
+    if (projection.rootEffectivePolicy === undefined) {
+      const preview: AdaptationPreview = {
+        status: "stopped",
+        rootTaskId: projection.rootTaskId ?? "",
+        parentTaskId: taskId,
+        nextRound: 0,
+        maxAdaptationRounds: 0,
+        profileId: "",
+        reason: "missing-effective-policy",
+        stoppedReason: "missing-effective-policy",
+        fields: [],
+        summary: "Adaptation stopped: Task lacks an immutable effective policy snapshot.",
+      };
+      return {
+        preview,
+        decision: { kind: "stopped", preview },
+      };
+    }
+    const decision = evaluateAdaptationGate({
+      parent: projection.parent,
+      rootEffectivePolicy: projection.rootEffectivePolicy,
+      existingLineage: projection.existingLineage,
+      rawPatch,
+    });
+    return {
+      preview: decision.preview,
+      decision,
+    };
+  }
+
+  /** Read-only adaptation preview. Returns the gate preview. */
+  adaptationPreview(params: {
+    taskId: string;
+    patch: unknown;
+    reason?: unknown;
+  }): AdaptationPreview {
+    const reason = this.normalizeAdaptationProposedReason(params.reason ?? "other-flexible-policy");
+    void reason; // persisted only by apply
+    return this.runAdaptationGate(params.taskId, params.patch).preview;
+  }
+
+  /** Confirmed, transactional adaptation apply. Returns either the persisted
+   *  successor summary (eligible path) or the same stopped preview object
+   *  (idempotent rejection path). The state machine never recurses on the
+   *  successor and may not call a model. */
+  adaptationApply(params: {
+    taskId: string;
+    patch: unknown;
+    reason?: unknown;
+    confirm: true;
+  }): {
+    status: "eligible" | "stopped";
+    preview: AdaptationPreview;
+    childTaskId?: string;
+    lineageId?: string;
+  } {
+    const proposedReason = this.normalizeAdaptationProposedReason(
+      params.reason ?? "other-flexible-policy",
+    );
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+
+    const gate = this.runAdaptationGate(params.taskId, params.patch);
+    if (gate.decision.kind !== "eligible") {
+      this.store.recordAdaptationRejection(
+        params.taskId,
+        "Adaptation apply rejected",
+        {
+          preview: gate.preview,
+          proposedReason,
+        },
+      );
+      return { status: "stopped", preview: gate.preview };
+    }
+    const result = this.commitAdaptationTransition(
+      gate.decision.context,
+      proposedReason,
+      gate.preview,
+    );
+    if (result.status === "eligible") {
+      try {
+        this.enqueue({ taskId: result.childTaskId, resuming: false });
+      } catch {
+        this.store.addEvent(
+          result.childTaskId,
+          undefined,
+          "task.ready",
+          "Adapted Task persisted and will be recovered from the durable queue",
+        );
+      }
+    }
+    return result;
+  }
+
+  // --- Main remediation verification ---
+
+  async remediationVerify(
+    taskId: string,
+    reason: string,
+    confirm: true,
+  ): Promise<RemediationVerifyView> {
+    const verificationTimeoutMs = this.settings.get().integration.verificationTimeoutMs;
+    const result = await verifyMainRemediation(
+      this.store,
+      { taskId, reason, confirm },
+      verificationTimeoutMs,
+    );
+    const task = this.store.getTask(taskId);
+    return projectRemediationVerifyResult(result, task.status);
+  }
+
+  // --- Candidate reverification (verification-only, no Worker, no Attempt) ---
+
+  /** Read-only correction eligibility shared by daemon, MCP, and Hub.
+   *  Never runs commands, never mutates state, never exposes private content. */
+  correctionEligibility(taskId: string): CorrectionEligibility {
+    this.store.getTask(taskId); // validate task exists
+    return resolveCorrectionEligibility(this.store, taskId);
+  }
+
+  /** Read-only eligibility for the Task Detail three-way choice. Never runs
+   *  commands, never mutates state, never echoes private candidate content. */
+  candidateReverificationEligibility(taskId: string): CandidateReverificationEligibility {
+    const task = this.store.getTask(taskId);
+    const maxMainReverifications = maxMainReverificationsFromSnapshot(task.effectivePolicy);
+    return resolveCandidateReverificationEligibility(
+      this.store,
+      taskId,
+      maxMainReverifications,
+    );
+  }
+
+  /** Authorize and execute one bounded candidate reverification. The Task stays
+   *  "failed" throughout verification (never enters a crash-recoverable Worker
+   *  state); on pass only the Task status moves to "succeeded" and the failed
+   *  Attempt is preserved. Requires no running/queued Worker job. */
+  async reverifyCandidate(
+    taskId: string,
+    reason: string,
+    confirm: true,
+  ): Promise<CandidateReverificationView> {
+    if (confirm !== true) throw new Error("candidate reverification requires confirm: true");
+    // Verify queue admission before recording any durable authorization - a
+    // running or queued Worker job must finish first.
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    if (this.active.has(taskId) || this.queue.some((job) => job.taskId === taskId)) {
+      throw new Error(`Task ${taskId} is already queued or running`);
+    }
+    const settings = this.settings.get();
+    const verificationTimeoutMs = settings.integration.verificationTimeoutMs;
+    const task = this.store.getTask(taskId);
+    const maxMainReverifications = maxMainReverificationsFromSnapshot(task.effectivePolicy);
+    const result = await reverifyCandidate(
+      this.store,
+      { taskId, reason, confirm },
+      maxMainReverifications,
+      verificationTimeoutMs,
+    );
+    const finalTask = this.store.getTask(taskId);
+    // A successful reverification changes a failed plan prerequisite to
+    // succeeded without going through the normal Worker completion path.
+    // Reconcile immediately so waiting/blocked dependents are not stranded
+    // until an unrelated event or daemon restart happens to wake them.
+    if (finalTask.status === "succeeded") this.reconcilePlans();
+    return projectCandidateReverificationResult(result, finalTask.status);
+  }
+
+  private commitAdaptationTransition(
+    context: AdaptationEligibleContext,
+    proposedReason: AdaptationProposedReasonCategory,
+    eligiblePreview: AdaptationPreview,
+  ): {
+    status: "eligible";
+    preview: AdaptationPreview;
+    childTaskId: string;
+    lineageId: string;
+  } | {
+    status: "stopped";
+    preview: AdaptationPreview;
+  } {
+    const parent = context.parent;
+    const parentRecord = this.store.getTask(parent.id);
+    const childId = randomUUID();
+    const childSessionId = randomUUID();
+    const createdAt = timestamp();
+
+    // Resolve the lineage root task id before constructing the child spec.
+    const parentEdge = this.store.getAdaptationLineageEdgeForChild(parent.id);
+    const resolvedRootTaskId = parentEdge?.rootTaskId ?? parent.id;
+
+    // Layer the validated patch onto the parent's spec so the contract
+    // remains identical except for advanced policy.
+    const validatedPatch = context.patch;
+    const composedOverride: Record<string, unknown> = {
+      ...(parentRecord.spec.advancedPolicyOverride ?? {}),
+    };
+    for (const [field, value] of Object.entries(validatedPatch)) {
+      if (field === "maxAdaptationRounds") continue; // defense in depth
+      composedOverride[field] = value;
+    }
+    const childSpec: TaskSpec = {
+      ...parentRecord.spec,
+      advancedPolicyOverride: composedOverride,
+    };
+    const childEffectivePolicy = deriveChildEffectivePolicy(
+      parent.effectivePolicy!,
+      context.patch,
+    );
+    const childRecord = buildTaskRecord({
+      spec: childSpec,
+      taskFile: parentRecord.taskFile,
+      home: path.dirname(this.store.databasePath),
+      id: childId,
+      sessionId: childSessionId,
+      createdAt,
+      effectivePolicy: childEffectivePolicy,
+    });
+
+    const lineageId = randomUUID();
+    const lineageRecord: AdaptationTransitionRecord = {
+      id: lineageId,
+      rootTaskId: resolvedRootTaskId,
+      parentTaskId: parent.id,
+      childTaskId: childId,
+      round: context.nextRound,
+      reason: "eligible",
+      proposedReason,
+      createdAt,
+    };
+
+    try {
+      this.store.createAdaptationTransition({
+        record: lineageRecord,
+        task: childRecord,
+        creationEvent: {
+          summary: `Task created (adapted round ${context.nextRound}): ${childRecord.name}`,
+          payload: {
+            parentTaskId: parent.id,
+            rootTaskId: resolvedRootTaskId,
+            round: context.nextRound,
+            proposedReason,
+          },
+        },
+        transitionEvent: {
+          summary: `Adaptation transition: round ${context.nextRound} from parent ${parent.id}`,
+          payload: {
+            rootTaskId: resolvedRootTaskId,
+            parentTaskId: parent.id,
+            childTaskId: childId,
+            round: context.nextRound,
+            proposedReason,
+          },
+        },
+      });
+    } catch (error) {
+      // The gate enforces one-successor-per-parent at read time, but a
+      // concurrent apply before commit could race. Always translate the
+      // UNIQUE failure into a stable stopped preview without ever leaking
+      // the original error. The transaction rolled back, so no Task was
+      // persisted.
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/UNIQUE constraint failed/i.test(message)) throw error;
+      const preview: AdaptationPreview = {
+        status: "stopped",
+        rootTaskId: resolvedRootTaskId,
+        parentTaskId: parent.id,
+        nextRound: 0,
+        maxAdaptationRounds: parent.effectivePolicy!.values.maxAdaptationRounds,
+        profileId: parent.effectivePolicy!.profileId,
+        reason: "successor-already-created",
+        stoppedReason: "successor-already-created",
+        fields: [],
+        summary: "Adaptation stopped: parent already has one successor in the lineage.",
+      };
+      this.store.recordAdaptationRejection(
+        parent.id,
+        "Adaptation apply rejected (duplicate lineage edge)",
+        { preview, proposedReason },
+      );
+      return { status: "stopped", preview };
+    }
+
+    return {
+      status: "eligible",
+      preview: eligiblePreview,
+      childTaskId: childId,
+      lineageId,
+    };
   }
 
   private dependencyDecision(taskId: string):
@@ -1208,10 +1996,44 @@ export class DaemonCoordinator {
   }
 
   private pump(): void {
-    const maxConcurrency = this.maxConcurrencyOverride ?? this.settings.get().execution.maxConcurrency;
-    while (!this.closing && this.active.size < maxConcurrency && this.queue.length > 0) {
-      const job = this.queue.shift();
-      if (!job) return;
+    const globalCap = this.maxConcurrencyOverride ?? this.settings.get().execution.maxConcurrency;
+    while (!this.closing && this.active.size < globalCap && this.queue.length > 0) {
+      // Find the next eligible job respecting per-profile concurrency caps
+      let jobIndex = -1;
+      for (let i = 0; i < this.queue.length; i += 1) {
+        const candidate = this.queue[i]!;
+        try {
+          const task = this.store.getTask(candidate.taskId);
+          const profileConcurrency = task.effectivePolicy?.values.maxConcurrency ?? globalCap;
+          const cap = Math.min(profileConcurrency, globalCap);
+          // Count active jobs from this profile
+          let profileActive = 0;
+          for (const [activeTaskId] of this.active) {
+            try {
+              const activeTask = this.store.getTask(activeTaskId);
+              if (activeTask.effectivePolicy?.profileId === task.effectivePolicy?.profileId) {
+                profileActive += 1;
+              }
+            } catch {
+              // Active task may have been removed; skip
+            }
+          }
+          if (profileActive < cap) {
+            jobIndex = i;
+            break;
+          }
+        } catch {
+          // Invalid task; skip this candidate
+        }
+      }
+      if (jobIndex === -1) {
+        // No eligible job under current concurrency caps; wait for an active job to finish.
+        // Queue items beyond index 0 may be eligible later but we cannot skip the head
+        // without stalling. Fair scheduling: if the head is blocked by concurrency, we
+        // check if any later item from a different profile could run.
+        return;
+      }
+      const job = this.queue.splice(jobIndex, 1)[0]!;
       const settings = this.settings.get();
       const execution = this.execute(job, settings)
         .catch((error: unknown) => {
@@ -1242,17 +2064,39 @@ export class DaemonCoordinator {
 
   private async execute(job: QueuedJob, settings: ForkLightSettings): Promise<void> {
     const exec = settings.execution;
+    const task = this.store.getTask(job.taskId);
+    // Read Attempt limits from immutable task snapshot, falling back to live settings for legacy tasks
+    const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
+    const maxExtraAttempts = task.effectivePolicy?.values.maxExtraAttempts ?? exec.maxExtraAttempts;
+
+    if (job.correcting) {
+      await correctTask(
+        this.store,
+        job.taskId,
+        undefined,
+        exec,
+        settings.providerDefaults,
+      );
+      return;
+    }
+
+    // Restart recovery: reconstruct pending generic-extra options when the
+    // queued job lost its in-memory execution options after daemon restart.
+    let effectiveOptions = job.executionOptions;
+    if (!effectiveOptions) {
+      const pending = resolvePendingGrantExecutionOptions(
+        this.store, job.taskId, baseMaxAttempts, maxExtraAttempts,
+      );
+      if (pending) effectiveOptions = pending;
+    }
     if (job.revising) {
-      // Revise: status already transitioned to queued and revision
-      // event recorded before enqueue; executeAttempt starts the new
-      // attempt in the existing session and workspace.
       await executeAttempt(
-        this.store, this.store.getTask(job.taskId), true, undefined,
-        job.feedback, exec, settings.providerDefaults, job.executionOptions,
+        this.store, task, true, undefined,
+        job.feedback, exec, settings.providerDefaults, effectiveOptions,
       );
     } else if (job.resuming) {
       const attemptCount = this.store.listAttempts(job.taskId).length;
-      const maximumOrdinal = job.executionOptions?.maximumOrdinal ?? exec.maxAttempts;
+      const maximumOrdinal = effectiveOptions?.maximumOrdinal ?? baseMaxAttempts;
       if (attemptCount >= maximumOrdinal) {
         throw new Error(`Task ${job.taskId} has reached maximum attempts (${maximumOrdinal})`);
       }
@@ -1263,16 +2107,28 @@ export class DaemonCoordinator {
         job.feedback,
         exec,
         settings.providerDefaults,
-        job.executionOptions,
+        effectiveOptions,
       );
     } else {
-      let task = this.store.getTask(job.taskId);
+      let currentTask = task;
       try {
-        await assertWorkspaceExists(task.paths);
-      } catch {
-        task = await prepareTaskWorkspace(this.store, task);
+        if (!(await isWorkspaceReady(currentTask.paths))) {
+          await clearTaskPreparationArtifacts(currentTask.paths);
+          currentTask = await prepareTaskWorkspace(this.store, currentTask);
+        }
+      } catch (error) {
+        const latest = this.store.getTask(task.id);
+        if (latest.status !== "failed") {
+          const message = error instanceof Error ? error.message : String(error);
+          this.store.setTaskStatus(task.id, "failed", {
+            finishedAt: timestamp(),
+            workerPid: null,
+            error: `Workspace preparation failed: recovery cleanup: ${message}`,
+          });
+        }
+        return;
       }
-      await executeAttempt(this.store, task, false, undefined, undefined, exec, settings.providerDefaults);
+      await executeAttempt(this.store, currentTask, false, undefined, undefined, exec, settings.providerDefaults);
     }
   }
 }

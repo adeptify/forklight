@@ -1,0 +1,167 @@
+version: 2
+name: Hub collaboration journey and readable Task Detail
+project: ../..
+contract:
+  outcome: Make the Hub explain what happened across the collaboration instead of listing system data, with Task Detail showing the Main input, Worker execution, independent verification, final delivery, failure cause, and next action in that order.
+  context:
+    - The Hub already has useful controls and evidence, but many pages expose IDs, internal states, dense metrics, or raw technical phrases before explaining their meaning.
+    - A MiniMax pass added a first Task story and beginner Insights hierarchy. Keep useful parts, but the current Task story incorrectly repeats the same sentence for what happened and why.
+    - A GLM pass added bilingual plain-language keys in src/hub/public/i18n.js. Reuse them where accurate and extend both languages together when the full journey needs new copy.
+    - The Main will independently review the patch and may correct it before integration.
+  inScope:
+    - Edit src/hub/server.ts, src/hub/public/app.js, src/hub/public/i18n.js, tests/hub-settings.test.ts, and tests/hub-ui-assets.test.ts.
+    - Add a bounded safe journey projection to GET /api/ops/tasks/:id using existing status, inspect, decision, and economics data.
+    - Project the original Main assignment as outcome or goal, in-scope work, out-of-scope boundaries, execution steps, deliverables, Worker focus paths, acceptance criteria, and acceptance commands. Support both version 2 Contracts and legacy version 1 Tasks.
+    - Project Worker execution as Provider/model/runtime, bounded Attempt summaries, the latest Worker completion claim clearly labelled as an unverified claim, and changed file paths derived from the diff with the existing safe path parser.
+    - Project independent verification as named checks with pass/fail/exit evidence and a plain conclusion without exposing raw logs.
+    - Project final delivery as Main review, remediation disposition, and integration state when available.
+    - Bound all arrays and long strings. Never expose raw prompt text, raw diff, raw log content, credentials, keychain data, or unrelated absolute paths.
+    - "Rebuild Task Detail around a visible journey in this order: Main input, Worker execution, independent verification, final output or delivery, and then the user-facing cause and next action."
+    - Separate what happened from why it happened. They must never render the same sentence as two different answers.
+    - Clearly distinguish Worker self-report from independent verification and Main acceptance.
+    - Move IDs, source path, session, Provider/runtime internals, raw error, internal failure category, machine decision fields, timeline, economics, and policy values into closed technical details by default.
+    - Keep supervision, adaptation, Main review, and Integration controls functional, but place each control near an explanation of when and why to use it.
+    - Add a concise page guide to Overview, Tasks, Plans, Competitions, Insights, Models, Workers, Limits, and Mains that says what the page answers, what the current state means, and the normal next step. Avoid repetitive boilerplate when the page already explains this well.
+    - Replace prominent raw English statuses, raw failure categories, and unexplained internal labels with bilingual plain-language labels. Raw values may remain only in technical details.
+    - Preserve existing confirmation gates, canonical task states, economics values, calculations, and control behavior.
+    - Add behavior-focused tests for the safe journey projection and UI story. Avoid giant brittle source-string test blocks.
+  outOfScope:
+    - Do not redesign the visual theme or make broad CSS changes; a later Grok visual pass owns styling.
+    - Do not alter Provider execution, Worker runtimes, task state transitions, economics calculations, or Integration safety rules.
+    - Do not fabricate inputs, outputs, verification results, Main decisions, savings, or next actions when evidence is absent.
+    - Do not expose full Worker logs or raw diffs in the browser.
+    - Do not commit, push, retry, or adapt task policy automatically.
+  executionSteps:
+    - Trace the existing task detail API response, inspect payload, TaskSpec versions, Attempt records, verification structure, and diff path parser.
+    - Define one small bounded journey projection with explicit empty and unavailable semantics.
+    - Add focused server tests proving useful fields are present and sensitive or unbounded fields are absent.
+    - Refactor Task Detail to render the collaboration journey before controls and technical details.
+    - Replace the duplicate what and why logic with evidence-based separate answers for queued, active, succeeded, authentication, budget, runtime, verification, and unknown failure states.
+    - Add concise bilingual page guides and readable state labels to the remaining Hub pages without changing navigation or actions.
+    - Add focused UI tests and run the targeted acceptance commands once.
+  deliverables:
+    - A safe Task journey API projection.
+    - A Task Detail view that lets a non-technical user understand the assignment, work, checks, outcome, failure cause, and next action.
+    - Consistent page-level orientation and bilingual state language across the Hub.
+    - Focused server and UI tests.
+  modules:
+    - name: Journey projection
+      responsibility: Convert internal task, attempt, decision, and diff records into bounded user-safe collaboration facts.
+      consumes:
+        - Task status and TaskSpec.
+        - Inspect attempts, decision, review, and diff.
+        - Existing affected-path parser.
+      produces:
+        - Assignment, execution, verification, and delivery summaries for the Hub.
+      boundaries:
+        - No raw prompts, diffs, logs, secrets, or unbounded text.
+    - name: Task collaboration story
+      responsibility: Explain the real Main-to-Worker process in evidence order.
+      consumes:
+        - Safe journey projection and existing task controls.
+      produces:
+        - Readable input, execution, verification, delivery, cause, and next-action sections.
+      boundaries:
+        - Worker claim is never presented as verified fact and machine state is never rewritten.
+    - name: Hub page orientation
+      responsibility: Help users understand what each page means and what they can do next.
+      consumes:
+        - Existing page data, active locale, and current navigation structure.
+      produces:
+        - Short bilingual page guides and human-readable state labels.
+      boundaries:
+        - No visual redesign and no removal of existing capabilities.
+  callChain:
+    - Main creates a Task with an explicit assignment and acceptance contract.
+    - Worker receives the bounded assignment and reports a candidate result.
+    - ForkLight independently runs acceptance checks and records evidence.
+    - Main reviews, revises, accepts, or rejects the verified candidate.
+    - Integration safely applies the approved patch when authorized.
+    - Hub presents those same facts as one readable journey, with technical evidence available on demand.
+  scenarios:
+    - name: Worker claim failed verification
+      given: A Worker reports completion but an acceptance command fails.
+      when: The Task Detail opens.
+      then: The view separately shows the Worker claim, the failed independent check, the actual failure cause, and the recommended Main review or correction.
+    - name: Configuration failure
+      given: A Task fails with authentication evidence before useful model work.
+      when: The Task Detail opens.
+      then: The view explains that configuration blocked execution, does not blame model coding quality, and suggests checking credentials or endpoint settings.
+    - name: Successful reviewed delivery
+      given: Independent checks pass and Main accepts or integrates the candidate.
+      when: The Task Detail opens.
+      then: The view distinguishes Worker completion, independent verification, Main decision, and final integration state.
+    - name: Legacy Task
+      given: A stored version 1 Task has only goal, constraints, attempts, and acceptance commands.
+      when: The detail API and UI render it.
+      then: The available assignment and execution facts appear with honest unavailable labels for missing contract fields.
+    - name: Sensitive evidence
+      given: Inspect contains raw diff, log paths, long result text, source paths, or credential-related Provider configuration.
+      when: The safe journey response is serialized.
+      then: Only bounded summaries and changed relative file paths are returned; raw sensitive fields are absent.
+    - name: Non-technical page visitor
+      given: A user opens any main Hub page without knowing ForkLight vocabulary.
+      when: The page loads in Chinese or English.
+      then: The first visible guidance explains what the page answers and the normal next step before dense technical facts.
+  risks:
+    - A journey projection can leak internal data if fields are copied wholesale, so select and bound every field explicitly.
+    - A friendly summary can overclaim certainty, so clearly label Worker claims, independent checks, and Main decisions as different evidence levels.
+    - Large UI refactors can break controls, so preserve existing action handlers and confirmation requirements and test them.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 1800
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Task Detail presents Main input, Worker execution, independent verification, final delivery, failure cause, and next action as distinct evidence-backed sections.
+    - What happened and why are separate answers and never duplicate the same localized sentence.
+    - Worker claims are visibly marked as unverified until independent checks pass.
+    - The task journey response is bounded and omits raw prompt, raw diff, raw logs, credentials, and unrelated absolute paths.
+    - Legacy and current Task contracts both render honestly.
+    - Every main Hub page provides concise bilingual orientation before dense internal facts.
+    - Existing supervision, adaptation, Main review, and Integration actions retain their handlers and confirmation gates.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-settings.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm run build
+    - git diff --check

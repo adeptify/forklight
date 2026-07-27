@@ -10,7 +10,8 @@ import {
   supportedRuntimeNamesList,
   type RuntimeName,
 } from "./runtime-names.js";
-import { resolveWorkerSelection } from "./worker-profiles.js";
+import { isPricingRouteId, resolveWorkerSelection } from "./worker-profiles.js";
+import { selectDeliveryProfile } from "./delivery-profiles.js";
 import {
   expandHome,
   requireNonEmptyString,
@@ -18,25 +19,37 @@ import {
   requireStringArray,
 } from "./parse-helpers.js";
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "./settings.js";
+import { validateTaskAdvancedPolicyOverride } from "./advanced-policy.js";
+import {
+  assessTaskQualityWithPolicy,
+  assertTaskQualityWithPolicy,
+  deriveEffectiveQualityPolicy,
+  effectiveQualityPolicyFromGlobal,
+} from "./contract-quality.js";
 import type {
   ContractTaskSpec,
+  DeliveryResolution,
   DeliverySpec,
-  QualityCheck,
   QualityReport,
-  QualityWarning,
+  TaskAdvancedPolicyOverride,
   TaskContract,
   TaskModuleContract,
+  TaskPresentation,
   PolicyMode,
   TaskScenarioContract,
   TaskSpec,
 } from "./types.js";
 
 const DELIVERY_COMMAND_MAX_COUNT = 16;
+export const TASK_PRESENTATION_SUMMARY_MAX = 300;
+export const TASK_PRESENTATION_LANGUAGE_MAX = 35;
 
 const DEFAULT_EXCLUDES = [
   ".git",
   ".runtime",
   ".forklight",
+  ".forklight-dev",
+  ".forklight-daemon-test",
   "node_modules",
   ".DS_Store",
 ];
@@ -144,11 +157,56 @@ function parseScenarios(value: unknown): TaskScenarioContract[] {
   }));
 }
 
+/** Deliberately covers ordinary BCP-47 language/script/region/variant tags
+ * without pretending to be a full language registry. The value is metadata,
+ * not an instruction to translate the authored summary. */
+export function isTaskPresentationLanguage(value: string): boolean {
+  return value.length <= TASK_PRESENTATION_LANGUAGE_MAX
+    && /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/.test(value);
+}
+
+function parsePresentation(value: unknown): TaskPresentation | undefined {
+  if (value === undefined) return undefined;
+  const presentation = object(value, "task.contract.presentation");
+  const keys = Object.keys(presentation);
+  if (
+    keys.length !== 2
+    || !keys.includes("summary")
+    || !keys.includes("language")
+  ) {
+    throw new Error("task.contract.presentation must contain exactly summary and language");
+  }
+  if (
+    typeof presentation.summary !== "string"
+    || presentation.summary.length === 0
+    || presentation.summary.length > TASK_PRESENTATION_SUMMARY_MAX
+    || presentation.summary !== presentation.summary.trim()
+    || /[\r\n\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/.test(presentation.summary)
+  ) {
+    throw new Error(
+      `task.contract.presentation.summary must be one trimmed paragraph of 1-${TASK_PRESENTATION_SUMMARY_MAX} characters`,
+    );
+  }
+  if (
+    typeof presentation.language !== "string"
+    || presentation.language !== presentation.language.trim()
+    || !isTaskPresentationLanguage(presentation.language)
+  ) {
+    throw new Error("task.contract.presentation.language must be a bounded BCP-47-like tag");
+  }
+  return {
+    summary: presentation.summary,
+    language: presentation.language,
+  };
+}
+
 function parseContract(value: unknown): TaskContract {
   const contract = object(value, "task.contract");
   const changeBudget = object(contract.changeBudget, "task.contract.changeBudget");
+  const presentation = parsePresentation(contract.presentation);
   return {
     outcome: stringValue(contract.outcome, "task.contract.outcome"),
+    ...(presentation === undefined ? {} : { presentation }),
     context: stringArray(contract.context, "task.contract.context"),
     inScope: stringArray(contract.inScope, "task.contract.inScope"),
     outOfScope: stringArray(contract.outOfScope, "task.contract.outOfScope"),
@@ -168,202 +226,16 @@ function parseContract(value: unknown): TaskContract {
   };
 }
 
-function qualityCheck(id: string, label: string, passed: boolean, detail: string): QualityCheck {
-  return { id, label, passed, detail };
-}
-
-/**
- * Hard placeholder sentinels: unambiguous "left unfilled" markers. Case
- * sensitive, so all-caps `TODO`/`TBD`/`FIXME` still trip the gate while the
- * lowercase words `todo`/`tbd`/`fixme` in prose fall through to the wording
- * warning. Template braces, underscore fills, and `???` are structural
- * placeholders, not natural language.
- */
-const PLACEHOLDER_SENTINEL = /\b(?:TODO|TBD|FIXME)\b|\{\{[^}]+\}\}|_{3,}|\?{3,}/;
-
-/**
- * Soft wording heuristic: natural-language uncertainty terms that may be
- * legitimate domain wording (error handling, compatibility notes, the word
- * `unknown`). These never hard-fail; they surface as field-located warnings
- * for human review. See FL-D70 / FL-D112.
- */
-const PLACEHOLDER_WORDING = /\b(?:unknown|todo|tbd|fixme)\b|待定|暂不清楚|以后再说/i;
-
-interface ContractStringField {
-  field: string;
-  text: string;
-}
-
-function collectContractStringFields(value: unknown, prefix: string, out: ContractStringField[]): void {
-  if (typeof value === "string") {
-    if (value.length > 0) out.push({ field: prefix, text: value });
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => collectContractStringFields(item, `${prefix}[${index}]`, out));
-    return;
-  }
-  if (value && typeof value === "object") {
-    for (const [key, val] of Object.entries(value)) {
-      collectContractStringFields(val, prefix ? `${prefix}.${key}` : key, out);
-    }
-  }
-}
-
-function boundedExcerpt(text: string, match: RegExpMatchArray): string {
-  const start = match.index ?? 0;
-  const end = start + match[0].length;
-  const lo = Math.max(0, start - 20);
-  const hi = Math.min(text.length, end + 20);
-  const lead = lo > 0 ? "…" : "";
-  const trail = hi < text.length ? "…" : "";
-  return `${lead}${text.slice(lo, hi).trim()}${trail}`;
-}
-
-interface PlaceholderScan {
-  sentinelFields: string[];
-  warnings: QualityWarning[];
-}
-
-function scanPlaceholders(fields: ContractStringField[]): PlaceholderScan {
-  const sentinelFields: string[] = [];
-  const warnings: QualityWarning[] = [];
-  for (const field of fields) {
-    const sentinel = field.text.match(PLACEHOLDER_SENTINEL);
-    if (sentinel) {
-      sentinelFields.push(field.field);
-      continue;
-    }
-    const wording = field.text.match(PLACEHOLDER_WORDING);
-    if (wording) {
-      warnings.push({
-        field: field.field,
-        term: wording[0],
-        excerpt: boundedExcerpt(field.text, wording),
-      });
-    }
-  }
-  return { sentinelFields, warnings };
-}
-
 export function assessTaskQuality(spec: TaskSpec, quality?: ContractQualitySettings): QualityReport {
-  if (spec.version === 1) {
-    const issue = "Legacy version 1 task has no structured execution contract";
-    return {
-      passed: false,
-      score: 0,
-      checks: [qualityCheck("contract-version", "Structured contract", false, issue)],
-      issues: [issue],
-      warnings: [],
-    };
-  }
-
-  const contract = spec.contract;
-  const policy = quality ?? cloneDefaults().contractQuality;
-  const moduleDetailsComplete =
-    contract.modules.length > 0 &&
-    contract.modules.every(
-      (module) =>
-        module.responsibility.length >= policy.minModuleResponsibilityCharacters &&
-        module.consumes.length > 0 &&
-        module.produces.length > 0 &&
-        module.boundaries.length > 0,
-    );
-  const scenarioNames = new Set(contract.scenarios.map((scenario) => scenario.name.toLowerCase()));
-  const stringFields: ContractStringField[] = [];
-  collectContractStringFields({ contract, acceptance: spec.acceptance }, "", stringFields);
-  const placeholderScan = scanPlaceholders(stringFields);
-  const placeholderDetail = placeholderScan.sentinelFields.length === 0
-    ? "Remove TODO, TBD, FIXME, or template variables before submitting"
-    : `Remove template placeholders in: ${placeholderScan.sentinelFields.join(", ")}`;
-  const checks = [
-    qualityCheck(
-      "outcome",
-      "Concrete outcome",
-      contract.outcome.length >= policy.minOutcomeCharacters,
-      `Describe one observable result with enough detail to judge success (minimum ${policy.minOutcomeCharacters} characters)`,
-    ),
-    qualityCheck(
-      "context",
-      "Relevant context",
-      contract.context.length > 0,
-      "Include the current behavior or reason for the change",
-    ),
-    qualityCheck(
-      "scope",
-      "In-scope and out-of-scope boundaries",
-      contract.inScope.length > 0 && contract.outOfScope.length > 0,
-      "State both what may change and what must remain untouched",
-    ),
-    qualityCheck(
-      "execution",
-      "Execution path",
-      contract.executionSteps.length > 0 && contract.deliverables.length > 0,
-      "List implementation steps and concrete deliverables",
-    ),
-    qualityCheck(
-      "modules",
-      "Module production and consumption",
-      moduleDetailsComplete,
-      `Each module needs a responsibility (minimum ${policy.minModuleResponsibilityCharacters} characters), inputs, outputs, and boundaries`,
-    ),
-    qualityCheck(
-      "call-chain",
-      "Call chain",
-      contract.callChain.length >= policy.minCallChainSteps,
-      `Show at least ${policy.minCallChainSteps} step(s) from producer to consumer`,
-    ),
-    qualityCheck(
-      "scenarios",
-      "Normal and boundary scenarios",
-      contract.scenarios.length >= policy.minScenarios && scenarioNames.size === contract.scenarios.length,
-      `Provide at least ${policy.minScenarios} uniquely named scenario(s), including a boundary or failure case`,
-    ),
-    qualityCheck(
-      "risks",
-      "Known risks",
-      contract.risks.length > 0,
-      "Name at least one implementation or integration risk",
-    ),
-    qualityCheck(
-      "acceptance",
-      "Behavioral and executable acceptance",
-      spec.acceptance.criteria.length > 0 && spec.acceptance.commands.length > 0,
-      "Require both human-readable criteria and independent commands",
-    ),
-    qualityCheck(
-      "placeholders",
-      "No unresolved placeholders",
-      placeholderScan.sentinelFields.length === 0,
-      placeholderDetail,
-    ),
-    qualityCheck(
-      "change-budget",
-      "Bounded change surface",
-      contract.changeBudget.maxFiles <= policy.maxFiles && contract.changeBudget.maxDiffLines <= policy.maxDiffLines,
-      `Split the task until one attempt changes at most ${policy.maxFiles} files and ${policy.maxDiffLines} added/deleted lines`,
-    ),
-    qualityCheck(
-      "focus-paths",
-      "Focused inspection entry points",
-      spec.worker.focusPaths.length > 0 && spec.worker.focusPaths.length <= policy.maxFocusPaths,
-      `Name one to ${policy.maxFocusPaths} files or directories the Worker should inspect first`,
-    ),
-  ];
-  const passedCount = checks.filter((check) => check.passed).length;
-  const issues = checks.filter((check) => !check.passed).map((check) => `${check.label}: ${check.detail}`);
-  return {
-    passed: issues.length === 0,
-    score: Math.round((passedCount / checks.length) * 100),
-    checks,
-    issues,
-    warnings: placeholderScan.warnings,
-  };
+  return assessTaskQualityWithPolicy(
+    spec,
+    effectiveQualityPolicyFromGlobal(quality ?? cloneDefaults().contractQuality),
+  );
 }
 
 export function assertTaskQuality(spec: TaskSpec, quality?: ContractQualitySettings): QualityReport {
   const report = assessTaskQuality(spec, quality);
-  if (!report.passed) {
+  if (report.admitted !== true) {
     throw new Error(
       `Task Contract quality gate failed (${report.score}/100):\n${report.issues
         .map((issue) => `- ${issue}`)
@@ -408,7 +280,9 @@ export function parseTaskSpec(
     endpoint?: string;
     effort?: string;
     maxBudgetUsd?: number | null;
+    pricingRoute?: string;
   } = {};
+  let selectedProfileId: string | undefined;
   const profileIdRaw = root.workerProfileId;
   if (profileIdRaw !== undefined) {
     if (typeof profileIdRaw !== "string" || profileIdRaw.trim() === "") {
@@ -424,6 +298,7 @@ export function parseTaskSpec(
         modelCatalog,
       },
     );
+    selectedProfileId = resolved.profileId;
     profileDefaults = {
       provider: resolved.provider,
       runtime: resolved.runtime,
@@ -431,6 +306,7 @@ export function parseTaskSpec(
       endpoint: resolved.endpoint,
       effort: resolved.effort,
       maxBudgetUsd: resolved.maxBudgetUsd,
+      ...(resolved.pricingRoute === undefined ? {} : { pricingRoute: resolved.pricingRoute }),
     };
   } else if (
     workerProfiles !== undefined
@@ -448,6 +324,7 @@ export function parseTaskSpec(
           : { modelCatalog: policy.modelCatalog }),
       },
     );
+    selectedProfileId = resolved.profileId;
     profileDefaults = {
       provider: resolved.provider,
       runtime: resolved.runtime,
@@ -455,6 +332,7 @@ export function parseTaskSpec(
       endpoint: resolved.endpoint,
       effort: resolved.effort,
       maxBudgetUsd: resolved.maxBudgetUsd,
+      ...(resolved.pricingRoute === undefined ? {} : { pricingRoute: resolved.pricingRoute }),
     };
   }
   const providerName = stringValue(
@@ -520,6 +398,11 @@ export function parseTaskSpec(
     if (raw === undefined) return undefined;
     return normalizeDirectCodexProfileId(raw);
   })();
+  const advancedPolicyOverride: TaskAdvancedPolicyOverride | undefined = (() => {
+    const raw = root.advancedPolicy;
+    if (raw === undefined) return undefined;
+    return validateTaskAdvancedPolicyOverride(raw, "task.advancedPolicy");
+  })();
   const defaultsCompletion = policy?.completionPolicy ?? cloneDefaults().completionPolicy;
   const completionPolicyMode = policyModeValue(
     completionPolicy.noChangeMode,
@@ -536,7 +419,74 @@ export function parseTaskSpec(
     throw new Error("task.acceptance.commands must contain at least one independent verification command");
   }
   const generatedPaths = generatedPathPatterns(workspace.generatedPaths);
-  const delivery = deliverySpec(root.delivery);
+
+  // --- Delivery resolution ---
+  const deliveryProfileIdRaw = root.deliveryProfileId;
+  let deliveryProfileId: string | undefined;
+  if (deliveryProfileIdRaw !== undefined) {
+    if (typeof deliveryProfileIdRaw !== "string" || deliveryProfileIdRaw.trim() === "") {
+      throw new Error("task.deliveryProfileId must be a non-empty string when supplied");
+    }
+    deliveryProfileId = deliveryProfileIdRaw.trim();
+  }
+
+  const inlineDelivery = deliverySpec(root.delivery);
+
+  // Conflict: both inline delivery and explicit profile id
+  if (inlineDelivery !== undefined && deliveryProfileId !== undefined) {
+    throw new Error(
+      "task.delivery and task.deliveryProfileId are mutually exclusive; remove one",
+    );
+  }
+
+  let resolvedDelivery: DeliverySpec | undefined;
+  let deliveryResolution: DeliveryResolution | undefined;
+  const deliverySettings = policy?.deliveryProfiles ?? cloneDefaults().deliveryProfiles;
+
+  if (deliveryProfileId !== undefined) {
+    // Explicit profile id — selectDeliveryProfile fails closed on malformed/missing
+    const selection = selectDeliveryProfile(deliverySettings, project, deliveryProfileId);
+    if (!selection) throw new Error("Delivery profile resolution failed");
+    resolvedDelivery = {
+      buildCommands: [...selection.profile.buildCommands],
+      activationCommands: [...selection.profile.activationCommands],
+      activationCheckCommands: [...selection.profile.activationCheckCommands],
+    };
+    deliveryResolution = {
+      source: selection.provenance,
+      profileId: selection.profile.id,
+    };
+  } else if (inlineDelivery !== undefined) {
+    // Inline delivery — no profile resolution
+    resolvedDelivery = inlineDelivery;
+    deliveryResolution = { source: "inline" };
+  } else {
+    // Implicit resolution: project binding → default → null
+    const selection = selectDeliveryProfile(deliverySettings, project);
+    if (selection !== null) {
+      resolvedDelivery = {
+        buildCommands: [...selection.profile.buildCommands],
+        activationCommands: [...selection.profile.activationCommands],
+        activationCheckCommands: [...selection.profile.activationCheckCommands],
+      };
+      deliveryResolution = {
+        source: selection.provenance,
+        profileId: selection.profile.id,
+      };
+    }
+  }
+
+  const explicitPricingRoute = provider.pricingRoute === undefined
+    ? undefined
+    : stringValue(provider.pricingRoute, "task.provider.pricingRoute");
+  if (explicitPricingRoute !== undefined && !isPricingRouteId(explicitPricingRoute)) {
+    throw new Error("task.provider.pricingRoute must be a bounded non-empty identifier");
+  }
+  // Explicit Provider or endpoint selection changes the billing identity.
+  // Require an explicit route for that override instead of inheriting a stale one.
+  const inheritedPricingRoute = provider.name === undefined && provider.endpoint === undefined
+    ? profileDefaults.pricingRoute
+    : undefined;
 
   const common = {
     name: stringValue(root.name, "task.name"),
@@ -559,9 +509,11 @@ export function parseTaskSpec(
       ...(provider.keychainAccount === undefined
         ? {}
         : { keychainAccount: stringValue(provider.keychainAccount, "task.provider.keychainAccount") }),
-      ...(provider.pricingRoute === undefined
-        ? {}
-        : { pricingRoute: stringValue(provider.pricingRoute, "task.provider.pricingRoute") }),
+      ...(explicitPricingRoute !== undefined
+        ? { pricingRoute: explicitPricingRoute }
+        : inheritedPricingRoute !== undefined
+          ? { pricingRoute: inheritedPricingRoute }
+          : {}),
     },
     runtime: {
       name: runtimeName,
@@ -584,9 +536,12 @@ export function parseTaskSpec(
       allowedCommands: workerAllowedCommands,
       focusPaths: stringArray(worker.focusPaths, "task.worker.focusPaths"),
     },
-    ...(delivery === undefined ? {} : { delivery }),
+    ...(resolvedDelivery === undefined ? {} : { delivery: resolvedDelivery }),
+    ...(deliveryResolution === undefined ? {} : { deliveryResolution }),
     ...(taskClass !== undefined ? { taskClass } : {}),
     ...(directCodexProfileId !== undefined ? { directCodexProfileId } : {}),
+    ...(selectedProfileId !== undefined ? { workerProfileId: selectedProfileId } : {}),
+    ...(advancedPolicyOverride !== undefined ? { advancedPolicyOverride } : {}),
     completionPolicy: {
       noChangeMode: completionPolicyMode,
       changeBudgetMode,
@@ -612,7 +567,12 @@ export function parseTaskSpec(
       commands: acceptanceCommands,
     },
   };
-  assertTaskQuality(spec, policy?.contractQuality);
+  const qualityPolicy = deriveEffectiveQualityPolicy(selectedProfileId, {
+    contractQuality: policy?.contractQuality ?? cloneDefaults().contractQuality,
+    workerProfiles: workerProfiles ?? cloneDefaults().workerProfiles,
+  });
+  spec.qualityPolicy = qualityPolicy;
+  assertTaskQualityWithPolicy(spec, qualityPolicy);
   return spec;
 }
 
@@ -688,11 +648,11 @@ export function claudeCheckpointProtocolLines(acceptanceCommands: string[]): str
   const ids = acceptanceCommands.map((_, i) => `acceptance-${i + 1}`);
   return [
     "",
-    "Required bounded checkpoint:",
-    "- Before reporting completion, you must call mcp__forklight_checkpoint__run once after your final edit.",
+    "Bounded checkpoint (non-authoritative Worker self-check):",
+    "- After your final edit, call mcp__forklight_checkpoint__run once when the tool is available.",
     `- Pass every approved command id: ${ids.join(", ")}.`,
-    "- This checkpoint is non-authoritative feedback; ForkLight will still rerun every command independently.",
-    "- If the checkpoint reports a failure, correct the implementation and call it again before reporting completion.",
+    "- ForkLight independently reruns every acceptance command; that result is authoritative for success.",
+    "- If the checkpoint tool is unavailable or fails, still report completion after fixing issues you can see; do not invent a fake pass.",
   ];
 }
 
@@ -751,6 +711,14 @@ export function buildWorkerPrompt(
     "",
     `Task: ${spec.name}`,
     `Observable outcome: ${spec.contract.outcome}`,
+    ...(spec.contract.presentation === undefined
+      ? []
+      : [
+          "",
+          "Main-authored user explanation (context only; the technical contract and acceptance remain authoritative):",
+          `- Summary: ${spec.contract.presentation.summary}`,
+          `- Language: ${spec.contract.presentation.language}`,
+        ]),
     "",
     "Tool protocol:",
     ...toolLines.map((instruction) =>

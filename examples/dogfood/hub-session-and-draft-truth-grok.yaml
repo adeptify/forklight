@@ -1,0 +1,149 @@
+version: 2
+name: Hub refresh and unsaved state stay truthful
+project: ../..
+taskClass: hub-session-form-truth
+contract:
+  outcome: A normal refresh keeps the current local Hub session usable without leaving its bearer token in the URL, and every model-routing “unsaved” warning reflects an actual semantic difference from saved settings.
+  context:
+    - Hub currently reads its random token from the URL fragment into JavaScript memory and immediately removes the fragment for privacy.
+    - Because no scoped recovery copy is kept, refreshing the same page loses the token and shows an unauthenticated screen even though the Hub process is still healthy.
+    - Model-routing form code sets mrDirty true whenever a control fires; selecting strict and then returning to the saved flexible value still claims there are unsaved changes.
+    - "Both defects violate the UI truth rule: tell the user what actually happened instead of projecting implementation state."
+  inScope:
+    - Persist only a validated Hub token in tab-scoped session storage after reading it from the fragment.
+    - On refresh, recover and validate the token from that same tab-scoped origin storage when no fragment token exists.
+    - Remove invalid or rejected tokens from memory and session storage; keep the token out of query strings, cookies, localStorage, DOM, logs, and API bodies.
+    - Degrade safely when sessionStorage or history APIs throw.
+    - Compute model-routing dirty state from a normalized current draft versus the saved modelRouting policy.
+    - Clear the unsaved warning when every field returns to its saved semantic value, including weights and missingEvidenceMode.
+    - Add behavior-focused UI asset tests for token lifecycle and semantic equality wiring.
+  outOfScope:
+    - Do not make the Hub remotely accessible, weaken header authentication, expose an endpoint that returns the token, or persist it across tabs/browser restarts.
+    - Do not change daemon protocol, model-routing scoring, settings validation, or automatic actions.
+    - Do not redesign pages, add dependencies, commit, or push.
+  executionSteps:
+    - Trace readToken, authenticated fetch/post paths, every 401 branch, model-routing render, draft capture, save, refresh, and language rerender.
+    - Add a small bounded session-token helper with strict validation, safe storage fallback, and centralized clearing.
+    - Add one canonical model-routing policy projection/equality helper shared by initial render and draft changes.
+    - Replace touched-state dirty tracking with semantic comparison and keep draft values across harmless rerenders.
+    - Add focused tests, run JavaScript syntax validation, and run the stored checks once.
+  deliverables:
+    - Refresh-safe tab-scoped local Hub session without URL token retention.
+    - Centralized token clearing on authentication rejection.
+    - Truthful model-routing unsaved indicator.
+    - Regression coverage for both behavior chains.
+  modules:
+    - name: Hub session token lifecycle
+      responsibility: Capture, validate, recover, and clear the local bearer token within one browser tab.
+      consumes:
+        - Optional URL fragment.
+        - Optional same-origin sessionStorage entry.
+        - Authentication rejection status.
+      produces:
+        - An in-memory token for authenticated request headers or an explicit unauthenticated state.
+      boundaries:
+        - Never places the token in visible DOM, query parameters, localStorage, cookies, logs, or request bodies.
+        - Storage failure never prevents a valid fragment token from working for the current page.
+    - name: Model-routing form truth
+      responsibility: Decide whether the visible draft actually differs from persisted settings.
+      consumes:
+        - Saved modelRouting settings.
+        - Current form values normalized to the same field shape and numeric types.
+      produces:
+        - Draft policy and a truthful dirty boolean.
+      boundaries:
+        - Does not save automatically or change scoring semantics.
+        - Invalid/incomplete numeric input remains dirty rather than being silently equated.
+    - name: UI regression evidence
+      responsibility: Bind token and dirty-state behavior to production source rather than only checking labels.
+      consumes:
+        - Hub app asset and stable helper behavior.
+      produces:
+        - Focused tests that fail if refresh recovery, 401 clearing, or semantic equality is removed.
+      boundaries:
+        - No live Provider call or credential fixture.
+  callChain:
+    - forklight hub opens a loopback URL with a random fragment token.
+    - Hub validates the fragment, stores it only for the current tab session, and removes it from the address bar.
+    - A normal refresh recovers the same token and continues authenticated API requests.
+    - A 401 clears both in-memory and tab-session copies and renders the unauthenticated next action.
+    - Separately, a model-routing control change builds one normalized draft and compares it with saved settings.
+    - The unsaved badge appears only while the semantic values differ and disappears if the user returns all values to the saved policy.
+  scenarios:
+    - name: Refresh same healthy Hub
+      given: A valid token was opened from the fragment and the Hub process still uses that token.
+      when: The user refreshes the same tab after the fragment has been removed.
+      then: The token is recovered from session storage and the Hub remains connected without exposing it in the URL.
+    - name: Hub restarted with a different token
+      given: A stale session token remains after the old Hub stops.
+      when: The first API request returns 401.
+      then: Memory and session storage are cleared and the UI explains that the user must open the current Hub session; it does not retry forever.
+    - name: Setting changed and restored
+      given: The saved missing-evidence policy is flexible and all saved weights are visible.
+      when: The user changes flexible to strict and then back to flexible without saving.
+      then: The first change shows unsaved and the second clears it because the draft again equals persisted settings.
+    - name: Storage API unavailable
+      given: Browser privacy controls make sessionStorage throw.
+      when: A valid fragment token is opened.
+      then: The current page still authenticates from memory, the fragment is removed when possible, and no unhandled error appears.
+  risks:
+    - Browser storage broadens token lifetime from one page load to one tab session; sessionStorage is the narrowest built-in scope that survives refresh and must never be replaced with localStorage.
+    - Numeric form normalization can hide invalid values; non-finite or incomplete values must remain visibly dirty and continue to be rejected by existing save validation.
+    - Static source-string tests alone can miss behavior, so tests should execute bounded pure helpers when practical.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 650
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 3
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+    - tests/hub-settings.test.ts
+acceptance:
+  criteria:
+    - Same-tab refresh recovers a valid token without leaving it in the URL or expanding its storage scope.
+    - Authentication rejection clears every recoverable token copy and does not retry automatically.
+    - The model-routing unsaved badge is driven by semantic draft equality, not by whether a control fired.
+    - Returning every edited policy field to its persisted value clears the warning.
+    - Existing bilingual UI, model-routing save, and authentication header behavior remain intact.
+  commands:
+    - node --check src/hub/public/app.js
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts tests/hub-settings.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

@@ -1,0 +1,149 @@
+version: 2
+name: Configurable routing missing-evidence policy
+project: ../..
+contract:
+  outcome: Users can choose whether a positive-weight routing factor with missing or incomparable evidence blocks model recommendation or becomes a visible warning while ForkLight ranks only the remaining comparable evidence.
+  context:
+    - Current routing marks positive-factor-unavailable and always suppresses the recommendation.
+    - This is too strict for optional cost or duration evidence, subscriptions, and cross-currency candidates.
+    - Independent verification history, minimum samples, active evidence, and score-gap rules remain truthful boundaries.
+    - "The development default should be flexible: use available comparable evidence, disclose omitted factors, and keep Main as final decision-maker."
+  inScope:
+    - Add a persisted modelRouting missing-evidence policy with strict block and flexible warn behavior.
+    - Default new and legacy-merged settings to flexible behavior.
+    - In flexible mode, omit unavailable factors from every candidate score and allow a recommendation only when minimum samples, one active factor, and the gap threshold pass.
+    - In strict mode, preserve existing blocking behavior.
+    - Expose the choice in Hub advanced model-routing UI and save/reload it.
+    - Explain missing factors and the two modes in plain Chinese and English.
+    - Add focused core, settings, Hub bridge, and UI asset tests.
+  outOfScope:
+    - Do not treat missing evidence as zero.
+    - Do not convert currencies or infer subscription prices.
+    - Do not weaken failed verification or minimum sample requirements.
+    - Do not launch competitions automatically or permanently exclude a model.
+    - Do not commit or push.
+  executionSteps:
+    - Define the policy type, default, SettingsService validation, and Hub projection and patch shape.
+    - Refactor uncertainty so unavailable positive factors are reported in both modes but block only in strict mode.
+    - Keep no-active-factors, insufficient samples, and insufficient gap as blockers.
+    - Add one small advanced UI control with human-readable labels and consequences.
+    - Render the recommendation caveat and missing-factor explanation in both languages.
+    - Run focused tests and build once.
+  deliverables:
+    - Configurable missing-evidence routing policy end to end.
+    - Flexible and strict routing regression tests.
+    - Readable bilingual Hub control and result explanation.
+  modules:
+    - name: Routing policy and scorer
+      responsibility: Separate unavailable-factor warnings from hard recommendation blockers and score only comparable active factors.
+      consumes:
+        - RoutingEvidence candidates.
+        - Effective modelRouting policy.
+      produces:
+        - Candidate scores, uncertainty reasons, and optional advisory recommendation.
+      boundaries:
+        - Never fabricates evidence.
+        - Never modifies model availability.
+        - Minimum samples and verification history remain required.
+    - name: Settings contract
+      responsibility: Persist and validate the policy consistently across defaults and partial updates.
+      consumes:
+        - Settings patches.
+        - Legacy and default settings.
+      produces:
+        - Effective frozen ModelRoutingSettings.
+      boundaries:
+        - Rejects unsupported mode values.
+        - Contains no credential fields.
+    - name: Hub policy experience
+      responsibility: Let nontechnical users understand and change strict versus flexible missing-evidence handling.
+      consumes:
+        - Hub settings view.
+        - Routing advisory result.
+      produces:
+        - Saved setting and a plain-language explanation of what happened and why.
+      boundaries:
+        - Advanced control remains secondary.
+        - Technical evidence stays available but is not dominant.
+  callChain:
+    - User selects strict or flexible handling in Hub.
+    - Hub POST /api/settings builds a modelRouting patch.
+    - SettingsService validates and persists the mode.
+    - Coordinator passes the effective policy to provideRoutingAdvice.
+    - The scorer marks missing factors and decides whether they block.
+    - Hub renders a recommendation or blocker, evidence gaps, and the next action.
+  scenarios:
+    - name: Flexible mode with cross-currency cost
+      given: Both candidates meet sample requirements and behavior factors are comparable, but official cost has positive weight and currencies differ.
+      when: The policy is flexible.
+      then: Cost is omitted for all candidates, the gap uses remaining active factors, and a recommendation may appear with a clear warning.
+    - name: Strict mode with the same cost gap
+      given: The same candidate evidence and positive official-cost weight.
+      when: The policy is strict.
+      then: No recommendation appears and the missing or incomparable cost reason is explicit.
+    - name: Flexible mode still refuses empty evidence
+      given: A candidate has fewer than the minimum relevant samples or every positive factor is unavailable.
+      when: Routing advice is requested.
+      then: No recommendation appears and a bounded competition is suggested when configured.
+  risks:
+    - Flexible scoring could sound more certain than evidence supports, so warnings must remain prominent and confidence must use only active comparable weight.
+    - Legacy persisted documents omit the field, so deep merge must supply the new default safely.
+    - Bilingual UI text can drift from actual behavior, so tests should assert labels and wiring.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 950
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 3
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/model-routing.ts
+    - src/core/settings.ts
+    - src/hub/settings-api.ts
+    - src/hub/public
+    - tests/model-routing.test.ts
+    - tests/settings.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Missing evidence is never scored as zero.
+    - Flexible mode can recommend from comparable active factors while exposing omitted factors.
+    - Strict mode blocks on any positive-weight unavailable factor.
+    - Insufficient samples, zero active factors, and insufficient score gap block in both modes.
+    - The setting round-trips through SettingsService and Hub API.
+    - Chinese and English UI explain the two choices without relying on technical jargon.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/model-routing.test.ts tests/settings.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm run build
+    - git diff --check

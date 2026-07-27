@@ -9,14 +9,17 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ProviderModelSummary } from "../src/core/statistics.js";
 import type {
   AttemptRecord,
+  EffectivePolicySnapshot,
   CompetitionCandidateRecord,
   CompetitionRecord,
   IntegrationReceiptRecord,
   IntegrationResultRecord,
+  IntegrationStageEvidence,
   TaskRecord,
   TaskSpec,
   VerificationResult,
 } from "../src/core/types.js";
+import type { CompactIntegrationOperationView } from "../src/core/integration-operation.js";
 import { DEFAULT_RANKING_POLICY } from "../src/core/competition.js";
 import { taskPaths } from "../src/core/config.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
@@ -41,11 +44,17 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
     assert.deepEqual(
       tools.tools.map((tool) => tool.name).sort(),
       [
+        "forklight_adaptation_apply",
+        "forklight_adaptation_preview",
+        "forklight_candidate_reverify",
         "forklight_compete_submit",
         "forklight_competition_compare",
         "forklight_competition_list",
         "forklight_competition_status",
+        "forklight_correct",
+        "forklight_correction_eligibility",
         "forklight_direct_codex_capture",
+        "forklight_direct_codex_capture_task",
         "forklight_direct_codex_inbox",
         "forklight_direct_codex_publication_preview",
         "forklight_direct_codex_publication_register",
@@ -59,11 +68,13 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_integration_wait",
         "forklight_list",
         "forklight_main_review",
+        "forklight_model_routing",
         "forklight_plan_board",
         "forklight_plan_inspect",
         "forklight_plan_submit",
         "forklight_provider_probe",
         "forklight_provider_status",
+        "forklight_remediation_verify",
         "forklight_resume",
         "forklight_settings_get",
         "forklight_settings_reset",
@@ -92,6 +103,330 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
       healthData.mcpBuildIdentity?.buildId,
       healthData.daemonBuildIdentity?.buildId,
     );
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+// --- Model routing MCP surface tests ---
+
+test("MCP model_routing tool is registered as read-only", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-mr-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tools = await client.listTools();
+    const routingTool = tools.tools.find((t) => t.name === "forklight_model_routing");
+    assert.ok(routingTool !== undefined, "forklight_model_routing must be registered");
+    assert.equal(routingTool.annotations?.readOnlyHint, true,
+      "model_routing must be marked read-only");
+    assert.equal(routingTool.annotations?.openWorldHint, false,
+      "model_routing must be closed-world (never calls Provider)");
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP model_routing returns privacy-safe advisory for empty history", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-mr-safe-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({
+      name: "forklight_model_routing",
+      arguments: {
+        taskClass: "nonexistent-class",
+        candidates: [
+          { provider: "deepseek", model: "v4" },
+          { provider: "qwen", model: "plus" },
+        ],
+      },
+    });
+    assert.equal(result.isError, undefined);
+    const advisory = result.structuredContent as Record<string, unknown>;
+    assert.equal(advisory.taskClass, "nonexistent-class");
+    assert.equal((advisory.candidates as unknown[]).length, 2);
+    assert.equal(advisory.shouldRunCompetition, true);
+    // Privacy-safe: no Task ids, logs, or credentials
+    const json = JSON.stringify(advisory);
+    assert.doesNotMatch(json, /error/);
+    assert.doesNotMatch(json, /api[_-]?key/);
+    assert.doesNotMatch(json, /\/tasks\//);
+    assert.doesNotMatch(json, /credential/);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+// --- Bounded adaptation MCP surface tests ---------------------------------
+
+async function rootAdaptationSnapshot(): Promise<EffectivePolicySnapshot> {
+  const { resolveEffectivePolicy, defaultAdvancedPolicyFields, enforcementCapabilityForRuntime } =
+    await import("../src/core/advanced-policy.js");
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  return resolveEffectivePolicy(
+    undefined, undefined,
+    { ...defaultAdvancedPolicyFields(), maxAdaptationRounds: 1, maxDurationMs: 60_000 },
+    "default",
+    caps,
+  );
+}
+
+async function seedTerminalTaskForAdaptation(store: StateStore): Promise<TaskRecord> {
+  const { registerTaskFromSpec } = await import("../src/core/runner.js");
+  const effectivePolicy = await rootAdaptationSnapshot();
+  const task = registerTaskFromSpec(
+    store,
+    {
+      version: 1,
+      name: `adapt-mcp-${Math.random().toString(36).slice(2)}`,
+      project: "/tmp/src",
+      goal: "Adaptation MCP test",
+      constraints: [],
+      provider: {
+        name: "deepseek", model: "deepseek-v4-flash",
+        keychainService: "forklight.test.api-key",
+      },
+      runtime: {
+        name: "claude-code", executable: "claude",
+        effort: "low", maxBudgetUsd: 0.1,
+      },
+      workspace: { exclude: [] },
+      worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+    },
+    `forklight://test/adapt-mcp-${Math.random().toString(36).slice(2)}`,
+    effectivePolicy,
+  );
+  store.setTaskStatus(task.id, "succeeded", { error: null });
+  return store.getTask(task.id);
+}
+
+test("MCP adaptation tools have truthful read-only vs mutating annotations", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-adapt-annot-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tools = await client.listTools();
+    const previewTool = tools.tools.find((t) => t.name === "forklight_adaptation_preview");
+    assert.ok(previewTool !== undefined, "adaptation_preview must be registered");
+    assert.equal(previewTool.annotations?.readOnlyHint, true,
+      "adaptation_preview must be marked read-only");
+    assert.equal(previewTool.annotations?.openWorldHint, false,
+      "adaptation_preview must not be marked open-world");
+
+    const applyTool = tools.tools.find((t) => t.name === "forklight_adaptation_apply");
+    assert.ok(applyTool !== undefined, "adaptation_apply must be registered");
+    assert.equal(applyTool.annotations?.readOnlyHint, false,
+      "adaptation_apply must NOT be marked read-only");
+    assert.equal(applyTool.annotations?.openWorldHint, false,
+      "adaptation_apply mutates local ForkLight state but does not reach an external world");
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP adaptation_preview is read-only and returns canonical before/after evidence", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-adapt-preview-"));
+  const store = new StateStore(home);
+  const task = await seedTerminalTaskForAdaptation(store);
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const preview = await client.callTool({
+      name: "forklight_adaptation_preview",
+      arguments: {
+        taskId: task.id,
+        patch: { maxDurationMs: 600_000 },
+        reason: "duration-budget",
+      },
+    });
+    assert.equal(preview.isError, undefined);
+    const data = preview.structuredContent as Record<string, unknown>;
+    assert.equal(data.status, "eligible");
+    assert.equal(data.nextRound, 1);
+    assert.equal(data.maxAdaptationRounds, 1);
+    assert.equal(typeof data.summary, "string");
+    const fields = data.fields as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(fields) && fields.length > 0);
+    const dur = fields.find((f) => f.field === "maxDurationMs");
+    assert.ok(dur);
+    assert.equal(dur!.before, 60_000);
+    assert.equal(dur!.after, 600_000);
+    assert.equal(dur!.changed, true);
+
+    // Verify preview is read-only: no Task created.
+    const recheck = new StateStore(home);
+    assert.equal(recheck.listTasks().length, 1, "preview must not create a successor Task");
+    recheck.close();
+
+    // Repeated preview returns identical shape without side effects.
+    const again = await client.callTool({
+      name: "forklight_adaptation_preview",
+      arguments: {
+        taskId: task.id,
+        patch: { maxDurationMs: 600_000 },
+        reason: "duration-budget",
+      },
+    });
+    assert.deepEqual(again.structuredContent, data);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP adaptation_apply requires confirm: true and creates at most one successor", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-adapt-apply-"));
+  const store = new StateStore(home);
+  const task = await seedTerminalTaskForAdaptation(store);
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    // Valid apply with confirm: true.
+    const apply = await client.callTool({
+      name: "forklight_adaptation_apply",
+      arguments: {
+        taskId: task.id,
+        patch: { maxDurationMs: 600_000 },
+        reason: "duration-budget",
+        confirm: true,
+      },
+    });
+    assert.equal(apply.isError, undefined);
+    const data = apply.structuredContent as Record<string, unknown>;
+    assert.equal(data.status, "eligible");
+    assert.ok(typeof data.childTaskId === "string" && (data.childTaskId as string).length > 0);
+    assert.ok(typeof data.lineageId === "string");
+
+    // Verify exactly one successor exists.
+    const recheck = new StateStore(home);
+    assert.equal(recheck.listTasks().length, 2, "one successor Task created");
+    recheck.close();
+
+    // Duplicate apply returns stopped; no second successor.
+    const dup = await client.callTool({
+      name: "forklight_adaptation_apply",
+      arguments: {
+        taskId: task.id,
+        patch: { maxDurationMs: 700_000 },
+        reason: "duration-budget",
+        confirm: true,
+      },
+    });
+    assert.equal(dup.isError, undefined);
+    const dupData = dup.structuredContent as Record<string, unknown>;
+    assert.equal(dupData.status, "stopped");
+    assert.equal((dupData.preview as Record<string, unknown>).stoppedReason, "successor-already-created");
+
+    const final = new StateStore(home);
+    assert.equal(final.listTasks().length, 2, "no extra successor on duplicate apply");
+    final.close();
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP adaptation surfaces reject malformed JSON, unknown fields, and unknown reasons safely", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-adapt-reject-"));
+  const store = new StateStore(home);
+  const task = await seedTerminalTaskForAdaptation(store);
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    // Forbidden field (maxAdaptationRounds) rejected by preview gate.
+    const forbidden = await client.callTool({
+      name: "forklight_adaptation_preview",
+      arguments: {
+        taskId: task.id,
+        patch: { maxAdaptationRounds: 99 },
+        reason: "other-flexible-policy",
+      },
+    });
+    assert.equal(forbidden.isError, undefined);
+    const fbData = forbidden.structuredContent as Record<string, unknown>;
+    assert.equal(fbData.status, "stopped");
+    assert.equal(fbData.stoppedReason, "forbidden-field");
+
+    // Verify no Task was mutated.
+    const recheck = new StateStore(home);
+    assert.equal(recheck.listTasks().length, 1, "no Task created on forbidden patch");
+    recheck.close();
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP adaptation apply rejects missing confirm without creating a successor", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-adapt-noconfirm-"));
+  const store = new StateStore(home);
+  await seedTerminalTaskForAdaptation(store);
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    // MCP schema requires confirm: z.literal(true), so the SDK should reject
+    // missing confirm before it reaches the daemon.
+    const bad = await client.callTool({
+      name: "forklight_adaptation_apply",
+      arguments: {
+        taskId: "00000000-0000-0000-0000-000000000000",
+        patch: { maxDurationMs: 600_000 },
+        reason: "duration-budget",
+      } as unknown as Record<string, unknown>,
+    });
+    assert.equal(bad.isError, true, "apply without literal confirm true must fail schema validation");
+    const recheck = new StateStore(home);
+    assert.equal(recheck.listTasks().length, 1, "missing confirmation must not create a successor");
+    recheck.close();
   } finally {
     await client.close();
     await server.close();
@@ -646,7 +981,20 @@ test("MCP submit uses effective defaults but explicit provider wins", async () =
   const store = new StateStore(home);
   const { SettingsService } = await import("../src/core/settings.js");
   const svc = new SettingsService(store);
-  svc.update({ execution: { defaultProvider: "deepseek", defaultEffort: "medium" } });
+  svc.update({
+    execution: { defaultProvider: "deepseek", defaultEffort: "medium" },
+    deliveryProfiles: {
+      defaultProfileId: "named-profile",
+      profiles: [{
+        id: "named-profile",
+        label: "Named profile",
+        buildCommands: ["profile build"],
+        activationCommands: ["profile activate"],
+        activationCheckCommands: ["profile check"],
+      }],
+      projectBindings: {},
+    },
+  });
   store.close();
 
   const daemon = new ForkLightDaemon(home, 0);
@@ -681,11 +1029,7 @@ test("MCP submit uses effective defaults but explicit provider wins", async () =
         maxBudgetUsd: 1.5,
         focusPaths: ["src"],
         generatedPaths: ["**/.custom-cache/**"],
-        delivery: {
-          buildCommands: ["npm run build"],
-          activationCommands: ["forklight daemon restart"],
-          activationCheckCommands: ["forklight health --json"],
-        },
+        deliveryProfileId: "named-profile",
       },
     });
     assert.equal(submit.isError, undefined);
@@ -701,9 +1045,13 @@ test("MCP submit uses effective defaults but explicit provider wins", async () =
     );
     assert.deepEqual(stored.spec.workspace.generatedPaths, ["**/.custom-cache/**"]);
     assert.deepEqual(stored.spec.delivery, {
-      buildCommands: ["npm run build"],
-      activationCommands: ["forklight daemon restart"],
-      activationCheckCommands: ["forklight health --json"],
+      buildCommands: ["profile build"],
+      activationCommands: ["profile activate"],
+      activationCheckCommands: ["profile check"],
+    });
+    assert.deepEqual(stored.spec.deliveryResolution, {
+      source: "explicit",
+      profileId: "named-profile",
     });
   } finally {
     await client.close();
@@ -1225,4 +1573,179 @@ test("inlineTask + parseTaskSpec keep explicit null against finite default (FL-D
     completionPolicy: settings.completionPolicy,
   });
   assert.equal(spec.runtime.maxBudgetUsd, null);
+});
+
+// --- Compact Integration MCP response tests ---
+
+test("MCP validates the same optional Main-authored presentation shape as YAML Tasks", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-presentation-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const base = qualityContractArgs(home);
+    const contract = base.contract as Record<string, unknown>;
+    const valid = await client.callTool({
+      name: "forklight_validate",
+      arguments: {
+        ...base,
+        contract: {
+          ...contract,
+          presentation: {
+            summary: "Explain the requested result to the user before technical details.",
+            language: "en-GB",
+          },
+        },
+      },
+    });
+    assert.equal(valid.isError, undefined, toolErrorText(valid));
+
+    const invalid = await client.callTool({
+      name: "forklight_validate",
+      arguments: {
+        ...base,
+        contract: {
+          ...contract,
+          presentation: { summary: "line one\nline two", language: "en" },
+        },
+      },
+    });
+    assert.equal(invalid.isError, true);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP integration status/wait are compact by default in both surfaces, full with detail=full", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-compact-"));
+  const store = new StateStore(home);
+  const { task } = await seedSucceededTask(store, home);
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const pf = await client.callTool({
+      name: "forklight_integration_preflight", arguments: { taskId: task.id },
+    });
+    const receipt = pf.structuredContent as IntegrationReceiptRecord;
+    const applied = await client.callTool({
+      name: "forklight_integration_apply",
+      arguments: { taskId: task.id, receiptId: receipt.id, confirm: true },
+    });
+    const operationId = (applied.structuredContent as { operationId: string }).operationId;
+    await client.callTool({
+      name: "forklight_integration_wait", arguments: { operationId, timeoutMs: 5_000 },
+    });
+
+    // --- Default compact status: both content & structuredContent are compact ---
+    const cs = await client.callTool({
+      name: "forklight_integration_status", arguments: { operationId },
+    });
+    assert.equal(cs.isError, undefined);
+    const csText = (cs.content as Array<{ type: string; text: string }>)[0]!.text;
+    const csData = cs.structuredContent as CompactIntegrationOperationView;
+
+    assert.ok(!csText.includes("stdout"), "compact status text excludes stdout");
+    assert.ok(!csText.includes("stderr"), "compact status text excludes stderr");
+    assert.ok(csText.length < 5_000, `compact status bounded, got ${csText.length}`);
+    assert.equal(typeof csData.operationId, "string");
+    assert.ok(Array.isArray(csData.stages));
+    for (const s of csData.stages) {
+      assert.equal(typeof s.commandCount, "number");
+      assert.ok(!("commands" in s), "compact structuredContent must not have raw commands");
+    }
+
+    // --- Default compact wait: same guarantees ---
+    const cw = await client.callTool({
+      name: "forklight_integration_wait", arguments: { operationId, timeoutMs: 1_000 },
+    });
+    assert.equal(cw.isError, undefined);
+    const cwText = (cw.content as Array<{ type: string; text: string }>)[0]!.text;
+    assert.ok(!cwText.includes("stdout"), "compact wait text excludes stdout");
+    const cwData = cw.structuredContent as CompactIntegrationOperationView;
+    assert.ok(Array.isArray(cwData.stages));
+    for (const s of cwData.stages) {
+      assert.ok(!("commands" in s), "compact wait structuredContent must not have raw commands");
+    }
+
+    // --- Full detail status: complete view ---
+    const fs = await client.callTool({
+      name: "forklight_integration_status", arguments: { operationId, detail: "full" },
+    });
+    assert.equal(fs.isError, undefined);
+    const fsData = fs.structuredContent as Record<string, unknown>;
+    assert.ok(fsData.result !== undefined, "full detail status has result");
+    const fsStages = fsData.stages as IntegrationStageEvidence[] | undefined;
+    assert.ok(Array.isArray(fsStages) && fsStages.length > 0, "full detail stages present");
+
+    // --- Full detail wait: complete view ---
+    const fw = await client.callTool({
+      name: "forklight_integration_wait",
+      arguments: { operationId, timeoutMs: 1_000, detail: "full" },
+    });
+    assert.equal(fw.isError, undefined);
+    assert.ok((fw.structuredContent as Record<string, unknown>).result !== undefined,
+      "full detail wait has result");
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP forklight_correct tool schema validates feedback, budget, and confirm", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-corr-"));
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tool = (await client.listTools()).tools
+      .find((candidate) => candidate.name === "forklight_correct");
+    assert.ok(tool, "forklight_correct tool must be registered");
+    assert.equal(tool?.annotations?.readOnlyHint, false);
+    // Confirm required
+    const noConfirm = await client.callTool({
+      name: "forklight_correct",
+      arguments: { taskId: "00000000-0000-4000-8000-000000000001", feedback: "Fix it" },
+    });
+    assert.ok(noConfirm.isError);
+    // Empty feedback rejected
+    const emptyFb = await client.callTool({
+      name: "forklight_correct",
+      arguments: {
+        taskId: "00000000-0000-4000-8000-000000000001",
+        feedback: "   ",
+        confirm: true,
+      },
+    });
+    assert.ok(emptyFb.isError);
+    const incompleteStructured = await client.callTool({
+      name: "forklight_correct",
+      arguments: {
+        taskId: "00000000-0000-4000-8000-000000000001",
+        feedback: "Keep the useful output and fix the remaining gap",
+        candidateRevisionId: "00000000-0000-4000-8000-000000000002",
+        confirm: true,
+      },
+    });
+    assert.ok(incompleteStructured.isError, "structured correction fields are all-or-none");
+    const inputSchema = tool?.inputSchema as { properties?: Record<string, unknown> };
+    assert.ok(inputSchema.properties?.candidateRevisionId);
+    assert.ok(inputSchema.properties?.reusablePaths);
+    assert.ok(inputSchema.properties?.remainingGaps);
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });

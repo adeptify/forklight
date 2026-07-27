@@ -1,0 +1,138 @@
+version: 2
+name: Expose one-step bounded policy adaptation to Main
+project: ../..
+contract:
+  outcome: Main can preview and explicitly confirm one bounded Worker-policy adjustment through CLI and MCP without creating an automatic retry loop.
+  context:
+    - ForkLight already has a durable adaptation_preview and adaptation_apply daemon operation.
+    - The transition core permits at most one successor per parent and obeys the immutable root maxAdaptationRounds snapshot.
+    - The missing product layer is a strict, explainable CLI and MCP surface that Main runtimes can call.
+    - Development defaults remain loose; this Task must not add background diagnosis, parameter tuning, recursive calls, or automatic retries.
+  inScope:
+    - Add CLI preview and apply commands for the existing daemon operations.
+    - Add MCP preview and apply tools with strict bounded schemas and truthful read-only versus mutating annotations.
+    - Mark adaptation_preview as a read-only daemon operation.
+    - Accept a JSON policy patch and one bounded proposed-reason category; require explicit confirmation for apply.
+    - Return the canonical before/after preview and child Task id without raw prompt, source, Diff, log, or secret content.
+    - Add focused regression coverage for parsing, annotations, confirmation, daemon routing, and one-successor behavior.
+  outOfScope:
+    - Do not add Hub UI in this Task; it is a dependent presentation Task.
+    - Do not change the adaptation gate, lineage cap, scheduler semantics, Task success authority, Worker prompts, Provider execution, Integration, commit, or push.
+    - Do not infer a patch from failure text and do not invoke a model from the adaptation path.
+    - Do not add dependencies, migrations, tables, autonomous loops, or repeated retry behavior.
+  executionSteps:
+    - Inspect the existing daemon adaptation operations and the established CLI and MCP command patterns.
+    - Add the smallest strict adapters that forward only taskId, patch, proposed reason, and explicit confirmation.
+    - Keep preview read-only and apply identity-checked and mutation-labelled.
+    - Prove malformed JSON, unknown fields, unknown reasons, and missing confirmation fail before mutation.
+    - Run the focused tests, TypeScript, and whitespace checks once; report remaining uncertainty instead of tuning repeatedly.
+  deliverables:
+    - A human and JSON CLI path for adaptation preview and confirmed apply.
+    - Two MCP tools with strict schemas and safe output.
+    - Regression evidence that the new surfaces cannot bypass the existing bounded state machine.
+  modules:
+    - name: CLI adaptation adapter
+      responsibility: Parse bounded user input and call the existing daemon preview or apply operation.
+      consumes:
+        - Task id, JSON policy patch, proposed-reason enum, and optional explicit confirmation.
+      produces:
+        - Canonical content-free preview or confirmed successor summary.
+      boundaries:
+        - It never diagnoses failure, chooses policy values, loops, or writes the source project.
+    - name: MCP adaptation tools
+      responsibility: Let any Main runtime use the same preview-before-confirm workflow.
+      consumes:
+        - Strict structured arguments identical in meaning to the CLI adapter.
+      produces:
+        - Structured canonical preview/apply result and bounded text summary.
+      boundaries:
+        - Preview is read-only; apply is mutating but non-destructive and requires confirm true.
+    - name: Daemon method classification
+      responsibility: Classify preview as read-only while retaining build-identity protection for apply.
+      consumes:
+        - Existing daemon method names.
+      produces:
+        - Correct identity and mutation behavior.
+      boundaries:
+        - No coordinator or state-machine policy changes.
+  callChain:
+    - Main chooses a terminal Task and a bounded policy delta.
+    - CLI or MCP sends adaptation_preview to the daemon.
+    - The existing gate returns before/after values, provenance, enforcement phase, and stopped or eligible status.
+    - Only after Main or the user confirms does the adapter send adaptation_apply with confirm true.
+    - The existing transaction creates at most one queued successor and returns its child Task id.
+  scenarios:
+    - name: preview only
+      given: A terminal Task whose immutable root policy allows one adaptation round.
+      when: Main previews a duration or size-policy delta.
+      then: ForkLight returns the canonical before/after evidence and creates no Task.
+    - name: explicit apply
+      given: The same preview is eligible and the caller supplies confirm true.
+      when: Main applies the delta.
+      then: Exactly one successor is created and scheduled through the existing durable queue.
+    - name: no endless loop
+      given: The parent already has a successor or the immutable root round cap is exhausted.
+      when: Any surface previews or applies again.
+      then: It returns a stable stopped result and never creates another successor or calls a model.
+    - name: invalid parameter
+      given: The patch is malformed, contains a forbidden field, or uses an unknown reason.
+      when: CLI or MCP validates it.
+      then: The request fails safely without mutation and without echoing content-bearing values.
+  risks:
+    - A CLI convenience path could accidentally bypass confirm; apply must require the literal confirmation flag.
+    - MCP annotations could mislabel apply as read-only; tests must distinguish both tools.
+    - Reimplementing the gate in adapters would create drift; all decisions must remain in the existing coordinator core.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 4000
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/daemon/protocol.ts
+    - tests/daemon.test.ts
+    - tests/mcp.test.ts
+    - tests/cli-supervision.test.ts
+acceptance:
+  criteria:
+    - Preview is read-only and apply requires explicit confirmation.
+    - CLI and MCP delegate to the same existing bounded coordinator operations.
+    - No surface creates more than one successor for one parent or performs autonomous retries.
+    - Focused tests, TypeScript, and patch whitespace checks pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/mcp.test.ts tests/cli-supervision.test.ts
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check

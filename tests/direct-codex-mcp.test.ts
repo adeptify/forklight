@@ -86,11 +86,12 @@ function vs(r: unknown): Record<string, unknown>[] {
 test("annotations: inbox/preview readOnly, capture/review/register mutating, all non-destructive", async () => {
   await withDc(async (client) => {
     const tools = (await client.listTools()).tools.filter((t) => t.name.startsWith("forklight_direct_codex_"));
-    assert.equal(tools.length, 5);
+    assert.equal(tools.length, 6);
     const m = new Map(tools.map((t) => [t.name, t.annotations]));
     assert.equal(m.get("forklight_direct_codex_inbox")!.readOnlyHint, true);
     assert.equal(m.get("forklight_direct_codex_publication_preview")!.readOnlyHint, true);
     assert.equal(m.get("forklight_direct_codex_capture")!.readOnlyHint, false);
+    assert.equal(m.get("forklight_direct_codex_capture_task")!.readOnlyHint, false);
     assert.equal(m.get("forklight_direct_codex_review")!.readOnlyHint, false);
     assert.equal(m.get("forklight_direct_codex_publication_register")!.readOnlyHint, false);
     for (const [name, a] of m) {
@@ -268,5 +269,116 @@ test("review immutability: duplicate review rejected, inbox reflects accepted st
     const dup = await client.callTool({ name: "forklight_direct_codex_review", arguments: { confirm: true, sampleId: "imm", decision: "rejected", rejectionReason: "incomplete-evidence", reviewer: "main-codex", reviewedAt: TS, schemaVersion: 1 } });
     assert.equal(dup.isError, true);
     assert.match(tx(dup), /Review already exists/);
+  });
+});
+
+// --- Guided capture-task MCP tests ---
+
+async function gcap(client: Client, taskId: string, runRef?: string): Promise<Record<string, unknown>> {
+  const r = await client.callTool({
+    name: "forklight_direct_codex_capture_task",
+    arguments: { taskId, runRef: runRef ?? `codex-run:${taskId}`, usage: tu() },
+  });
+  assert.equal(r.isError, undefined, `guided capture failed: ${JSON.stringify(r)}`);
+  return r.structuredContent as Record<string, unknown>;
+}
+
+test("guided capture-task succeeds with store-derived identity, content-free output, and receipt attribution", async () => {
+  await withDc(async (client, home) => {
+    const id = randomUUID(); seed(home, [id]);
+    const s = await gcap(client, id, "codex-run:gr-1");
+    // Identity derived from stored Task
+    assert.equal(s.forklightTaskId, id);
+    assert.equal(s.exactTaskClass, DC_CLASS);
+    assert.equal(s.directCodexProfileId, DC_PROFILE);
+    assert.equal(s.directRunRef, "codex-run:gr-1");
+    assert.equal(s.source, "codex-terminal-result");
+    assert.equal(s.complete, true);
+    assert.equal(s.schemaVersion, 1);
+    assert.equal(typeof s.sampleId, "string");
+    assert.equal(typeof s.pairingRef, "string");
+    assert.equal(typeof s.capturedAt, "string");
+    // Content-free: no raw text, prompt, response, log, diff, hash, or secret fields
+    for (const raw of ["text", "content", "prompt", "response", "log", "diff", "hash", "secret"]) {
+      assert.equal(raw in s, false);
+    }
+    // Appears in inbox as pending
+    const items = vs(await client.callTool({ name: "forklight_direct_codex_inbox", arguments: { taskClass: DC_CLASS, directCodexProfileId: DC_PROFILE } }));
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.reviewState, "pending");
+    assert.deepEqual((items[0]!.sample as Record<string, unknown>).sampleId, s.sampleId);
+    // Receipt attribution
+    const receipts = recv(home, id);
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0]!.operation, "forklight_direct_codex_capture");
+    assert.equal(receipts[0]!.transport, "mcp");
+  });
+});
+
+test("guided capture-task Zod-strict rejection + privacy: malformed usage, extra fields, unknown task", async () => {
+  await withDc(async (client, home) => {
+    const id = randomUUID(); seed(home, [id]);
+    const priv = "GC-MCP-PRIV-9999";
+
+    // Extra field in args → error
+    const r1 = await client.callTool({ name: "forklight_direct_codex_capture_task", arguments: { taskId: id, runRef: "codex-run:ref", usage: tu(), metadata: { prompt: priv } } });
+    assert.equal(r1.isError, true);
+    assert.ok(!tx(r1).includes(priv));
+
+    // Malformed usage → error, no echo
+    const r2 = await client.callTool({ name: "forklight_direct_codex_capture_task", arguments: { taskId: id, runRef: "codex-run:ref", usage: { type: "turn.completed" } } });
+    assert.equal(r2.isError, true);
+
+    // Extra field in usage → error, no echo
+    const r3 = await client.callTool({ name: "forklight_direct_codex_capture_task", arguments: { taskId: id, runRef: "codex-run:ref", usage: { ...tu(), prompt: priv } } });
+    assert.equal(r3.isError, true);
+    assert.ok(!tx(r3).includes(priv));
+
+    // Bad runRef format — daemon normalizer rejects, error is privacy-safe
+    const r4 = await client.callTool({ name: "forklight_direct_codex_capture_task", arguments: { taskId: id, runRef: priv, usage: tu() } });
+    assert.equal(r4.isError, true);
+    assert.ok(!tx(r4).includes(priv));
+
+    // Negative token count → Zod validation error
+    const r5 = await client.callTool({ name: "forklight_direct_codex_capture_task", arguments: { taskId: id, runRef: "codex-run:rej", usage: { type: "turn.completed", usage: { input_tokens: -1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 } } } });
+    assert.equal(r5.isError, true);
+
+    // Unknown task id → error, no echo of the unknown id
+    const secretTaskId = `unknown-gc-${priv}`;
+    const r6 = await client.callTool({ name: "forklight_direct_codex_capture_task", arguments: { taskId: secretTaskId, runRef: "codex-run:ref", usage: tu() } });
+    assert.equal(r6.isError, true);
+    assert.ok(!tx(r6).includes(priv));
+
+    // No partial evidence — inbox remains empty after all failures
+    assert.deepEqual(vs(await client.callTool({ name: "forklight_direct_codex_inbox", arguments: { taskClass: DC_CLASS, directCodexProfileId: DC_PROFILE } })), []);
+  });
+});
+
+test("guided capture-task preserves pending→review→publication gates", async () => {
+  await withDc(async (client, home) => {
+    const id = randomUUID(); seed(home, [id]);
+    await gcap(client, id);
+
+    // Pending in inbox — cannot register without review
+    const p0 = sc(await client.callTool({ name: "forklight_direct_codex_publication_preview", arguments: { taskClass: DC_CLASS, directCodexProfileId: DC_PROFILE } }));
+    assert.equal(p0.readiness, "no-accepted-samples");
+
+    // Review accepted
+    const sid = (vs(await client.callTool({ name: "forklight_direct_codex_inbox", arguments: { taskClass: DC_CLASS, directCodexProfileId: DC_PROFILE } }))[0]!.sample as Record<string, unknown>).sampleId as string;
+    await client.callTool({ name: "forklight_direct_codex_review", arguments: { confirm: true, sampleId: sid, decision: "accepted", reviewer: "main-codex", reviewedAt: TS, schemaVersion: 1 } });
+
+    // Now ready
+    const p1 = sc(await client.callTool({ name: "forklight_direct_codex_publication_preview", arguments: { taskClass: DC_CLASS, directCodexProfileId: DC_PROFILE } }));
+    assert.equal(p1.readiness, "ready");
+    assert.equal(p1.acceptedCount, 1);
+
+    // Register
+    const reg = await client.callTool({ name: "forklight_direct_codex_publication_register", arguments: { confirm: true, method: "paired-sample-v1", confidence: "low", createdAt: TS, taskClass: DC_CLASS, directCodexProfileId: DC_PROFILE } });
+    assert.equal(reg.isError, undefined);
+
+    // Only capture wrote receipt
+    const receipts = recv(home, id);
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0]!.operation, "forklight_direct_codex_capture");
   });
 });

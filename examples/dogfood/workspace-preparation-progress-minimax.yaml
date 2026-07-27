@@ -1,0 +1,159 @@
+version: 2
+name: Make workspace preparation observable
+project: ../..
+contract:
+  outcome: Replace the several-minute opaque preparing state with truthful staged progress and timing evidence, so Main and every status consumer can tell what ForkLight is doing before the Worker starts without exposing private paths or pretending elapsed time is completion percentage.
+  context:
+    - ForkLight creates an isolated baseline and Worker workspace before every Attempt. Recent dogfood Tasks spent roughly five to six minutes in preparing with only a generic status.
+    - prepareWorkspace currently scans the source, copies it twice, links verifier-only dependencies, writes workspace context, and stores a source manifest, but only emits one event after everything finishes.
+    - Hub polling is now cached, so observation should no longer repeatedly start runtime doctor subprocesses; the remaining product gap is honest progress from the preparation operation itself.
+    - This Task instruments the canonical preparation path. A dependent presentation pass may add richer localized Hub rendering; existing list/status/Task Detail consumers must at least receive safe current-stage evidence immediately.
+    - Progress events are operational evidence, not model-quality evidence. They must not alter Task outcome, routing scores, failure classification, retry policy, or Worker accounting.
+  inScope:
+    - Add a typed optional progress callback to prepareWorkspace with a small stable stage vocabulary covering initialization, source scan, baseline copy, Worker copy, dependency linking, context/manifest writing, and completion.
+    - Emit stage-start or stage-complete observations at meaningful boundaries with elapsed milliseconds and only safe counts that are actually known. Never invent percent complete or estimate remaining time.
+    - Thread the callback through prepareTaskWorkspace so each stage becomes a durable Task event before the Worker begins. Keep the final workspace.prepared event and manifest evidence compatible.
+    - Make the latest preparation stage available through the existing list/status progress cursor without loading full event history. Prefer a structured safe stage code and bounded numeric evidence over parsing English summary text.
+    - Keep summaries short and understandable. Public progress must not contain source paths, workspace paths, file names, excluded names, credential locations, command text, prompt text, or raw errors.
+    - "Preserve preparation behavior: the same exclusions, symlink handling, two isolated copies, shared dependency links, generated context, source manifest, permissions, and failure semantics."
+    - Ensure callback failures cannot corrupt or silently complete preparation. Define and test whether callback delivery is awaited and whether an observer error fails closed or is isolated; choose one consistent contract and document it in code.
+    - Add deterministic tests using temporary small workspaces. Assert stage ordering and monotonic elapsed values without sleep-based timing or brittle wall-clock thresholds.
+    - Add a regression test proving list/status can expose a live preparation stage while Task status remains preparing, then completion still emits workspace.prepared and returns the same manifest.
+    - Do not optimize copy strategy in this Task. The timing evidence should identify the real bottleneck before a later bounded optimization.
+  outOfScope:
+    - Hub visual redesign, model-routing UI, Worker stream coalescing, copy algorithm replacement, incremental snapshots, archive/search, Provider execution, retries, policy adaptation, cost math, routing scores, commit, or push.
+    - Percent complete, estimated time remaining, fake file-by-file progress, polling loops, arbitrary heartbeats, or storing source file names in progress payloads.
+    - Changing what is copied, weakening isolation, following source symlinks, copying node_modules, or removing the baseline.
+  executionSteps:
+    - Audit prepareWorkspace, prepareTaskWorkspace, EventType, latest-event progress projection, Store event metadata, and existing workspace/daemon tests.
+    - Define one compact preparation progress type and stable stage order before modifying the copy routine.
+    - Instrument only meaningful operation boundaries with a monotonic elapsed value and known safe counts.
+    - Persist stage observations from prepareTaskWorkspace and project the latest structured stage through status/list using the existing O(1) event cursor path.
+    - Add deterministic unit and integration coverage for order, privacy, unchanged manifest/behavior, live preparing status, completion, and callback error semantics.
+    - Run the stored acceptance commands once. Do not change copy strategy or add retries based on timing seen in this Task.
+  deliverables:
+    - Typed workspace-preparation stage observations with elapsed time and safe counts.
+    - Durable preparation progress events before the Worker starts.
+    - O(1) status/list projection of the current structured preparation stage.
+    - Backward-compatible final workspace.prepared evidence and unchanged isolated workspace behavior.
+    - Deterministic privacy and progress regression tests.
+  modules:
+    - name: Workspace preparation instrumentation
+      responsibility: Report truthful operation boundaries while producing the same isolated baseline, Worker copy, context, and manifest.
+      consumes:
+        - TaskSpec, TaskPaths, optional canonical source directory, and optional progress observer.
+      produces:
+        - Existing WorkspaceManifest plus ordered safe stage observations.
+      boundaries:
+        - No copy-strategy change, source mutation, file-name disclosure, percentage, ETA, or retry.
+    - name: Task preparation event bridge
+      responsibility: Persist each preparation stage as Task evidence before execution and preserve terminal preparation failure truth.
+      consumes:
+        - Typed preparation observations from the workspace module.
+      produces:
+        - Durable bounded Task events and the existing final workspace.prepared event.
+      boundaries:
+        - No Attempt creation, Worker execution, routing impact, policy adaptation, or rewritten failure.
+    - name: Status progress projection
+      responsibility: Show the current structured preparation stage through existing status and list surfaces in constant time.
+      consumes:
+        - Latest event metadata and Task status.
+      produces:
+        - Existing progress cursor plus optional safe preparation stage evidence.
+      boundaries:
+        - No full event-history scan, raw payload, paths, filenames, commands, prompts, credentials, or invented completion percentage.
+  callChain:
+    - Main submits a validated Task and ForkLight records it before workspace copying begins.
+    - Runner changes the Task to preparing and passes a bounded observer into prepareWorkspace.
+    - Workspace preparation reports each real operation boundary while creating the same isolated files.
+    - Runner stores each observation as safe Task evidence.
+    - Store exposes only the latest event metadata and structured safe preparation stage to status/list consumers.
+    - Hub, CLI, or MCP polling can tell what stage is current without delaying or changing preparation.
+    - Completion writes the original workspace.prepared evidence, then normal scheduling starts the Worker.
+  scenarios:
+    - name: Long baseline copy
+      given: Source scanning finished and the baseline copy takes several minutes.
+      when: Main checks status during the copy.
+      then: Task remains preparing and reports the baseline-copy stage with elapsed time, not a frozen generic message or invented percentage.
+    - name: Counts become known gradually
+      given: The source file count is unknown before scanning and known afterwards.
+      when: Stages are emitted.
+      then: Early stages omit the count, later stages may include the actual aggregate count, and missing never appears as zero.
+    - name: Private workspace
+      given: The project and run directories contain user-specific paths and file names.
+      when: Public status/list progress is returned.
+      then: Only the stable stage code, elapsed duration, and permitted aggregate counts are visible.
+    - name: Preparation failure
+      given: A copy or manifest operation fails after one or more progress stages.
+      when: prepareTaskWorkspace handles the error.
+      then: Existing failed status and error evidence remain authoritative; no completion event or fake 100 percent is emitted.
+    - name: Existing callers
+      given: A test, competition, or runtime calls prepareWorkspace without an observer.
+      when: Preparation completes.
+      then: The call remains source-compatible and produces the same manifest and workspace layout.
+  risks:
+    - Emitting too frequently can recreate event and UI pressure, so only fixed stage boundaries are allowed.
+    - Adding payload-dependent status reads can turn O(1) polling into full-history work, so the latest-event projection must remain bounded.
+    - Wall-clock assertions are flaky, so tests must assert ordering and monotonicity using an injected clock or non-strict elapsed comparisons.
+    - Changing preparation while instrumenting it can hide the original bottleneck, so copy optimization is explicitly deferred until evidence exists.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 2200
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: xhigh
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workspace/copy.ts
+    - src/core/runner.ts
+    - src/core/types.ts
+    - src/core/task-progress.ts
+    - src/core/task-summary.ts
+    - src/state/store.ts
+    - tests/workspace.test.ts
+    - tests/daemon.test.ts
+acceptance:
+  criteria:
+    - Workspace preparation emits a small fixed ordered vocabulary with monotonic elapsed milliseconds and only actually known aggregate counts.
+    - Task stage events are durable before Worker start, and list/status exposes the latest structured preparation stage through a bounded O(1) cursor.
+    - Public progress contains no source/workspace path, file name, excluded name, credential, command, prompt, raw error, percentage, or ETA.
+    - Existing copy exclusions, symlink behavior, permissions, dependency linking, workspace context, source manifest, return shape, and failure state remain compatible.
+    - Existing callers that omit the observer remain source-compatible.
+    - Preparation failures never emit completion, change outcome semantics, or affect model-quality routing evidence.
+    - No retry, tuning loop, copy optimization, Provider call, commit, or push is introduced.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/workspace.test.ts tests/daemon.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

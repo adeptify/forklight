@@ -68,7 +68,7 @@ test("smoke: daemon lifecycle, settings, provider status, safe shutdown", async 
     );
 
     const provAll = await daemonRequest<Record<string, unknown>>("provider_status", {}, home);
-    for (const name of ["deepseek", "qwen", "minimax", "glm"]) {
+    for (const name of ["deepseek", "qwen", "minimax", "glm", "volcengine"]) {
       assert.ok(name in provAll, `provider_status must include ${name}`);
       const s = provAll[name] as Record<string, unknown>;
       assert.ok(typeof s.status === "string");

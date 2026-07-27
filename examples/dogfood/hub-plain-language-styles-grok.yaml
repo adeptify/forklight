@@ -1,0 +1,115 @@
+version: 2
+name: Hub plain-language visual hierarchy styles
+project: ../..
+contract:
+  outcome: Add restrained responsive styles for a beginner-friendly Insights guide, compact Token evidence, and collapsed technical details while preserving the existing ForkLight visual system.
+  context:
+    - A completed MiniMax pass added guide-card econ-guide, guide-step, summary-line econ-guide-item, ev-token-compact, econ-technical-body, task-story, task-story-row, task-story-label, and task-story-value classes to app.js.
+    - The Hub is a dense local developer control surface. It needs clearer hierarchy, not marketing decoration or reduced evidence.
+    - Existing light/dark tokens, radii, typography, and responsive behavior must remain the design system.
+  inScope:
+    - Edit src/hub/public/app.css only.
+    - Style the exact shared classes listed in context using existing CSS variables; inspect app.js to confirm their actual nesting before editing.
+    - Make the three-item guide scan as a single explanation group rather than three generic elevated cards.
+    - Emphasize compact Token values while keeping exact values visibly secondary and selectable.
+    - Make the technical details disclosure discoverable but visually quieter than the decision-level cards.
+    - Style the Task Detail story as one grouped three-part explanation above controls, with clear labels and wrapping for long localized text.
+    - Add an explicit single-column mobile fallback below the existing responsive breakpoint.
+    - Preserve both light and dark themes, keyboard focus, text wrapping, and horizontal-overflow safety.
+  outOfScope:
+    - Do not edit app.js, i18n.js, tests, HTML, backend, settings, or data.
+    - Do not add dependencies, images, gradients, animation, decorative icons, fake charts, or a new visual system.
+    - Do not commit, push, retry, or tune policy automatically.
+  executionSteps:
+    - Audit the existing economics, details, spacing, color, and responsive rules.
+    - Add minimal styles for the frozen shared class contract using existing tokens.
+    - Ensure the guide is one grouped region with three readable columns on desktop and one column on mobile.
+    - Ensure long exact numbers wrap safely and no horizontal overflow is introduced.
+    - Run the focused UI asset test and diff check once.
+  deliverables:
+    - Responsive styles for the new Insights hierarchy.
+    - Clear primary versus technical evidence hierarchy in both themes.
+  modules:
+    - name: Insights presentation layer
+      responsibility: Visually separate explanation, decision metrics, and technical evidence.
+      consumes:
+        - Existing ForkLight design tokens and the frozen class-name contract.
+      produces:
+        - Responsive, theme-safe, low-motion CSS.
+      boundaries:
+        - No content, data, JavaScript behavior, dependency, or global theme changes.
+  callChain:
+    - The Insights renderer emits the shared semantic classes.
+    - Existing theme tokens select light or dark values.
+    - CSS groups the guide, highlights compact values, and keeps technical evidence available but secondary.
+  scenarios:
+    - name: Desktop beginner scan
+      given: The Insights page has three explanation items.
+      when: The viewport is desktop width.
+      then: They read as one coherent guide and the primary metrics remain visually dominant.
+    - name: Narrow viewport
+      given: The viewport is approximately 390px wide.
+      when: Large compact and exact Token values render.
+      then: The guide becomes one column and exact values wrap without horizontal overflow.
+    - name: Dark theme keyboard user
+      given: Dark mode and keyboard navigation are active.
+      when: The technical disclosure receives focus.
+      then: Text contrast and focus indication remain clear without animation.
+    - name: Failed Task story
+      given: The Task drawer explains what happened, why, and next action.
+      when: It renders in either language.
+      then: The three answers read in order, long reasons wrap, and the technical disclosure remains secondary.
+  risks:
+    - New cards could add visual clutter, so the guide should be one grouped surface with internal divisions.
+    - Exact values can overflow, so wrapping and min-width rules must be explicit.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 240
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.css
+acceptance:
+  criteria:
+    - The guide is a single grouped surface with three readable regions, not three generic cards.
+    - Compact Token values are prominent, exact values are secondary, and long values wrap.
+    - The technical disclosure is visibly interactive and keyboard focus remains clear.
+    - The Task Detail story forms one readable grouped block and does not look like three unrelated metric cards.
+    - Mobile uses one column and both themes use existing variables.
+    - No dependency, animation, backend, data, credential, commit, or push changes.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - git diff --check

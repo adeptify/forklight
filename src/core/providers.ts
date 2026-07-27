@@ -6,7 +6,7 @@ import {
   type ProviderDefaultsSettings,
 } from "./settings.js";
 
-export type ProviderName = "deepseek" | "qwen" | "minimax" | "glm" | "xai";
+export type ProviderName = "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai";
 
 export interface ProviderDefinition {
   name: ProviderName;
@@ -35,7 +35,7 @@ export interface ProviderVariant {
   recommended?: boolean;
 }
 
-const PROVIDER_NAMES: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "xai"];
+const PROVIDER_NAMES: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"];
 
 export function isProviderName(value: string): value is ProviderName {
   return PROVIDER_NAMES.includes(value as ProviderName);
@@ -110,6 +110,7 @@ export function providerLabel(name: ProviderName): string {
     case "qwen": return "Qwen via Alibaba Model Studio";
     case "minimax": return "MiniMax";
     case "glm": return "GLM via Alibaba Model Studio";
+    case "volcengine": return "Volcengine Coding Plan (GLM)";
     case "xai": return "xAI";
   }
 }
@@ -117,6 +118,7 @@ export function providerLabel(name: ProviderName): string {
 export function providerVariantLabel(name: ProviderName): string {
   if (name === "minimax") return "Account region";
   if (name === "qwen" || name === "glm") return "Alibaba plan";
+  if (name === "volcengine") return "Coding Plan";
   return "Connection";
 }
 
@@ -193,6 +195,16 @@ export function providerVariants(
         recommended: true,
       },
     ];
+  }
+  if (name === "volcengine") {
+    return [{
+      id: "coding-plan",
+      label: "Coding Plan",
+      description: "Volcengine ARK Coding Plan through the Anthropic Messages compatible endpoint.",
+      endpoint: "https://ark.cn-beijing.volces.com/api/coding",
+      models: ["glm-5.2[1M]"],
+      recommended: true,
+    }];
   }
   // FL-D18: list official DeepSeek Claude-compatible models, not only the current default.
   // Default remains recommended when it matches; all listed models stay selectable.

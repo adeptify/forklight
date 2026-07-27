@@ -62,7 +62,7 @@ function mkSvc(
   return new ProviderProbeService(store, settings, runner, keychain, reader, clock);
 }
 
-const ALL_PROVIDERS: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "xai"];
+const ALL_PROVIDERS: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"];
 
 // --- Probe policy ---
 
@@ -410,7 +410,7 @@ test("provider with keychain but no probe evidence is unverified", () => {
 test("getAllProviderStatuses returns all registered providers including xai", () => {
   const service = mkSvc(undefined, undefined, undefined, stubKeychain(new Set(["forklight.deepseek.api-key"])));
   const all = service.getAllProviderStatuses();
-  assert.equal(Object.keys(all).length, 5);
+  assert.equal(Object.keys(all).length, ALL_PROVIDERS.length);
   for (const n of ALL_PROVIDERS) {
     assert.ok(n in all, `${n} missing from getAllProviderStatuses`);
   }

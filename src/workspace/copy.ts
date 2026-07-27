@@ -6,12 +6,14 @@ import {
   readFile,
   readdir,
   realpath,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { lstatSync } from "node:fs";
 import path from "node:path";
 import type { TaskPaths, TaskSpec } from "../core/types.js";
+import { matchesExcludedSegment } from "./path-policy.js";
 
 interface ManifestEntry {
   path: string;
@@ -32,9 +34,65 @@ const SHARED_DEPENDENCY_DIRECTORIES = ["node_modules"];
 const WORKSPACE_CONTEXT_PATH = path.join(".forklight", "workspace-context.md");
 const WORKSPACE_CONTEXT_MAX_FILES = 200;
 
+// --- Workspace preparation progress ---
+//
+// A small stable vocabulary of operation boundaries, monotonically elapsed
+// from preparation start.  Stages never include source/workspace paths,
+// file names, excluded names, or credential locations in their payloads —
+// only the stage code, phase, elapsed milliseconds, and (when actually
+// known) a single aggregate count.
+
+export const PREPARATION_STAGES = [
+  "init",
+  "source-scan",
+  "baseline-copy",
+  "worker-copy",
+  "dependency-link",
+  "context-write",
+  "complete",
+] as const;
+
+export type PreparationStage = typeof PREPARATION_STAGES[number];
+
+export type PreparationPhase = "start" | "complete";
+
+export interface PreparationObservation {
+  /** Stable operation-boundary code from PREPARATION_STAGES. */
+  stage: PreparationStage;
+  /** Boundary the observation belongs to: start of a stage or completion. */
+  phase: PreparationPhase;
+  /** Monotonic milliseconds since preparation start. Never negative. */
+  elapsedMs: number;
+  /** What the aggregate count represents. Kept explicit so a UI never has
+   *  to guess whether "306" means files, dependencies, or something else. */
+  countKind?: "files" | "dependencies";
+  /** Aggregate count known at this boundary. Omitted when unknown. */
+  count?: number;
+}
+
+export type PreparationObserver = (
+  observation: PreparationObservation,
+) => void | Promise<void>;
+
+export interface PreparationOptions {
+  /** Optional progress observer. Contract: delivery is awaited, and an
+   *  observer error fails closed — prepareWorkspace re-throws so the
+   *  caller can mark the Task failed and skip the final workspace.prepared
+   *  event.  Observers may be sync or async; when the returned value is a
+   *  Promise, prepareWorkspace awaits it before continuing.  Callers that
+   *  omit this option see source-compatible behaviour with no progress
+   *  evidence emitted. */
+  observer?: PreparationObserver;
+  /** Injected monotonic clock used only for the elapsedMs field of each
+   *  observation.  Defaults to Date.now.  Event wall-clock timestamps are
+   *  owned by the Store and remain wall-clock-authoritative. */
+  now?: () => number;
+}
+
 function excluded(relativePath: string, excludes: Set<string>): boolean {
-  if (!relativePath || relativePath === ".") return false;
-  return relativePath.split(path.sep).some((part) => excludes.has(part));
+  // Delegates to the single shared named-segment rule so snapshot copying
+  // and Patch classification share one product meaning.  See path-policy.ts.
+  return matchesExcludedSegment(relativePath, excludes);
 }
 
 export async function buildManifest(root: string, excludes: Set<string>): Promise<Manifest> {
@@ -165,40 +223,119 @@ async function writeWorkspaceContext(
   }
 }
 
+/** Emit one PreparationObservation to the optional observer, await its
+ *  return value, and propagate any thrown error or rejection unchanged.
+ *  When no observer is supplied this is a no-op so source-compatible
+ *  callers pay no cost. */
+async function emitStage(
+  observer: PreparationObserver | undefined,
+  now: () => number,
+  startedAtMs: number,
+  stage: PreparationStage,
+  phase: PreparationPhase,
+  count?: number,
+  countKind?: PreparationObservation["countKind"],
+): Promise<void> {
+  if (observer === undefined) return;
+  const observation: PreparationObservation = {
+    stage,
+    phase,
+    elapsedMs: Math.max(0, now() - startedAtMs),
+    ...(count === undefined ? {} : { count }),
+    ...(countKind === undefined ? {} : { countKind }),
+  };
+  // `await` handles synchronous observers, native Promises, and thenables.
+  await observer(observation);
+}
+
 export async function prepareWorkspace(
   spec: TaskSpec,
   paths: TaskPaths,
   sourceDir?: string,
+  options?: PreparationOptions,
 ): Promise<WorkspaceManifest> {
+  const observer = options?.observer;
+  const now = options?.now ?? Date.now;
+  const startedAtMs = now();
+
+  await emitStage(observer, now, startedAtMs, "init", "start");
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   await mkdir(paths.logs, { recursive: true, mode: 0o700 });
   await mkdir(paths.claudeConfig, { recursive: true, mode: 0o700 });
   const copySource = sourceDir ?? spec.project;
   const excludes = new Set(spec.workspace.exclude);
+
+  await emitStage(observer, now, startedAtMs, "source-scan", "start");
   const sourceManifest = await buildManifest(copySource, excludes);
+  await emitStage(
+    observer,
+    now,
+    startedAtMs,
+    "source-scan",
+    "complete",
+    sourceManifest.files.length,
+    "files",
+  );
+
   const filter = (source: string): boolean => {
     const relative = path.relative(copySource, source);
     if (excluded(relative, excludes)) return false;
     return !lstatSync(source).isSymbolicLink();
   };
 
+  await emitStage(
+    observer,
+    now,
+    startedAtMs,
+    "baseline-copy",
+    "start",
+    sourceManifest.files.length,
+    "files",
+  );
   await cp(copySource, paths.baseline, {
     recursive: true,
     preserveTimestamps: true,
     filter,
   });
+  await emitStage(observer, now, startedAtMs, "baseline-copy", "complete");
+
+  await emitStage(
+    observer,
+    now,
+    startedAtMs,
+    "worker-copy",
+    "start",
+    sourceManifest.files.length,
+    "files",
+  );
   await cp(copySource, paths.workspace, {
     recursive: true,
     preserveTimestamps: true,
     filter,
   });
+  await emitStage(observer, now, startedAtMs, "worker-copy", "complete");
+
+  await emitStage(observer, now, startedAtMs, "dependency-link", "start");
   const linkedDependencies = await linkSharedDependencies(spec, paths, excludes);
+  await emitStage(
+    observer,
+    now,
+    startedAtMs,
+    "dependency-link",
+    "complete",
+    linkedDependencies.length,
+    "dependencies",
+  );
+
+  await emitStage(observer, now, startedAtMs, "context-write", "start");
   await writeWorkspaceContext(spec, paths, sourceManifest, linkedDependencies);
   await writeFile(
     path.join(paths.root, "source-manifest.json"),
     `${JSON.stringify(sourceManifest, null, 2)}\n`,
     { mode: 0o600 },
   );
+  await emitStage(observer, now, startedAtMs, "context-write", "complete");
+  await emitStage(observer, now, startedAtMs, "complete", "complete");
   return { ...sourceManifest, linkedDependencies };
 }
 
@@ -252,4 +389,54 @@ export async function assessSourceCompatibility(
 export async function assertWorkspaceExists(paths: TaskPaths): Promise<void> {
   const metadata = await lstat(paths.workspace);
   if (!metadata.isDirectory()) throw new Error(`Worker workspace is not a directory: ${paths.workspace}`);
+}
+
+function isManifest(value: unknown): value is Manifest {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Partial<Manifest>;
+  if (!Array.isArray(candidate.files) || !Array.isArray(candidate.skippedSymlinks)) return false;
+  if (!candidate.skippedSymlinks.every((entry) => typeof entry === "string")) return false;
+  return candidate.files.every((entry) => {
+    if (entry === null || typeof entry !== "object") return false;
+    const file = entry as Partial<ManifestEntry>;
+    return typeof file.path === "string"
+      && file.path.length > 0
+      && typeof file.bytes === "number"
+      && Number.isSafeInteger(file.bytes)
+      && file.bytes >= 0
+      && typeof file.sha256 === "string"
+      && /^[a-f0-9]{64}$/.test(file.sha256);
+  });
+}
+
+/**
+ * A Worker may consume a snapshot only after both copies are directories and
+ * the final manifest written by prepareWorkspace has the expected shape.
+ * Missing, partial, malformed, and wrong-type artifacts are all "not ready".
+ */
+export async function isWorkspaceReady(paths: TaskPaths): Promise<boolean> {
+  try {
+    const [baseline, workspace, manifestFile] = await Promise.all([
+      lstat(paths.baseline),
+      lstat(paths.workspace),
+      lstat(path.join(paths.root, "source-manifest.json")),
+    ]);
+    if (!baseline.isDirectory() || !workspace.isDirectory() || !manifestFile.isFile()) {
+      return false;
+    }
+    const raw = await readFile(path.join(paths.root, "source-manifest.json"), "utf8");
+    return isManifest(JSON.parse(raw));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove only Task-owned preparation outputs. `force` makes a missing path a
+ * no-op; permission, I/O, and other unexpected errors still reject the call.
+ */
+export async function clearTaskPreparationArtifacts(paths: TaskPaths): Promise<void> {
+  await rm(paths.baseline, { recursive: true, force: true });
+  await rm(paths.workspace, { recursive: true, force: true });
+  await rm(path.join(paths.root, "source-manifest.json"), { recursive: true, force: true });
 }

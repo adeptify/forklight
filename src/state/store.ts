@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  AdaptationTransitionRecord,
   AttemptRecord,
   CompetitionCandidateRecord,
   CompetitionEvaluationRecord,
@@ -16,6 +17,8 @@ import type {
   PlanItemStatus,
   PlanRecord,
   ProbeEvidence,
+  RemediationCheckRecord,
+  RemediationDisposition,
   StagedTaskRegistration,
   TaskRecord,
   TaskStatus,
@@ -25,7 +28,7 @@ import { normalizeDirectCodexSampleReview, type DirectCodexSampleReview } from "
 import { normalizeDirectCodexCalibrationRecord, normalizeOrchestrationExchangeReceipt, type DirectCodexCalibrationRecord, type OrchestrationExchangeReceipt } from "../core/token-efficiency.js";
 import { isoTimestamp as now } from "../core/time.js";
 
-type TaskRecordPatch = Omit<Partial<TaskRecord>, "error" | "finishedAt" | "workerPid" | "currentAttemptId" | "startedAt"> & {
+type TaskRecordPatch = Omit<Partial<TaskRecord>, "effectivePolicy" | "error" | "finishedAt" | "workerPid" | "currentAttemptId" | "startedAt"> & {
   error?: string | null;
   finishedAt?: string | null;
   workerPid?: number | null;
@@ -255,6 +258,39 @@ export class StateStore {
         reviewed_at TEXT NOT NULL,
         record_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS adaptation_lineage (
+        id TEXT PRIMARY KEY,
+        root_task_id TEXT NOT NULL REFERENCES tasks(id),
+        parent_task_id TEXT NOT NULL REFERENCES tasks(id),
+        child_task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+        round INTEGER NOT NULL CHECK (round > 0),
+        reason TEXT NOT NULL,
+        proposed_reason TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (parent_task_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_adaptation_lineage_root
+        ON adaptation_lineage(root_task_id, round);
+      CREATE INDEX IF NOT EXISTS idx_adaptation_lineage_parent
+        ON adaptation_lineage(parent_task_id);
+      CREATE INDEX IF NOT EXISTS idx_adaptation_lineage_child
+        ON adaptation_lineage(child_task_id);
+      CREATE TABLE IF NOT EXISTS remediation_checks (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        commands_json TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_remediation_checks_task
+        ON remediation_checks(task_id, created_at);
+      CREATE TABLE IF NOT EXISTS remediation_dispositions (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        disposition_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `);
   }
 
@@ -436,6 +472,53 @@ export class StateStore {
       timestamp: row.timestamp,
       type: row.type,
       summary: row.summary,
+    };
+  }
+
+  /** Read the latest structured workspace-preparation stage without loading
+   *  the full event payload history. Callers only request it for preparing
+   *  Tasks, where the matching event is at the end of the Task timeline. */
+  latestPreparationStageMeta(taskId: string): {
+    stage: string;
+    phase: "start" | "complete";
+    elapsedMs: number;
+    countKind?: "files" | "dependencies";
+    count?: number;
+  } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT payload_json FROM events
+         WHERE task_id = ? AND type = 'workspace.preparation.stage'
+         ORDER BY sequence DESC LIMIT 1`,
+      )
+      .get(taskId) as { payload_json: string | null } | undefined;
+    if (row === undefined || row.payload_json === null) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.payload_json);
+    } catch {
+      return undefined;
+    }
+    if (parsed === null || typeof parsed !== "object") return undefined;
+    const candidate = parsed as Record<string, unknown>;
+    if (
+      typeof candidate.stage !== "string"
+      || (candidate.phase !== "start" && candidate.phase !== "complete")
+      || typeof candidate.elapsedMs !== "number"
+      || !Number.isFinite(candidate.elapsedMs)
+    ) {
+      return undefined;
+    }
+    return {
+      stage: candidate.stage,
+      phase: candidate.phase,
+      elapsedMs: candidate.elapsedMs,
+      ...(candidate.countKind === "files" || candidate.countKind === "dependencies"
+        ? { countKind: candidate.countKind }
+        : {}),
+      ...(typeof candidate.count === "number" && Number.isFinite(candidate.count)
+        ? { count: candidate.count }
+        : {}),
     };
   }
 
@@ -1352,5 +1435,213 @@ export class StateStore {
         return s;
       })
       .filter((s) => !reviewedIds.has(s.sampleId));
+  }
+
+  // --- Bounded policy adaptation lineage ---
+
+  private insertAdaptationLineage(record: AdaptationTransitionRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO adaptation_lineage
+         (id, root_task_id, parent_task_id, child_task_id, round, reason, proposed_reason, record_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.rootTaskId,
+        record.parentTaskId,
+        record.childTaskId,
+        record.round,
+        record.reason,
+        record.proposedReason,
+        JSON.stringify(record),
+        record.createdAt,
+      );
+  }
+
+  /** Atomically persist a bounded adaptation transition edge plus the
+   *  successor TaskRecord and supporting events. Either every row commits
+   *  or none do — UNIQUE(parent_task_id) and UNIQUE(child_task_id) reject
+   *  duplicate apply requests so recovery never produces a second successor. */
+  createAdaptationTransition(params: {
+    record: AdaptationTransitionRecord;
+    task: TaskRecord;
+    creationEvent?: { summary: string; payload?: Record<string, unknown> };
+    transitionEvent: { summary: string; payload?: Record<string, unknown> };
+  }): void {
+    this.transact(() => {
+      this.insertTask(params.task);
+      if (params.creationEvent !== undefined) {
+        this.insertEvent(
+          params.task.id,
+          undefined,
+          "task.created",
+          params.creationEvent.summary,
+          params.creationEvent.payload,
+        );
+      }
+      this.insertAdaptationLineage(params.record);
+      this.insertEvent(
+        params.task.id,
+        undefined,
+        "task.adaptation.transitioned",
+        params.transitionEvent.summary,
+        {
+          ...(params.transitionEvent.payload ?? {}),
+          lineageId: params.record.id,
+        },
+      );
+    });
+  }
+
+  /** Append-only adaptation rejection event (no lineage row, no Task). */
+  recordAdaptationRejection(taskId: string, summary: string, payload: unknown): EventRecord {
+    return this.insertEvent(taskId, undefined, "task.adaptation.rejected", summary, payload);
+  }
+
+  getAdaptationLineageEdgeForParent(parentTaskId: string): AdaptationTransitionRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT record_json FROM adaptation_lineage WHERE parent_task_id = ?`,
+      )
+      .get(parentTaskId) as { record_json: string } | undefined;
+    if (row === undefined) return undefined;
+    return parseRecord<AdaptationTransitionRecord>(row.record_json, "adaptation lineage edge");
+  }
+
+  getAdaptationLineageEdgeForChild(childTaskId: string): AdaptationTransitionRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT record_json FROM adaptation_lineage WHERE child_task_id = ?`,
+      )
+      .get(childTaskId) as { record_json: string } | undefined;
+    if (row === undefined) return undefined;
+    return parseRecord<AdaptationTransitionRecord>(row.record_json, "adaptation lineage edge");
+  }
+
+  listAdaptationLineageForRoot(rootTaskId: string): AdaptationTransitionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM adaptation_lineage
+         WHERE root_task_id = ?
+         ORDER BY round, created_at, id`,
+      )
+      .all(rootTaskId) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) =>
+      parseRecord<AdaptationTransitionRecord>(row.record_json, "adaptation lineage edge"),
+    );
+  }
+
+  // --- Main remediation checks ---
+
+  saveRemediationCheck(record: RemediationCheckRecord): void {
+    const commandsJson = JSON.stringify(record.commands);
+    const recordJson = JSON.stringify(record);
+    this.db
+      .prepare(
+        `INSERT INTO remediation_checks (id, task_id, status, commands_json, record_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.taskId,
+        record.status,
+        commandsJson,
+        recordJson,
+        record.createdAt,
+      );
+  }
+
+  /** Persist a completed check and its optional passing disposition atomically. */
+  saveRemediationOutcome(
+    record: RemediationCheckRecord,
+    disposition?: RemediationDisposition,
+  ): void {
+    if (disposition !== undefined) {
+      if (
+        record.status !== "passed"
+        || disposition.status !== "verified-repaired-delivered"
+        || disposition.checkId !== record.id
+        || disposition.createdAt !== record.createdAt
+      ) {
+        throw new Error("Invalid remediation outcome");
+      }
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveRemediationCheck(record);
+      if (disposition !== undefined) {
+        this.saveRemediationDisposition(record.taskId, disposition);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getRemediationChecks(taskId: string): RemediationCheckRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM remediation_checks
+         WHERE task_id = ? ORDER BY created_at, id`,
+      )
+      .all(taskId) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.record_json);
+      } catch {
+        throw new Error("Corrupt remediation check record in state database");
+      }
+      const record = parsed as Partial<RemediationCheckRecord>;
+      if (
+        typeof record.id !== "string"
+        || record.id.length === 0
+        || record.taskId !== taskId
+        || (record.status !== "failed" && record.status !== "passed")
+        || typeof record.createdAt !== "string"
+        || (record.reason !== undefined
+          && (typeof record.reason !== "string" || record.reason.length === 0))
+        || !Array.isArray(record.commands)
+      ) {
+        throw new Error("Corrupt remediation check record in state database");
+      }
+      return record as RemediationCheckRecord;
+    });
+  }
+
+  saveRemediationDisposition(taskId: string, disposition: RemediationDisposition): void {
+    const json = JSON.stringify(disposition);
+    this.db
+      .prepare(
+        `INSERT INTO remediation_dispositions (task_id, disposition_json, created_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(taskId, json, disposition.createdAt);
+  }
+
+  getRemediationDisposition(taskId: string): RemediationDisposition | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT disposition_json FROM remediation_dispositions WHERE task_id = ?`,
+      )
+      .get(taskId) as { disposition_json: string } | undefined;
+    if (row === undefined) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.disposition_json);
+    } catch {
+      throw new Error("Corrupt remediation disposition record in state database");
+    }
+    const disposition = parsed as Partial<RemediationDisposition>;
+    if (
+      disposition.status !== "verified-repaired-delivered"
+      || typeof disposition.checkId !== "string"
+      || typeof disposition.createdAt !== "string"
+    ) {
+      throw new Error("Corrupt remediation disposition record in state database");
+    }
+    return disposition as RemediationDisposition;
   }
 }

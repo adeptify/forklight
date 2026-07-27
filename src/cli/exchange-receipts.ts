@@ -25,7 +25,11 @@ export type TaskScopedCliOperation =
   | "forklight_integration_preflight" | "forklight_integration_apply"
   | "forklight_integration_status" | "forklight_integration_wait"
   | "forklight_integration_history" | "forklight_revise"
-  | "forklight_main_review"
+  | "forklight_main_review" | "forklight_correct"
+  | "forklight_correction_eligibility"
+  | "forklight_adaptation_preview" | "forklight_adaptation_apply"
+  | "forklight_remediation_verify"
+  | "forklight_candidate_reverify"
   | "forklight_direct_codex_capture";
 
 export type { TaskIdSource };
@@ -177,6 +181,39 @@ export function humanTokenReportLines(report: TaskTokenReport): string {
     lines.push(`  baseline: ${bl.minTokens}-${bl.maxTokens} tokens (method: ${bl.method}, taskClass: ${bl.taskClass}, confidence: ${bl.confidence})`);
   } else {
     lines.push(`  unavailable: ${dcs.reason}`);
+  }
+  lines.push("");
+
+  // --- Token usage reconciliation (diagnostic; never changes Worker volume) ---
+  const rec = report.usageReconciliation;
+  lines.push(`Token usage reconciliation (${rec.state}):`);
+  lines.push(`  Compared: ${rec.comparedAttemptCount} attempt(s)`);
+  lines.push(`  Matched: ${rec.matchedAttemptCount} | Mismatched: ${rec.mismatchedAttemptCount}`);
+  lines.push(`  Missing breakdown: ${rec.missingBreakdownCount} | Missing usage: ${rec.missingUsageCount}`);
+  lines.push(`  Invalid counter evidence: ${rec.invalidCounterEvidenceCount}`);
+  lines.push(`  Worker volume source: terminal top-level (${wv.grossWorkerTokens} tokens)`);
+  if (rec.grossDeltas.available) {
+    const gd = rec.grossDeltas;
+    lines.push(`  Compared attempts top-level gross: ${gd.topLevelGross}`);
+    lines.push(`  Compared attempts per-model gross: ${gd.perModelGross}`);
+    lines.push(`  Compared attempts delta (perModel - top-level): ${gd.delta >= 0 ? "+" : ""}${gd.delta}`);
+  } else {
+    lines.push(`  Compared attempts aggregate: unavailable (${rec.grossDeltas.reason})`);
+  }
+  if (rec.state === "matched") {
+    lines.push("  [diagnostic] All compared attempts have identical top-level and");
+    lines.push("  per-model counters.");
+  } else if (rec.state === "mismatch") {
+    lines.push("  [diagnostic] Top-level and per-model counters differ. The per-model");
+    lines.push("  breakdown is diagnostic only — ForkLight does not add it to the");
+    lines.push("  canonical Worker volume, does not treat it as a bill, and does not");
+    lines.push("  claim the difference as savings or waste.");
+  } else if (rec.state === "partial") {
+    lines.push("  [diagnostic] Some attempts have per-model breakdowns and they match");
+    lines.push("  their top-level counters. Other attempts are missing the breakdown.");
+  } else if (rec.state === "unavailable") {
+    lines.push("  [diagnostic] No usable top-level/per-model comparison is available.");
+    lines.push("  Worker volume still uses terminal top-level usage when present.");
   }
 
   return `${lines.join("\n")}\n`;

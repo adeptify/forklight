@@ -1,7 +1,7 @@
 // Task Token-efficiency report service acceptance tests — lock
 // Store-backed attribution, evidence counts, immutability, privacy,
-// missing-Task rejection, and read-only behaviour.  No live Provider,
-// daemon, or private project content.
+// missing-Task rejection, read-only behaviour, and Token-usage
+// reconciliation.  No live Provider, daemon, or private project content.
 
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
@@ -815,5 +815,151 @@ test("calibration selection: identity-missing + mismatch + frozen + deterministi
     assert.deepEqual(a.calibrationSelection, b.calibrationSelection);
     assert.notEqual(a, b);
     assert.notEqual(a.calibrationSelection, b.calibrationSelection);
+  } finally { store.close(); }
+});
+
+// --- Token usage reconciliation: present, frozen, detached ------------------
+
+test("usageReconciliation is present, frozen, and detached from store state", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-tokrep-rec-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("task-rec"));
+    store.createAttempt(makeAttempt("att-1", "task-rec", 1,
+      makeUsage(100, 50, 20, 10)));
+    store.createAttempt(makeAttempt("att-2", "task-rec", 2,
+      makeUsage(200, 100, 0, 0)));
+    store.saveExchangeReceipt(makeReceiptInput(
+      "rec-rwx", "task-rec", "tool-call", TS, "Hi", undefined, undefined));
+
+    const result = getTaskTokenReport(store, "task-rec");
+    assert.ok(result.usageReconciliation, "usageReconciliation must be present");
+    assert.ok(Object.isFrozen(result.usageReconciliation), "usageReconciliation must be frozen");
+    assert.equal(result.usageReconciliation.state, "unavailable"); // no perModel data
+    assert.equal(result.usageReconciliation.totalAttemptCount, 2);
+    assert.equal(result.usageReconciliation.missingBreakdownCount, 2);
+    assert.equal(result.usageReconciliation.comparedAttemptCount, 0);
+
+    assert.throws(() => { (result.usageReconciliation as any).state = "hacked"; }, TypeError);
+    assert.throws(() => { (result.usageReconciliation as any).comparedAttemptCount = 999; }, TypeError);
+  } finally { store.close(); }
+});
+
+// --- Token usage reconciliation: perModel breakdown → matched ---------------
+
+test("usageReconciliation: perModel breakdown produces matched when sums match", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-tokrep-rec2-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("task-rec2"));
+    const usage: AttemptTokenUsage = {
+      inputTokens: 100, outputTokens: 50,
+      cacheReadInputTokens: 20, cacheCreationInputTokens: 10,
+      source: "terminal-result" as const, complete: true as const,
+      serviceTier: "standard",
+      perModel: [
+        { model: "m1", inputTokens: 60, outputTokens: 30,
+          cacheReadInputTokens: 10, cacheCreationInputTokens: 5 },
+        { model: "m2", inputTokens: 40, outputTokens: 20,
+          cacheReadInputTokens: 10, cacheCreationInputTokens: 5 },
+      ],
+    };
+    store.createAttempt(makeAttempt("att-1", "task-rec2", 1, usage));
+
+    const result = getTaskTokenReport(store, "task-rec2");
+    assert.equal(result.usageReconciliation.state, "matched");
+    assert.equal(result.usageReconciliation.comparedAttemptCount, 1);
+    assert.equal(result.usageReconciliation.matchedAttemptCount, 1);
+    assert.equal(result.usageReconciliation.mismatchedAttemptCount, 0);
+
+    // Worker volume unchanged — perModel NOT double-counted
+    assert.equal(result.report.workerVolume.grossWorkerTokens, 180);
+  } finally { store.close(); }
+});
+
+// --- Token usage reconciliation: GLM mismatch in store-backed report --------
+
+test("usageReconciliation: real GLM mismatch reports +1,882,895 delta, top-level unchanged", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-tokrep-glm-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("task-glm"));
+    const glmUsage: AttemptTokenUsage = {
+      inputTokens: 378_237,
+      outputTokens: 126_836,
+      cacheReadInputTokens: 40_756_800,
+      cacheCreationInputTokens: 0,
+      source: "terminal-result" as const, complete: true as const,
+      serviceTier: "standard",
+      perModel: [
+        { model: "glm-5.2[1m]", inputTokens: 378_658, outputTokens: 132_190, cacheReadInputTokens: 42_633_920, cacheCreationInputTokens: 0 },
+      ],
+    };
+    store.createAttempt(makeAttempt("att-1", "task-glm", 1, glmUsage));
+
+    const result = getTaskTokenReport(store, "task-glm");
+    assert.equal(result.usageReconciliation.state, "mismatch");
+    assert.equal(result.usageReconciliation.mismatchedAttemptCount, 1);
+    assert.equal(result.usageReconciliation.comparedAttemptCount, 1);
+
+    const gd = result.usageReconciliation.grossDeltas;
+    assert.equal(gd.available, true);
+    if (!gd.available) assert.fail("GLM gross comparison unavailable");
+    assert.equal(gd.topLevelGross, 41_261_873);
+    assert.equal(gd.perModelGross, 43_144_768);
+    assert.equal(gd.delta, 1_882_895);
+
+    // Worker volume uses top-level, NOT perModel sum
+    assert.equal(result.report.workerVolume.grossWorkerTokens, 41_261_873);
+    assert.notEqual(result.report.workerVolume.grossWorkerTokens, 43_144_768);
+
+    // Immutability
+    assert.throws(() => { (result.usageReconciliation.grossDeltas as any).delta = 0; }, TypeError);
+
+    // Evidence details
+    const ev = result.usageReconciliation.evidence[0]!;
+    assert.equal(ev.ordinal, 1);
+    assert.equal(ev.topLevel.gross, 41_261_873);
+    assert.equal(ev.perModel.gross, 43_144_768);
+    assert.equal(ev.deltas.gross, 1_882_895);
+    assert.equal(ev.modelCount, 1);
+  } finally { store.close(); }
+});
+
+// --- Token usage reconciliation: privacy — no model strings in report -------
+
+test("usageReconciliation: report JSON never exposes model strings", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-tokrep-priv-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("task-priv"));
+    const usage: AttemptTokenUsage = {
+      inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
+      source: "terminal-result" as const, complete: true as const,
+      perModel: [{ model: "sensitive-model-name", inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }],
+    };
+    store.createAttempt(makeAttempt("att-1", "task-priv", 1, usage));
+
+    const result = getTaskTokenReport(store, "task-priv");
+    const json = JSON.stringify(result);
+    assert.ok(!json.includes("sensitive-model-name"));
+    assert.ok(!json.includes("sensitive-model-name"));
+  } finally { store.close(); }
+});
+
+// --- Token usage reconciliation: deterministic, non-reference-equal ---------
+
+test("usageReconciliation: same state → equal but non-reference-equal reconciliation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-tokrep-det-"));
+  const store = new StateStore(home);
+  try {
+    store.createTask(makeTask("task-det"));
+    store.createAttempt(makeAttempt("att-1", "task-det", 1,
+      makeUsage(100, 50, 20, 10)));
+
+    const r1 = getTaskTokenReport(store, "task-det");
+    const r2 = getTaskTokenReport(store, "task-det");
+    assert.deepEqual(r1.usageReconciliation, r2.usageReconciliation);
+    assert.notEqual(r1.usageReconciliation, r2.usageReconciliation);
   } finally { store.close(); }
 });

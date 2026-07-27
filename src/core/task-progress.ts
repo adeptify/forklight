@@ -20,6 +20,17 @@ export interface LatestEventMeta {
   summary: string;
 }
 
+/** Privacy-safe structured snapshot of the current workspace-preparation
+ *  stage. It carries no paths, file names, credentials, commands, prompts,
+ *  raw errors, invented percentages, or ETA. */
+export interface PreparationStageCursor {
+  stage: string;
+  phase: "start" | "complete";
+  elapsedMs: number;
+  countKind?: "files" | "dependencies";
+  count?: number;
+}
+
 /**
  * Classify Worker activity from Task status + latest event age (FL-D83).
  * `tasks.updatedAt` is frozen between spawn and terminal, so callers must not
@@ -41,13 +52,15 @@ export function classifyActivity(
 /**
  * Canonical TaskDecisionView.progress for status surfaces (CLI status, MCP
  * status via Decision View, list JSON). Driven by latest-event metadata rather
- * than frozen tasks.updatedAt.
+ * than frozen tasks.updatedAt. When the caller supplies a structured
+ * preparationStage, list/status consumers can explain the current operation.
  */
 export function buildStatusProgress(
   task: TaskRecord,
   latestEvent: LatestEventMeta | undefined,
   nowMs: number,
   quietAfterMs: number = DEFAULT_QUIET_AFTER_MS,
+  preparationStage?: PreparationStageCursor,
 ): TaskDecisionView["progress"] {
   return {
     activity: classifyActivity(task, latestEvent, nowMs, quietAfterMs),
@@ -55,6 +68,7 @@ export function buildStatusProgress(
     ...(latestEvent === undefined ? {} : { lastEventAt: latestEvent.timestamp }),
     ...(latestEvent === undefined ? {} : { latestAction: latestEvent.summary }),
     ...(latestEvent === undefined ? {} : { lastEventType: String(latestEvent.type) }),
+    ...(preparationStage === undefined ? {} : { preparationStage }),
   };
 }
 

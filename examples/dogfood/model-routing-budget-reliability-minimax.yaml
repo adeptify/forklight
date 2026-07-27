@@ -1,0 +1,177 @@
+version: 2
+name: Add opt-in budget reliability to model routing
+project: ../..
+taskClass: model-routing-budget-reliability
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: Add one configurable, evidence-safe budget-reliability factor to ForkLight model-routing advice so repeated bounded-budget exhaustion can be considered without becoming a model-quality failure, a hard disqualification, or a permanent model ban.
+  presentation:
+    summary: ForkLight 可以在用户明确开启后，把“这个模型在相同预算上限下能否稳定结束”作为柔性选择依据；预算失败仍不等于模型能力差，也不会让模型永久失去资格。
+    language: zh-CN
+  context:
+    - "Inspect first: src/core/statistics.ts, src/core/model-routing.ts, src/core/settings.ts, src/hub/settings-api.ts, src/hub/public/app.js, src/hub/public/i18n.js, tests/model-routing.test.ts, and tests/statistics.test.ts."
+    - Current routing correctly classifies credential, Provider, workspace, interruption and budget failures as non-model evidence. This prevents unfair quality penalties but also means repeated budget exhaustion currently has no optional influence on model choice.
+    - Existing routing is read-only and advisory. It has configurable weights, strict or flexible missing-evidence behavior, minimum sample rules, uncertainty, and optional Competition guidance. Every historical model remains eligible.
+    - Runtime monetary budget and observed Token ceiling are frozen on the Task or Attempt. Development defaults are uncapped, so uncapped history must not be treated as proof that a model succeeds within a budget.
+    - Different budget envelopes are not comparable. A model run under USD 0.20 cannot be scored as equivalent to one under USD 2.00, and a Token ceiling cannot be silently substituted for a runtime USD cap.
+    - Official Provider cost, runtime cost estimate, Worker Token volume, Main Token savings and configured budget are distinct evidence families. This Task must not merge or relabel them.
+  inScope:
+    - "Extend routing evidence with privacy-safe bounded-budget coverage: comparable sample count, completion-without-budget-exhaustion count/rate, explicit budget-exhaustion count, excluded uncapped count, and a stable comparable budget-envelope description with no Task or Attempt ids."
+    - "Count a Task as bounded-budget evidence only when its frozen execution evidence has at least one explicit finite cap: runtime maxBudgetUsd and/or observedTokenCeiling. Legacy or uncapped records remain visible as excluded coverage, never zero-valued evidence."
+    - Count a bounded Task as budget-exhausted only from the existing canonical budget failure classification. Count succeeded, Main-remediated, behavior-passed or model-quality-failed bounded Tasks as completed without budget exhaustion. Exclude credential, Provider, workspace, interruption, no-progress and unclassified outcomes from the factor denominator.
+    - Require every sample inside one candidate to use one identical frozen budget envelope, and require the same envelope across all scored candidates. Mixed or mismatched envelopes make the factor unavailable with stable reasons rather than normalized guesses.
+    - Add a non-negative modelRouting weight named budgetReliability. Default it to zero so current routing recommendations do not change until the user explicitly opts in.
+    - When enabled and comparable, score the completion-without-budget-exhaustion rate as higher-is-better. Use its own coverage gate in addition to existing general sample sufficiency.
+    - "Preserve hard invariants: all candidates stay eligible; budget history cannot cause disqualification, change Task success, trigger retry, mutate a Worker/Profile, start Competition, or override Main."
+    - Reuse existing strict/flexible missing-evidence semantics. Strict blocks a recommendation when this enabled factor is unavailable; flexible omits it with a visible warning and may use other comparable evidence.
+    - Expose the new flexible weight and evidence through the existing settings, daemon, CLI, MCP and Hub response paths without a new mutating operation.
+    - Update the Models-page routing UI with bilingual plain-language copy that explains what the factor measures, why an uncapped success is not evidence, why different caps cannot be compared, and that budget reliability is not model quality or Provider billing.
+    - Add behavior-focused tests covering equivalent envelopes, mixed envelopes, cross-candidate mismatch, uncapped history, budget exhaustion, successful and behavior-failed bounded Tasks, non-model exclusions, default-zero behavior, strict/flexible modes, settings round-trip, privacy, immutability and UI copy.
+  outOfScope:
+    - Automatically selecting a model, changing a Task or Worker, launching a Worker or Competition, retrying, adapting a budget, raising a cap, or permanently banning a model.
+    - Treating file/line change-budget policy failure as execution budget exhaustion.
+    - Currency conversion, converting Token ceilings to USD, deriving an equivalent cap from runtime estimates or official prices, or comparing different budget envelopes.
+    - Adding Worker Token volume or direct Main Token savings as a routing factor; they require separate comparability rules and evidence.
+    - Changing official price calculation, Token reconciliation, direct-Codex calibration, success/failure authority, Integration, commit, or push.
+  executionSteps:
+    - Trace current failure classification, frozen Task/Attempt budget fields, routing evidence, settings validation and Hub rendering before editing.
+    - Define one deterministic budget-envelope normalizer and evidence derivation with safe finite-number handling and no raw ids/content.
+    - Add the optional factor to the canonical routing plan and stable unavailable reasons while preserving default output behavior when weight is zero.
+    - Thread the new weight through backwards-compatible settings and existing read-only surfaces.
+    - Add explanation-first bilingual Hub copy and keep raw rates/envelope details secondary.
+    - Run the stored acceptance commands once. Report semantic gaps rather than weakening comparability or creating extra Attempts.
+  deliverables:
+    - Budget reliability evidence and exact-envelope comparability rules.
+    - Optional zero-default budgetReliability routing factor with strict/flexible missing-evidence behavior.
+    - Backwards-compatible settings, daemon, CLI, MCP and Hub propagation.
+    - Bilingual explanation-first UI and focused regression tests.
+  modules:
+    - name: Budget outcome evidence
+      responsibility: Derive whether bounded historical work ended without budget exhaustion under one frozen, comparable envelope.
+      consumes:
+        - Terminal Task status, canonical failure classification, Main-remediation disposition, independent behavior result, frozen runtime maxBudgetUsd, and frozen observedTokenCeiling.
+      produces:
+        - Comparable bounded sample count, successful-within-budget count/rate, exhaustion count, excluded count, and one normalized envelope or an explicit unavailable state.
+      boundaries:
+        - Uncapped, legacy, external-failure and incomparable-envelope records never become zero or positive evidence; no Task ids, Attempt ids, diagnostics, paths or raw content leave the layer.
+    - name: Routing factor
+      responsibility: Apply budget reliability only as an explicit soft preference when coverage and envelopes are comparable.
+      consumes:
+        - Per-candidate budget evidence, minimum samples, missing-evidence mode, and budgetReliability weight.
+      produces:
+        - Used, disabled or unavailable factor evidence plus stable uncertainty reasons.
+      boundaries:
+        - Default weight zero; no eligibility change, hard ban, mutation, retry, automatic Competition, cost substitution or cross-envelope normalization.
+    - name: Settings and explanation
+      responsibility: Let users configure and understand the factor through existing routing controls.
+      consumes:
+        - Canonical settings and advisory response.
+      produces:
+        - Round-trippable weight plus bilingual meaning, evidence gaps and next-action copy.
+      boundaries:
+        - Main remains final decision-maker; prominent UI avoids formulas and does not call budget reliability model quality, cost, bill or savings.
+  callChain:
+    - Terminal Task history retains immutable status, verification, remediation and frozen budget evidence.
+    - Statistics derives exact-task-class budget outcomes and rejects uncapped or mixed-envelope evidence from comparison.
+    - Model routing resolves the saved budgetReliability weight and compares the factor only when every candidate has sufficient evidence under the same envelope.
+    - Daemon, CLI, MCP and Hub carry the same read-only advisory without recomputation or Provider calls.
+    - Hub explains whether budget reliability was used, omitted or disabled; Main chooses the actual model or Competition.
+  scenarios:
+    - name: Comparable bounded history
+      given: Two models each have enough Tasks under exactly maxBudgetUsd 1.00 and no Token ceiling, with different budget-exhaustion rates.
+      when: The user enables budgetReliability.
+      then: The model with the higher completion-without-exhaustion rate gets the higher factor score while both remain eligible.
+    - name: Uncapped success is not budget proof
+      given: A model has many successful Tasks but every Task has null runtime budget and null Token ceiling.
+      when: Routing advice is requested with budgetReliability enabled.
+      then: The factor is unavailable for missing bounded-budget evidence; no success is counted as within-budget proof.
+    - name: Mixed envelope inside one model
+      given: One candidate has bounded Tasks split between USD 0.50 and USD 2.00.
+      when: Routing advice is requested.
+      then: Its budget factor is unavailable with a mixed-envelope reason, not an averaged cap or rate.
+    - name: Candidate envelope mismatch
+      given: One candidate was tested at USD 1.00 and another at USD 2.00.
+      when: They are compared.
+      then: Budget reliability is unavailable for all candidates with a cross-candidate envelope-mismatch reason.
+    - name: External failure does not become budget evidence
+      given: A bounded Task fails because credentials or the Provider are unavailable.
+      when: Budget evidence is derived.
+      then: The failure remains visible as non-model evidence but is excluded from both budget success and exhaustion counts.
+    - name: Flexible development mode
+      given: Budget reliability is enabled but comparable evidence is missing, while quality factors have enough clear evidence.
+      when: missingEvidenceMode is flexible.
+      then: The advisory may still recommend from quality evidence, names budget reliability as omitted, and does not invent zero.
+    - name: Strict evidence mode
+      given: The same missing budget evidence exists.
+      when: missingEvidenceMode is strict.
+      then: No recommendation is produced and Competition guidance follows the saved policy; no model is disqualified.
+  risks:
+    - Counting uncapped success would falsely imply budget discipline, so at least one finite frozen cap is mandatory.
+    - Averaging different caps would reward models given larger budgets, so exact envelope identity is required before scoring.
+    - Generic policy change-budget failures contain the word budget but are not Token/runtime exhaustion, so only the canonical budget failure category counts.
+    - Sparse data can make rates volatile, so the factor has its own sample coverage and remains zero-weight by default.
+    - Adding a field to persisted settings can break legacy merges, so omitted budgetReliability must synthesize to zero without rewriting history.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 2600
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - src/core/model-routing.ts
+    - src/core/settings.ts
+    - src/hub/settings-api.ts
+    - src/hub/public
+    - docs/configuration.md
+    - tests/model-routing.test.ts
+    - tests/statistics.test.ts
+acceptance:
+  criteria:
+    - Budget reliability uses only bounded frozen execution evidence under one exact envelope; uncapped, legacy, mixed-envelope and external-failure records never become zero or positive evidence.
+    - A canonical budget exhaustion remains non-model quality evidence and never disqualifies, bans, retries or mutates a model or Task.
+    - budgetReliability defaults to zero and affects advice only after explicit enablement with sufficient same-envelope samples.
+    - Strict mode blocks on unavailable enabled budget evidence; flexible mode reports it as omitted and may use other comparable evidence without inventing zero.
+    - Settings and existing daemon, CLI, MCP and Hub surfaces carry one canonical field and response without Provider calls or automatic execution.
+    - Hub explains bounded completion, uncapped exclusion, envelope comparability and Main authority in real English and Chinese; raw math stays secondary.
+    - Existing routing factors, official pricing, Token evidence, success authority, Competition and persisted settings remain compatible.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/model-routing.test.ts tests/statistics.test.ts tests/settings.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

@@ -132,3 +132,115 @@ test("checkpoint satisfaction requires every approved command to pass for the sa
     },
   ], "attempt-1", 2), false);
 });
+
+test("resolveTerminalAfterVerification: independent verify is authoritative", async () => {
+  const { resolveTerminalAfterVerification } = await import("../src/core/checkpoint.js");
+
+  // (a) supported runtime, verify pass, no checkpoint → succeed (no false-fail)
+  const a = resolveTerminalAfterVerification({
+    verificationPassed: true,
+    checkpointCapability: "supported",
+    checkpointSatisfied: false,
+  });
+  assert.equal(a.status, "succeeded");
+  assert.equal(a.failureReason, undefined);
+  assert.equal(a.recordCheckpointGap, true);
+  assert.equal(a.gapReason, "missing-or-failed-non-authoritative");
+
+  // (b) verify fail still fails (checkpoint ok does not rescue)
+  const b = resolveTerminalAfterVerification({
+    verificationPassed: false,
+    checkpointCapability: "supported",
+    checkpointSatisfied: true,
+  });
+  assert.equal(b.status, "failed");
+  assert.equal(b.failureReason, "Independent verification failed");
+
+  // (c) unsupported runtime skips checkpoint and succeeds when verify passes
+  const c = resolveTerminalAfterVerification({
+    verificationPassed: true,
+    checkpointCapability: "unsupported",
+    checkpointSatisfied: false,
+  });
+  assert.equal(c.status, "succeeded");
+  assert.equal(c.gapReason, "runtime-unsupported");
+
+  // supported + verify pass + checkpoint ok → succeed without gap event
+  const d = resolveTerminalAfterVerification({
+    verificationPassed: true,
+    checkpointCapability: "supported",
+    checkpointSatisfied: true,
+  });
+  assert.equal(d.status, "succeeded");
+  assert.equal(d.recordCheckpointGap, false);
+
+  // partial capability behaves like supported for terminalization
+  const e = resolveTerminalAfterVerification({
+    verificationPassed: true,
+    checkpointCapability: "partial",
+    checkpointSatisfied: false,
+  });
+  assert.equal(e.status, "succeeded");
+  assert.equal(e.gapReason, "missing-or-failed-non-authoritative");
+});
+
+test("checkpointSatisfied edge cases: authority, partial cmds, multi-attempt, empty catalog", async () => {
+  const { checkpointSatisfied } = await import("../src/core/checkpoint.js");
+  type Ev = import("../src/core/types.js").EventRecord;
+
+  const good = (attemptId: string, commands: unknown[]): Ev => ({
+    attemptId,
+    type: "checkpoint.completed",
+    payload: {
+      authority: "non-authoritative-checkpoint",
+      commands,
+    },
+  } as unknown as Ev);
+
+  // multi-attempt isolation: attempt-1 payload must not satisfy attempt-2
+  const forA1 = good("attempt-1", [
+    { commandId: "acceptance-1", exitCode: 0, timedOut: false },
+  ]);
+  assert.equal(checkpointSatisfied([forA1], "attempt-1", 1), true);
+  assert.equal(checkpointSatisfied([forA1], "attempt-2", 1), false);
+
+  // wrong authority never satisfies
+  assert.equal(checkpointSatisfied([
+    {
+      attemptId: "a",
+      type: "checkpoint.completed",
+      payload: {
+        authority: "authoritative-please",
+        commands: [{ commandId: "acceptance-1", exitCode: 0, timedOut: false }],
+      },
+    } as unknown as Ev,
+  ], "a", 1), false);
+
+  // partial command set (missing acceptance-2)
+  assert.equal(checkpointSatisfied([
+    good("a", [{ commandId: "acceptance-1", exitCode: 0, timedOut: false }]),
+  ], "a", 2), false);
+
+  // extra unknown command id fails
+  assert.equal(checkpointSatisfied([
+    good("a", [
+      { commandId: "acceptance-1", exitCode: 0, timedOut: false },
+      { commandId: "acceptance-extra", exitCode: 0, timedOut: false },
+    ]),
+  ], "a", 1), false);
+
+  // timedOut true fails
+  assert.equal(checkpointSatisfied([
+    good("a", [{ commandId: "acceptance-1", exitCode: 0, timedOut: true }]),
+  ], "a", 1), false);
+
+  // zero acceptance commands: no payload needed
+  assert.equal(checkpointSatisfied([], "any", 0), true);
+
+  // latest matching attempt wins when multiple completed events exist
+  const failedThenOk: Ev[] = [
+    good("a", [{ commandId: "acceptance-1", exitCode: 1, timedOut: false }]),
+    good("a", [{ commandId: "acceptance-1", exitCode: 0, timedOut: false }]),
+  ];
+  assert.equal(checkpointSatisfied(failedThenOk, "a", 1), true);
+});

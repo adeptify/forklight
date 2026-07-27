@@ -1,0 +1,115 @@
+version: 2
+name: Live candidate reuse correction dogfood
+project: fixtures/candidate-reuse-runtime
+taskClass: candidate-reuse-live-dogfood
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: Create feature.txt containing exactly one line, candidate reuse works, so ForkLight can retain the useful file after a deterministic one-time independent verification failure and then verify a Main-authorized same-candidate correction.
+  presentation:
+    summary: 用一个极小项目现场验证：第一次结果失败但文件可用，Main 不从头重做，而是在同一候选和会话里继续修并重新验收。
+    language: zh-CN
+  context:
+    - The fixture verification script intentionally fails only on its first actual invocation inside one isolated workspace.
+    - MiniMax-M3 currently reports completion without invoking the optional non-authoritative checkpoint in this fixture, so independent verification records the one-time failure while retaining feature.txt.
+    - A later Main correction reuses the same workspace, where every later invocation can pass.
+  inScope:
+    - Create feature.txt with the exact accepted line and newline.
+    - Create the exact file and report completion without manually rerunning the acceptance command.
+    - Preserve README.md and verify.mjs unchanged.
+  outOfScope:
+    - Editing the verification harness, changing acceptance commands, touching original source outside the isolated workspace, retries, adaptation, commit, or push.
+  executionSteps:
+    - Read README.md and verify.mjs to understand the tiny fixture.
+    - Create feature.txt with the exact required content.
+    - Report the file as the useful candidate output without manually invoking verify.mjs.
+  deliverables:
+    - One feature.txt file with the exact accepted content.
+    - One retained candidate whose first independent acceptance invocation fails once.
+  modules:
+    - name: Candidate output
+      responsibility: Produce the smallest useful Worker result that can be retained across a Main correction.
+      consumes:
+        - The exact accepted line from the Task outcome.
+      produces:
+        - feature.txt with one line and a trailing newline.
+      boundaries:
+        - Do not edit the verification harness or source outside the isolated workspace.
+    - name: Dogfood verification
+      responsibility: Demonstrate one failed independent check followed by a passing same-workspace correction check.
+      consumes:
+        - feature.txt and the workspace-local excluded invocation counter.
+      produces:
+        - Stored failed evidence on invocation two and passing evidence after Main correction.
+      boundaries:
+        - The counter is test-only evidence and never enters the business Diff.
+  callChain:
+    - Worker creates feature.txt in the isolated candidate workspace.
+    - Independent verification records the deterministic first-invocation failure while retaining feature.txt.
+    - Main authorizes one correction on the same Task, workspace, and session.
+    - Worker rechecks the retained candidate and the full original acceptance passes.
+  scenarios:
+    - name: Useful failed candidate
+      given: feature.txt has the exact accepted content and acceptance has not run in this workspace.
+      when: Independent verification runs for the first Attempt.
+      then: The first acceptance invocation fails once while feature.txt remains available in the retained workspace.
+    - name: Main correction reuse
+      given: The failed Task froze baseMaxAttempts 1, maxExtraAttempts 0, and maxMainCorrections 1.
+      when: Main explicitly authorizes correction with no runtime budget cap.
+      then: The next Attempt reuses the same workspace and session, and the unchanged original acceptance command passes.
+    - name: No automatic loop
+      given: The first Attempt fails independent verification.
+      when: Main has not authorized correction.
+      then: No second Worker Attempt starts automatically.
+  risks:
+    - A Worker that manually invokes acceptance before ForkLight verification would consume the deterministic failure; the Task therefore forbids manual acceptance invocation.
+    - This fixture proves control flow and retained-candidate reuse, not a counterfactual Token saving amount.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 4
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: low
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 600000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .verify-count
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - README.md
+    - verify.mjs
+    - feature.txt
+acceptance:
+  criteria:
+    - feature.txt contains exactly candidate reuse works followed by one newline.
+    - verify.mjs remains unchanged and the workspace-local counter is excluded from the business Diff.
+    - The first Task stops after one failed Attempt; only explicit Main correction may start Attempt two.
+  commands:
+    - node verify.mjs

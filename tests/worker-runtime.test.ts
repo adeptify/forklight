@@ -26,6 +26,8 @@ import { StateStore } from "../src/state/store.js";
 import { executeAttempt } from "../src/core/runner.js";
 import type { WorkerAdapter, WorkerDoctorResult } from "../src/workers/types.js";
 import { registerWorkerAdapter } from "../src/workers/registry.js";
+import { spawn } from "node:child_process";
+import type { WorkerExecutionResult, WorkerRunContext } from "../src/workers/types.js";
 
 function policy() {
   const s = cloneDefaults();
@@ -255,6 +257,7 @@ test("Grok sandbox profile allows network, system.sb, and TMPDIR write roots", (
     runtimeDirectory: "/Users/me/.grok/bin",
     userHome: "/Users/me",
     operatorGrokHome: "/Users/me/.grok",
+    operatorClaudeHome: "/Users/me/.claude",
     temporaryDirectory: "/var/folders/tmp",
   });
   assert.ok(profile.includes('(import "system.sb")'));
@@ -262,14 +265,134 @@ test("Grok sandbox profile allows network, system.sb, and TMPDIR write roots", (
   assert.ok(profile.includes("(allow process*)"));
   assert.ok(profile.includes("(deny default)"));
   assert.ok(profile.includes("/Users/me"));
+  assert.ok(profile.includes("(deny file-read-data"));
+  assert.ok(!profile.includes("(deny file-read*"));
   assert.ok(profile.includes("/ws"));
   assert.ok(profile.includes("/Users/me/.grok"), "operator .grok must remain readable for CLI assets");
+  assert.ok(
+    profile.includes("/Users/me/.claude"),
+    "operator .claude must remain readable because Grok imports compatible settings",
+  );
   assert.ok(
     profile.includes("/var/folders/tmp"),
     "temp directory must be on file-write allowlist (Claude parity)",
   );
   // Writes must not allow operator home broadly — only task grok home.
   assert.ok(profile.includes('(subpath "/gh")'));
+});
+
+test("executeAttempt succeeds when verify passes even if supported-runtime checkpoint is missing", async () => {
+  resetWorkerRegistryForTests();
+  getWorkerAdapter("claude-code");
+  const caps = {
+    budgetFlag: "supported" as const,
+    checkpoint: "supported" as const,
+    isolation: "supported" as const,
+    toolsPolicy: "supported" as const,
+    effortMapping: "supported" as const,
+    costUsageFidelity: "partial" as const,
+    sessionResume: "supported" as const,
+    streamingEvents: "supported" as const,
+    progressHeartbeat: "tool-lifecycle" as const,
+  };
+  registerWorkerAdapter({
+    name: "claude-code",
+    displayName: "Claude Code (test double)",
+    defaultExecutable: "claude",
+    capabilities: () => caps,
+    doctor: (): WorkerDoctorResult => ({
+      runtime: "claude-code",
+      ok: true,
+      executable: "claude",
+      issues: [],
+      capabilities: caps,
+    }),
+    validateSpec: () => {},
+    effortArgs: () => [],
+    toolProtocolAppendix: () => [],
+    checkpointProtocolAppendix: () => [],
+    // Succeed without emitting checkpoint.completed — the false-fail class under test.
+    run: async () => ({ status: "succeeded", exitCode: 0, resultText: "ok" }),
+  });
+
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-ckpt-missing-"));
+  const source = path.join(root, "source");
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "hello.ts"), "export const n = 1;\n");
+
+  const home = path.join(root, "state");
+  const store = new StateStore(home);
+  const { taskPaths } = await import("../src/core/config.js");
+  const { prepareWorkspace } = await import("../src/workspace/copy.js");
+  const paths = taskPaths(home, "66666666-6666-4666-8666-666666666666");
+  const spec = parseTaskSpec(
+    minimalContract({
+      project: source,
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.deepseek.api-key" },
+      runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: 0.1 },
+      acceptance: { criteria: ["c1"], commands: ["true"] },
+      contract: {
+        outcome: "Observable outcome text here",
+        context: ["ctx"],
+        inScope: ["in"],
+        outOfScope: ["out"],
+        executionSteps: ["step one", "step two"],
+        deliverables: ["d1"],
+        modules: [{
+          name: "m1",
+          responsibility: "does work",
+          consumes: ["a"],
+          produces: ["b"],
+          boundaries: ["c"],
+        }],
+        callChain: ["one", "two"],
+        scenarios: [
+          { name: "s1", given: "g", when: "w", then: "t" },
+          { name: "s2", given: "g", when: "w", then: "t" },
+        ],
+        risks: ["r"],
+        changeBudget: { maxFiles: 4, maxDiffLines: 100 },
+      },
+    }),
+    source,
+    {
+      ...policy(),
+      completionPolicy: { noChangeMode: "off", changeBudgetMode: "off" },
+    },
+  );
+  await prepareWorkspace(spec, paths);
+  await writeFile(path.join(paths.workspace, "src", "hello.ts"), "export const n = 2;\n");
+
+  const task = {
+    id: "66666666-6666-4666-8666-666666666666",
+    name: spec.name,
+    status: "queued" as const,
+    sourcePath: source,
+    taskFile: path.join(home, "task.yaml"),
+    spec,
+    paths,
+    sessionId: "77777777-7777-4777-8777-777777777777",
+    createdAt: "2026-07-26T00:00:00.000Z",
+    updatedAt: "2026-07-26T00:00:00.000Z",
+  };
+  store.createTask(task);
+
+  const result = await executeAttempt(store, store.getTask(task.id), false);
+  assert.equal(result.attempt.runtimeBudgetEnforcement, "supported");
+  assert.equal(result.verification?.passed, true);
+  assert.equal(result.task.status, "succeeded", "must not false-fail on missing non-authoritative checkpoint");
+  assert.notEqual(result.task.error, "Required bounded checkpoint missing or failed");
+  const events = store.listEvents(task.id);
+  const gap = events.find((e) => e.type === "checkpoint.skipped");
+  assert.ok(gap, "audit event for missing checkpoint");
+  assert.equal(
+    (gap!.payload as { reason?: string } | undefined)?.reason,
+    "missing-or-failed-non-authoritative",
+  );
+  assert.equal(checkpointSatisfied(events, result.attempt.id, 1), false);
+  store.close();
+  resetWorkerRegistryForTests();
 });
 
 test("executeAttempt emits checkpoint.skipped for unsupported checkpoint runtime", async () => {
@@ -372,6 +495,7 @@ test("executeAttempt emits checkpoint.skipped for unsupported checkpoint runtime
   store.createTask(task);
 
   const result = await executeAttempt(store, store.getTask(task.id), false);
+  assert.equal(result.attempt.runtimeBudgetEnforcement, "unsupported");
   const events = store.listEvents(task.id);
   const skipped = events.find((e) => e.type === "checkpoint.skipped");
   assert.ok(skipped, "shipped executeAttempt must emit checkpoint.skipped");
@@ -451,10 +575,17 @@ test("executeAttempt fails closed when worker doctor.ok is false", async () => {
     createdAt: "2026-07-25T00:00:00.000Z",
     updatedAt: "2026-07-25T00:00:00.000Z",
   };
-  // Workspace must exist for executeAttempt
-  const { mkdir } = await import("node:fs/promises");
+  // A first Attempt now requires the same completed snapshot boundary as
+  // production: baseline + workspace directories and the final manifest.
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  await mkdir(task.paths.root, { recursive: true });
+  await mkdir(task.paths.baseline, { recursive: true });
   await mkdir(task.paths.workspace, { recursive: true });
   await mkdir(task.paths.logs, { recursive: true });
+  await writeFile(
+    path.join(task.paths.root, "source-manifest.json"),
+    JSON.stringify({ files: [], skippedSymlinks: [] }),
+  );
   store.createTask(task);
 
   const result = await executeAttempt(store, store.getTask(task.id), false);
@@ -462,4 +593,214 @@ test("executeAttempt fails closed when worker doctor.ok is false", async () => {
   assert.match(result.task.error ?? "", /doctor failed|simulated doctor failure/);
   store.close();
   resetWorkerRegistryForTests();
+});
+
+// --- Advanced policy snapshot: runtime watchdog/timer consumption ---
+
+import {
+  noProgressFromSnapshot,
+  stopGraceFromSnapshot,
+  maxDurationFromSnapshot,
+  observedTokenCeilingFromSnapshot,
+  enforcementCapabilityForRuntime,
+  defaultAdvancedPolicyFields as testDefaultAdvancedPolicy,
+} from "../src/core/advanced-policy.js";
+
+test("noProgressFromSnapshot returns null for null in snapshot (unlimited/watchdog disabled)", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const snap = {
+    profileId: "test",
+    values: { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: null },
+    provenance: {} as Record<keyof ReturnType<typeof testDefaultAdvancedPolicy>, "task" | "worker" | "global">,
+    enforcementCapability: caps,
+  };
+  const result = noProgressFromSnapshot(snap);
+  assert.equal(result, null, "null noProgressTimeoutMs means unlimited (watchdog disabled)");
+});
+
+test("stopGraceFromSnapshot returns configured value", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const snap = {
+    profileId: "test",
+    values: { ...testDefaultAdvancedPolicy(), workerStopGraceMs: 5000 },
+    provenance: {} as Record<keyof ReturnType<typeof testDefaultAdvancedPolicy>, "task" | "worker" | "global">,
+    enforcementCapability: caps,
+  };
+  assert.equal(stopGraceFromSnapshot(snap), 5000);
+});
+
+test("maxDurationFromSnapshot returns null for unlimited, finite for configured", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const unlimited = {
+    profileId: "test",
+    values: { ...testDefaultAdvancedPolicy(), maxDurationMs: null },
+    provenance: {} as Record<keyof ReturnType<typeof testDefaultAdvancedPolicy>, "task" | "worker" | "global">,
+    enforcementCapability: caps,
+  };
+  assert.equal(maxDurationFromSnapshot(unlimited), null);
+
+  const finite = {
+    profileId: "test",
+    values: { ...testDefaultAdvancedPolicy(), maxDurationMs: 300_000 },
+    provenance: {} as Record<keyof ReturnType<typeof testDefaultAdvancedPolicy>, "task" | "worker" | "global">,
+    enforcementCapability: caps,
+  };
+  assert.equal(maxDurationFromSnapshot(finite), 300_000);
+});
+
+test("observedTokenCeilingFromSnapshot returns null for unlimited, finite for configured", () => {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const unlimited = {
+    profileId: "test",
+    values: { ...testDefaultAdvancedPolicy(), observedTokenCeiling: null },
+    provenance: {} as Record<keyof ReturnType<typeof testDefaultAdvancedPolicy>, "task" | "worker" | "global">,
+    enforcementCapability: caps,
+  };
+  assert.equal(observedTokenCeilingFromSnapshot(unlimited), null);
+
+  const finite = {
+    profileId: "test",
+    values: { ...testDefaultAdvancedPolicy(), observedTokenCeiling: 50_000 },
+    provenance: {} as Record<keyof ReturnType<typeof testDefaultAdvancedPolicy>, "task" | "worker" | "global">,
+    enforcementCapability: caps,
+  };
+  assert.equal(observedTokenCeilingFromSnapshot(finite), 50_000);
+});
+
+test("legacy task without snapshot gets compatible defaults", () => {
+  assert.equal(noProgressFromSnapshot(undefined), 1_800_000);
+  assert.equal(stopGraceFromSnapshot(undefined), 10_000);
+  assert.equal(maxDurationFromSnapshot(undefined), null);
+  assert.equal(observedTokenCeilingFromSnapshot(undefined), null);
+});
+
+async function policyRunnerFixture(
+  advancedPolicy: Partial<ReturnType<typeof testDefaultAdvancedPolicy>>,
+) {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-policy-runner-"));
+  const source = path.join(root, "source");
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "hello.ts"), "export const n = 1;\n");
+  const home = path.join(root, "state");
+  const store = new StateStore(home);
+  const { taskPaths } = await import("../src/core/config.js");
+  const { prepareWorkspace } = await import("../src/workspace/copy.js");
+  const id = "77777777-7777-4777-8777-777777777777";
+  const paths = taskPaths(home, id);
+  const spec = parseTaskSpec(
+    minimalContract({ project: source }),
+    source,
+    { ...policy(), completionPolicy: { noChangeMode: "off", changeBudgetMode: "off" } },
+  );
+  await prepareWorkspace(spec, paths);
+  const values = { ...testDefaultAdvancedPolicy(), ...advancedPolicy };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  const task = {
+    id,
+    name: spec.name,
+    status: "queued" as const,
+    sourcePath: source,
+    taskFile: path.join(home, "task.yaml"),
+    spec,
+    paths,
+    sessionId: "88888888-8888-4888-8888-888888888888",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    effectivePolicy: {
+      profileId: "test-worker",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("claude-code"),
+    },
+  };
+  store.createTask(task);
+  return { store, task: store.getTask(id) };
+}
+
+function registerPolicyTestClaude(
+  run: (ctx: WorkerRunContext) => Promise<WorkerExecutionResult>,
+): void {
+  resetWorkerRegistryForTests();
+  getWorkerAdapter("claude-code");
+  const capabilities = getWorkerAdapter("claude-code").capabilities();
+  registerWorkerAdapter({
+    name: "claude-code",
+    displayName: "Policy test Claude",
+    defaultExecutable: process.execPath,
+    capabilities: () => capabilities,
+    doctor: () => ({
+      runtime: "claude-code",
+      ok: true,
+      executable: process.execPath,
+      issues: [],
+      capabilities,
+    }),
+    validateSpec: () => {},
+    effortArgs: () => [],
+    toolProtocolAppendix: () => [],
+    checkpointProtocolAppendix: () => [],
+    run,
+  });
+}
+
+test("observed Token ceiling hard-fails after gross terminal usage", async () => {
+  registerPolicyTestClaude(async () => ({
+    status: "succeeded",
+    exitCode: 0,
+    resultText: "ok",
+    usage: {
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadInputTokens: 3,
+      cacheCreationInputTokens: 4,
+      source: "terminal-result",
+      complete: true,
+    },
+  }));
+  const { store, task } = await policyRunnerFixture({ observedTokenCeiling: 20 });
+  try {
+    const result = await executeAttempt(store, task, false);
+    assert.equal(result.task.status, "failed");
+    assert.equal(result.verification, undefined);
+    assert.match(result.task.error ?? "", /observed-token/);
+    const event = store.listEvents(task.id).find((candidate) => candidate.type === "policy.token.exceeded");
+    assert.ok(event);
+    const evidence = event.payload as { observed: number; enforcementPhase: string };
+    assert.equal(evidence.observed, 22, "gross usage includes both cache surfaces");
+    assert.equal(evidence.enforcementPhase, "post-observation");
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+  }
+});
+
+test("maximum wall duration preemptively terminates the spawned Worker", async () => {
+  registerPolicyTestClaude(async (ctx) => {
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"]);
+    ctx.hooks?.onSpawn?.(child);
+    const exitCode = await new Promise<number>((resolve) => {
+      child.once("close", (code) => resolve(code ?? 130));
+    });
+    return { status: "interrupted", exitCode, error: "terminated for test" };
+  });
+  const { store, task } = await policyRunnerFixture({
+    maxDurationMs: 50,
+    workerStopGraceMs: 20,
+  });
+  try {
+    const result = await executeAttempt(store, task, false);
+    assert.equal(result.task.status, "failed");
+    assert.match(result.task.error ?? "", /duration/);
+    const event = store.listEvents(task.id).find((candidate) => candidate.type === "policy.duration.exceeded");
+    assert.ok(event);
+    const evidence = event.payload as { enforcementPhase: string; configured: number };
+    assert.equal(evidence.enforcementPhase, "preemptive");
+    assert.equal(evidence.configured, 50);
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+  }
 });

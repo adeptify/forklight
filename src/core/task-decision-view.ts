@@ -4,6 +4,7 @@ import {
   buildStatusProgress,
   DEFAULT_QUIET_AFTER_MS,
   type LatestEventMeta,
+  type PreparationStageCursor,
 } from "./task-progress.js";
 import type {
   AttemptRecord,
@@ -11,6 +12,7 @@ import type {
   EventRecord,
   IntegrationOperationView,
   IntegrationResultRecord,
+  RemediationDisposition,
   TaskDecisionView,
   TaskRecord,
   VerificationResult,
@@ -48,6 +50,33 @@ function objectPayload(event: EventRecord | undefined): Record<string, unknown> 
   return event?.payload !== null && typeof event?.payload === "object"
     ? event.payload as Record<string, unknown>
     : undefined;
+}
+
+function preparationStage(
+  task: TaskRecord,
+  events: readonly EventRecord[],
+): PreparationStageCursor | undefined {
+  if (task.status !== "preparing") return undefined;
+  const payload = objectPayload(latestEvent(events, "workspace.preparation.stage"));
+  if (
+    typeof payload?.stage !== "string"
+    || (payload.phase !== "start" && payload.phase !== "complete")
+    || typeof payload.elapsedMs !== "number"
+    || !Number.isFinite(payload.elapsedMs)
+  ) {
+    return undefined;
+  }
+  return {
+    stage: payload.stage,
+    phase: payload.phase,
+    elapsedMs: payload.elapsedMs,
+    ...(payload.countKind === "files" || payload.countKind === "dependencies"
+      ? { countKind: payload.countKind }
+      : {}),
+    ...(typeof payload.count === "number" && Number.isFinite(payload.count)
+      ? { count: payload.count }
+      : {}),
+  };
 }
 
 function workerClaim(
@@ -277,6 +306,7 @@ export function buildTaskDecisionView(input: {
   attempts: readonly AttemptRecord[];
   events: readonly EventRecord[];
   integrationResults: readonly IntegrationResultRecord[];
+  remediationDisposition?: RemediationDisposition;
   /** Injected clock for activity classification; defaults to Date.now(). */
   nowMs?: number;
   quietAfterMs?: number;
@@ -315,6 +345,7 @@ export function buildTaskDecisionView(input: {
       type: latest.type,
       summary: latest.summary,
     };
+  const latestPreparationStage = preparationStage(input.task, orderedEvents);
   // FL-D83: activity is last-event age, not frozen tasks.updatedAt. MCP status
   // and Console Decision View share this progress model with CLI status.
   const progress = buildStatusProgress(
@@ -322,6 +353,7 @@ export function buildTaskDecisionView(input: {
     latestMeta,
     input.nowMs ?? Date.now(),
     input.quietAfterMs ?? DEFAULT_QUIET_AFTER_MS,
+    latestPreparationStage,
   );
   // Same gate as CLI list / listTaskSurfaces: do not leak historical categories
   // onto succeeded, running, or queued tasks after revise/resume.
@@ -337,5 +369,8 @@ export function buildTaskDecisionView(input: {
     ...(integration === undefined ? {} : { integration }),
     progress,
     ...(failureCategory === undefined ? {} : { failureCategory }),
+    ...(input.remediationDisposition === undefined
+      ? {}
+      : { remediationDisposition: input.remediationDisposition }),
   };
 }

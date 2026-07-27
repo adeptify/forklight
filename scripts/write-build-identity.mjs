@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { inspectSourceTree } from "../dist/src/core/source-digest.js";
 
 const PROTOCOL_VERSION = 2;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -24,12 +25,14 @@ const input = [
   sourceRevision,
   builtAt,
 ].join("\0");
+const sourceDigest = inspectSourceTree(root).digest;
 const identity = {
   protocolVersion: PROTOCOL_VERSION,
   packageVersion: String(packageJson.version),
   buildId: createHash("sha256").update(input).digest("hex"),
   builtAt,
   sourceRevision,
+  sourceDigest,
 };
 const destination = path.join(root, "dist", "build-identity.json");
 mkdirSync(path.dirname(destination), { recursive: true });

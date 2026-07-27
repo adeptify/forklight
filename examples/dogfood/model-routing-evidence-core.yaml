@@ -1,0 +1,173 @@
+version: 2
+name: Evidence-aware model routing advisory core
+project: ../..
+contract:
+  outcome: Add a read-only, configurable model-routing advisory that recommends a provider/model only when comparable historical evidence is sufficient, separates model-quality failures from configuration, policy, workspace, interruption, and Provider failures, and otherwise recommends a bounded competition instead of banning a model or guessing.
+  context:
+    - ForkLight already stores terminal Tasks, Attempts, independent verification, Main-remediated delivery, taskClass, runtime estimates, and Provider-native official-cost evidence.
+    - Current provider/model statistics classify a change-budget failure as generic verification and expose a machine failure rate that can unfairly punish a model for configurable policy, credentials, endpoint region, workspace preparation, interruption, or Provider availability.
+    - Competition scoring compares candidates after execution, but there is no pre-execution advisory that says whether historical evidence is comparable, why a model is or is not preferred, or when a competition is justified.
+    - Cost must use Provider-native official pricing evidence only. Runtime telemetry, legacy costUsd, currencies, ranges, and exact quotes must never be mixed or silently converted.
+    - Speed is useful telemetry but must have zero routing weight by default and only affect advice when the user explicitly enables it.
+    - The Main owns the final choice. This advisory must never launch work, switch a Worker, disable a model, mutate settings, retry, commit, or push.
+  inScope:
+    - Define one explicit failure-impact taxonomy that preserves the existing diagnostic category but additionally marks whether the failure is model-quality evidence, non-model evidence, or ambiguous evidence.
+    - Treat configurable size/completion policy failures, credentials or endpoint configuration, Provider or infrastructure errors, workspace preparation, and explicit interruption as non-model evidence. Treat failed acceptance behavior after useful execution as model-quality evidence. Keep unclassified/no-progress cases visible and conservative rather than silently blaming or clearing the model.
+    - Extend provider/model statistics with taskClass filtering, relevant routing sample count, ignored non-model failure counts by category, model-quality failure count/rate, correction churn, accepted delivery evidence, and Provider-native official-cost coverage grouped by original currency.
+    - Official-cost evidence may be exact only when every contributing Attempt has a quoted Provider-native amount. Preserve unavailable reasons and native currency. Do not reuse runtimeCostEstimateUsd or costUsd as official price.
+    - Add a strict configurable routing policy with minimum relevant samples, uncertainty threshold, competition-on-uncertainty, and non-negative weights for accepted delivery, verified behavior, model-quality failure, correction churn, official cost, and duration. Official cost and duration weights default to zero.
+    - Keep hard invariants separate from preferences. Failure-impact semantics, evidence provenance, currency separation, missing-not-zero, independent verification authority, and Main choice are hard. Minimum samples, uncertainty threshold, competition behavior, and factor weights are flexible settings.
+    - Implement a pure advisory service that consumes an exact taskClass plus two or more explicit provider/model candidates and the resolved routing policy, then returns each candidate's evidence coverage, factor availability, ignored failure distribution, score, uncertainty, and a recommendation only when evidence is sufficient and comparable.
+    - A model with failures remains a candidate. Insufficient evidence, non-model failures, missing official cost, mixed currency, or a close score must produce uncertainty and optionally recommend competition; none may permanently disqualify a model.
+    - Cost contributes only when all scored candidates have comparable exact official-cost evidence in the same native currency and adequate coverage. Otherwise the factor is unavailable with a stable reason.
+    - Expose the same read-only advisory through daemon, CLI, and MCP. Inputs must be bounded and strict; outputs must omit Task ids, error text, logs, prompts, diffs, credentials, endpoints, and source paths.
+    - Preserve existing statistics, competition scoring, task execution, Worker profiles, defaults, and persisted settings compatibility.
+    - Add behavior-focused tests for classification impact, taskClass isolation, exact official cost, mixed/missing currency, insufficient samples, close scores, configurable weights, duration disabled by default, non-model failures not penalizing models, and privacy-safe public surfaces.
+  outOfScope:
+    - Hub UI; a dependent Task will add a readable advisory surface after the response contract is stable.
+    - Automatically selecting or launching a Worker, starting a competition, changing defaults, disabling a Provider/model, adapting policy, retrying, or modifying an existing Task.
+    - Currency conversion, guessed Provider pricing, inferred API region, or treating subscription plans as per-request cost.
+    - Rewriting historical machine status, verification, failure events, Main remediation, or competition results.
+    - Commit, push, package publication, or live Provider probes.
+  executionSteps:
+    - Audit statistics, verification policy evidence, Attempt officialCost, remediation disposition, settings validation, daemon routing, CLI argument parsing, and MCP schemas.
+    - Define the failure-impact and routing-policy types with strict validation, defaults, and backwards-compatible settings merge.
+    - Extend statistics through one shared evidence derivation without changing existing rates or historical records.
+    - Implement the pure model-routing advisory and stable uncertainty reasons; keep cost and duration factors explicitly unavailable when their preconditions are not met.
+    - Thread one read-only operation through coordinator, daemon, CLI, and MCP using the same service and compact public response.
+    - Add focused tests and run the stored acceptance commands once. Do not tune thresholds or add retries in response to this Task's own result.
+  deliverables:
+    - Failure-impact taxonomy that distinguishes model-quality, non-model, and ambiguous evidence.
+    - Configurable routing policy with clear hard invariants and flexible preferences.
+    - Pure evidence-aware routing advisory with competition guidance and no automatic mutation.
+    - Provider-native exact-cost comparison that remains unavailable when evidence or currency is not comparable.
+    - Daemon, CLI, and MCP read-only surfaces plus focused regression tests and configuration documentation.
+  modules:
+    - name: Failure and statistics evidence
+      responsibility: Derive routing-relevant outcomes without rewriting historical truth or blaming models for external failures.
+      consumes:
+        - Terminal Tasks, Attempts, events, verification policy effects, taskClass, Main remediation, and Attempt officialCost.
+      produces:
+        - Relevant sample counts, model-quality failures, ignored failure distribution, correction churn, accepted delivery, and official native-currency coverage.
+      boundaries:
+        - Existing machine success and failure distributions stay unchanged; no raw diagnostic leaves the statistics layer.
+    - name: Routing policy and advisory
+      responsibility: Score comparable evidence and express uncertainty or competition need without taking action.
+      consumes:
+        - Exact taskClass, explicit candidates, evidence summaries, and resolved flexible routing settings.
+      produces:
+        - Per-candidate factors, score, coverage, stable unavailable reasons, confidence, optional recommendation, and shouldRunCompetition.
+      boundaries:
+        - No permanent exclusion, Provider call, Worker launch, automatic competition, settings mutation, or cross-currency conversion.
+    - name: Read-only control surfaces
+      responsibility: Make the advisory available consistently to Main clients.
+      consumes:
+        - Strict bounded request containing taskClass and explicit provider/model candidates.
+      produces:
+        - The same privacy-safe daemon, CLI, and MCP result.
+      boundaries:
+        - No Task ids, prompts, logs, diffs, errors, credentials, endpoints, source paths, or mutation annotations.
+  callChain:
+    - Main describes the upcoming taskClass and candidate provider/model pairs.
+    - Daemon validates the bounded request and resolves the current flexible routing policy.
+    - Statistics derives exact-class historical evidence and classifies failure impact without changing stored records.
+    - Routing advisory scores only available comparable factors and reports missing or ignored evidence explicitly.
+    - Main receives either an evidence-backed recommendation or uncertainty plus a suggestion to run a bounded competition.
+    - Main remains responsible for the actual Worker choice and any later competition submission.
+  scenarios:
+    - name: Policy failures do not punish a model
+      given: A model has many failed Tasks caused only by warn or legacy hard file and line limits, while its behavior checks or later Main-remediated delivery are acceptable.
+      when: Routing advice is requested for the same taskClass.
+      then: Those policy failures remain visible as ignored non-model evidence and do not increase model-quality failure rate or permanently exclude the model.
+    - name: Region or credential error
+      given: A MiniMax candidate has a 401 caused by the wrong endpoint region and no useful execution.
+      when: Advice compares it with another model.
+      then: The failure is non-model evidence, sample sufficiency decreases, and the advisory suggests uncertainty or competition rather than declaring MiniMax incapable.
+    - name: Comparable exact official cost
+      given: Every relevant candidate has enough exact quoted official-cost samples in the same native currency.
+      when: The user enables a positive official-cost weight.
+      then: Average Provider-native official cost contributes to the score with currency and coverage shown.
+    - name: Incomparable cost
+      given: One candidate has USD exact quotes and another has CNY ranges, subscription-plan evidence, or missing per-request usage.
+      when: Cost weighting is enabled.
+      then: Cost is unavailable for the comparison with a stable reason; no conversion, zero, or runtime estimate is substituted.
+    - name: Sparse or new task class
+      given: Fewer than the configured relevant samples exist for every candidate.
+      when: Advice is requested.
+      then: No winner is claimed and shouldRunCompetition follows the configured flexible policy.
+    - name: Historical failures and later success
+      given: A model has previous model-quality failures but also accepted deliveries and improving recent evidence.
+      when: Routing advice is requested.
+      then: The model remains eligible and its full evidence contributes; no historical failure creates a permanent ban.
+    - name: Speed opt-in
+      given: Candidates have comparable durations but the duration weight remains at its default.
+      when: Advice is computed.
+      then: Duration is reported as telemetry but contributes zero score until the user explicitly enables it.
+  risks:
+    - A vague failure taxonomy can encode hidden bias, so every category must expose a stable impact and tests for policy, auth, Provider, workspace, interruption, behavior, no-progress, and unclassified cases.
+    - Small samples can create false certainty, so recommendation, confidence, and competition guidance require configurable sufficiency and score-gap conditions.
+    - Cost comparison can silently become false across currencies or incomplete tiers, so only exact Provider-native same-currency evidence may score.
+    - Settings drift can make advice hard to reproduce, so the advisory response must include the resolved policy used without exposing unrelated settings.
+    - Adding a new read-only operation can accidentally be marked mutating or leak diagnostics, so daemon, CLI, MCP annotations, and privacy tests are required.
+  changeBudget:
+    maxFiles: 16
+    maxDiffLines: 3600
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: xhigh
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - src/core/settings.ts
+    - src/core/model-routing.ts
+    - src/daemon
+    - src/mcp/server.ts
+    - src/cli.ts
+    - docs/configuration.md
+    - tests
+acceptance:
+  criteria:
+    - Model-quality, non-model, and ambiguous evidence are distinct, and policy, credentials, Provider, workspace, and interruption failures never silently lower model-quality rate.
+    - Exact taskClass isolation, minimum sample rules, score-gap uncertainty, and competition guidance are configurable and deterministic.
+    - Accepted delivery, independent behavior, model-quality failure, correction churn, official cost, and duration are separate factors with explicit availability and coverage.
+    - Official cost scores only with complete Provider-native same-currency quoted evidence; runtime estimates, legacy costUsd, ranges, subscription plans, missing evidence, and currency conversion are never substituted.
+    - Duration has zero default weight and affects advice only after an explicit routing policy change.
+    - A failed model remains eligible; insufficient or incomparable evidence returns uncertainty rather than a ban or invented winner.
+    - Daemon, CLI, and MCP expose one strict bounded privacy-safe read-only advisory and never launch work or mutate settings.
+    - Existing statistics, competition, execution, settings, and persisted data remain compatible.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/model-routing.test.ts tests/statistics.test.ts tests/settings.test.ts tests/daemon.test.ts tests/mcp.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

@@ -1,0 +1,154 @@
+version: 2
+name: Task Detail tells the whole collaboration story
+project: ../..
+taskClass: hub-task-detail-comprehension-ui
+contract:
+  outcome: A non-technical user can open Task Detail and understand, in one pass, what Main asked for, what the Worker did, what it returned, what Main checked, what was finally delivered, why any machine step failed, and what to do next.
+  context:
+    - The product goal is comprehension, not field coverage. Rich evidence that does not explain what happened is a product failure.
+    - The server already provides a bounded safe journey. tests/fixtures/hub-task-story-v1.json is the exact shared response fixture for this task and must be consumed as-is, not guessed or changed.
+    - Current Task Detail mixes Worker claims, attempts, changed files, verification, Main review, Integration, cause, delivery plan, calibration, and manual controls without one visually dominant process.
+    - Primary Chinese and English must use product language. Internal names, command text, ids, raw reasons, and protocol terms belong in closed technical details.
+    - Machine failure and final Main-repaired delivery are separate facts and must both remain visible.
+  inScope:
+    - "Rebuild the primary Task Detail story as one ordered process: current state; Main input; Worker process; Worker output; Main verification; final delivery; cause; next action."
+    - Make every process step show a short state, the meaningful input, what happened, and the output or absence of output without repeating the same sentence.
+    - Separate the unverified Worker claim from verified output and make changed files a secondary evidence list.
+    - Explain a failed machine Attempt and a later Main-repaired verified delivery without relabelling the machine Attempt as successful.
+    - Keep the existing four-stage delivery truth directly after the collaboration process and remove duplicate final-delivery wording where it harms comprehension.
+    - Replace primary Chinese uses of Task Contract, Integration, remediation/disposition, Profile, receipt, preflight, provider/runtime codes, and similar internal terms with plain product language; retain exact technical terms only inside closed details where needed.
+    - Add one pure presentation adapter that can be executed against tests/fixtures/hub-task-story-v1.json so ordering and state truth are behavior-tested instead of only searched as strings.
+    - Preserve all current actions and evidence, but keep calibration, manual operations, ids, raw timeline, economics diagnostics, and command text visually secondary.
+    - Add bilingual and narrow-screen regression coverage.
+  outOfScope:
+    - Do not change server payloads, task state, verification logic, economics arithmetic, settings, or Integration safety.
+    - Do not expose raw prompts, full logs, full diffs, credentials, or unbounded output.
+    - Do not add dependencies, commit, push, or redesign unrelated top-level pages.
+  executionSteps:
+    - Read the shared fixture and trace the current renderTaskJourney, renderTaskDeliveryPlan, showTask, bilingual copy, and CSS.
+    - Define a pure bounded presentation adapter whose ordered steps consume only existing safe journey fields.
+    - Render the process with a clear visual connector and concise state badges; keep evidence disclosures attached to the step they explain.
+    - Rewrite primary Chinese and English copy by user meaning, not literal protocol translation.
+    - Execute the adapter against the shared fixture and assert the repaired-delivery scenario preserves both machine failure and verified final delivery.
+    - Run the stored checks once.
+  deliverables:
+    - One readable ordered Task collaboration process.
+    - Executable shared-fixture presentation coverage.
+    - Clear Worker input/process/output and Main verification/final output separation.
+    - Plain Chinese and English with responsive layout.
+  modules:
+    - name: Task story adapter
+      responsibility: Convert the existing safe journey response into a bounded ordered set of user-facing process steps.
+      consumes:
+        - tests/fixtures/hub-task-story-v1.json and the same shape from Task Detail API.
+      produces:
+        - Ordered steps with stable ids, state codes, short summaries, and references to safe evidence.
+      boundaries:
+        - Pure; no network, DOM, mutation, inferred success, or technical prose.
+    - name: Task story renderer
+      responsibility: Show each process step as input, action, output, state, reason, or next action in the place where it becomes useful.
+      consumes:
+        - Task story adapter output and existing localized copy.
+      produces:
+        - A readable process with optional evidence disclosures.
+      boundaries:
+        - Worker claims stay unverified; machine and final delivery states never overwrite each other.
+    - name: Plain-language copy and layout
+      responsibility: Make the same product meaning understandable in Chinese, English, and narrow screens.
+      consumes:
+        - Locale, process step state, and bounded evidence.
+      produces:
+        - Short product copy and responsive hierarchy.
+      boundaries:
+        - Technical names remain available only after deliberate expansion.
+  callChain:
+    - User opens one Task.
+    - The safe API response is converted into ordered process steps.
+    - The page first states the current outcome and then walks from Main input through final delivery.
+    - The user expands evidence only when they need exact files, checks, or internal records.
+    - The next-action step tells the user whether to wait, fix, review, apply, or do nothing.
+  scenarios:
+    - name: Failed Worker but repaired final delivery
+      given: The shared fixture records a failed Attempt and failed independent verification, followed by verified-repaired-delivered and completed source delivery.
+      when: Task Detail renders.
+      then: The Worker step remains failed, the cause explains the rejected Worker result, the final delivery says Main repaired and verified it, and next action says no further action is needed.
+    - name: Worker output awaits verification
+      given: Changed files and an unverified claim exist but verification has not run.
+      when: Task Detail renders.
+      then: The page calls them Worker-submitted output, not final delivery, and directs Main to verify.
+    - name: No file output
+      given: No changed file paths and no verified final delivery exist.
+      when: Task Detail renders.
+      then: The output step honestly says no file output is recorded and does not treat the Worker claim as proof.
+    - name: Narrow bilingual view
+      given: The user switches Chinese and English on a narrow viewport.
+      when: The ordered process and disclosures render.
+      then: The sequence stays obvious, text wraps, and internal ids do not dominate.
+  risks:
+    - Repeating the same status across multiple cards creates noise, so each step must answer a distinct user question.
+    - Simplification can erase evidence truth, so the adapter must preserve machine failure, Main repair, verification, and delivery as separate states.
+    - Static string tests can pass while the process is wrong, so the shared fixture must execute the pure adapter.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 1800
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+delivery:
+  buildCommands:
+    - npm run build
+  activationCommands: []
+  activationCheckCommands: []
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Task Detail has one visually dominant ordered process from Main input to final delivery and next action.
+    - The shared fixture executes through a pure presentation adapter and proves state ordering.
+    - Worker claims, machine verification, Main repair, and final delivery remain separate facts.
+    - Primary Chinese and English explain product meaning without internal protocol jargon.
+    - Existing actions and evidence remain reachable, and narrow layout remains usable.
+  commands:
+    - node --check src/hub/public/app.js
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - npm run build
+    - git diff --check

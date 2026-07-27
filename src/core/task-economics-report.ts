@@ -16,6 +16,7 @@ import type { StateStore } from "../state/store.js";
 import type { PricingCurrency } from "./pricing.js";
 import type { OrchestrationExchangeReceipt } from "./token-efficiency.js";
 import type { DirectCodexProfilePublication } from "./direct-codex-calibration.js";
+import type { BoundedEstimate } from "./pricing-calculator.js";
 
 // --- Immutability helpers ---
 
@@ -92,10 +93,32 @@ export interface UnavailableOfficialSection {
   readonly breakdown: Readonly<Record<string, number>>;
 }
 
+export interface OfficialCostRangeEntry {
+  readonly attemptId: string;
+  readonly ordinal: number;
+  /** Bounded estimate from the per-request-usage-required unavailable result. */
+  readonly boundedEstimate: BoundedEstimate;
+}
+
+export interface OfficialCostRangeCurrencyTotal {
+  readonly currency: PricingCurrency;
+  /** Additive lower bound across all ranged Attempts in this currency. */
+  readonly min: number;
+  /** Additive upper bound across all ranged Attempts in this currency. */
+  readonly max: number;
+  /** Number of Attempts contributing to this range. */
+  readonly rangedAttemptCount: number;
+  /** Unique pricing-source URLs that contributed range evidence, sorted. */
+  readonly sources: readonly string[];
+}
+
 export interface OfficialCostSection {
   /** Native-currency totals — one entry per currency sorted by currency
    *  code.  Never contains a cross-currency grand total. */
   readonly totals: readonly OfficialCostCurrencyTotals[];
+  /** Conservative aggregate-tier range evidence. These Attempts are also
+   *  counted in unavailable with reason calculation:per-request-usage-required. */
+  readonly ranges: readonly OfficialCostRangeCurrencyTotal[];
   readonly unavailable: UnavailableOfficialSection;
 }
 
@@ -199,7 +222,14 @@ export function getTaskEconomicsReport(
     sources: Set<string>;
     providerBillClaim: boolean;
   };
+  type RangeAggregate = {
+    min: number;
+    max: number;
+    rangedAttemptCount: number;
+    sources: Set<string>;
+  };
   const byCurrency = new Map<PricingCurrency, CurrencyAggregate>();
+  const rangeByCurrency = new Map<PricingCurrency, RangeAggregate>();
   const unavailableEntries: UnavailableOfficialEntry[] = [];
 
   for (const a of attempts) {
@@ -226,7 +256,21 @@ export function getTaskEconomicsReport(
     } else {
       let reason: string;
       if ("result" in oc && oc.result !== undefined) {
-        reason = (oc as AttemptOfficialCostCalculationUnavailable).result.reason;
+        const calcResult = (oc as AttemptOfficialCostCalculationUnavailable).result;
+        reason = calcResult.reason;
+        // Collect bounded range evidence when present
+        if (calcResult.boundedEstimate !== undefined) {
+          const be = calcResult.boundedEstimate;
+          let rng = rangeByCurrency.get(be.currency);
+          if (!rng) {
+            rng = { min: 0, max: 0, rangedAttemptCount: 0, sources: new Set() };
+            rangeByCurrency.set(be.currency, rng);
+          }
+          rng.min += be.min;
+          rng.max += be.max;
+          rng.rangedAttemptCount++;
+          rng.sources.add(be.pricing.source.url);
+        }
       } else {
         reason = (oc as { reason: string }).reason;
       }
@@ -273,6 +317,15 @@ export function getTaskEconomicsReport(
     runtimeEstimate,
     officialCost: {
       totals,
+      ranges: [...rangeByCurrency.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([currency, data]) => ({
+          currency,
+          min: data.min,
+          max: data.max,
+          rangedAttemptCount: data.rangedAttemptCount,
+          sources: [...data.sources].sort(),
+        })),
       unavailable: {
         unavailableCount: unavailableEntries.length,
         entries: unavailableEntries,

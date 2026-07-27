@@ -1,0 +1,157 @@
+version: 2
+name: Excluded snapshot paths cannot become delivery
+project: ../..
+taskClass: workspace-delivery-truth
+contract:
+  outcome: Paths deliberately hidden from the safe Worker snapshot cannot later inflate the reviewed source patch or enter Integration merely because an acceptance build recreated them; raw and generated audit evidence remains available.
+  context:
+    - Workspace copying excludes named path segments such as dist, node_modules, and .git, but PathPolicy currently classifies only explicit generated patterns plus a small cache list.
+    - A verifier-side npm build can recreate dist after Worker edits; because dist was absent from both baseline and initial workspace, the generated tree then appears as hundreds of new business files.
+    - This caused a two-source-file MiniMax delivery to be rejected by Integration as 457 files and 69002 lines. Raising the size limit would hide the classification bug.
+    - "Snapshot exclusion and delivery classification must share one product meaning: content omitted from the comparison baseline is not eligible for automatic source Integration."
+  inScope:
+    - Reuse one normalized path-segment exclusion rule for safe snapshot copying and Patch classification.
+    - Classify a recreated path that matches workspace.exclude as non-business generated evidence, except ForkLight internal paths remain internal.
+    - Preserve explicit workspace.generatedPaths for included paths whose changes are generated.
+    - Keep raw and generated patch artifacts complete and non-destructive while integration.patch contains only eligible business changes.
+    - Add regression coverage for a source edit plus a recreated dist tree without declaring dist in generatedPaths.
+    - Document the distinction among exclude, generated evidence, and eligible Integration output.
+  outOfScope:
+    - Do not infer generated source from directory names such as src/generated.
+    - Do not delete generated output, alter acceptance commands, loosen Integration limits, or hide raw evidence.
+    - Do not change source-write, Main Review, verification, commit, or push authority.
+    - Do not add dependencies, commit, or push.
+  executionSteps:
+    - Inspect snapshot exclusion, PathPolicy, Patch report, and Integration preflight call chains.
+    - Define one shared path-segment matcher whose behavior is explicit for nested excluded directories.
+    - Make PathPolicy treat recreated excluded content as generated/non-integratable evidence.
+    - Add focused workspace and Integration regression tests with a large recreated dist output and one real source change.
+    - Update configuration documentation and run the stored checks once.
+  deliverables:
+    - Shared exclusion semantics across snapshot and delivery classification.
+    - Source-only Integration patch despite verifier-created excluded output.
+    - Complete raw/generated audit evidence and regression coverage.
+    - Plain documentation explaining why excluded content cannot be auto-integrated.
+  modules:
+    - name: Path policy
+      responsibility: Classify each normalized relative path as business, generated evidence, or ForkLight internal content.
+      consumes:
+        - Task workspace.exclude names.
+        - Task workspace.generatedPaths patterns.
+        - A relative path from one diff section.
+      produces:
+        - One deterministic classification used by Patch generation.
+      boundaries:
+        - No filesystem mutation.
+        - No inference from arbitrary words like generated in a source path.
+    - name: Workspace snapshot
+      responsibility: Apply the same named-segment exclusion meaning while scanning and copying the isolated baseline and Worker workspace.
+      consumes:
+        - Source-relative paths.
+        - The resolved exclusion set.
+      produces:
+        - A safe snapshot that omits the configured segments.
+      boundaries:
+        - Existing dependency-link behavior remains intact.
+        - Exclusion does not grant write or Integration authority.
+    - name: Patch and Integration evidence
+      responsibility: Keep raw evidence complete while separating generated/excluded output from the reviewed Integration patch.
+      consumes:
+        - One no-index raw diff.
+        - PathPolicy classifications.
+      produces:
+        - Raw patch, generated patch, source-only integration patch, and separate metrics.
+      boundaries:
+        - Integration continues to measure and apply only its reviewed patch.
+        - Unsupported patch forms and source compatibility remain hard checks.
+    - name: Regression and documentation
+      responsibility: Prove and explain the product behavior without relying on one ForkLight session fixture.
+      consumes:
+        - A temporary project with source and recreated excluded output.
+      produces:
+        - Focused tests and user-facing configuration guidance.
+      boundaries:
+        - No live Provider calls in tests.
+  callChain:
+    - Main submits a Task whose workspace excludes dist from the snapshot.
+    - prepareWorkspace applies the shared named-segment exclusion rule to baseline and Worker copies.
+    - Worker changes source and the independent acceptance build recreates dist.
+    - writeWorkspacePatchReport runs one raw diff and classifies each file section.
+    - Raw evidence retains both source and dist; generated evidence retains dist; integration.patch retains only source.
+    - Integration preflight measures, reviews, and applies only the eligible source patch.
+  scenarios:
+    - name: Build recreates excluded dist
+      given: dist is in workspace.exclude but not workspace.generatedPaths, and the isolated baseline contains no dist.
+      when: A verifier build creates hundreds of dist files after one source edit.
+      then: Dist appears in raw and generated evidence, does not count toward business or Integration metrics, and the source edit remains eligible for Integration.
+    - name: Nested excluded segment
+      given: coverage or another configured name appears as a nested path segment.
+      when: Patch classification sees pkg/coverage/report.json.
+      then: It follows the same exclusion meaning as snapshot copying and cannot enter Integration.
+    - name: Included generated source remains business by default
+      given: src/generated/client.ts was present in the safe snapshot and no generatedPaths pattern covers it.
+      when: Worker intentionally edits it.
+      then: It remains business delivery evidence and is not silently discarded by a name heuristic.
+  risks:
+    - Treating excluded paths as deliverable would apply files without a trustworthy baseline, so they must fail closed out of Integration while remaining auditable.
+    - A shared helper can accidentally change copy semantics; preserve existing nested-segment behavior with direct tests.
+    - Generated output can be very large, so the regression should prove streaming evidence remains complete without adding a fragile timing assertion.
+  changeBudget:
+    maxFiles: 6
+    maxDiffLines: 750
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 3
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workspace/path-policy.ts
+    - src/workspace/copy.ts
+    - src/workspace/patch.ts
+    - tests/workspace.test.ts
+    - tests/integration.test.ts
+    - docs/configuration.md
+acceptance:
+  criteria:
+    - Snapshot exclusion and Patch classification use the same normalized named-segment semantics.
+    - Recreated excluded output is preserved in raw/generated evidence but absent from business/Integration evidence.
+    - An included source path is never discarded merely because its name contains generated.
+    - Integration safety, review, source compatibility, and patch-form checks are not weakened.
+    - The behavior is documented as a product invariant rather than a one-off dist workaround.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/workspace.test.ts tests/integration.test.ts
+    - npm run build
+    - git diff --check

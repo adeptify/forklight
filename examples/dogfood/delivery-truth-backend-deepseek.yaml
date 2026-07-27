@@ -1,0 +1,175 @@
+version: 2
+name: Delivery plan is configurable and visible before Integration
+project: ../..
+taskClass: delivery-activation-truth-backend
+contract:
+  outcome: Every Task and Integration preflight exposes a safe immutable delivery plan that tells Main whether source verification, artifact build, and runtime activation are actually configured; the Hub can read and atomically replace the reusable Delivery Profile registry.
+  context:
+    - ForkLight core already snapshots resolved Delivery Profiles and Integration already executes build and activation stages when commands exist.
+    - Hub settings currently omit deliveryProfiles, so users cannot configure or bind this existing ability visually.
+    - Task Detail and preflight currently expose no bounded plan; a source-only Task can show Integration completed while artifact-built and runtime-activated are merely not-applicable.
+    - FL-D198 requires source applied, source verified, artifact built, and runtime activated to remain separate truths.
+    - The projection must describe configuration and provenance without executing commands or implying that a future stage passed.
+  inScope:
+    - Add one pure bounded DeliveryPlanView projection from the immutable Task delivery snapshot and DeliveryResolution.
+    - Distinguish source-only, build-required, and activation-required plans with four explicit expected stages.
+    - Include only profile provenance/id and command counts in the safe Task/preflight projection; do not expose command text there.
+    - Attach the delivery plan to Integration preflight receipts/events so Main sees it before authorizing source mutation.
+    - Expose deliveryProfiles in Hub settings GET/status and accept an exact full-registry replacement through the existing atomic SettingsService path.
+    - Expose the safe delivery plan in Hub Task Detail without recomputing from mutable settings.
+    - Preserve legacy receipts/tasks whose delivery plan is absent.
+    - Add focused domain, Integration, Hub settings, and Hub server tests.
+  outOfScope:
+    - Do not execute build or activation during preflight or settings save.
+    - Do not infer commands from project paths, package files, frameworks, or the current ForkLight repository.
+    - Do not auto-bind a project, auto-activate a runtime, weaken Integration confirmation, or expose secrets.
+    - Do not add UI controls, dependencies, commits, or pushes.
+  executionSteps:
+    - Trace Delivery Profile selection, Task snapshots, preflight receipt persistence, Hub settings projection/patch, and Task Detail serialization.
+    - Define a detached DeliveryPlanView with resolution source, optional profile id, command counts, outcome, and four stage expectations.
+    - Reuse that projection in preflight and Hub Task Detail; keep stored legacy data readable.
+    - Extend Hub settings projection and patch validation by delegating canonical registry validation to the existing delivery-profiles domain and SettingsService.
+    - Add behavior tests for no profile, inline delivery, project/default/explicit profile provenance, invalid atomic replacement, and preflight payload.
+    - Run the stored acceptance commands once.
+  deliverables:
+    - Pure safe delivery-plan projection from Task snapshots.
+    - Integration preflight receipt/event evidence containing the reviewed plan.
+    - Hub settings read/write support for the complete Delivery Profile registry.
+    - Hub Task Detail API support for the same safe plan.
+    - Regression tests proving configuration and runtime outcome are never conflated.
+  modules:
+    - name: Delivery plan domain
+      responsibility: Convert one immutable Task delivery snapshot into a small truthful plan for Main and UI consumption.
+      consumes:
+        - Task DeliverySpec or its absence.
+        - Task DeliveryResolution or its absence.
+      produces:
+        - Resolution provenance, command counts, planned outcome, and four stage expectations.
+      boundaries:
+        - Pure and detached; no settings read, filesystem access, command execution, or localized prose.
+        - Not-configured means no stage was authorized, never passed or failed.
+    - name: Integration preflight evidence
+      responsibility: Bind the plan Main reviewed to the preflight receipt and audit event before apply.
+      consumes:
+        - Canonical stored Task.
+        - Safe DeliveryPlanView.
+      produces:
+        - Receipt/event evidence alongside affected files and rejection reasons.
+      boundaries:
+        - Does not change receipt safety, expiry, one-use, patch digest, or Main Review requirements.
+        - Older receipts without this optional evidence remain readable.
+    - name: Hub settings boundary
+      responsibility: Project and atomically replace reusable Delivery Profiles without duplicating core validation.
+      consumes:
+        - Current ForkLight settings.
+        - One complete candidate DeliveryProfilesSettings registry.
+      produces:
+        - Safe Hub settings view and validated SettingsService patch.
+      boundaries:
+        - No partial ambiguous array merge; replacement is exact and atomic.
+        - Invalid profiles, references, paths, or unknown fields reject the whole update.
+    - name: Hub Task Detail transport
+      responsibility: Return the Task snapshot plan that the UI can explain before Integration.
+      consumes:
+        - Canonical daemon Task status.
+      produces:
+        - A bounded deliveryPlan field with no command text.
+      boundaries:
+        - Does not infer from mutable Hub settings or report future stages as complete.
+  callChain:
+    - User creates or updates a reusable Delivery Profile and project binding through Hub settings.
+    - SettingsService validates and atomically stores the complete registry.
+    - Task creation resolves inline, explicit, project, default, or none and snapshots DeliverySpec plus provenance.
+    - DeliveryPlanView reads only that Task snapshot and describes the four expected stages.
+    - Hub Task Detail shows the plan before Main authorizes Integration.
+    - Integration preflight stores the same plan with the receipt.
+    - Integration apply later produces actual stage evidence, which remains separate from the preflight expectation.
+  scenarios:
+    - name: Source-only task is explicit
+      given: A Task has no inline delivery and resolves no Delivery Profile.
+      when: Main opens Task Detail or creates a preflight receipt.
+      then: Source apply and source verify are required, artifact build and runtime activation are not configured, and no stage is described as passed.
+    - name: Project-bound build and activation
+      given: A Task snapshots a project-bound profile with one build command, two activation commands, and one activation check.
+      when: The delivery plan is projected after mutable settings later change.
+      then: The plan retains project provenance, the original profile id and counts, and expects artifact build and runtime activation.
+    - name: Invalid registry replacement
+      given: Existing valid Delivery Profiles are stored.
+      when: Hub posts a registry with a missing profile reference or noncanonical project path.
+      then: The whole update is rejected and the prior registry remains unchanged.
+    - name: Legacy receipt
+      given: A receipt stored before deliveryPlan existed is loaded.
+      when: Integration history or apply reads it.
+      then: It remains compatible and no missing plan is interpreted as a successful build or activation.
+  risks:
+    - Recomputing from current settings would rewrite historical intent, so every projection must use the immutable Task snapshot.
+    - Exposing command text in ordinary Task Detail can leak accidental inline secrets, so the safe plan contains counts only.
+    - Array deep-merge semantics can create malformed registries, so Hub replacement must validate one complete candidate atomically.
+    - Adding required persisted fields would break legacy data, so receipt evidence must remain backward compatible.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1400
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+delivery:
+  buildCommands:
+    - npm run build
+  activationCommands: []
+  activationCheckCommands: []
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/delivery-profiles.ts
+    - src/core/types.ts
+    - src/core/integration.ts
+    - src/hub/settings-api.ts
+    - src/hub/server.ts
+    - tests/delivery-profiles.test.ts
+    - tests/integration.test.ts
+    - tests/hub-settings.test.ts
+acceptance:
+  criteria:
+    - A safe immutable delivery plan distinguishes configuration expectations from actual stage outcomes.
+    - Task Detail and preflight expose the same snapshot-derived plan without command text.
+    - Hub can atomically read and replace the complete Delivery Profile registry through core validation.
+    - Invalid settings leave the previous registry intact and legacy records remain compatible.
+    - No preflight, settings read, or page load executes build or activation commands.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/delivery-profiles.test.ts tests/integration.test.ts tests/hub-settings.test.ts tests/hub-ops-mutations.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - npm run build
+    - git diff --check

@@ -1,0 +1,192 @@
+version: 2
+name: Immutable candidate revision and structured correction preflight
+project: ../..
+taskClass: candidate-revision-gap-contract
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+contract:
+  outcome: Make partial Worker output a first-class, immutable candidate that Main can review, bind to a structured correction gap, and preflight before any model call; a later correction or Integration must never silently operate on a different patch.
+  presentation:
+    summary: Worker 只完成了一部分时，ForkLight 会保留这一版成果、标清哪些继续用和哪些要修，并在花费下一轮模型成本前告诉 Main 当前是否真的可以续修。
+    language: zh-CN
+  context:
+    - "Inspect first: src/core/verifier.ts, src/core/runner.ts, src/core/attempt-authorization.ts, src/core/main-review.ts, src/core/integration.ts, src/core/candidate-reverification.ts, src/core/types.ts, src/state/store.ts, src/daemon/coordinator.ts, src/daemon/server.ts, src/daemon/protocol.ts, src/mcp/server.ts, src/hub/server.ts, src/hub/public/app.js, src/hub/public/i18n.js and their focused tests."
+    - ForkLight already preserves the Task workspace, Attempt history and one current Diff. Same-candidate correction and no-Worker reverification are explicit, separately limited and non-looping.
+    - The current Diff path is mutable because every verification recomputes it. Attempt records do not own a content-addressed candidate snapshot, so a later workspace change cannot be proven to be the candidate Main reviewed.
+    - Main correction currently accepts one free-text feedback string. It has no structured record of the exact candidate revision, reusable paths, remaining gaps, acceptance expectations, or stop condition.
+    - Reverification has canonical read-only eligibility, while Worker correction discovers allowance and other rejections only after the mutation request. Hub therefore may leave an action enabled that the daemon must reject.
+    - Integration preflight binds Main acceptance to the latest verification sequence and binds apply to its own preflight digest, but Main acceptance itself is not yet bound to the reviewed candidate patch digest.
+    - This is product evidence and authority, not an automatic repair feature. No path may start a Worker, retry, change a model, or integrate without the existing explicit Main and user confirmations.
+  inScope:
+    - Add a versioned immutable CandidateRevision record for every normal Worker Attempt that reaches independent verification. It must bind Task id, Attempt id and ordinal, verification event sequence, SHA-256 of the exact integration Diff, affected paths, file/line counts, verification outcome, creation time and a private snapshot patch path.
+    - Copy the exact integration Diff to a unique task-internal revision artifact before the Task becomes terminal. Never expose the private absolute artifact path in Hub, MCP summaries or normal CLI output.
+    - Make revision capture idempotent for the same Attempt, verification sequence and digest; reject conflicting duplicate identity rather than overwriting an earlier artifact or event.
+    - Add a bounded CandidateGapContract for Main correction containing schema version, candidateRevisionId, reusable relative paths, one to eight remaining gaps with short descriptions and concrete acceptance expectations, plus a fixed return-to-Main no-progress stop rule.
+    - Validate paths with the existing safe relative-path rules and require every reusable path to exist in the referenced Candidate Revision affected set. Bound all arrays and text; never accept raw logs, prompts, credentials or arbitrary nested data.
+    - Add canonical read-only correction eligibility shared by daemon, MCP and Hub. It must report a stable category, frozen allowance and latest revision summary without running commands or exposing private content.
+    - Eligibility must fail before any grant, queue mutation or model call when the Task is not failed/interrupted, is a Competition candidate, has a running Attempt, lacks a revision for the latest terminal Attempt, has zero/exhausted allowance, has a pending incompatible grant, or the requested revision is stale.
+    - Bind every new correction grant to the referenced Candidate Revision and canonical Gap Contract digest. Restart recovery must reconstruct exactly the same contract. Idempotent replay is allowed only for identical revision, gap contract, feedback and budget.
+    - Send the Worker a concise generated correction instruction that names reusable paths, remaining gaps, acceptance expectations and the stop rule, in addition to existing verifier remediation. Do not send the private revision artifact path.
+    - Bind Main Review accept to the Candidate Revision that matches the accepted verification. Integration preflight must reject if the current integration Diff digest differs from that accepted Candidate Revision, even before creating a passing receipt.
+    - Keep legacy Tasks readable. A legacy Task without CandidateRevision may still show its existing evidence, but new structured correction and digest-bound accept/preflight must fail closed with a clear migration/new-Task instruction rather than inventing a revision.
+    - "Expose plain-language English and Chinese Task Detail content: which candidate is retained, what is reusable, what remains, why correction is available or unavailable, remaining correction count, and that incremental cost is additional rather than a measured full-restart saving."
+    - Add behavior-focused tests for immutable snapshot bytes and digest, duplicate/conflicting capture, safe projection, structured validation, stale revision, zero/exhausted allowance, no mutation on rejection, restart recovery, Main Review binding, Integration mismatch rejection, legacy records, bilingual UI and no automatic loop.
+  outOfScope:
+    - Cross-Provider or cross-runtime Worker handoff. The CandidateRevision and Gap Contract must be designed as the evidence boundary for that next step, but this Task must not mutate Task provider/runtime identity or pretend a resumed session belongs to another Worker.
+    - Automatically deciding that a candidate is reusable, generating gaps with a model, launching a correction, retrying, increasing allowances, adapting budgets, selecting a model, or starting Competition.
+    - Measuring hypothetical full-restart savings without a same-contract, same-model, same-profile paired run.
+    - Weakening independent acceptance, source compatibility, Main Review, Integration confirmation, secret isolation, original-source write protection, commit or push authority.
+    - Replacing the current SQLite schema with an external database or adding cloud synchronization.
+  executionSteps:
+    - Trace the exact point where the integration Diff is complete, the verification event becomes canonical, correction authorization becomes durable, Main acceptance is recorded, and Integration reads the current Diff.
+    - Implement a small candidate-revision core with strict normalization, content hashing, private artifact creation and event-backed immutable lookup; use existing Task storage and task-internal artifact conventions.
+    - Add the bounded Gap Contract and one canonical correction-eligibility resolver; route authorization and restart recovery through it without duplicating decisions in UI or MCP.
+    - Bind correction grants and Main acceptance to revision identity and make Integration preflight verify the accepted digest.
+    - Thread only privacy-safe revision and eligibility summaries through daemon, MCP and Hub; make Task Detail explain the decision before exposing technical ids.
+    - Add focused tests, run the stored commands once, and report any contract gap instead of weakening invariants or creating another Attempt automatically.
+  deliverables:
+    - Immutable per-Attempt CandidateRevision evidence and private snapshot artifact.
+    - Structured, bounded CandidateGapContract bound to one revision and one correction grant.
+    - Canonical correction preflight across core, daemon, MCP and Hub.
+    - Main Review to Integration candidate-digest binding.
+    - Explanation-first bilingual Task Detail and regression coverage.
+  modules:
+    - name: Candidate revision evidence
+      responsibility: Freeze the exact candidate patch produced by one independently verified Attempt and make its identity auditable later.
+      consumes:
+        - Completed integration Diff, Attempt identity, verification event and patch metrics.
+      produces:
+        - Content-addressed CandidateRevision event plus a private read-only patch snapshot inside the Task root.
+      boundaries:
+        - No source mutation, no public absolute path, no overwrite, no invented revision for legacy evidence and no Worker invocation.
+    - name: Gap contract and correction admission
+      responsibility: Describe the retained work and remaining bounded repair, then decide whether a correction may be authorized before state changes.
+      consumes:
+        - Failed or interrupted Task, latest terminal Attempt, CandidateRevision, frozen correction allowance, pending grant state, Main feedback, structured gaps and explicit confirmation.
+      produces:
+        - Privacy-safe eligibility view or one durable revision-bound correction grant with canonical worker instruction.
+      boundaries:
+        - No automatic action, no stale revision, no arbitrary paths/content, no allowance expansion, no cross-Worker identity mutation and no loop.
+    - name: Review and Integration binding
+      responsibility: Prove that the patch Main accepted is the patch Integration preflights.
+      consumes:
+        - Latest passing verification, matching CandidateRevision and explicit Main accept.
+      produces:
+        - Review evidence containing revision id/digest and a preflight rejection if the live Diff differs.
+      boundaries:
+        - Existing user confirmation, source checks, preflight receipt digest and apply-time recheck remain mandatory.
+    - name: Control surfaces
+      responsibility: Show the same eligibility, revision and gap facts through daemon, MCP and Hub in language a non-expert can act on.
+      consumes:
+        - Canonical privacy-safe projections from core services.
+      produces:
+        - Disabled/enabled correction action, reason, allowance, retained scope, remaining work and incremental-cost caveat.
+      boundaries:
+        - UI does not recompute eligibility, expose private patch locations, promise savings or auto-submit.
+  callChain:
+    - Worker finishes an Attempt and ForkLight computes the integration Diff plus independent verification.
+    - Candidate revision core snapshots and hashes that exact Diff, then stores immutable revision evidence bound to the Attempt and verification.
+    - Main inspects the candidate and submits a structured Gap Contract referencing that revision.
+    - Correction eligibility checks Task state, lineage, revision freshness, allowance and pending grants without mutation.
+    - Explicit authorization stores the revision and contract digest; restart recovery reads the same evidence and the Worker receives only the canonical repair instruction.
+    - The corrected Attempt produces a new CandidateRevision; old revisions remain unchanged.
+    - Main accepts one passing revision; Integration preflight hashes the live Diff and requires an exact match before issuing a usable receipt.
+  scenarios:
+    - name: Partially useful failed candidate
+      given: The latest failed Attempt changed several files and independent verification identified two bounded gaps.
+      when: Main keeps three affected paths and submits those two gaps against the latest CandidateRevision.
+      then: Preflight reports one correction available, authorization binds the exact revision and contract, and no new snapshot or full restart occurs.
+    - name: Correction disabled
+      given: The Task froze maxMainCorrections at zero.
+      when: Task Detail loads or Main queries eligibility.
+      then: The action is disabled with the frozen allowance reason before feedback submission and no event, queue item or model call is created.
+    - name: Stale candidate
+      given: The current workspace Diff no longer matches the revision Main referenced.
+      when: Main requests correction or accepts the result for Integration.
+      then: ForkLight rejects with a stable stale-revision or patch-mismatch reason and preserves all history.
+    - name: Correction restart recovery
+      given: A revision-bound correction grant is durable but the Daemon stops before starting the next Attempt.
+      when: Recovery runs.
+      then: Exactly one job is reconstructed with the same revision id, Gap Contract digest, feedback and budget; no duplicate grant or contract is created.
+    - name: Corrected candidate becomes a new revision
+      given: A correction Attempt changes the retained workspace and passes verification.
+      when: verification completes.
+      then: A new immutable CandidateRevision is created for the new Attempt while the prior failed revision artifact and metadata remain unchanged.
+    - name: Integration patch changed after Main accept
+      given: Main accepted a passing CandidateRevision but the task Diff bytes changed before preflight.
+      when: Integration preflight runs.
+      then: Preflight rejects because the accepted revision digest does not match, even if a later git apply check would succeed.
+    - name: Legacy Task
+      given: A stored Task predates CandidateRevision evidence.
+      when: It is inspected.
+      then: Existing evidence remains readable, while structured correction and digest-bound acceptance explain that a new verified revision is required.
+  risks:
+    - A digest without preserved bytes would not be a usable immutable revision, so snapshot creation and event identity must be tested together.
+    - Storing absolute artifact paths in public projections could leak local information, so only revision id, digest prefix, metrics and relative affected paths may leave the core.
+    - Duplicating eligibility in Hub would drift from daemon behavior, so every surface must consume one canonical resolver.
+    - Overly broad free-form gaps would recreate the current ambiguity, so counts, lengths, paths and acceptance expectations are bounded and normalized.
+    - Requiring revisions for old history could silently break unrelated reads, so only new structured correction/accept paths fail closed while legacy inspection remains compatible.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 4200
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/state/store.ts
+    - src/daemon
+    - src/mcp
+    - src/hub
+    - tests/candidate-revision.test.ts
+    - tests/attempt-authorization.test.ts
+    - tests/integration.test.ts
+acceptance:
+  criteria:
+    - Every newly verified Worker Attempt owns one immutable content-addressed CandidateRevision and private patch snapshot; conflicting duplicate identity cannot overwrite history.
+    - Main correction accepts one bounded structured Gap Contract referencing the latest revision and rejects stale, unsafe, zero-allowance, exhausted, competing, active or incompatible states before mutation.
+    - A durable correction grant and restart recovery preserve the exact revision, contract digest, canonical instruction and budget without duplicate model calls.
+    - Main acceptance is bound to the passing revision digest and Integration preflight rejects a changed patch before issuing a usable receipt.
+    - Legacy inspection remains compatible, while new authority-bearing paths fail closed when revision evidence is unavailable.
+    - Daemon, MCP and Hub use one privacy-safe eligibility decision; Task Detail explains retained work, remaining gaps, allowance and incremental cost in English and Chinese without promising hypothetical savings.
+    - No action automatically starts a Worker, retries, adapts policy, changes model/runtime, weakens acceptance, integrates, commits or pushes.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/candidate-revision.test.ts tests/attempt-authorization.test.ts tests/candidate-reverification.test.ts tests/main-review.test.ts tests/integration.test.ts
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

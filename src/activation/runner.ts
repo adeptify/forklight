@@ -121,6 +121,37 @@ export async function consumeActivationHandoff(
   return handoff;
 }
 
+export const ACTIVATION_OPERATION_ID_ENV = "FORKLIGHT_ACTIVATION_OPERATION_ID";
+const ACTIVATION_TASK_ID_ENV = "FORKLIGHT_ACTIVATION_TASK_ID";
+const ACTIVATION_RECEIPT_ID_ENV = "FORKLIGHT_ACTIVATION_RECEIPT_ID";
+
+/** Set operation-context environment variables for every child process
+ *  spawned by the activation commands.  The daemon validates these values
+ *  against its durable Integration state — they are transport only, not
+ *  authority.  Must be called AFTER consuming the one-use handoff. */
+export function setActivationHandoffContext(handoff: ActivationHandoff): void {
+  process.env[ACTIVATION_OPERATION_ID_ENV] = handoff.operationId;
+  process.env[ACTIVATION_TASK_ID_ENV] = handoff.taskId;
+  process.env[ACTIVATION_RECEIPT_ID_ENV] = handoff.receiptId;
+}
+
+/** Read the operation context set by the activation main entry point.
+ *  Returns undefined when the current process was not launched from a
+ *  validated activation handoff. */
+export function readActivationHandoffContext(): {
+  operationId: string;
+  taskId: string;
+  receiptId: string;
+} | undefined {
+  const operationId = process.env[ACTIVATION_OPERATION_ID_ENV];
+  const taskId = process.env[ACTIVATION_TASK_ID_ENV];
+  const receiptId = process.env[ACTIVATION_RECEIPT_ID_ENV];
+  if (operationId === undefined || taskId === undefined || receiptId === undefined) {
+    return undefined;
+  }
+  return { operationId, taskId, receiptId };
+}
+
 async function executeCommands(
   commands: string[],
   handoff: ActivationHandoff,
@@ -131,7 +162,7 @@ async function executeCommands(
       const result = await runCaptured(
         "/bin/zsh",
         ["-lc", command],
-        { cwd: handoff.sourcePath, timeoutMs: handoff.timeoutMs },
+        { cwd: handoff.sourcePath, timeoutMs: handoff.timeoutMs, env: process.env },
       );
       results.push({
         command,
@@ -201,7 +232,10 @@ export function launchActivationRunner(handoffPath: string, logPath: string): nu
   const child = spawn(launch.executable, launch.args, {
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
-    env: { ...process.env, FORKLIGHT_ACTIVATION_LOG: logPath },
+    env: {
+      ...process.env,
+      FORKLIGHT_ACTIVATION_LOG: logPath,
+    },
   });
   child.unref();
   if (child.pid === undefined) throw new Error("Unable to launch activation runner");

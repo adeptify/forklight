@@ -1,0 +1,165 @@
+version: 2
+name: Explain and configure model routing in Hub
+project: ../..
+contract:
+  outcome: Give Hub users one bilingual, explanation-first place to understand how ForkLight compares models, adjust the flexible routing preferences, run a read-only evidence check for an exact task class, and see why there is a recommendation or why evidence is still insufficient.
+  context:
+    - The evidence-aware model-routing core, settings, daemon, CLI, and MCP operation already exist and are the canonical source of truth.
+    - The current Hub exposes model and Worker configuration but does not expose modelRouting settings or the model_routing advisory, so users cannot see what evidence was considered or tune the flexible preferences without CLI/MCP.
+    - The product goal is understanding, not information density. The page must lead with what is being decided, what inputs were used, what the evidence says, and what the user can do next.
+    - Existing model catalog and Worker profiles are the safe source for candidate provider/model pairs. Do not ask users to type credentials, endpoints, Task ids, paths, prompts, or raw JSON.
+    - Routing remains advisory. Main chooses; evaluating advice must not launch a Worker, run a Provider request, start a competition, mutate a Task, disable a model, retry, commit, or push.
+  inScope:
+    - "Extend the Hub-safe settings view and patch builder to expose the complete modelRouting policy: minimum relevant samples, uncertainty threshold, competition-on-uncertainty, and weights for accepted delivery, verified behavior, model-quality failure, correction churn, official cost, and duration."
+    - Reuse the shared SettingsService validation and merge semantics. Hub validation may improve error clarity but must not duplicate or weaken the canonical settings rules.
+    - Add a privacy-safe Hub bridge to the daemon model_routing operation. The bridge accepts one bounded taskClass plus 2-10 explicit provider/model candidates, calls only the daemon advisory, and returns the canonical response without recomputing scores.
+    - Add an explanation-first section to the existing Models page. It should explain that the result is advice for Main, not automatic selection; show the task class and candidate models as the input; and keep policy settings visually secondary to the decision explanation.
+    - Let users select at least two unique configured candidate pairs from the current catalog/profiles, evaluate them without saving settings, and separately save routing preferences through the existing settings flow.
+    - "Render the result in this order: plain-language conclusion, why that conclusion is or is not available, per-model evidence coverage and contributing factors, ignored non-model failures, and next action. Put stable reason codes, raw numeric score details, and diagnostic payloads inside a closed technical disclosure."
+    - Clearly distinguish missing evidence from zero, model-quality failures from configuration/provider/policy failures, accepted delivery from machine success, and runtime estimates from official Provider cost.
+    - When official-cost or duration weight is zero, say that it is visible evidence but does not affect the choice. When cost is unavailable or currencies are incomparable, say so without conversion or substitution.
+    - "Explain each flexible preference in bilingual plain language and state which invariants cannot be changed here: evidence provenance, missing-not-zero, currency separation, independent verification authority, and Main's final choice."
+    - Preserve exact provider/model ids where selection matters. Keep internal ids, endpoints, error strings, formulas, and raw response objects out of prominent UI.
+    - Add behavior-focused tests for Hub settings round-trip, strict candidate validation, daemon bridge read-only behavior, bilingual UI keys, canonical field names, and the absence of automatic execution or mutation.
+  outOfScope:
+    - Changing the routing algorithm, failure taxonomy, statistics derivation, pricing math, daemon/MCP/CLI response contract, model catalog schema, Worker execution, competition scoring, or Task state machine.
+    - Automatically choosing a Worker, launching a Task or competition, probing a Provider, changing a default model, disabling a candidate, converting currencies, or inventing evidence.
+    - A new top-level navigation item, broad visual redesign, commit, push, release, retries, or self-tuning thresholds based on this Task's own result.
+  executionSteps:
+    - Inspect the canonical model-routing response and existing Models/settings renderers before designing the Hub projection.
+    - Extend Hub-safe settings read/write using the existing SettingsService as authority and add focused round-trip validation tests.
+    - Add one bounded read-only HTTP bridge to daemon model_routing, with strict body validation and no Provider or Task mutation path.
+    - Add the Models-page policy editor and advisory input using configured candidates, then render meaning and next action before technical evidence.
+    - Add paired English and Chinese copy and only the minimal CSS needed for readable hierarchy and responsive layout.
+    - Run the stored acceptance commands once. Do not alter routing thresholds or create extra Attempts in response to this Task's result.
+  deliverables:
+    - Hub-safe modelRouting settings view and patch support.
+    - Read-only Hub model-routing advisory bridge with bounded input.
+    - Bilingual Models-page policy editor and evidence explainer.
+    - Plain-language recommendation, uncertainty, evidence, and next-action rendering with closed technical detail.
+    - Focused Hub regression tests.
+  modules:
+    - name: Hub routing settings bridge
+      responsibility: Read and update only the flexible routing policy through canonical SettingsService validation.
+      consumes:
+        - Current ForkLight settings and a bounded Hub patch.
+      produces:
+        - A secret-free Hub settings view and canonical modelRouting settings update.
+      boundaries:
+        - No credentials, Provider defaults, hard invariants, Task snapshots, or routing algorithm changes.
+    - name: Hub advisory bridge
+      responsibility: Validate a task class and explicit candidates, then relay the canonical read-only daemon advice.
+      consumes:
+        - One taskClass and 2-10 unique configured provider/model pairs.
+      produces:
+        - The existing privacy-safe routing advisory response.
+      boundaries:
+        - No Provider call, Task creation, competition start, settings mutation, response recomputation, or raw daemon diagnostics.
+    - name: Models-page explanation
+      responsibility: Help a non-technical user understand the input, process, evidence, result, uncertainty, and next step.
+      consumes:
+        - Safe settings, configured candidates, and canonical routing response.
+      produces:
+        - Bilingual controls, plain-language evidence cards, and closed technical detail.
+      boundaries:
+        - Exact model ids remain visible where meaningful; technical vocabulary never replaces the explanation.
+  callChain:
+    - User opens Models and sees what model selection advice can and cannot do.
+    - Hub derives selectable provider/model pairs from the already configured catalog and Worker profiles.
+    - User enters an exact task class, chooses at least two candidates, and explicitly asks for advice.
+    - Hub validates the bounded input and calls the daemon model_routing read-only operation.
+    - Canonical routing core reads historical evidence and resolved policy without calling any Provider or changing state.
+    - Hub explains the conclusion, evidence gaps or comparisons, and a safe next action; Main still makes the actual choice.
+    - If the user edits preferences, Save updates settings separately and future evaluations use the new resolved policy.
+  scenarios:
+    - name: Not enough comparable history
+      given: At least one selected candidate has fewer samples than the configured minimum.
+      when: The user asks for advice.
+      then: No winner is presented; the UI explains which evidence is missing and suggests a bounded comparison only when the policy says so.
+    - name: Recommendation has sufficient evidence
+      given: Every candidate has enough comparable evidence and the score gap exceeds the uncertainty threshold.
+      when: Advice is returned.
+      then: The UI names the recommended provider/model, explains the decisive factors, and states that Main may override it.
+    - name: External failures remain visible but fair
+      given: A selected model has authentication, Provider, workspace, interruption, or flexible policy failures.
+      when: Per-model evidence is rendered.
+      then: Those failures appear as ignored non-model evidence and do not look like proof that the model cannot code.
+    - name: Cost and time are opt-in
+      given: Official-cost and duration weights are both zero.
+      when: Results and settings are shown.
+      then: Cost and duration may be visible as evidence, but the page states they do not influence the recommendation until enabled.
+    - name: Save and evaluate are separate
+      given: The user changes a preference but has not saved it.
+      when: The current result remains on screen.
+      then: The page does not imply the old result used the unsaved preference and offers a clear save or re-evaluate action.
+    - name: Narrow viewport
+      given: The Models page is viewed at about 390 CSS pixels wide.
+      when: The routing editor and result are displayed.
+      then: Controls and evidence cards become a readable single column with no horizontal overflow.
+  risks:
+    - Recomputing or renaming canonical factors in the browser could make Hub disagree with CLI/MCP, so only presentation labels and grouping may change.
+    - A POST transport can be mistaken for a mutation, so tests must prove the route only calls model_routing and never submit, compete, probe, or settings_update.
+    - Dense scores can recreate the original readability problem, so the conclusion, reasons, and next action must precede raw factors and codes.
+    - Model catalog and Worker profiles may contain duplicate pairs, so candidate options and requests must be deduplicated and bounded.
+    - Unsaved settings can make evidence misleading, so saved-policy provenance and re-evaluation state must be explicit.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 3000
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: xhigh
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/settings-api.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/hub-settings.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Hub users can view and update every flexible modelRouting setting through canonical validation without exposing secrets or changing hard evidence rules.
+    - The Hub advisory accepts one bounded taskClass and 2-10 unique configured candidates and relays only daemon model_routing.
+    - Evaluating advice cannot call a Provider, create or change a Task, start a competition, update settings, retry, commit, or push.
+    - The Models page explains input, process, result, evidence coverage, uncertainty, ignored non-model failures, and next action in paired English and Chinese.
+    - Missing evidence never appears as zero; cost and duration are clearly opt-in and exact official-cost comparability is not rewritten.
+    - Raw codes and score details remain available only as secondary technical evidence, while the primary result is understandable without protocol vocabulary.
+    - Existing model catalog, Worker profiles, settings, task operations, and routing algorithm remain compatible.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-settings.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts tests/model-routing.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

@@ -33,11 +33,22 @@ export type DaemonMethod =
   | "provider_status"
   | "provider_probe"
   | "task_economics"
+  | "economics_summary"
   | "direct_codex_capture"
+  | "direct_codex_guided_capture"
   | "direct_codex_inbox"
   | "direct_codex_review"
   | "direct_codex_publication_preview"
   | "direct_codex_publication_register"
+  | "adaptation_preview"
+  | "adaptation_apply"
+  | "activation_handoff_shutdown"
+  | "remediation_verify"
+  | "candidate_reverify"
+  | "candidate_reverify_eligibility"
+  | "correction_eligibility"
+  | "correct"
+  | "model_routing"
   | "shutdown";
 
 export interface DaemonRequest {
@@ -77,6 +88,11 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "task_economics",
   "direct_codex_inbox",
   "direct_codex_publication_preview",
+  "adaptation_preview",
+  "candidate_reverify_eligibility",
+  "correction_eligibility",
+  "economics_summary",
+  "model_routing",
 ]);
 
 function isMutatingDaemonMethod(method: DaemonMethod): boolean {
@@ -84,6 +100,6 @@ function isMutatingDaemonMethod(method: DaemonMethod): boolean {
 }
 
 export function requiresMatchingBuildIdentity(method: DaemonMethod): boolean {
-  return isMutatingDaemonMethod(method) && method !== "shutdown";
+  return isMutatingDaemonMethod(method) && method !== "shutdown" && method !== "activation_handoff_shutdown";
 }
 import type { BuildIdentity } from "../core/build-identity.js";

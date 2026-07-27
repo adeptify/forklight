@@ -1,0 +1,140 @@
+version: 2
+name: Hub top-level pages explain the whole journey
+project: ../..
+contract:
+  outcome: Make every top-level Hub page explain what is happening, what goes in, what ForkLight does, what comes out, and what the user should do next before it presents dense controls or evidence.
+  context:
+    - The Hub already contains useful controls and evidence, but individual cards can still read as an information inventory when the user does not know the product's internal vocabulary.
+    - Task Detail has a separate collaboration journey and direct Main Token comparison workflow. Preserve those flows and apply the same explanation-first standard to the eight top-level pages.
+    - This is a product comprehension pass, not a visual redesign. Existing evidence, controls, safety confirmations, and compact technical disclosures must remain available.
+  inScope:
+    - "Add one small reusable page-story renderer with five plain-language slots: current purpose, input, process, output, and next action."
+    - Apply it before dense content on Overview, Board, Plans, Compete, Insights, Models, Workers, and Main.
+    - Tailor each page's copy to its real behavior; do not repeat a generic marketing paragraph eight times.
+    - Explain unfamiliar concepts in the copy itself. For example, a competition is the same bounded assignment given to multiple Workers, then independently checked and compared; it is not a live debate between models.
+    - "Treat status as a sentence with meaning: what is happening, why it matters, and whether the user needs to act. Keep raw ids, daemon method names, evidence codes, and configuration field names out of this primary story."
+    - Keep primary text short enough to scan and provide equivalent English and Chinese copy.
+    - Use the existing design tokens and responsive layout; on narrow screens the five parts must form one readable column without horizontal scrolling.
+    - Add behavior-focused asset tests proving all eight pages use the shared narrative contract, both locales carry every key, and dense evidence remains secondary.
+  outOfScope:
+    - Do not change backend APIs, data shapes, Task status, economics arithmetic, model routing, Provider pricing, persistence, daemon operations, or safety confirmations.
+    - Do not remove evidence, controls, advanced settings, exact values, failure diagnostics, or existing Task Detail journeys.
+    - Do not add dependencies, images, animation, gradients, a new navigation model, automatic actions, retries, Provider calls, commits, or pushes.
+  executionSteps:
+    - Audit the eight page renderers and identify the real input, process, output, and user action for each.
+    - Add one restrained shared renderer and one dedicated localized content record per page.
+    - Insert it before controls and tables without duplicating existing page titles.
+    - Add minimal responsive styles and focused tests.
+    - Run the stored acceptance commands once; report any pre-existing failure separately.
+  deliverables:
+    - Explanation-first story on every top-level Hub page.
+    - Equivalent English and Chinese wording that avoids unexplained internal vocabulary.
+    - Responsive visual hierarchy that keeps primary meaning above detailed controls and evidence.
+    - Regression coverage for the eight-page narrative contract.
+  modules:
+    - name: Shared page story
+      responsibility: Turn each page's real behavior into current purpose, input, process, output, and next action.
+      consumes:
+        - Bounded page-specific localized copy and existing page state.
+      produces:
+        - One concise explanation block before dense content.
+      boundaries:
+        - No data mutation, protocol vocabulary, raw diagnostics, or invented state.
+    - name: Page-specific narrative map
+      responsibility: Give each of the eight pages a concrete explanation that matches what its controls actually do.
+      consumes:
+        - Existing page renderer behavior and user-visible states.
+      produces:
+        - Paired English and Chinese copy for all five slots.
+      boundaries:
+        - No generic marketing copy and no claims unsupported by current behavior.
+    - name: Narrative presentation
+      responsibility: Keep the explanation visually primary while dense evidence and advanced controls remain available below it.
+      consumes:
+        - Existing Hub design tokens and responsive breakpoints.
+      produces:
+        - Desktop grouping and a one-column mobile layout without overflow.
+      boundaries:
+        - No new visual system, decoration, motion, or hidden controls.
+  callChain:
+    - The user opens one of the eight top-level pages.
+    - The page story first explains the page's purpose and current meaning.
+    - It names what the user or system provides as input.
+    - It explains the bounded process ForkLight performs.
+    - It names the output the page will show and the next user action.
+    - Existing controls, statuses, evidence, and technical details remain below that explanation.
+  scenarios:
+    - name: First-time user opens Compete
+      given: The user does not know what a model competition means.
+      when: The Compete page renders.
+      then: The user learns that the same Task is independently executed by multiple Workers, verified, compared, and returned as advice before seeing candidate ids or scores.
+    - name: User configures a Worker
+      given: A model exists but no Worker profile has been created.
+      when: The Workers page renders.
+      then: The explanation shows that model, runtime, and limits are inputs; a reusable execution preset is the output; connecting Main is the next step.
+    - name: User reads Insights
+      given: Some cost or Token evidence is unavailable.
+      when: The Insights page renders.
+      then: The explanation distinguishes collected evidence, aggregation, supported conclusions, and missing-proof limits before exact figures.
+    - name: Narrow bilingual layout
+      given: The locale is English or Chinese and the viewport is about 390 CSS pixels wide.
+      when: Any top-level page renders.
+      then: All five story parts remain readable in one column without clipped text or horizontal scrolling.
+  risks:
+    - Repeating too much text on every visit can create new clutter, so each page story must be concise and visually grouped as one region.
+    - Copy may drift from real behavior, so tests must bind every story to the existing renderer rather than checking translation keys alone.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 900
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Overview, Board, Plans, Compete, Insights, Models, Workers, and Main each explain purpose, input, process, output, and next action before dense controls or evidence.
+    - Competition, Worker, Main, Token, cost, and unavailable-evidence concepts are explained in plain language where they first matter.
+    - English and Chinese communicate the same meaning and no primary story requires protocol or implementation knowledge.
+    - Existing controls, evidence, advanced settings, failure detail disclosures, Task Detail journeys, confirmations, and responsive behavior remain functional.
+    - No backend, data, arithmetic, routing, pricing, Provider, automatic action, dependency, commit, or push change occurs.
+  commands:
+    - node --check src/hub/public/app.js
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

@@ -74,7 +74,7 @@ test("catalog truth: all six entries match official sources", () => {
   assert.equal(e.serviceTier, "standard");
   assert.equal(e.promotion, null);
   assert.equal(e.source.url, "https://api-docs.deepseek.com/quick_start/pricing/");
-  assert.equal(e.source.checkedAt, "2026-07-23");
+  assert.equal(e.source.checkedAt, "2026-07-26");
   assert.equal(e.rates.length, 1);
   assert.equal(e.rates[0]!.input, 0.14);
   assert.equal(e.rates[0]!.output, 0.28);
@@ -233,6 +233,23 @@ test("MiniMax with omitted route returns route-required for both regions", () =>
     endpoint: "https://api.minimaxi.com/anthropic", modelAlias: "MiniMax-M3",
     serviceTier: "priority",
   }), "route-required");
+});
+
+test("Volcengine Coding Plan identity is strict and subscription cost is explicit", () => {
+  unavailable(resolveOfficialPricing({
+    provider: "volcengine",
+    endpoint: "https://ark.cn-beijing.volces.com/api/coding",
+    route: "volcengine-coding-plan-subscription",
+    modelAlias: "glm-5.2[1M]",
+    serviceTier: "standard",
+  }), "subscription-plan-no-per-request-price");
+  unavailable(resolveOfficialPricing({
+    provider: "volcengine",
+    endpoint: "https://ark.cn-beijing.volces.com/api/coding",
+    route: "volcengine-coding-plan-subscription",
+    modelAlias: "glm-5.2",
+    serviceTier: "standard",
+  }), "unsupported-model");
 });
 
 // ---------------------------------------------------------------------------

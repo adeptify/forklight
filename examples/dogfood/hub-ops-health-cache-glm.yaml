@@ -1,0 +1,126 @@
+version: 2
+name: Stop Hub health polling from delaying active work
+project: ../..
+contract:
+  outcome: Make the Hub's normal two-second refresh cheap enough that several open tabs cannot repeatedly block workspace preparation or Worker event processing.
+  context:
+    - Dogfood with three open Hub tabs left two Tasks in preparing for about six minutes before either Worker started.
+    - The existing short-lived cache covers /api/status and /api/daemon, but the normal Hub refresh also calls /api/ops/health every two seconds.
+    - /api/ops/health currently bypasses the cache and asks the daemon to rerun health evidence, including synchronous runtime and environment checks.
+    - This is a bounded correction to the existing cache contract, not a broad performance rewrite.
+  inScope:
+    - Cache and coalesce /api/ops/health across Hub tabs using the existing HubEvidenceCache and its bounded TTL.
+    - Return a safe checkedAt timestamp so the UI and tests can distinguish a recent snapshot from live task state.
+    - Invalidate the cached operations-health snapshot after successful daemon lifecycle and configuration mutations that can change health evidence.
+    - Keep task, board, plan, competition, statistics, settings, economics, and Task Detail reads uncached and current.
+    - Update deterministic tests so repeated and concurrent /api/ops/health reads cause one daemon health call within the TTL, refresh after expiry or invalidation, and do not trigger Provider probes.
+  outOfScope:
+    - Do not change browser polling intervals, daemon health contents, runtime adapters, Provider probes, workspace copying, task scheduling, model routing, settings schema, or retry policy.
+    - Do not cache task progress or result endpoints, hide freshness, add background refresh, loop on failure, call a live Provider, commit, or push.
+  executionSteps:
+    - Trace the existing /api/ops/health request and every current HubEvidenceCache invalidation path.
+    - Add one health evidence class or a compatible shared snapshot without changing the public daemon health facts.
+    - Attach checkedAt only to this cached health response; do not add it to operational task data.
+    - Add focused counted-dependency tests for cache hit, concurrent coalescing, expiry, mutation invalidation, and uncached task reads.
+    - Run the stored acceptance commands once and report any remaining tradeoff.
+  deliverables:
+    - Normal Hub refresh no longer reruns daemon health once per tab every two seconds.
+    - Health freshness remains visible and bounded.
+    - Live Task and Board state remains uncached.
+    - Regression tests protect the real /api/ops/health route.
+  modules:
+    - name: Operations health snapshot
+      responsibility: Reuse and coalesce the expensive daemon health read for a short, visible lifetime.
+      consumes:
+        - Existing daemon health response and Hub evidence cache.
+      produces:
+        - The same health facts plus checkedAt.
+      boundaries:
+        - No task data, Provider call, persistent state, retry, or background work.
+    - name: Health invalidation
+      responsibility: Remove stale health evidence after a successful relevant mutation.
+      consumes:
+        - Existing Hub mutation success paths.
+      produces:
+        - One fresh health read on the next request.
+      boundaries:
+        - Failed mutations do not clear or replace known evidence.
+  callChain:
+    - One or more Hub tabs request /api/ops/health during normal refresh.
+    - Hub returns a recent snapshot or shares one in-flight daemon health request.
+    - Task and Board requests continue directly to the daemon and remain current.
+    - A relevant successful mutation invalidates the health snapshot.
+    - The next health request refreshes once and records a new checkedAt.
+  scenarios:
+    - name: Three open tabs
+      given: Three Hub tabs refresh within the same cache lifetime.
+      when: They request operations health concurrently.
+      then: All receive health while the daemon executes one underlying health request.
+    - name: Active preparation
+      given: A Task is scanning or copying its workspace.
+      when: Hub continues normal refresh.
+      then: Health polling does not repeatedly occupy the daemon while Task progress reads remain current.
+    - name: Configuration changed
+      given: A recent health snapshot exists.
+      when: A relevant settings, Provider, model, Worker, Main, or daemon lifecycle mutation succeeds.
+      then: The next operations-health read refreshes once instead of returning pre-mutation evidence.
+    - name: Health read fails
+      given: No valid health snapshot exists and the daemon read fails.
+      when: Hub handles the error.
+      then: No failed value is cached and no retry loop is started.
+  risks:
+    - A cache can briefly show old environment evidence, so retain the short TTL and expose checkedAt.
+    - Broad invalidation can cause an extra health check, but correctness after explicit mutation is more important than that one refresh.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 700
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: xhigh
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 4
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - tests/hub-health-cache.test.ts
+acceptance:
+  criteria:
+    - Repeated and concurrent /api/ops/health requests share one daemon health read during the bounded TTL.
+    - Responses include checkedAt and refresh after expiry or successful relevant mutation.
+    - Task, Board, Plan, Competition, statistics, settings, economics, and Task Detail data remains uncached.
+    - Provider probes, runtime adapters, task execution, and polling intervals are unchanged.
+    - No retry loop, Provider call, credential exposure, commit, or push is introduced.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-health-cache.test.ts tests/hub-ops-mutations.test.ts
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

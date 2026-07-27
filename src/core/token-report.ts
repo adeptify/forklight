@@ -16,6 +16,10 @@ import {
   type DirectCodexProfilePublication,
 } from "./direct-codex-calibration.js";
 import { type StateStore } from "../state/store.js";
+import {
+  reconcileTokenUsage,
+  type TokenUsageReconciliation,
+} from "./token-reconciliation.js";
 
 function freezeDeep(v: unknown): void {
   if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
@@ -214,6 +218,11 @@ export interface TaskTokenReport {
   readonly receiptCount: number;
   readonly report: TokenEfficiencyReport;
   readonly calibrationSelection: CalibrationSelection;
+  /** Immutable diagnostic comparison of top-level terminal usage against
+   *  optional per-model breakdowns.  Top-level Worker volume remains the
+   *  canonical counter family — perModel is never added, substituted, or
+   *  repurposed as request-level pricing data. */
+  readonly usageReconciliation: TokenUsageReconciliation;
 }
 
 export function getTaskTokenReport(
@@ -235,9 +244,12 @@ export function getTaskTokenReport(
     ...(sel.resolvedCurrentTaskClass !== undefined ? { currentTaskClass: sel.resolvedCurrentTaskClass } : {}),
   });
 
+  const usageReconciliation = reconcileTokenUsage(attempts);
+
   const result: TaskTokenReport = {
     taskId, attemptCount: attempts.length, receiptCount: receipts.length, report,
     calibrationSelection: sel.selection,
+    usageReconciliation,
   };
   freezeDeep(result);
   return result;

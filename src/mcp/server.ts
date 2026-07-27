@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { forklightHome } from "../core/config.js";
 import type { ProviderModelSummary } from "../core/statistics.js";
+import type { RoutingAdvisoryResponse } from "../core/model-routing.js";
 import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
 import type {
   AttemptRecord,
@@ -15,7 +16,17 @@ import {
   type MaxBudgetResolution,
 } from "../core/budget.js";
 import { assessIntegrationFeasibility } from "../core/integration-feasibility.js";
-import { assessTaskQuality, parseTaskSpec } from "../core/task.js";
+import { buildCompactIntegrationOperationView } from "../core/integration-operation.js";
+import type { IntegrationOperationView } from "../core/types.js";
+import {
+  isTaskPresentationLanguage,
+  parseTaskSpec,
+  TASK_PRESENTATION_SUMMARY_MAX,
+} from "../core/task.js";
+import {
+  assessTaskQualityWithPolicy,
+  effectiveQualityPolicyFromGlobal,
+} from "../core/contract-quality.js";
 import { daemonRequest, ensureDaemon } from "../daemon/client.js";
 import type { ForkLightSettings, TaskPolicy } from "../core/settings.js";
 import {
@@ -32,10 +43,10 @@ import {
   isBuildIdentity,
 } from "../core/build-identity.js";
 import { SUPPORTED_RUNTIME_NAMES } from "../core/runtime-names.js";
-import { resolveWorkerSelection } from "../core/worker-profiles.js";
+import { isPricingRouteId, resolveWorkerSelection } from "../core/worker-profiles.js";
 
 const SERVER_INSTRUCTIONS =
-  "ForkLight runs bounded external coding Workers (runtimes: claude-code default, optional grok-build with provider xai). The Main agent may be Claude Code, Grok Build, OpenCode, Codex, or a human using CLI/Console — not Codex-only. Before submit, the Main agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, modules, call chain, scenarios, risks, and independent acceptance. Validate first. Submit returns immediately. Prefer forklight_wait over tight-loop status. Use forklight_list for progress-aware boards. Status may include failureCategory authentication|budget|runtime. Worker runtime is chosen by task.runtime (or defaultRuntime), independent of which Main client is connected. Record taskId for continuity across Main sessions. The Main agent remains accountable for review and user approvals. Never call ForkLight a native subagent of the Main product, and never use it to commit or push.";
+  "ForkLight runs bounded external coding Workers (runtimes: claude-code default, optional grok-build with provider xai). The Main agent may be Claude Code, Grok Build, OpenCode, Codex, or a human using CLI/Console — not Codex-only. Before submit, the Main agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, modules, call chain, scenarios, risks, and independent acceptance. Validate first. Submit returns immediately. Prefer forklight_wait over tight-loop status. Use forklight_list for progress-aware boards. Status may include failureCategory authentication|budget|runtime|contract-infeasible. Worker runtime is chosen by task.runtime (or defaultRuntime), independent of which Main client is connected. Record taskId for continuity across Main sessions. The Main agent remains accountable for review and user approvals. Never call ForkLight a native subagent of the Main product, and never use it to commit or push.";
 
 const moduleContractSchema = z.object({
   name: z.string().min(1),
@@ -58,11 +69,26 @@ const deliverySpecSchema = z.object({
   activationCheckCommands: z.array(z.string().trim().min(1)).max(16).default([]),
 }).strict();
 
+const taskPresentationSchema = z.object({
+  summary: z.string()
+    .min(1)
+    .max(TASK_PRESENTATION_SUMMARY_MAX)
+    .refine(
+      (value) => value === value.trim()
+        && !/[\r\n\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/.test(value),
+      { message: "summary must be one trimmed paragraph" },
+    ),
+  language: z.string().refine(isTaskPresentationLanguage, {
+    message: "language must be a bounded BCP-47-like tag",
+  }),
+}).strict();
+
 const taskInputSchema = z.object({
   project: z.string().min(1).describe("Absolute path to the source project"),
   name: z.string().min(1).max(120),
   contract: z.object({
     outcome: z.string().min(12),
+    presentation: taskPresentationSchema.optional(),
     context: z.array(z.string().min(1)).min(1),
     inScope: z.array(z.string().min(1)).min(1),
     outOfScope: z.array(z.string().min(1)).min(1),
@@ -81,7 +107,7 @@ const taskInputSchema = z.object({
     criteria: z.array(z.string().min(1)).min(1),
     commands: z.array(z.string().min(1)).min(1),
   }),
-  provider: z.enum(["deepseek", "qwen", "minimax", "glm", "xai"]).optional(),
+  provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]).optional(),
   model: z.string().min(1).optional(),
   endpoint: z.string().url().optional(),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
@@ -98,6 +124,12 @@ const taskInputSchema = z.object({
   focusPaths: z.array(z.string().min(1)).min(1),
   generatedPaths: z.array(z.string().min(1).max(240)).optional(),
   delivery: deliverySpecSchema.optional(),
+  deliveryProfileId: z.string().min(1).max(64).optional(),
+  /** Explicit billing route override. Wins over Worker profile setting.
+   *  Bounded non-empty identifier; never a credential. */
+  pricingRoute: z.string().refine(isPricingRouteId, {
+    message: "pricingRoute must be a bounded non-empty identifier",
+  }).optional(),
 });
 
 type TaskInput = z.infer<typeof taskInputSchema>;
@@ -124,6 +156,7 @@ export function inlineTask(
       ...(input.endpoint === undefined ? {} : { endpoint: input.endpoint }),
       ...(input.effort === undefined ? {} : { effort: input.effort }),
       ...(input.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: input.maxBudgetUsd }),
+      ...(input.pricingRoute === undefined ? {} : { pricingRoute: input.pricingRoute }),
     },
     {
       execution: settings.execution,
@@ -149,6 +182,7 @@ export function inlineTask(
       model: resolved.model,
       keychainService: resolved.keychainService,
       endpoint: resolved.endpoint,
+      ...(resolved.pricingRoute === undefined ? {} : { pricingRoute: resolved.pricingRoute }),
     },
     runtime: {
       name: resolved.runtime,
@@ -161,6 +195,7 @@ export function inlineTask(
     },
     worker: { allowEdits: input.allowEdits, allowedCommands: [], focusPaths: input.focusPaths },
     ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
+    ...(input.deliveryProfileId === undefined ? {} : { deliveryProfileId: input.deliveryProfileId }),
     acceptance: input.acceptance,
   };
 }
@@ -236,6 +271,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         completionPolicy: settings.completionPolicy,
         workerProfiles: settings.workerProfiles,
         modelCatalog: settings.modelCatalog,
+        deliveryProfiles: settings.deliveryProfiles,
       };
       const budget = resolveMaxBudgetUsd(
         input.maxBudgetUsd,
@@ -243,7 +279,10 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       );
       const inline = inlineTask(input, settings, budget);
       const spec = parseTaskSpec(inline, input.project, policy);
-      const report = assessTaskQuality(spec, settings.contractQuality);
+      const report = assessTaskQualityWithPolicy(
+        spec,
+        spec.qualityPolicy ?? effectiveQualityPolicyFromGlobal(settings.contractQuality),
+      );
       // FL-D10 parity with CLI validate: surface Task budget vs Integration limit.
       const integrationFeasibility = assessIntegrationFeasibility(
         spec,
@@ -545,6 +584,76 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
   );
 
   server.registerTool(
+    "forklight_correct",
+    {
+      title: "Authorize a Main correction",
+      description:
+        "Authorize one explicit bounded correction for a failed or interrupted Worker whose candidate has useful parts worth reusing. The Worker continues in its existing workspace and session with the same Task id; independent verification reruns all original acceptance commands. For Tasks with candidate revision evidence, first call forklight_correction_eligibility, then provide candidateRevisionId, reusablePaths, and remainingGaps together. Limited by the Task's frozen maxMainCorrections, not maxExtraAttempts. Requires bounded feedback, explicit confirm, and an optional per-Attempt runtime budget (null = uncapped).",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        feedback: z.string().trim().min(1).max(1000),
+        maxBudgetUsd: z.number().positive().nullable().optional(),
+        candidateRevisionId: z.string().uuid().optional(),
+        reusablePaths: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
+        remainingGaps: z.array(z.object({
+          description: z.string().trim().min(10).max(500),
+          acceptanceExpectation: z.string().trim().min(10).max(500),
+        }).strict()).min(1).max(8).optional(),
+        confirm: z.literal(true),
+      }).strict().superRefine((value, context) => {
+        const structuredCount = [
+          value.candidateRevisionId,
+          value.reusablePaths,
+          value.remainingGaps,
+        ].filter((item) => item !== undefined).length;
+        if (structuredCount !== 0 && structuredCount !== 3) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "candidateRevisionId, reusablePaths, and remainingGaps must be provided together",
+          });
+        }
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    },
+    async ({ taskId, feedback, maxBudgetUsd, candidateRevisionId, reusablePaths, remainingGaps }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_correct",
+        home,
+        args: {
+          taskId,
+          feedbackLength: feedback.trim().length,
+          maxBudgetUsd: maxBudgetUsd ?? null,
+          structuredGapContract: candidateRevisionId !== undefined,
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const task = await daemonRequest<TaskRecord>(
+            "correct",
+            {
+              taskId,
+              feedback,
+              ...(maxBudgetUsd === undefined ? {} : { maxBudgetUsd }),
+              ...(candidateRevisionId === undefined ? {} : {
+                candidateRevisionId,
+                reusablePaths,
+                remainingGaps,
+              }),
+              confirm: true,
+            },
+            home,
+          );
+          return textAndData(
+            buildTaskSummary(task),
+            `ForkLight task ${taskId} was queued for Main correction. The Worker will reuse the existing workspace and session. Poll forklight_status.`,
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
     "forklight_main_review",
     {
       title: "Record Main agent review",
@@ -638,6 +747,38 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         content: [{ type: "text", text: JSON.stringify(summaries, null, 2) }],
         structuredContent: { summaries },
       };
+    },
+  );
+
+  server.registerTool(
+    "forklight_model_routing",
+    {
+      title: "Evidence-aware model routing advisory",
+      description:
+        "Provide a read-only, evidence-aware routing advisory for an exact taskClass and two or more provider/model candidates. Recommends a model only when comparable historical evidence is sufficient; otherwise suggests bounded competition. Non-model failures (credentials, provider errors, policy, workspace, interruption) never penalize a model. Official-cost comparison is available only when all candidates have exact same-currency Provider-native quotes. Duration contributes zero weight by default. Never launches work, switches a Worker, disables a model, or mutates settings.",
+      inputSchema: z.object({
+        taskClass: z.string().trim().min(1).max(200)
+          .describe("Exact task class identifier — never pattern-matched or inferred"),
+        candidates: z.array(z.object({
+          provider: z.string().trim().min(1).max(100),
+          model: z.string().trim().min(1).max(200),
+        })).min(2).max(10),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ taskClass, candidates }) => {
+      await ensureDaemon(home);
+      const advisory = await daemonRequest<RoutingAdvisoryResponse>(
+        "model_routing",
+        { taskClass, candidates },
+        home,
+      );
+      return textAndData(
+        advisory,
+        advisory.recommendation
+          ? `Model routing recommends ${advisory.recommendation.provider}/${advisory.recommendation.model} (confidence ${advisory.recommendation.confidence}) for task class "${taskClass}".`
+          : `Model routing advice for "${taskClass}": insufficient or incomparable evidence;${advisory.shouldRunCompetition ? " consider a bounded competition." : " no recommendation."}`,
+      );
     },
   );
 
@@ -788,26 +929,32 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Read integration operation status",
       description:
-        "Return the latest durable stage evidence and final result, when available, for an integration operation. Read-only.",
-      inputSchema: z.object({ operationId: z.string().uuid() }),
+        "Return compact stage aggregates and status for an integration operation by default. Set detail=full only for deep audit with raw command stdout/stderr evidence. Read-only.",
+      inputSchema: z.object({
+        operationId: z.string().uuid(),
+        detail: z.enum(["compact", "full"]).default("compact").describe(
+          "compact (default): aggregate counts per stage, no raw command text. full: complete durable evidence including command stdout/stderr.",
+        ),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ operationId }) => {
+    async ({ operationId, detail }) => {
       let taskId: string | undefined;
       return withMcpExchangeReceipt({
         operation: "forklight_integration_status",
         home,
-        args: { operationId },
+        args: { operationId, detail },
         taskId: () => taskId,
         invoke: async () => {
           await ensureDaemon(home);
-          const view = await daemonRequest<Record<string, unknown>>(
+          const view = await daemonRequest<IntegrationOperationView>(
             "integration_status",
             { operationId },
             home,
           );
           if (typeof view.taskId === "string") taskId = view.taskId;
-          return textAndData(view);
+          if (detail === "full") return textAndData(view);
+          return textAndData(buildCompactIntegrationOperationView(view));
         },
       });
     },
@@ -818,29 +965,33 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Wait for an integration operation",
       description:
-        "Wait up to timeoutMs for an integration operation. A timeout reports outcome-unknown while background work may continue; query status with the same operationId.",
+        "Wait up to timeoutMs for an integration operation, returning compact stage aggregates by default. Set detail=full only for deep audit with raw command stdout/stderr. A timeout reports outcome-unknown while background work may continue.",
       inputSchema: z.object({
         operationId: z.string().uuid(),
         timeoutMs: z.number().int().min(1).max(3_600_000),
+        detail: z.enum(["compact", "full"]).default("compact").describe(
+          "compact (default): aggregate counts per stage, no raw command text. full: complete durable evidence including command stdout/stderr.",
+        ),
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ operationId, timeoutMs }) => {
+    async ({ operationId, timeoutMs, detail }) => {
       let taskId: string | undefined;
       return withMcpExchangeReceipt({
         operation: "forklight_integration_wait",
         home,
-        args: { operationId, timeoutMs },
+        args: { operationId, timeoutMs, detail },
         taskId: () => taskId,
         invoke: async () => {
           await ensureDaemon(home);
-          const view = await daemonRequest<Record<string, unknown>>(
+          const view = await daemonRequest<IntegrationOperationView>(
             "integration_wait",
             { operationId, timeoutMs },
             home,
           );
           if (typeof view.taskId === "string") taskId = view.taskId;
-          return textAndData(view);
+          if (detail === "full") return textAndData(view);
+          return textAndData(buildCompactIntegrationOperationView(view));
         },
       });
     },
@@ -854,7 +1005,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         "Submit a Task Contract with multiple candidate models. Runs each candidate in an isolated workspace from a single canonical snapshot. Returns the competition ID immediately; poll forklight_competition_status for progress.",
       inputSchema: taskInputSchema.extend({
         candidates: z.array(z.object({
-          providerName: z.enum(["deepseek", "qwen", "minimax", "glm", "xai"]),
+          providerName: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]),
           modelName: z.string().min(1),
           // Per-candidate override: null = unlimited for that candidate (FL-D92 parity).
           maxBudgetUsd: z.number().positive().nullable().optional(),
@@ -942,7 +1093,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       description:
         "Return cached provider verification status (verified, failed, stale, or unverified). This is a safe, read-only operation — it never triggers a probe, incurs no cost, and reveals no secrets.",
       inputSchema: z.object({
-        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "xai"]).optional().describe(
+        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]).optional().describe(
           "Optional provider name. Omit to return status for all configured providers.",
         ),
       }),
@@ -964,7 +1115,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       description:
         "Run an EXPLICIT live probe against one or all configured providers. This is a MUTATING, potentially billable operation: every request uses the current configured budget, timeout, cache lifetime, and concurrency limits, then persists only safe evidence.",
       inputSchema: z.object({
-        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "xai"]).optional().describe(
+        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]).optional().describe(
           "Optional provider name. Omit to probe all configured providers with bounded concurrency.",
         ),
       }),
@@ -979,6 +1130,213 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         result,
         `Provider probe completed for ${provider ?? "all providers"}. Results are cached; use forklight_provider_status to re-read without cost.`,
       );
+    },
+  );
+
+  // --- Bounded adaptation control surfaces ----------------------------------
+  // Two thin handlers that delegate all identity, validation, gate logic,
+  // successor creation, and one-successor enforcement to the daemon.
+
+  const adaptationReasonSchema = z.enum([
+    "duration-budget",
+    "size-policy",
+    "attempt-budget",
+    "completion-policy",
+    "concurrency-cap",
+    "no-progress-timeout",
+    "other-flexible-policy",
+  ]);
+
+  server.registerTool(
+    "forklight_adaptation_preview",
+    {
+      title: "Preview a bounded policy adaptation",
+      description:
+        "Preview the before/after fields and eligibility for one bounded Worker-policy adjustment against a terminal Task. Read-only — never creates a Task or mutates state. The proposed patch may only contain flexible advanced-policy fields; maxAdaptationRounds and authority-bearing fields are forbidden.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        patch: z.record(z.string(), z.unknown()).describe(
+          "Flexible advanced-policy fields to preview (e.g. maxDurationMs, fileLimit, changeBudgetMode). maxAdaptationRounds is forbidden.",
+        ),
+        reason: adaptationReasonSchema.describe(
+          "Bounded proposed-reason category describing the intent of the patch.",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ taskId, patch, reason }) => {
+      await ensureDaemon(home);
+      const preview = await daemonRequest<Record<string, unknown>>(
+        "adaptation_preview", { taskId, patch, reason }, home,
+      );
+      return textAndData(
+        preview,
+        `Adaptation preview for ${taskId}: ${preview.status}${preview.summary ? ` — ${preview.summary}` : ""}`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_adaptation_apply",
+    {
+      title: "Apply a confirmed bounded policy adaptation",
+      description:
+        "Apply one bounded Worker-policy adjustment, creating at most one successor Task. Requires explicit confirm: true. The root immutable maxAdaptationRounds cap is enforced; a parent can have at most one successor. Never triggers a model call or creates more than one successor.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        patch: z.record(z.string(), z.unknown()).describe(
+          "Flexible advanced-policy fields to adjust. maxAdaptationRounds is forbidden.",
+        ),
+        reason: adaptationReasonSchema.describe(
+          "Bounded proposed-reason category describing the intent of the patch.",
+        ),
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that the adaptation transition is approved. Must be true.",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, patch, reason }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "adaptation_apply",
+        { taskId, patch, reason, confirm: true },
+        home,
+      );
+      const childSummary = result.childTaskId !== undefined
+        ? `successor created: ${result.childTaskId}`
+        : "no successor created";
+      return textAndData(
+        result,
+        `Adaptation apply for ${taskId}: ${result.status} — ${childSummary}`,
+      );
+    },
+  );
+
+  // --- Main remediation verification ----------------------------------------
+  // Thin handler that delegates all identity, validation, acceptance-
+  // command execution, and persistence to the daemon.
+
+  server.registerTool(
+    "forklight_remediation_verify",
+    {
+      title: "Verify Main-repaired source delivery",
+      description:
+        "Run stored acceptance commands against the current source in an isolated copy. Requires explicit confirm: true. Never resumes a Worker, calls a model, or mutates source. Only failed or interrupted Tasks are eligible, and only one passing final disposition per Task.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        reason: z.string().trim().min(1).max(1000),
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that Main has repaired the source and wants to verify. Must be true.",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, reason }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_remediation_verify",
+        home,
+        args: { taskId, reasonLength: reason.length, confirm: true },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const result = await daemonRequest<Record<string, unknown>>(
+            "remediation_verify",
+            { taskId, reason, confirm: true },
+            home,
+          );
+          const check = result.check as Record<string, unknown> | undefined;
+          const disposition = result.disposition as Record<string, unknown> | undefined;
+          return textAndData(
+            result,
+            `Main remediation verification ${check?.status ?? "unknown"}: Task ${taskId}.${
+              disposition?.status === "verified-repaired-delivered"
+                ? " Final delivery recorded."
+                : ""
+            }`,
+          );
+        },
+      });
+    },
+  );
+
+  // --- Candidate reverification (verification-only, no Worker) --------------
+  // Thin handler that delegates all eligibility, acceptance-command rerun,
+  // canonical verification evidence, and Task status management to the daemon.
+
+  server.registerTool(
+    "forklight_correction_eligibility",
+    {
+      title: "Check Main correction eligibility",
+      description:
+        "Return a read-only eligibility check for Main correction (candidate reuse). Reports stable category, frozen allowance, and latest revision summary without running commands or exposing private content. Always call this before calling forklight_correct to verify the action is available and to surface why when it is not.",
+      inputSchema: z.object({ taskId: z.string().uuid() }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ taskId }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_correction_eligibility",
+        home,
+        args: { taskId },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const eligibility = await daemonRequest<Record<string, unknown>>(
+            "correction_eligibility",
+            { taskId },
+            home,
+          );
+          return textAndData(
+            eligibility,
+            eligibility.eligible
+              ? `Task ${taskId} is eligible for one Main correction (${(eligibility.allowance as Record<string, unknown>).remaining} remaining).`
+              : `Task ${taskId} is not eligible for Main correction: ${eligibility.category}.`,
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_candidate_reverify",
+    {
+      title: "Reverify a failed candidate without a Worker",
+      description:
+        "Rerun a failed Task's complete original acceptance suite against the retained candidate WITHOUT launching a Worker or creating another Attempt. Only eligible when the latest independent verification failed behavior acceptance while policy and source compatibility passed, a non-empty business Diff is retained, no Attempt is running, and the frozen maxMainReverifications allowance remains. The original Attempt record and status are preserved. Worker invoked = no, incremental Worker Tokens = 0, incremental model/provider runtime cost = 0. Local verification time and the Main orchestration exchange are NOT zero; no full-restart saving is claimed without a paired baseline. On pass the Task moves to succeeded but a fresh Main Review accept bound to the new verification is still required before Integration.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        reason: z.string().trim().min(1).max(1000),
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that Main wants a verification-only rerun. Must be true.",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, reason }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_candidate_reverify",
+        home,
+        args: { taskId, reasonLength: reason.length, confirm: true },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const result = await daemonRequest<Record<string, unknown>>(
+            "candidate_reverify",
+            { taskId, reason, confirm: true },
+            home,
+          );
+          const cost = result.costFacts as Record<string, unknown> | undefined;
+          const status = typeof result.status === "string" ? result.status : "unknown";
+          return textAndData(
+            result,
+            `Candidate reverification ${status}: Task ${taskId}.${
+              status === "passed"
+                ? " Task moved to succeeded; a fresh Main Review accept is still required before Integration."
+                : " Task remains failed; the original Attempt record is preserved."
+            } Worker invoked=${cost?.workerInvoked ?? false}, incremental Worker Tokens=0, incremental model/provider cost=0, commands ${cost?.passedCommandCount ?? 0}/${cost?.commandCount ?? 0}.`,
+          );
+        },
+      });
     },
   );
 
@@ -1040,6 +1398,43 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
           return textAndData(
             sample,
             `Direct Codex sample ${sample.sampleId} captured for Task ${sample.forklightTaskId}.`,
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_direct_codex_capture_task",
+    {
+      title: "Guided capture direct Codex sample by Task identity",
+      description:
+        "Capture one count-only Codex turn.completed terminal event using a stored Task's calibration identity (exactTaskClass, directCodexProfileId). The daemon derives identity from the stored Task — no metadata fields are needed. Returns content-free pending sample evidence.",
+      inputSchema: z.object({
+        taskId: z.string().min(1).describe("Opaque non-empty ForkLight Task id (must carry taskClass + directCodexProfileId)"),
+        runRef: z.string().min(1).describe("Canonical opaque Codex run reference (e.g. codex-run:<id>)"),
+        usage: codexTerminalUsageSchema,
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, runRef, usage }) => {
+      await ensureDaemon(home);
+      let resolvedTaskId: string | undefined;
+      return withMcpExchangeReceipt({
+        operation: "forklight_direct_codex_capture",
+        home,
+        args: { taskId, runRef, usage },
+        taskId: () => resolvedTaskId,
+        invoke: async () => {
+          const sample = await daemonRequest<DirectCodexPairedSample>(
+            "direct_codex_guided_capture",
+            { forklightTaskId: taskId, codexRunRef: runRef, usage },
+            home,
+          );
+          resolvedTaskId = sample.forklightTaskId;
+          return textAndData(
+            sample,
+            `Direct Codex guided sample ${sample.sampleId} captured for Task ${sample.forklightTaskId}.`,
           );
         },
       });

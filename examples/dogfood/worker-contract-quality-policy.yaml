@@ -1,0 +1,166 @@
+version: 2
+name: Per-Worker contract quality policy core
+project: ../..
+contract:
+  outcome: Make Task Contract quality thresholds and their enforcement effect configurable per Worker, visibly resolved and frozen at Task creation, while keeping security and execution-authority invariants permanently hard.
+  context:
+    - FL-D163 shows that a loose Worker Advanced profile can still be rejected by a separate global maxFiles, maxDiffLines, or maxFocusPaths gate.
+    - Users need development-friendly policies without hidden contradictions, but a soft quality preference must never weaken secrets, source isolation, command authority, explicit confirmation, or independent acceptance.
+    - Existing advanced execution policy already resolves Worker values and snapshots them into Tasks; contract quality needs an equally explicit but separate Quality layer.
+    - The product must expose how each quality field was resolved and whether a failed check blocks, warns, contributes score evidence, or is ignored.
+    - This Task implements the core and non-visual control surfaces. A dependent MiniMax Task will implement the Hub editor after the contract is stable.
+  inScope:
+    - Define a strict per-Worker contract-quality policy override covering enforcement mode, maximum files, maximum diff lines, maximum focus paths, minimum scenarios, minimum call-chain steps, minimum outcome length, and minimum module-responsibility length.
+    - Support null as explicit unlimited for maximum fields and zero as disabled for minimum thresholds, without nullish fallback replacing explicit values.
+    - Resolve each field from selected Worker Profile over global contract-quality defaults and return field-level provenance.
+    - Freeze the resolved quality policy into each new Task before execution so later settings edits cannot change stored work.
+    - Separate quality effects into hard, warn, score, and off semantics; hard blocks, while non-hard modes preserve truthful checks and score evidence without claiming success or changing model routing automatically.
+    - Keep Task schema validity, one or more stored acceptance commands, empty Worker arbitrary-command authority, secret isolation, original-source write isolation, Main Review, Integration confirmation, and commit/push authority outside this override and always hard.
+    - Make CLI validate, MCP validate, plan validation, inline Task submission, file Task submission, competition candidates, and daemon registration consume the same resolved policy path.
+    - Return a compact effective Quality preview/report with values, provenance, mode, check effects, blocking issues, and non-blocking advisories; do not expose prompts, commands, secrets, or source content.
+    - Preserve compatibility for old persisted settings, Worker Profiles, Task specs, and Task records that lack the new fields.
+    - Add focused tests for resolution, null and zero semantics, hard versus non-hard admission, immutable snapshots, all creation entry points, strict unknown-field rejection, and privacy-safe errors.
+  outOfScope:
+    - Hub UI controls or visual design; a dependent Task will consume the core preview.
+    - Automatically changing quality settings, detecting a failure and tuning policy, resubmitting Tasks, or adding any retry loop.
+    - Weakening security or authority invariants, acceptance-command requirements, independent verification, Main Review, Integration confirmation, commit, or push controls.
+    - Automatically modifying competition ranking or model selection based on contract quality score.
+    - Changing runtime file and line verification semantics already owned by Effective Advanced Policy.
+    - Reinterpreting historical Task success or failure statistics.
+  executionSteps:
+    - Audit settings validation, Worker Profile validation, Task parsing, plan validation, CLI/MCP validation, inline submission, competition creation, and immutable Task storage.
+    - Define one pure contract-quality policy resolver and preview model with explicit layer and provenance rather than duplicating thresholds across entry points.
+    - Thread the selected Worker Profile quality override through Task parsing before quality admission and snapshot the resolved result into the stored Task specification or record.
+    - Refactor quality assessment so check truth, admission effect, blocking issues, and advisories remain distinct for hard, warn, score, and off modes.
+    - Update every creation and validation path to consume the same resolved snapshot and keep legacy behavior explicit.
+    - Add focused tests, then run the full independent commands once without tuning or retrying automatically.
+  deliverables:
+    - Per-Worker contract-quality policy schema, validation, resolution, preview, and immutable Task snapshot.
+    - Shared hard versus soft quality admission behavior across file, inline, plan, competition, CLI, MCP, and daemon paths.
+    - Compact privacy-safe validation evidence suitable for the dependent Hub UI.
+    - Regression tests proving settings take effect and never alter hard security or authority boundaries.
+  modules:
+    - name: Contract quality policy domain
+      responsibility: Resolve configurable Quality fields and classify their enforcement effect independently from Safety invariants.
+      consumes:
+        - Global contract-quality defaults, selected Worker override, legacy missing data, and Task contract checks.
+      produces:
+        - Immutable effective values, field provenance, mode, truthful check effects, blocking issues, and advisories.
+      boundaries:
+        - No Provider call, source mutation, automatic tuning, retry, ranking change, or security override.
+    - name: Worker Profile and settings
+      responsibility: Validate and persist partial per-Worker quality overrides with safe compatibility.
+      consumes:
+        - Worker editor or settings patches with nullable maximums, non-negative minimums, and a policy mode.
+      produces:
+        - A canonical Worker Profile and global fallback that reject unknown or malformed fields.
+      boundaries:
+        - Credentials and hard Safety settings are not accepted in the quality object.
+    - name: Task creation and storage
+      responsibility: Apply the selected Worker quality policy consistently before admission and freeze it for the Task lifetime.
+      consumes:
+        - Parsed Task Contract, resolved Worker identity, and effective quality policy.
+      produces:
+        - A validated or softly admitted Task plus immutable quality snapshot and report.
+      boundaries:
+        - Later UI/settings edits cannot change queued, running, terminal, plan, or competition Tasks.
+    - name: Validation control surfaces
+      responsibility: Present one compact quality truth across CLI, MCP, daemon, plans, and competition entry points.
+      consumes:
+        - Effective policy snapshot and quality assessment.
+      produces:
+        - Values, provenance, mode, check effects, blocking issues, advisories, and stable privacy-safe errors.
+      boundaries:
+        - No raw Task content, acceptance command text, prompt, diff, credential, or automatic mutation in the public projection.
+  callChain:
+    - Main selects or defaults a Worker Profile and submits or validates a Task Contract.
+    - Settings and Worker Profile validators normalize the global fallback and partial Worker Quality override.
+    - The shared resolver produces field values, provenance, mode, and a creation-time snapshot.
+    - Task quality assessment evaluates each check truthfully and maps failures to block, warn, score evidence, or ignored effect.
+    - Hard Safety and schema checks run outside the Quality mode and still fail closed.
+    - File, inline, plan, competition, CLI, MCP, and daemon consumers return the same compact evidence and store the immutable snapshot for admitted Tasks.
+  scenarios:
+    - name: Loose development Worker
+      given: A Worker Profile sets warn mode with unlimited file, diff-line, and focus-path maximums.
+      when: A large but structurally valid Task Contract is validated and submitted with that Worker.
+      then: The hidden global maxima do not reject it, failed optional quality checks remain visible advisories, and the effective preview names Worker provenance.
+    - name: Strict production Worker
+      given: A Worker Profile sets hard mode with finite quality thresholds.
+      when: A Task exceeds one threshold.
+      then: Validation and every submission entry point reject it with the same bounded blocking issue before Provider execution.
+    - name: Settings change after creation
+      given: A Task has been admitted with a resolved Worker Quality policy.
+      when: Global settings or that Worker Profile change later.
+      then: The stored Task keeps its original values, provenance, mode, and evaluation semantics.
+    - name: Safety cannot be disabled
+      given: A Worker uses off mode and unlimited or disabled quality thresholds.
+      when: A Task supplies Worker arbitrary commands, no acceptance command, malformed schema, or attempts to alter source authority.
+      then: Submission still fails closed because these are Safety invariants rather than Quality preferences.
+    - name: Legacy compatibility
+      given: Existing settings, Worker Profiles, and stored Tasks have no quality override or snapshot.
+      when: They are loaded, inspected, or executed.
+      then: ForkLight derives documented global-compatible behavior without corrupting records or inventing Worker provenance.
+  risks:
+    - Treating all contract checks as soft could weaken execution safety, so configurable Quality checks and non-configurable Safety gates must be named separately in code and output.
+    - Reassessing a stored Task against mutable settings would make results nondeterministic, so creation-time snapshot evidence is required.
+    - Different entry points could drift if each resolves policy separately, so they must share one resolver and focused parity tests.
+    - Score and off modes could be misread as success; check truth and admission effect must remain separate and no automatic routing claim is allowed.
+    - New optional profile fields can break persisted settings if validation is not backward compatible.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 4200
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: xhigh
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/settings.ts
+    - src/core/worker-profiles.ts
+    - src/core/task.ts
+    - src/core/types.ts
+    - src/core/plan.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - tests
+acceptance:
+  criteria:
+    - A Worker-level Quality override visibly wins over global contract-quality defaults and is frozen for new Tasks.
+    - Null maximums and zero minimums remain explicit loose values and are never replaced through fallback.
+    - Hard, warn, score, and off modes preserve check truth while producing distinct admission effects.
+    - Schema, command authority, secrets, source isolation, acceptance, Main Review, Integration confirmation, commit, and push boundaries cannot be disabled by Quality settings.
+    - File, inline, plan, competition, CLI, MCP, and daemon paths consume one shared resolver with privacy-safe output.
+    - No automatic parameter tuning, resubmission, retry, Provider call during preview, commit, or push is introduced.
+  commands:
+    - npm run check
+    - npx tsc -p tsconfig.json --noEmit
+    - git diff --check
