@@ -1162,18 +1162,25 @@ test("Hub Task story executes the shared fixture as an ordered input-process-out
 
   assert.ok(src.includes("function renderTaskStory"));
   assert.ok(src.includes("function renderTaskWorkbench"), "full-page task workbench is shipped");
+  assert.ok(src.includes("function renderTaskTabShell"), "task detail tabs are shipped");
   assert.ok(src.includes('"task-story-flow"'));
   assert.ok(src.includes('"task-story-current-result"'));
   assert.ok(src.includes('"task-story-step-" + step.id'));
   assert.ok(src.includes('"task-workbench"'), "workbench role is present");
+  assert.ok(src.includes('"task-tabs"'), "tab shell role is present");
   assert.ok(src.includes("taskReportInstrTitle"), "instruction section uses plain-language key");
   assert.ok(src.includes("task-process-timeline"), "process timeline is surfaced openly");
   assert.ok(src.includes("detail-shell"), "detail uses full workbench shell not only a drawer strip");
+  assert.ok(src.includes('id: "overview"'), "overview tab exists");
+  assert.ok(src.includes('id: "actions"'), "actions tab exists");
+  assert.ok(src.includes('id: "more"'), "more tab exists");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   assert.ok(css.includes(".task-story-steps"));
   assert.ok(css.includes(".task-story-step:not(:last-child)::after"));
   assert.ok(css.includes(".task-report-hero"), "task report hero styles ship");
   assert.ok(css.includes(".task-report-card"), "open report cards ship");
+  assert.ok(css.includes(".task-tab-bar"), "tab bar styles ship");
+  assert.ok(css.includes(".task-tab.is-active"), "active tab styles ship");
   assert.ok(css.includes("left: var(--sidebar)"), "detail spans the workspace beside the nav");
   assert.match(css, /@media\s*\(max-width:\s*768px\)[\s\S]*?\.task-story-step/);
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
@@ -1186,12 +1193,15 @@ test("Hub Task story executes the shared fixture as an ordered input-process-out
     "taskReportInstrTitle", "taskReportProcessTitle", "taskReportResultTitle",
     "taskReportArtifactsTitle", "taskReportChecksTitle", "taskReportFinalTitle",
     "taskReportBack", "tlWorkerCompleted", "tlVerifCompleted",
+    "taskTabOverview", "taskTabInstruction", "taskTabProcess", "taskTabResult",
+    "taskTabChecks", "taskTabActions", "taskTabMore",
   ]) {
     assert.ok(i18n.indexOf(key) !== i18n.lastIndexOf(key), `${key} exists in both locales`);
   }
   assert.ok(i18n.includes("Worker 收到的任务说明"), "zh instruction title is plain language");
   assert.ok(i18n.includes("What the Worker was asked to do"), "en instruction title is plain language");
   assert.ok(i18n.includes("活动记录"), "zh timeline label is plain language");
+  assert.ok(i18n.includes("任务说明") && i18n.includes("执行过程"), "zh tab labels are plain");
 });
 
 /* --- Task story adapter: fixture-driven journey coverage ---
@@ -2184,27 +2194,24 @@ test("Hub Task detail carries the direct Main Token savings setup card", async (
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   const { enSection, zhSection } = splitI18n(i18n);
 
-  // Renderer exists and is placed after the open workbench, before manual actions.
+  // Calibration and actions live in the Actions tab; dense evidence in More.
   assert.ok(src.includes("function renderCalibrationCard"), "calibration card renderer");
   assert.ok(src.includes("function renderTaskWorkbench"), "open workbench is the primary report");
-  assert.ok(src.includes("shell.appendChild(renderCalibrationCard(task));"),
-    "showTask mounts the calibration card");
-  const workbenchIdx = src.indexOf("shell.appendChild(renderTaskWorkbench(task));");
-  const storyIdx = src.indexOf("shell.appendChild(renderTaskStory(task));");
-  const deliveryIdx = src.indexOf("shell.appendChild(renderTaskDeliveryPlan(task));");
-  const calIdx = src.indexOf("shell.appendChild(renderCalibrationCard(task));");
-  const manualIdx = src.indexOf('journeyDisclosure(t("taskManualActions")');
+  assert.ok(src.includes("manualActionsBody.appendChild(renderCalibrationCard(task))"),
+    "showTask mounts the calibration card inside Actions tab content");
+  assert.ok(src.includes('id: "actions"'), "actions tab is registered");
+  assert.ok(src.includes('id: "more"'), "more tab is registered");
+  const workbenchIdx = src.indexOf("shell.appendChild(renderTaskWorkbench(task");
+  const calIdx = src.indexOf("manualActionsBody.appendChild(renderCalibrationCard(task))");
   const journeyIdx = src.indexOf("var journeyEvidence = renderTaskJourney(task);");
   const techIdx = src.indexOf('collapsedSection(t("journeyTechnical")');
   assert.ok(
     workbenchIdx > 0
-      && storyIdx > workbenchIdx
-      && deliveryIdx > storyIdx
-      && calIdx > deliveryIdx
-      && manualIdx > calIdx
-      && journeyIdx > manualIdx
-      && techIdx > journeyIdx,
-    "workbench, story, delivery plan, calibration, manual actions, evidence and technical details stay in readable order",
+      && calIdx > 0
+      && journeyIdx > calIdx
+      && techIdx > journeyIdx
+      && workbenchIdx > techIdx,
+    "actions/more content is assembled before the tabbed workbench is mounted",
   );
 
   // State adapter covers every state.
@@ -2472,17 +2479,15 @@ test("Hub Delivery Profiles page wires reusable build/activation registry with s
   assert.ok(saveBlock.includes("restoreBtn"),
     "save bar has a restore-saved-values action");
 
-  // Task detail now renders the four-stage plan before the integration
-  // controls, never collapses planned and actual into one status, and the
-  // preflight result has replaced the raw JSON dump.
+  // Task detail Actions tab carries delivery plan + Integration controls.
   const showIdx = src.indexOf("function showTask(");
   const showBlock = src.slice(showIdx);
   assert.ok(showBlock.includes("renderTaskDeliveryPlan(task)"),
-    "showTask renders the four-stage plan before manual actions");
-  const planIdx = showBlock.indexOf("renderTaskDeliveryPlan(task)");
-  const integBtn = showBlock.indexOf("taskPreflight");
-  assert.ok(planIdx > 0 && integBtn > 0 && planIdx < integBtn,
-    "delivery plan is placed before the Integration preflight button");
+    "showTask renders the four-stage plan in the Actions tab");
+  assert.ok(showBlock.includes("taskPreflight"),
+    "Integration preflight remains available in Actions");
+  assert.ok(showBlock.includes('id: "actions"'),
+    "Actions tab hosts delivery and integration work");
   assert.ok(showBlock.includes("renderPreflightResult(res.result)"),
     "preflight result renders the readable card instead of raw JSON");
   assert.ok(!showBlock.includes("JSON.stringify(res.result).slice(0, 400)"),

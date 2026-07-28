@@ -6374,9 +6374,57 @@ function reportList(label, items, asFiles){
   block.appendChild(list);
   return block;
 }
-/* Primary Task workbench: open sections for instruction, process, result,
- * artifacts, checks, and next action. Avoids burying the facts users need. */
-function renderTaskWorkbench(task){
+/* Session-local Task Detail tab (presentation only; never mutates Task). */
+var taskDetailActiveTab = "overview";
+
+function renderTaskTabShell(tabs, activeId){
+  var root = h("div", "task-tabs");
+  root.setAttribute("data-fl-role", "task-tabs");
+  var bar = h("div", "task-tab-bar");
+  bar.setAttribute("role", "tablist");
+  var panels = h("div", "task-tab-panels");
+  var buttons = [];
+  var panelEls = [];
+  tabs.forEach(function(tab, index){
+    var btn = h("button", "task-tab" + (tab.id === activeId ? " is-active" : ""), tab.label);
+    btn.type = "button";
+    btn.setAttribute("role", "tab");
+    btn.setAttribute("data-task-tab", tab.id);
+    btn.setAttribute("aria-selected", tab.id === activeId ? "true" : "false");
+    if(tab.hint){
+      var badgeEl = h("span", "task-tab-badge", tab.hint);
+      btn.appendChild(document.createTextNode(" "));
+      btn.appendChild(badgeEl);
+    }
+    bar.appendChild(btn);
+    buttons.push(btn);
+
+    var panel = h("div", "task-tab-panel" + (tab.id === activeId ? " is-active" : ""));
+    panel.setAttribute("role", "tabpanel");
+    panel.setAttribute("data-task-tab-panel", tab.id);
+    panel.hidden = tab.id !== activeId;
+    if(tab.body) panel.appendChild(tab.body);
+    panels.appendChild(panel);
+    panelEls.push(panel);
+
+    btn.addEventListener("click", function(){
+      taskDetailActiveTab = tab.id;
+      buttons.forEach(function(b, i){
+        var on = tabs[i].id === tab.id;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        panelEls[i].classList.toggle("is-active", on);
+        panelEls[i].hidden = !on;
+      });
+    });
+  });
+  root.appendChild(bar);
+  root.appendChild(panels);
+  return root;
+}
+
+/* Primary Task workbench: sticky hero + tabbed sections so one screen is not a wall of cards. */
+function renderTaskWorkbench(task, extraTabs){
   var j = task.journey || {};
   var a = j.assignment || {};
   var we = j.workerExecution || {};
@@ -6415,7 +6463,13 @@ function renderTaskWorkbench(task){
   }
   shell.appendChild(hero);
 
-  // 1) What the Worker was asked to do (contract = instruction; no raw system prompt)
+  // --- Tab bodies ---
+  // Overview: short path only
+  var overviewBody = h("div", "task-tab-body");
+  overviewBody.appendChild(h("div", "task-report-card-hint", t("taskTabOverviewHint")));
+  overviewBody.appendChild(renderTaskStory(task));
+
+  // 1) Instruction
   var instrNodes = [];
   var goalText = a.presentation && a.presentation.summary
     ? a.presentation.summary
@@ -6443,14 +6497,15 @@ function renderTaskWorkbench(task){
   if(a.constraints && a.constraints.length){
     instrNodes.push(reportList(t("taskReportConstraints"), a.constraints, false));
   }
-  shell.appendChild(reportCard(
+  var instrBody = h("div", "task-tab-body");
+  instrBody.appendChild(reportCard(
     t("taskReportInstrTitle"),
     t("taskReportInstrHint"),
     instrNodes,
     "task-story-step-main-input"
   ));
 
-  // 2) Process: attempts + human timeline
+  // 2) Process
   var processNodes = [];
   processNodes.push(reportBlock(
     t("storyWorkerUsedLabel"),
@@ -6488,7 +6543,6 @@ function renderTaskWorkbench(task){
   if(task.timeline && task.timeline.length){
     var tl = h("div", "timeline");
     tl.setAttribute("data-fl-role", "task-process-timeline");
-    // Show latest activity first for scanning.
     task.timeline.slice().reverse().slice(0, 40).forEach(function(e){
       var te = h("div", "timeline-entry");
       te.appendChild(h("span", "ts", fmtTm(e.timestamp)));
@@ -6503,14 +6557,15 @@ function renderTaskWorkbench(task){
   } else {
     processNodes.push(h("div", "task-report-empty", t("taskReportTimelineEmpty")));
   }
-  shell.appendChild(reportCard(
+  var processBody = h("div", "task-tab-body");
+  processBody.appendChild(reportCard(
     t("taskReportProcessTitle"),
     t("taskReportProcessHint"),
     processNodes,
     "task-report-process"
   ));
 
-  // 3) Worker result claim - open, not buried
+  // 3) Result + artifacts
   var resultNodes = [];
   var claimStep = presentation.steps.find(function(s){ return s.id === "worker-output"; });
   if(we.workerClaim && we.workerClaim.text){
@@ -6522,23 +6577,22 @@ function renderTaskWorkbench(task){
   if(claimStep && claimStep.bodyKey){
     resultNodes.push(h("div", "summary-line dim", t(claimStep.bodyKey, claimStep.params || {})));
   }
-  shell.appendChild(reportCard(
+  var files = Array.isArray(we.changedFilePaths) ? we.changedFilePaths : [];
+  var resultBody = h("div", "task-tab-body");
+  resultBody.appendChild(reportCard(
     t("taskReportResultTitle"),
     t("taskReportResultHint"),
     resultNodes,
     "task-story-step-worker-output"
   ));
-
-  // 4) Artifacts / changed files - open
-  var files = Array.isArray(we.changedFilePaths) ? we.changedFilePaths : [];
-  shell.appendChild(reportCard(
+  resultBody.appendChild(reportCard(
     t("taskReportArtifactsTitle"),
     t("taskReportArtifactsHint", { count: String(files.length) }),
     [reportList(null, files, true)],
     "task-report-artifacts"
   ));
 
-  // 5) Independent checks
+  // 4) Checks + final handling
   var checkNodes = [];
   if(iv && iv.available){
     var conclusion = iv.conclusion === "passed"
@@ -6562,14 +6616,6 @@ function renderTaskWorkbench(task){
   } else {
     checkNodes.push(h("div", "task-report-empty", t("journeyVerifUnavailable")));
   }
-  shell.appendChild(reportCard(
-    t("taskReportChecksTitle"),
-    t("taskReportChecksHint"),
-    checkNodes,
-    "task-story-step-main-check"
-  ));
-
-  // 6) Final handling
   var finalNodes = [];
   if(fd.mainReview){
     finalNodes.push(reportBlock(
@@ -6592,13 +6638,36 @@ function renderTaskWorkbench(task){
   if(!finalNodes.length){
     finalNodes.push(h("div", "task-report-empty", t("journeyDeliveryNone")));
   }
-  shell.appendChild(reportCard(
+  var checksBody = h("div", "task-tab-body");
+  checksBody.appendChild(reportCard(
+    t("taskReportChecksTitle"),
+    t("taskReportChecksHint"),
+    checkNodes,
+    "task-story-step-main-check"
+  ));
+  checksBody.appendChild(reportCard(
     t("taskReportFinalTitle"),
     t("taskReportFinalHint"),
     finalNodes,
     "task-story-step-final-result"
   ));
 
+  var attemptCount = we.attempts && we.attempts.length ? String(we.attempts.length) : "0";
+  var fileCount = String(files.length);
+  var failCount = iv && iv.available ? String(iv.failedCount || 0) : "";
+
+  var tabs = [
+    { id: "overview", label: t("taskTabOverview"), body: overviewBody },
+    { id: "instruction", label: t("taskTabInstruction"), body: instrBody },
+    { id: "process", label: t("taskTabProcess"), hint: attemptCount, body: processBody },
+    { id: "result", label: t("taskTabResult"), hint: fileCount, body: resultBody },
+    { id: "checks", label: t("taskTabChecks"), hint: failCount, body: checksBody }
+  ];
+  (extraTabs || []).forEach(function(tab){ tabs.push(tab); });
+
+  var active = taskDetailActiveTab;
+  if(!tabs.some(function(tab){ return tab.id === active; })) active = "overview";
+  shell.appendChild(renderTaskTabShell(tabs, active));
   return shell;
 }
 
@@ -6614,24 +6683,11 @@ function showTask(id){
     top.appendChild(h("div", "dim fs12", t("taskReportBreadcrumb")));
     shell.appendChild(top);
 
-    // Open workbench first: instruction → process → result → artifacts → checks.
-    shell.appendChild(renderTaskWorkbench(task));
-
-    var reuseJourney = renderCandidateReuse(task);
-    if(reuseJourney) shell.appendChild(reuseJourney);
-    var reverifyJourney = renderCandidateReverification(task);
-    if(reverifyJourney) shell.appendChild(reverifyJourney);
-
-    // Compact story strip kept for fixture/test contract and quick scan.
-    shell.appendChild(renderTaskStory(task));
-
-    // Delivery plan after the readable report.
-    shell.appendChild(renderTaskDeliveryPlan(task));
-    shell.appendChild(renderCalibrationCard(task));
-
-    // Manual actions remain available but secondary.
-    var manualActionsBody = h("div", "task-manual-actions");
-    manualActionsBody.appendChild(h("div", "summary-line dim mb-8", t("taskManualActionsHint")));
+    // Actions tab body is filled below, then passed into the tabbed workbench.
+    var actionsBody = h("div", "task-tab-body task-manual-actions");
+    actionsBody.appendChild(h("div", "task-report-card-hint", t("taskTabActionsHint")));
+    actionsBody.appendChild(h("div", "summary-line dim mb-8", t("taskManualActionsHint")));
+    var manualActionsBody = actionsBody;
 
     // Supervision panel
     var sup = h("div", "card form-card");
@@ -6907,13 +6963,18 @@ function showTask(id){
 
     // Bounded adaptation panel
     manualActionsBody.appendChild(renderAdaptationPanel(task));
-    shell.appendChild(journeyDisclosure(t("taskManualActions"), manualActionsBody));
+    var reuseJourney = renderCandidateReuse(task);
+    if(reuseJourney) manualActionsBody.appendChild(reuseJourney);
+    var reverifyJourney = renderCandidateReverification(task);
+    if(reverifyJourney) manualActionsBody.appendChild(reverifyJourney);
+    manualActionsBody.appendChild(renderTaskDeliveryPlan(task));
+    manualActionsBody.appendChild(renderCalibrationCard(task));
 
-    // Secondary full evidence (older dense journey) stays closed by default.
+    // More tab: dense evidence + technical IDs (optional for power users).
+    var moreBody = h("div", "task-tab-body");
+    moreBody.appendChild(h("div", "task-report-card-hint", t("taskTabMoreHint")));
     var journeyEvidence = renderTaskJourney(task);
-    shell.appendChild(journeyDisclosure(t("storyEvidenceDetails"), journeyEvidence));
-
-    // Closed technical details: IDs, source path, session, runtime, raw types.
+    moreBody.appendChild(journeyDisclosure(t("storyEvidenceDetails"), journeyEvidence));
     var techBody = hd("div", "task-technical-body");
     techBody.appendChild(hd("div", "grid-2 fs12 mb-8", [
       hd("div", "", [h("span", "dim", t("journeyTechId") + " "), h("span", "mono", task.id)]),
@@ -6970,7 +7031,12 @@ function showTask(id){
       techBody.appendChild(collapsedSection(
         t("taskTechnicalTimeline") + " (" + task.timeline.length + ")", tlTech));
     }
-    shell.appendChild(collapsedSection(t("journeyTechnical"), techBody));
+    moreBody.appendChild(collapsedSection(t("journeyTechnical"), techBody));
+
+    shell.appendChild(renderTaskWorkbench(task, [
+      { id: "actions", label: t("taskTabActions"), body: actionsBody },
+      { id: "more", label: t("taskTabMore"), body: moreBody }
+    ]));
     f.appendChild(shell);
     showDetail(f);
   }).catch(function(e){

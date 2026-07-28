@@ -704,6 +704,74 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
 .detail-close:hover { color: var(--hi2); border-color: var(--hi); background: var(--hi-soft); }
 
 /* Open report sections: instruction → process → result → artifacts */
+/* Task Detail tabs: one concern per panel */
+.task-tabs {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.task-tab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px;
+  border: var(--border);
+  border-radius: var(--radius);
+  background: var(--paper);
+  position: sticky;
+  top: 56px;
+  z-index: 1;
+}
+.task-tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+  line-height: 1.2;
+}
+.task-tab:hover {
+  color: var(--ink);
+  background: var(--bg);
+}
+.task-tab.is-active {
+  color: var(--hi2);
+  background: var(--hi-soft);
+  border-color: color-mix(in srgb, var(--hi) 30%, var(--line));
+}
+.task-tab-badge {
+  display: inline-block;
+  margin-left: 4px;
+  min-width: 1.1em;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg2);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.task-tab.is-active .task-tab-badge {
+  background: color-mix(in srgb, var(--hi) 18%, var(--paper));
+  color: var(--hi2);
+}
+.task-tab-panels {
+  min-width: 0;
+}
+.task-tab-panel {
+  min-width: 0;
+}
+.task-tab-panel[hidden] { display: none !important; }
+.task-tab-body {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
 .task-report-hero {
   display: grid;
   gap: 10px;
