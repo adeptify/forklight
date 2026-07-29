@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { writeFile, mkdir } from "node:fs/promises";
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { writeFile, mkdir, readFile } from "node:fs/promises";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  parseRemediationAmendmentInput,
   projectRemediationVerifyResult,
   verifyMainRemediation,
+  REMEDIATION_COMMAND_MAX_LENGTH,
   REMEDIATION_REASON_MAX_LENGTH,
 } from "../src/core/main-remediation.js";
 import { recordMainReview } from "../src/core/main-review.js";
@@ -946,6 +949,816 @@ test("interrupted Task remediation remains compatible without Main review", asyn
     assert.equal(result.check.status, "passed");
     assert.equal(result.disposition?.status, "verified-repaired-delivered");
     assert.equal(store.getTask(task.id).status, "interrupted");
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// --- Acceptance amendment (Main corrects mistaken acceptance commands) ---
+
+const failedTypecheckVerification: VerificationResult = {
+  passed: false,
+  behaviorPassed: false,
+  policyPassed: true,
+  sourceCompatible: true,
+  commands: [
+    {
+      command: "node -e ''",
+      exitCode: 0,
+      stdout: "pass-secret",
+      stderr: "",
+      durationMs: 1,
+      timedOut: false,
+    },
+    {
+      command: "npm run typecheck",
+      exitCode: 1,
+      stdout: "",
+      stderr: "missing script: typecheck",
+      durationMs: 2,
+      timedOut: false,
+    },
+    {
+      command: "node -e 'console.log(1)'",
+      exitCode: 0,
+      stdout: "1",
+      stderr: "",
+      durationMs: 1,
+      timedOut: false,
+    },
+  ],
+  diffPath: "/tmp/diff",
+  sourceUnchanged: true,
+};
+
+function createFailedFixtureWithVerification(
+  store: StateStore,
+  id: string,
+  sourcePath: string,
+  verification: VerificationResult,
+  acceptanceCommands?: string[],
+): { task: TaskRecord; attempt: AttemptRecord; verificationSequence: number } {
+  const currentAttempt = attempt(id, 1, "failed");
+  const commands = acceptanceCommands
+    ?? verification.commands.map((command) => command.command);
+  const task: TaskRecord = {
+    ...taskRecord(id, "failed", sourcePath, commands),
+    currentAttemptId: currentAttempt.id,
+  };
+  store.createTask(task);
+  store.createAttempt(currentAttempt);
+  const verificationEvent = store.addEvent(
+    task.id,
+    currentAttempt.id,
+    "verification.completed",
+    "Independent verification failed",
+    verification,
+  );
+  return {
+    task,
+    attempt: currentAttempt,
+    verificationSequence: verificationEvent.sequence,
+  };
+}
+
+test("amended acceptance replaces only the failed command and records amended basis", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-amend-pass-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const fixture = createFailedFixtureWithVerification(
+      store,
+      "t-amend-pass",
+      sourceDir,
+      failedTypecheckVerification,
+    );
+    recordMainReview(store, fixture.task.id, {
+      decision: "revise",
+      reason: "Main wrote the wrong acceptance command",
+      confirm: true,
+    });
+    const taskBefore = store.getTask(fixture.task.id);
+    const attemptBefore = store.getAttempt(fixture.attempt.id);
+    const verificationBefore = store.listEvents(fixture.task.id)
+      .find((event) => event.sequence === fixture.verificationSequence);
+
+    const result = await verifyMainRemediation(
+      store,
+      {
+        taskId: fixture.task.id,
+        reason: "Replace mistaken typecheck with build",
+        confirm: true,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "node -e ''",
+          }],
+        },
+      },
+      30000,
+    );
+
+    assert.equal(result.check.status, "passed");
+    assert.equal(result.disposition?.status, "verified-repaired-delivered");
+    assert.equal(result.disposition?.acceptanceBasis, "amended-acceptance");
+    assert.equal(result.disposition?.amendedCommandCount, 1);
+    assert.equal(result.disposition?.reasonCode, "contradictory-acceptance");
+    assert.equal(result.check.amendment?.amendedCommands.length, 3);
+    assert.equal(result.check.amendment?.amendedCommands[0], "node -e ''");
+    assert.equal(result.check.amendment?.amendedCommands[1], "node -e ''");
+    assert.equal(result.check.amendment?.amendedCommands[2], "node -e 'console.log(1)'");
+    // Passing commands preserved exactly in private suite evidence.
+    assert.equal(
+      result.check.amendment?.amendedCommands[0],
+      failedTypecheckVerification.commands[0]!.command,
+    );
+    assert.equal(
+      result.check.amendment?.amendedCommands[2],
+      failedTypecheckVerification.commands[2]!.command,
+    );
+
+    // Zero Worker / Attempt / Task mutation; original verification immutable.
+    assert.deepEqual(store.getTask(fixture.task.id), taskBefore);
+    assert.deepEqual(store.getAttempt(fixture.attempt.id), attemptBefore);
+    assert.deepEqual(
+      store.listEvents(fixture.task.id)
+        .find((event) => event.sequence === fixture.verificationSequence),
+      verificationBefore,
+    );
+    assert.equal(store.listAttempts(fixture.task.id).length, 1);
+
+    // Public projection never leaks command text or private reason.
+    const view = projectRemediationVerifyResult(result, taskBefore.status);
+    const publicJson = JSON.stringify(view);
+    assert.doesNotMatch(publicJson, /typecheck|pass-secret|missing script|Replace mistaken/);
+    assert.equal(view.disposition?.acceptanceBasis, "amended-acceptance");
+    assert.equal(view.disposition?.amendedCommandCount, 1);
+    assert.equal(view.disposition?.reasonCode, "contradictory-acceptance");
+
+    const events = store.listEvents(fixture.task.id)
+      .filter((event) => event.type.startsWith("remediation."));
+    const publicEvidence = JSON.stringify(events.map((event) => event.payload));
+    assert.doesNotMatch(publicEvidence, /typecheck|pass-secret|missing script|Replace mistaken/);
+    assert.match(publicEvidence, /amended-acceptance/);
+    assert.match(publicEvidence, /contradictory-acceptance/);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("acceptance amendment rejects passing-command, duplicates, whitespace, and same-command", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-amend-reject-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const fixture = createFailedFixtureWithVerification(
+      store,
+      "t-amend-reject",
+      sourceDir,
+      failedTypecheckVerification,
+    );
+    recordMainReview(store, fixture.task.id, {
+      decision: "revise",
+      reason: "bound revise for amendment tests",
+      confirm: true,
+    });
+    const eventsBefore = store.listEvents(fixture.task.id).map((event) => event.id);
+
+    const base = {
+      taskId: fixture.task.id,
+      reason: "invalid amendment",
+      confirm: true as const,
+    };
+
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        ...base,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "node -e ''",
+            replacementCommand: "node -e 'process.exit(0)'",
+          }],
+        },
+      }, 30000),
+      /cannot replace a passing command/,
+    );
+
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        ...base,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [
+            {
+              originalCommand: "npm run typecheck",
+              replacementCommand: "node -e ''",
+            },
+            {
+              originalCommand: "npm run typecheck",
+              replacementCommand: "node -e '1'",
+            },
+          ],
+        },
+      }, 30000),
+      /appear only once/,
+    );
+
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        ...base,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "",
+          }],
+        },
+      }, 30000),
+      /replacementCommand must be 1-.*non-whitespace/,
+    );
+
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        ...base,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "   \t  ",
+          }],
+        },
+      }, 30000),
+      /replacementCommand must be 1-.*non-whitespace/,
+    );
+
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        ...base,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "npm run typecheck",
+          }],
+        },
+      }, 30000),
+      /must differ from originalCommand/,
+    );
+
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        ...base,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run missing",
+            replacementCommand: "node -e ''",
+          }],
+        },
+      }, 30000),
+      /exactly match a failed verification command/,
+    );
+
+    // No source copy / check / disposition side effects from rejected amendments.
+    assert.deepEqual(store.listEvents(fixture.task.id).map((event) => event.id), eventsBefore);
+    assert.equal(store.getRemediationChecks(fixture.task.id).length, 0);
+    assert.equal(store.getRemediationDisposition(fixture.task.id), undefined);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("acceptance amendment rejects originalCommand that failed in multiple slots", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-amend-dup-slot-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const duplicateFailed: VerificationResult = {
+      passed: false,
+      behaviorPassed: false,
+      policyPassed: true,
+      sourceCompatible: true,
+      commands: [
+        {
+          command: "npm run typecheck",
+          exitCode: 1,
+          stdout: "",
+          stderr: "fail-1",
+          durationMs: 1,
+          timedOut: false,
+        },
+        {
+          command: "node -e ''",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        },
+        {
+          command: "npm run typecheck",
+          exitCode: 1,
+          stdout: "",
+          stderr: "fail-2",
+          durationMs: 1,
+          timedOut: false,
+        },
+      ],
+      diffPath: "/tmp/diff",
+      sourceUnchanged: true,
+    };
+    const fixture = createFailedFixtureWithVerification(
+      store,
+      "t-amend-dup-slot",
+      sourceDir,
+      duplicateFailed,
+    );
+    recordMainReview(store, fixture.task.id, {
+      decision: "revise",
+      reason: "duplicate failed slots",
+      confirm: true,
+    });
+    const eventsBefore = store.listEvents(fixture.task.id).map((event) => event.id);
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        taskId: fixture.task.id,
+        reason: "cannot target ambiguous failed slots",
+        confirm: true,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "npm run build",
+          }],
+        },
+      }, 30000),
+      /exactly one failed verification slot/,
+    );
+    assert.deepEqual(store.listEvents(fixture.task.id).map((event) => event.id), eventsBefore);
+    assert.equal(store.getRemediationChecks(fixture.task.id).length, 0);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("acceptance amendment rejects a command duplicated across failed and passing slots", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-amend-mixed-slot-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const mixedDuplicate: VerificationResult = {
+      passed: false,
+      behaviorPassed: false,
+      policyPassed: true,
+      sourceCompatible: true,
+      commands: [
+        {
+          command: "npm run typecheck", exitCode: 1, stdout: "", stderr: "failed",
+          durationMs: 1, timedOut: false,
+        },
+        {
+          command: "npm run typecheck", exitCode: 0, stdout: "", stderr: "",
+          durationMs: 1, timedOut: false,
+        },
+      ],
+      diffPath: "/tmp/diff",
+      sourceUnchanged: true,
+    };
+    const fixture = createFailedFixtureWithVerification(
+      store,
+      "t-amend-mixed-slot",
+      sourceDir,
+      mixedDuplicate,
+    );
+    recordMainReview(store, fixture.task.id, {
+      decision: "revise",
+      reason: "mixed duplicate slots",
+      confirm: true,
+    });
+    const eventsBefore = store.listEvents(fixture.task.id).map((event) => event.id);
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        taskId: fixture.task.id,
+        reason: "command selector is ambiguous",
+        confirm: true,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "npm run build",
+          }],
+        },
+      }, 30000),
+      /exactly one failed verification slot/,
+    );
+    assert.deepEqual(store.listEvents(fixture.task.id).map((event) => event.id), eventsBefore);
+    assert.equal(store.getRemediationChecks(fixture.task.id).length, 0);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI amendment file parse accepts valid private file and rejects invalid shapes", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-cli-amend-"));
+  try {
+    // Executable CLI path: read file → JSON.parse → shared parser (same as cli.ts).
+    const validPath = path.join(home, "valid-amendment.json");
+    await writeFile(validPath, JSON.stringify({
+      verificationEventSequence: 7,
+      reasonCode: "contradictory-acceptance",
+      replacements: [{
+        originalCommand: "npm run typecheck",
+        replacementCommand: "npm run build",
+      }],
+    }), "utf8");
+    const validRaw = await readFile(validPath, "utf8");
+    const validParsed: unknown = JSON.parse(validRaw);
+    const amendment = parseRemediationAmendmentInput(validParsed);
+    assert.ok(amendment !== undefined);
+    assert.equal(amendment!.verificationEventSequence, 7);
+    assert.equal(amendment!.replacements[0]!.replacementCommand, "npm run build");
+
+    // Invalid JSON object shape rejected locally before daemon.
+    assert.throws(
+      () => parseRemediationAmendmentInput(["not", "an", "object"]),
+      /amendment must be a non-null object/,
+    );
+
+    // Unknown fields: fixed privacy-safe error, never echoes names or paths.
+    assert.throws(
+      () => parseRemediationAmendmentInput({
+        verificationEventSequence: 1,
+        reasonCode: "contradictory-acceptance",
+        replacements: [{ originalCommand: "a", replacementCommand: "b" }],
+        sourcePath: "/Users/secret/project",
+      }),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /^amendment contains unknown fields$/);
+        assert.doesNotMatch(message, /sourcePath|Users\/secret/);
+        return true;
+      },
+    );
+
+    // Oversized command rejected at CLI parse bound.
+    assert.throws(
+      () => parseRemediationAmendmentInput({
+        verificationEventSequence: 1,
+        reasonCode: "contradictory-acceptance",
+        replacements: [{
+          originalCommand: "ok",
+          replacementCommand: "x".repeat(REMEDIATION_COMMAND_MAX_LENGTH + 1),
+        }],
+      }),
+      /replacementCommand must be 1-/,
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("executable CLI rejects a private amendment locally without starting the daemon", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-cli-exec-"));
+  try {
+    const amendmentPath = path.join(home, "amendment.json");
+    await writeFile(amendmentPath, JSON.stringify({
+      verificationEventSequence: 1,
+      reasonCode: "contradictory-acceptance",
+      replacements: [{ originalCommand: "a", replacementCommand: "b" }],
+      privateCommandMarker: "must-not-be-echoed",
+    }), "utf8");
+    const result = spawnSync(process.execPath, [
+      "--disable-warning=ExperimentalWarning",
+      "--import", "tsx",
+      "src/cli.ts",
+      "remediate", "verify", "not-used",
+      "--reason", "bounded Main correction",
+      "--confirm",
+      "--amendment", amendmentPath,
+      "--json",
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, FORKLIGHT_HOME: path.join(home, "forklight-home") },
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    assert.notEqual(result.status, 0);
+    assert.match(output, /amendment contains unknown fields/);
+    assert.doesNotMatch(output, /privateCommandMarker|must-not-be-echoed/);
+    assert.equal(existsSync(path.join(home, "forklight-home")), false,
+      "local CLI validation must fail before daemon bootstrap or state mutation");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stored amendment evidence fails closed on corrupt replacement or count mismatch", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-store-amend-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const task = taskRecord("t-store-amend", "failed", sourceDir, ["node -e ''"]);
+    store.createTask(task);
+
+    // Deep validation: empty replacement text fails closed on read.
+    const badCheckId = "check-bad-replacement";
+    const badRecord = {
+      id: badCheckId,
+      taskId: task.id,
+      status: "passed" as const,
+      commands: [{
+        command: "node -e ''",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+      }],
+      amendment: {
+        verificationEventSequence: 1,
+        reasonCode: "contradictory-acceptance" as const,
+        replacements: [{
+          originalCommand: "npm run typecheck",
+          replacementCommand: "   ",
+        }],
+        amendedCommands: ["node -e ''"],
+      },
+      createdAt: "2026-07-26T00:00:00.000Z",
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = (store as any).db;
+    db.prepare(
+      `INSERT INTO remediation_checks (id, task_id, status, commands_json, record_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      badCheckId,
+      task.id,
+      "passed",
+      JSON.stringify(badRecord.commands),
+      JSON.stringify(badRecord),
+      badRecord.createdAt,
+    );
+    assert.throws(
+      () => store.getRemediationChecks(task.id),
+      /Corrupt remediation check/,
+    );
+
+    // amendedCommandCount must equal replacements.length on save.
+    const okCheck: RemediationCheckRecord = {
+      id: "check-count-mismatch",
+      taskId: task.id,
+      status: "passed",
+      commands: [{
+        command: "node -e ''",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+      }],
+      amendment: {
+        verificationEventSequence: 1,
+        reasonCode: "contradictory-acceptance",
+        replacements: [{
+          originalCommand: "npm run typecheck",
+          replacementCommand: "npm run build",
+        }],
+        amendedCommands: ["npm run build"],
+      },
+      createdAt: "2026-07-26T01:00:00.000Z",
+    };
+    assert.throws(
+      () => store.saveRemediationOutcome({
+        ...okCheck,
+        id: "check-suite-count-mismatch",
+        amendment: {
+          ...okCheck.amendment!,
+          amendedCommands: ["npm run build", "node -e ''"],
+        },
+      }, {
+        status: "verified-repaired-delivered",
+        checkId: "check-suite-count-mismatch",
+        createdAt: okCheck.createdAt,
+        acceptanceBasis: "amended-acceptance",
+        amendedCommandCount: 1,
+        reasonCode: "contradictory-acceptance",
+      }),
+      /Invalid amended-acceptance remediation outcome/,
+    );
+    assert.throws(
+      () => store.saveRemediationOutcome(okCheck, {
+        status: "verified-repaired-delivered",
+        checkId: okCheck.id,
+        createdAt: okCheck.createdAt,
+        acceptanceBasis: "amended-acceptance",
+        amendedCommandCount: 2, // mismatch with replacements.length === 1
+        reasonCode: "contradictory-acceptance",
+      }),
+      /Invalid amended-acceptance remediation outcome/,
+    );
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("acceptance amendment rejects stale review or verification binding", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-amend-stale-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const fixture = createFailedFixtureWithVerification(
+      store,
+      "t-amend-stale",
+      sourceDir,
+      failedTypecheckVerification,
+    );
+    recordMainReview(store, fixture.task.id, {
+      decision: "revise",
+      reason: "first revise",
+      confirm: true,
+    });
+
+    // Stale verification sequence in the amendment itself.
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        taskId: fixture.task.id,
+        reason: "stale sequence",
+        confirm: true,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence + 99,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "node -e ''",
+          }],
+        },
+      }, 30000),
+      /stale verification event/,
+    );
+
+    // Newer verification after the amendment was prepared.
+    store.addEvent(
+      fixture.task.id,
+      fixture.attempt.id,
+      "verification.completed",
+      "Newer verification",
+      failedTypecheckVerification,
+    );
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        taskId: fixture.task.id,
+        reason: "stale after new verification",
+        confirm: true,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "node -e ''",
+          }],
+        },
+      }, 30000),
+      /stale verification event/,
+    );
+
+    assert.equal(store.getRemediationChecks(fixture.task.id).length, 0);
+    assert.equal(store.listAttempts(fixture.task.id).length, 1);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("failed amended check records private evidence without final disposition", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-amend-fail-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const fixture = createFailedFixtureWithVerification(
+      store,
+      "t-amend-fail",
+      sourceDir,
+      failedTypecheckVerification,
+    );
+    recordMainReview(store, fixture.task.id, {
+      decision: "revise",
+      reason: "amendment still needs a working replacement",
+      confirm: true,
+    });
+    const result = await verifyMainRemediation(
+      store,
+      {
+        taskId: fixture.task.id,
+        reason: "replacement still fails",
+        confirm: true,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "node -e 'process.exit(7)'",
+          }],
+        },
+      },
+      30000,
+    );
+    assert.equal(result.check.status, "failed");
+    assert.equal(result.disposition, undefined);
+    assert.equal(store.getRemediationDisposition(fixture.task.id), undefined);
+    assert.equal(store.getRemediationChecks(fixture.task.id).length, 1);
+    assert.equal(store.getRemediationChecks(fixture.task.id)[0]!.amendment?.reasonCode,
+      "contradictory-acceptance");
+    assert.equal(store.getTask(fixture.task.id).status, "failed");
+    assert.equal(store.listAttempts(fixture.task.id).length, 1);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("normal remediation without amendment keeps original-acceptance behavior", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-no-amend-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const task = taskRecord("t-no-amend", "failed", sourceDir, ["node -e ''"]);
+    store.createTask(task);
+    const result = await verifyMainRemediation(
+      store,
+      { taskId: task.id, reason: "legacy path", confirm: true },
+      30000,
+    );
+    assert.equal(result.check.status, "passed");
+    assert.equal(result.disposition?.status, "verified-repaired-delivered");
+    assert.equal(result.disposition?.acceptanceBasis, "original-acceptance");
+    assert.equal(result.disposition?.amendedCommandCount, undefined);
+    assert.equal(result.check.amendment, undefined);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("acceptance amendment requires bound Main revise even on failed Tasks", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-amend-noreview-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const fixture = createFailedFixtureWithVerification(
+      store,
+      "t-amend-noreview",
+      sourceDir,
+      failedTypecheckVerification,
+    );
+    const eventsBefore = store.listEvents(fixture.task.id).map((event) => event.id);
+    // No Main review — amendment must fail closed before any check starts.
+    await assert.rejects(
+      verifyMainRemediation(store, {
+        taskId: fixture.task.id,
+        reason: "amend without review",
+        confirm: true,
+        amendment: {
+          verificationEventSequence: fixture.verificationSequence,
+          reasonCode: "contradictory-acceptance",
+          replacements: [{
+            originalCommand: "npm run typecheck",
+            replacementCommand: "node -e ''",
+          }],
+        },
+      }, 30000),
+      /requires a valid Main revise review/,
+    );
+    assert.deepEqual(store.listEvents(fixture.task.id).map((event) => event.id), eventsBefore);
+    assert.equal(store.getRemediationChecks(fixture.task.id).length, 0);
+    assert.equal(store.getRemediationDisposition(fixture.task.id), undefined);
+    assert.equal(store.listAttempts(fixture.task.id).length, 1);
   } finally {
     store.close();
     rmSync(home, { recursive: true, force: true });

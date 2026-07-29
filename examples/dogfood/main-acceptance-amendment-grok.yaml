@@ -1,0 +1,177 @@
+version: 2
+name: Main corrects a mistaken acceptance command without rerunning the Worker
+project: /Users/yijunwang/code/forklight
+taskClass: main-acceptance-amendment
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: When Main wrote an invalid acceptance command but the retained Worker candidate is useful, let Main explicitly replace only the failed command, independently verify the current source with zero Worker calls, preserve the original machine failure, and show the user that final delivery used an amended acceptance contract.
+  presentation:
+    summary: Main 写错验收命令时，可以保留 Worker 成果、定向修正验收并独立复验，不整单重跑。
+    language: zh-CN
+  context:
+    - Task 00b0cd43-eeba-40d1-9d6e-c5b5e6c73c1b retained a useful Grok candidate, but Main mistakenly declared npm run typecheck even though this repository exposes npm run build as its type/build command.
+    - Existing remediation verification can verify current source only with the original immutable command list, so it cannot represent this honest contract-author correction.
+    - Existing candidate reverify and Worker correction intentionally forbid changing acceptance commands; keep those paths unchanged.
+    - The product already preserves machine Task failure while separately projecting verified-repaired-delivered. Extend that truth model instead of rewriting Task, Attempt, or original verification history.
+  inScope:
+    - Add an explicit optional acceptance amendment to Main remediation verification through core, CLI, daemon, MCP, and safe Hub projections.
+    - Use a one-to-one replacement list bound to the latest independent verification event. Each original command must be an exact command that failed in that event, appear only once, and receive one non-empty bounded replacement.
+    - Derive the amended suite by replacing failed commands in place. Every originally passing command remains byte-for-byte identical and in the same order; commands cannot be dropped or reordered.
+    - Require the latest valid Main review to be revise and bound to the current Attempt plus the exact verification event before an amendment can run.
+    - Run the amended suite only against an isolated copy of current source, with existing verifier environment, timeout, cleanup, single-flight, and explicit confirmation boundaries.
+    - Persist private amended command evidence with the remediation check, and expose only a compact acceptance basis, counts, timestamp, and privacy-safe contradictory-acceptance reason code.
+    - A passing amended check creates the existing verified-repaired-delivered disposition with amended-acceptance basis while leaving original Task status, Attempt, verification, Candidate, and patch digest unchanged.
+    - Make Task Detail explain in English and Chinese that Main corrected its own acceptance definition, the Worker was not rerun, original failure remains visible, and final current source passed the amended independent checks.
+    - Ensure statistics keep machine failure visible but do not treat a passing amended-acceptance delivery as model-quality failure.
+    - Add focused tests for eligibility, exact binding, preservation of passed commands, privacy, CLI/daemon/MCP request shapes, Hub copy, statistics impact, and zero Worker/Attempt mutation.
+  outOfScope:
+    - Editing the stored Task Contract, original acceptance commands, original verification result, Task status, Attempt history, Candidate Revision, Diff, Integration authority, source files, or Git history.
+    - Dropping, reordering, weakening, or replacing an originally passing command; adding arbitrary extra commands; amending policy/source-compatibility failures; or accepting generic free-text as structured evidence.
+    - Automatically inferring that a command is wrong from stderr, automatically proposing replacements, automatically running remediation, retrying a Worker, creating a new Task, adapting policy, integrating, committing, or pushing.
+    - Changing normal remediation without an amendment, candidate reverify, Worker correction, competition, routing thresholds, Provider behavior, or Hub layout.
+  executionSteps:
+    - Trace Main remediation eligibility, private check persistence, CLI/daemon/MCP exchange receipts, Task decision projection, Hub final-delivery copy, and statistics before editing.
+    - "Define the smallest immutable amendment shape: exact verification event sequence plus one-to-one failed-command replacements and the fixed contradictory-acceptance reason code."
+    - Validate every invariant before copying source, running commands, or persisting a started event. Reject stale reviews, stale verification, duplicates, passing-command replacement, missing failed commands, empty replacements, and duplicate passing dispositions.
+    - Reuse the existing isolated current-source remediation verifier and preserve normal remediation behavior when no amendment is supplied.
+    - Persist only bounded private audit evidence; public projections must never expose commands, stdout, stderr, paths, reason text, prompts, or replacement content.
+    - Add semantic tests, run every acceptance command once, and stop after one Candidate. Return unresolved security or authority questions to Main rather than weakening the boundaries.
+  deliverables:
+    - Durable, explicitly authorized amended-acceptance remediation verification.
+    - CLI, daemon, and MCP paths that do not leak commands into exchange receipts or public results.
+    - Plain-language bilingual final-delivery explanation and honest model statistics.
+    - Regression tests proving the original failure remains immutable and no Worker is called.
+  modules:
+    - name: Acceptance amendment authority
+      responsibility: Validate that Main may replace only exact commands that failed in the latest bound verification.
+      consumes:
+        - Failed or interrupted Task, current Attempt, latest verification event, latest Main review, explicit confirmation, bounded reason, and replacement mapping.
+      produces:
+        - A validated amended command suite or a privacy-safe rejection before execution.
+      boundaries:
+        - Passing commands stay exact and ordered; original Task evidence is immutable.
+    - name: Isolated amended remediation
+      responsibility: Run the validated amended suite against current source without a Worker or source mutation.
+      consumes:
+        - Validated amended suite, existing copy exclusions, verifier environment, and timeout.
+      produces:
+        - Private remediation check plus optional amended-acceptance delivery disposition.
+      boundaries:
+        - Existing cleanup, single-flight, duplicate-pass, and current-source isolation remain authoritative.
+    - name: Main control surfaces
+      responsibility: Carry an amendment safely from Main and project only compact evidence.
+      consumes:
+        - CLI amendment file or MCP structured input, daemon protocol, stored check/disposition.
+      produces:
+        - Compact CLI/MCP response, Task decision evidence, and bilingual Hub explanation.
+      boundaries:
+        - No command text or amendment-file path in public Task/Hub/statistics or exchange receipts.
+    - name: Outcome statistics
+      responsibility: Preserve machine failure while preventing Main-authored acceptance mistakes from becoming model-quality evidence after verified amended delivery.
+      consumes:
+        - Original failure and compact amended-acceptance disposition.
+      produces:
+        - Separate machine failure, Main-repaired delivery, and non-model contract evidence.
+      boundaries:
+        - No historical success-rate rewrite and no model ranking mutation.
+  callChain:
+    - Main reviews a failed candidate, records revise against the exact Attempt and verification, and writes a private amendment file replacing only the mistaken failed command.
+    - CLI reads and validates the file locally, sends the bounded structured amendment to the matched Daemon, and records only lengths/counts in exchange evidence.
+    - Core confirms exact review/verification binding, derives the amended suite while preserving all passing commands, then verifies an isolated copy of current source.
+    - Store keeps the private check and compact amended-acceptance disposition without changing Worker history or source.
+    - "Task Detail and statistics show the dual truth: original machine failure remains, Main corrected its acceptance definition, current source independently passed, and no Worker rerun occurred."
+  scenarios:
+    - name: Mistaken npm script is replaced once
+      given: The latest verification failed only npm run typecheck, all other commands passed, and the latest bound Main review is revise.
+      when: Main explicitly replaces that exact command with npm run build and confirms amended remediation.
+      then: Every passing command remains exact and ordered, the amended suite passes in isolation, and verified-repaired-delivered records amended-acceptance basis with zero new Attempts.
+    - name: Main tries to drop or replace a passing check
+      given: The latest verification contains both passing and failing commands.
+      when: The amendment targets a passing command, omits identity binding, duplicates a target, or supplies an empty replacement.
+      then: ForkLight rejects before copying source, running Shell, persisting a check, or changing any Task evidence.
+    - name: Review or verification moved
+      given: A newer Attempt, verification event, or Main review exists after the amendment was prepared.
+      when: Main submits the stale amendment.
+      then: ForkLight rejects it as stale and asks Main to inspect current evidence; no Worker or command runs.
+    - name: Amended check still fails
+      given: The amendment is valid but current source fails one amended command.
+      when: Isolated verification completes.
+      then: A failed private remediation check is recorded without final disposition, automatic retry, Worker, Integration, or model-quality rewrite.
+    - name: Public surfaces stay understandable and private
+      given: Commands, outputs, source paths, and Main reason contain sensitive-looking material.
+      when: CLI/MCP summaries, Task list/detail, Hub, events, and statistics are projected.
+      then: They expose only fixed plain-language outcome, basis, counts, reason code, check id, and timestamp.
+  risks:
+    - A replacement could silently weaken acceptance, so only failed commands may be replaced, all passed commands remain exact, the amendment is explicitly labeled, and original failure stays visible.
+    - Stale evidence could verify the wrong candidate, so current Attempt, latest verification sequence, and latest revise review must bind exactly before execution.
+    - Command text can contain secrets or local paths, so it remains private and never enters Hub, public events, exchange receipts, or statistics.
+    - Extending disposition types can leave older records unreadable, so new fields are optional on read and legacy original-acceptance remediation keeps its existing meaning.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 1600
+
+advancedPolicyOverride:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-remediation.ts
+    - src/core/types.ts
+    - src/core/task-decision-view.ts
+    - src/core/statistics.ts
+    - src/state/store.ts
+    - src/cli.ts
+    - src/cli/exchange-receipts.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/daemon/protocol.ts
+    - src/daemon/client.ts
+    - src/mcp/server.ts
+    - src/mcp/exchange-receipts.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/main-remediation.test.ts
+    - tests/daemon.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+    - tests/statistics.test.ts
+
+acceptance:
+  criteria:
+    - Main may amend only exact failed commands from the latest verification after an exact bound revise review; passing commands and original evidence remain immutable.
+    - A passing amended suite records verified-repaired-delivered with amended-acceptance basis while adding no Worker Attempt, model usage, source mutation, Integration, commit, or push.
+    - CLI, daemon, and MCP carry the amendment without exposing command text, paths, reason text, or outputs in public projections or exchange receipts.
+    - Task Detail explains the dual outcome in plain English and Chinese, and statistics preserve machine failure without blaming model quality after verified amended delivery.
+    - Normal remediation, candidate reverify, Worker correction, legacy records, and existing Integration authority remain compatible.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-remediation.test.ts tests/daemon.test.ts tests/mcp.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts tests/statistics.test.ts
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check
+
+deliveryProfileId: forklight-self-upgrade

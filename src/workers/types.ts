@@ -44,6 +44,12 @@ export interface WorkerExecutionResult {
   runtimeCostEstimateUsd?: number;
   /** Content-free evidence for a limit enforced inside the Worker adapter. */
   policyLimit?: import("../core/types.js").PolicyLimitEvidence;
+  /**
+   * Durable terminal failure class written by the adapter (e.g. connectivity).
+   * Runner persists this on the terminal worker.failed payload; public surfaces
+   * must never reconstruct it from raw stderr.
+   */
+  failureCategory?: import("../core/worker-failure.js").WorkerFailureCategory;
 }
 
 export interface WorkerRunHooks {

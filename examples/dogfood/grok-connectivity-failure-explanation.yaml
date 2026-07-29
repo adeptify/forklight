@@ -1,0 +1,162 @@
+version: 2
+name: Explain Grok connectivity failures without blaming the model
+project: /Users/yijunwang/code/forklight
+taskClass: grok-connectivity-failure-explanation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    Turn a measured Grok service timeout or connection refusal into durable,
+    privacy-safe connectivity evidence and a plain-language Task Detail
+    explanation, so a user understands why a working Grok TUI can coexist with
+    a failing ForkLight Daemon and what to check next.
+  presentation:
+    summary: Grok 网络失败要说明 TUI 与 Daemon 环境可能不同，并给出安全恢复动作。
+    language: zh-CN
+  context:
+    - A real failed Grok Task could not reach cli-chat-proxy.grok.com because the old Daemon did not inherit HTTP_PROXY, HTTPS_PROXY, or NO_PROXY, while the manually launched Grok TUI did.
+    - The copied local Grok authentication matched the operator authentication, so that incident was connectivity rather than authentication or model quality.
+    - Current Task failure surfaces understand authentication, budget, runtime, verification, and contract-infeasible, but do not have a durable Worker connectivity category.
+    - Grok stderr is retained privately in the Attempt log. Public Task fields and Hub copy must use a bounded safe summary, never raw stderr, proxy values, credentials, local paths, or endpoint details.
+  inScope:
+    - Add one durable Worker failure category for Provider/runtime connectivity failures.
+    - Detect the measured Grok timeout/connection-refusal family from terminal result and stderr at the Grok adapter boundary.
+    - Return a bounded safe error and category from the adapter, and make the runner persist that category on the terminal Worker failure event.
+    - Project the category through Task decision/list/detail surfaces.
+    - Explain in English and Chinese that a working TUI and the Daemon may have different network/proxy environments, then recommend checking the Daemon environment, restarting it from the intended environment when appropriate, and running one bounded smoke check.
+    - Treat this connectivity failure as non-model Provider/infrastructure evidence in statistics and routing.
+    - Add focused semantic tests for classification, durable projection, routing impact, bilingual copy, and privacy.
+  outOfScope:
+    - Reading, storing, editing, or displaying proxy values or credentials.
+    - Automatically importing shell configuration, changing system proxy settings, restarting the Daemon, retrying a Task, launching a smoke Task, or mutating Worker routing/settings.
+    - Reclassifying a generic no-progress watchdog timeout as connectivity without network evidence.
+    - Provider probe redesign, authentication redesign, Grok sandbox changes, Hub layout redesign, competition, Integration behavior, commit, or push.
+  executionSteps:
+    - Trace Grok stderr/result handling, WorkerExecutionResult, runner terminal events, WorkerFailureCategory, statistics, Task journey projection, and both locale maps before editing.
+    - Add the smallest shared connectivity category and ensure every public projection remains content-bounded.
+    - Classify only explicit network evidence such as the measured model/settings fetch timeouts, connection refused, or equivalent transport failures; ordinary model errors and no-progress watchdog failures keep their existing meaning.
+    - Preserve private raw logs for audit while replacing the public Task error/event summary with fixed safe copy.
+    - Add executable tests that prove the real timeout family is connectivity, the failure is non-model evidence, ordinary runtime/no-progress failures do not change category, and secret-like proxy values never reach public evidence or UI copy.
+    - Run every acceptance command and stop after one Candidate. Do not retry or broaden scope to fix unrelated baseline failures.
+  deliverables:
+    - Durable connectivity classification from Grok adapter through Task surfaces.
+    - Plain-language bilingual cause and next-action presentation.
+    - Focused regression tests with privacy and non-model-routing assertions.
+  modules:
+    - name: Grok failure boundary
+      responsibility: Convert explicit transport evidence into a safe result without leaking raw stderr.
+      consumes:
+        - Grok terminal result, redacted private stderr, exit code, watchdog state, and interruption state.
+      produces:
+        - WorkerExecutionResult with a safe error and optional connectivity category.
+      boundaries:
+        - Interruption and no-progress policy limits keep precedence; raw network details remain private.
+    - name: Durable Task evidence
+      responsibility: Persist and project the connectivity category without changing Task success or retry semantics.
+      consumes:
+        - WorkerExecutionResult and existing terminal Task/Attempt flow.
+      produces:
+        - Classified worker.failed evidence and Task decision/list/detail projection.
+      boundaries:
+        - No automatic retry, adaptation, routing mutation, or fabricated success.
+    - name: User explanation and routing evidence
+      responsibility: Tell the user what happened and exclude the incident from model-quality scoring.
+      consumes:
+        - Safe connectivity category only, never raw stderr or environment values.
+      produces:
+        - Bilingual Task Detail explanation, one recovery path, and non-model Provider/infrastructure statistics.
+      boundaries:
+        - Explain that environment mismatch is possible, not that every connectivity failure is definitely a proxy mismatch.
+  callChain:
+    - Grok child exits after explicit service transport failure.
+    - Grok adapter recognizes bounded connectivity evidence and returns safe classified failure.
+    - Runner persists Attempt/Task failure plus classified terminal event.
+    - Task decision and Hub journey consume the category and show plain-language cause and next action.
+    - Statistics map the incident to Provider/infrastructure non-model evidence, so routing does not punish Grok quality.
+  scenarios:
+    - name: TUI works while Daemon transport fails
+      given: Grok stderr reports model/settings fetch timeout or connection refusal.
+      when: The Worker exits unsuccessfully.
+      then: The Task exposes connectivity, safe cause text, and a Daemon network-environment recovery path without claiming the exact proxy cause unless separately measured.
+    - name: Private proxy material stays private
+      given: Raw stderr contains a proxy URL, token-like text, endpoint, or local detail.
+      when: Public Task evidence and Hub presentation are produced.
+      then: None of those raw values appear; only fixed safe copy and category are exposed.
+    - name: No-progress remains a policy failure
+      given: Grok produces no effective implementation progress but no explicit network transport evidence.
+      when: The watchdog stops it.
+      then: Existing no-progress behavior remains unchanged and is not labeled connectivity.
+    - name: Routing does not blame the model
+      given: A failed Attempt has durable connectivity evidence.
+      when: Statistics and model-routing evidence are derived.
+      then: The failure is visible as Provider/infrastructure and has non-model impact.
+  risks:
+    - Broad text matching could mislabel model or policy failures, so classification must require explicit transport/network evidence and preserve watchdog/interruption precedence.
+    - Raw stderr can contain sensitive values, so public summaries must be fixed strings and tests must include secret-like fixtures.
+    - Adding a union member can leave a projection unmapped, so focused typecheck and bilingual surface tests are required.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 1000
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workers/grok.ts
+    - src/workers/types.ts
+    - src/core/runner.ts
+    - src/core/worker-failure.ts
+    - src/core/types.ts
+    - src/core/statistics.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/worker-runtime.test.ts
+    - tests/task-surface.test.ts
+    - tests/statistics.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Explicit Grok service timeouts/connection refusals become durable connectivity failures with fixed safe public summaries.
+    - Generic runtime errors, interruptions, and no-progress watchdog failures retain their existing categories and behavior.
+    - Task Detail explains the TUI/Daemon environment distinction and one safe recovery path in English and Chinese without proxy values, credentials, endpoints, raw stderr, or local paths.
+    - Statistics and routing treat connectivity as non-model Provider/infrastructure evidence.
+    - No automatic retry, restart, proxy mutation, Worker selection change, Integration, commit, or push is introduced.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-runtime.test.ts tests/task-surface.test.ts tests/statistics.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check

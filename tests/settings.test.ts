@@ -837,6 +837,9 @@ test("model routing defaults match spec", () => {
   assert.equal(s.modelRouting.weights.duration, 0);
   assert.equal(s.modelRouting.weights.budgetReliability, 0);
   assert.equal(s.modelRouting.missingEvidenceMode, "flexible");
+  assert.equal(s.modelRouting.familyMinRelevantSamples, 5);
+  assert.deepEqual(s.modelRouting.competitionTriggersEnabled, []);
+  assert.equal(s.modelRouting.defaultCompetitionCandidates, 2);
 });
 
 test("model routing partial update preserves other fields", async () => {

@@ -460,6 +460,12 @@ interface FinalDeliverySection {
   /** Verified-repaired-delivered evidence when present (compact shape only). */
   remediationDisposition?: {
     status: string;
+    /** Optional; absent means original-acceptance (legacy). */
+    acceptanceBasis?: "original-acceptance" | "amended-acceptance";
+    amendedCommandCount?: number;
+    reasonCode?: "contradictory-acceptance";
+    checkId?: string;
+    createdAt?: string;
   };
   /** Integration operation state when available. */
   integration?: {
@@ -773,7 +779,23 @@ export function buildSafeTaskJourney(
 
   const disp = d.remediationDisposition as Record<string, unknown> | undefined;
   const remediationDisposition = disp?.status === "verified-repaired-delivered"
-    ? { status: "verified-repaired-delivered" as const }
+    ? {
+        status: "verified-repaired-delivered" as const,
+        ...(disp.acceptanceBasis === "amended-acceptance"
+          || disp.acceptanceBasis === "original-acceptance"
+          ? { acceptanceBasis: disp.acceptanceBasis as "original-acceptance" | "amended-acceptance" }
+          : {}),
+        ...(typeof disp.amendedCommandCount === "number"
+          && Number.isSafeInteger(disp.amendedCommandCount)
+          && disp.amendedCommandCount >= 1
+          ? { amendedCommandCount: disp.amendedCommandCount }
+          : {}),
+        ...(disp.reasonCode === "contradictory-acceptance"
+          ? { reasonCode: "contradictory-acceptance" as const }
+          : {}),
+        ...(typeof disp.checkId === "string" ? { checkId: disp.checkId } : {}),
+        ...(typeof disp.createdAt === "string" ? { createdAt: disp.createdAt } : {}),
+      }
     : undefined;
 
   const integ = d.integration as Record<string, unknown> | undefined;
@@ -1088,6 +1110,13 @@ function resolveCause(
       category: "runtime",
     };
   }
+  if (failureCategory === "connectivity") {
+    return {
+      what: "failed",
+      why: "the Worker could not reach the Provider service over the network; a working interactive TUI can still coexist with a failing Daemon Worker because their network environments may differ — this is infrastructure connectivity, not model quality",
+      category: "connectivity",
+    };
+  }
   if (failureCategory === "contract-infeasible") {
     return {
       what: "failed",
@@ -1129,6 +1158,8 @@ function resolveNextAction(
   if (failureCategory === "authentication") return "credentials";
   if (failureCategory === "budget") return "budget";
   if (failureCategory === "runtime") return "runtime";
+  // Connectivity: check Daemon network environment; do not blame model quality.
+  if (failureCategory === "connectivity") return "connectivity";
   // Contract-infeasible: return control to Main to revise the contract, not retry.
   if (failureCategory === "contract-infeasible") return "revise-contract";
   return "investigate";
@@ -1913,7 +1944,7 @@ export class HubServer {
         this.sendJson(req, res, 422, { error: "taskClass must contain 1 to 200 characters" });
         return;
       }
-      const candidates: Array<{ provider: string; model: string }> = [];
+      const candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }> = [];
       try {
         if (!Array.isArray(body.candidates)) {
           this.sendJson(req, res, 422, { error: "candidates must be an array" });
@@ -1942,13 +1973,22 @@ export class HubServer {
             this.sendJson(req, res, 422, { error: `candidates[${i}].model must contain 1 to 200 characters` });
             return;
           }
-          const dedupKey = `${provider}\0${model}`;
+          const runtime = typeof c.runtime === "string" && c.runtime.trim()
+            ? c.runtime.trim() : undefined;
+          const effort = typeof c.effort === "string" && c.effort.trim()
+            ? c.effort.trim() : undefined;
+          if ((runtime === undefined) !== (effort === undefined)) {
+            this.sendJson(req, res, 422, { error: `candidates[${i}] must include both runtime and effort, or neither` });
+            return;
+          }
+          const dedupKey = `${provider}\0${model}`
+            + (runtime !== undefined ? `\0${runtime}\0${effort}` : "");
           if (seen.has(dedupKey)) {
             this.sendJson(req, res, 422, { error: `Duplicate candidate at index ${i}: ${provider} / ${model}` });
             return;
           }
           seen.add(dedupKey);
-          candidates.push({ provider, model });
+          candidates.push({ provider, model, ...(runtime === undefined ? {} : { runtime, effort }) });
         }
       } catch (error) {
         this.sendJson(req, res, 422, {
@@ -1958,10 +1998,27 @@ export class HubServer {
       }
       try {
         // Bridge is strictly read-only — calls daemon model_routing only.
-        const advisory = await this.daemonCall<Record<string, unknown>>("model_routing", {
-          taskClass,
-          candidates,
-        });
+        const daemonParams: Record<string, unknown> = { taskClass, candidates };
+        const taskFamily = typeof body.taskFamily === "string" && body.taskFamily.trim()
+          ? body.taskFamily.trim() : undefined;
+        if (taskFamily) daemonParams.taskFamily = taskFamily;
+        const competitionIntent = body.competitionIntent === "none"
+          || body.competitionIntent === "consider"
+          || body.competitionIntent === "required"
+          ? body.competitionIntent : undefined;
+        if (competitionIntent) daemonParams.competitionIntent = competitionIntent;
+        const validTriggers = new Set(["critical", "multiple-plausible-solutions", "new-family", "user-requested"]);
+        const competitionTriggers = Array.isArray(body.competitionTriggers)
+          ? body.competitionTriggers.filter((t): t is string => typeof t === "string").map((t) => t.trim()).filter((t) => t.length > 0)
+          : undefined;
+        if (competitionTriggers?.some((trigger) => !validTriggers.has(trigger))) {
+          this.sendJson(req, res, 422, { error: "competitionTriggers contains an unsupported Main reason" });
+          return;
+        }
+        if (competitionTriggers && competitionTriggers.length > 0) {
+          daemonParams.competitionTriggers = competitionTriggers;
+        }
+        const advisory = await this.daemonCall<Record<string, unknown>>("model_routing", daemonParams);
         this.sendJson(req, res, 200, { ok: true, advisory });
       } catch (error) {
         this.sendJson(req, res, 503, {
@@ -2122,11 +2179,18 @@ export class HubServer {
           limit: 50,
         });
         const tasks = (Array.isArray(surfaces) ? surfaces : []).map((t) => {
-          // Compact final-delivery disposition (status, checkId, createdAt only).
-          // Never expose reason, command text/output, prompt, or diff payloads here.
+          // Compact final-delivery disposition only.
+          // Never expose reason text, command text/output, prompt, paths, or diffs.
           const disposition = t.remediationDisposition;
           let remediationDisposition:
-            | { status: string; checkId: string; createdAt: string }
+            | {
+                status: string;
+                checkId: string;
+                createdAt: string;
+                acceptanceBasis?: "original-acceptance" | "amended-acceptance";
+                amendedCommandCount?: number;
+                reasonCode?: "contradictory-acceptance";
+              }
             | undefined;
           if (
             disposition !== null
@@ -2135,11 +2199,30 @@ export class HubServer {
             && typeof (disposition as { checkId?: unknown }).checkId === "string"
             && typeof (disposition as { createdAt?: unknown }).createdAt === "string"
           ) {
-            const d = disposition as { status: string; checkId: string; createdAt: string };
+            const d = disposition as {
+              status: string;
+              checkId: string;
+              createdAt: string;
+              acceptanceBasis?: unknown;
+              amendedCommandCount?: unknown;
+              reasonCode?: unknown;
+            };
             remediationDisposition = {
               status: d.status,
               checkId: d.checkId,
               createdAt: d.createdAt,
+              ...(d.acceptanceBasis === "amended-acceptance"
+                || d.acceptanceBasis === "original-acceptance"
+                ? { acceptanceBasis: d.acceptanceBasis }
+                : {}),
+              ...(typeof d.amendedCommandCount === "number"
+                && Number.isSafeInteger(d.amendedCommandCount)
+                && d.amendedCommandCount >= 1
+                ? { amendedCommandCount: d.amendedCommandCount }
+                : {}),
+              ...(d.reasonCode === "contradictory-acceptance"
+                ? { reasonCode: "contradictory-acceptance" as const }
+                : {}),
             };
           }
           return {

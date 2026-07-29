@@ -1,0 +1,174 @@
+version: 2
+name: Explain Integration path classification before Main changes limits
+project: /Users/yijunwang/code/forklight
+taskClass: integration-path-provenance
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: volcengine-glm52-1m
+
+contract:
+  outcome: >-
+    Integration Preflight tells Main which relative paths would enter the source
+    delivery, why each path is treated as business source, and what contract
+    boundary to review when a file or line limit rejects a candidate, without
+    weakening safety or automatically reclassifying generated output.
+  presentation:
+    summary: 合入前说明每个路径为何被当作源码；体量拒绝时先检查生成物边界，不盲目放宽限制。
+    language: zh-CN
+  context:
+    - The existing PathPolicy already classifies raw Diff sections as business, generated, or internal and preserves raw/generated audit evidence separately from the Integration patch.
+    - Integration Preflight currently exposes only a flat affectedFiles list and raw rejection strings. A real Grok candidate rebuilt dist during acceptance; because Main omitted workspace.generatedPaths, 53 files looked like business delivery and the size gate correctly rejected without telling Main which contract boundary was missing.
+    - Directory names such as dist, build, generated, or .next can be real deliverables in some projects. Do not hard-code them as generated and do not infer or mutate policy from names.
+    - "The safe recovery is explanation: show the effective category/provenance used by current policy and, only when size admission rejects, give Main a bounded choice between correcting generated-path/exclusion policy in a new Task or keeping the paths as source and reducing scope. Never tell the user to raise limits blindly."
+  inScope:
+    - Extend the canonical PathPolicy with a deterministic explanation result that returns category plus bounded provenance while preserving classify behavior exactly.
+    - Distinguish internal ForkLight paths, configured snapshot exclusion, built-in generated pattern, Task-declared generated pattern, and default business inclusion.
+    - Add ordered path-classification evidence to Integration Preflight for the exact affected Integration paths. The evidence must use validated relative paths, stay one-to-one with affectedFiles, and never contain source absolute paths, command text, Diff content, credentials, or diagnostics.
+    - Persist and project the evidence through the existing receipt, event, daemon, CLI/MCP response, Hub bridge, and legacy readers without changing Integration authority.
+    - When Preflight rejects only or partly because reviewed patch file/line limits were exceeded and at least one path is default business, add a typed, privacy-safe authoring guidance code. The guidance is advisory and does not alter rejectionReasons, the immutable Task, PathPolicy, Candidate, or retry state.
+    - "Render a plain-language bilingual Preflight explanation: what will be integrated, what rule included it, why the current gate stopped, and the two safe Main choices. Put relative path details in a bounded disclosure rather than a wall of text."
+    - Add semantic tests for every provenance, exact ordering/cardinality, legacy receipts, privacy, size-rejection guidance, no guidance on unrelated rejection, Hub copy, and unchanged Integration safety.
+  outOfScope:
+    - Automatically classifying a path from its name, changing DEFAULT_GENERATED_PATTERNS, changing Task workspace policy, rewriting a stored Task, rerunning a Worker, adapting policy, increasing limits, retrying Preflight, or creating a replacement Task.
+    - Changing patch generation, raw/generated/integration artifacts, change-budget accounting, source compatibility, backup/apply/rollback behavior, Main Review, Integration confirmation, Delivery stages, Provider behavior, routing, competition, commit, or push.
+    - Exposing absolute paths, full Diff sections, file contents, commands, stdout/stderr, Task prompts, credentials, endpoints, or free-form internal errors in public evidence.
+  executionSteps:
+    - Trace PathPolicy, workspace patch classification, receipt construction/storage, daemon and MCP preflight responses, Hub bridge, and the Preflight card before editing.
+    - Define one canonical explanation type and delegate classify to it so category behavior cannot drift.
+    - Build receipt evidence only after affected paths pass the existing strict relative-path parser. Keep affectedFiles authoritative and verify evidence order and cardinality before persistence and apply.
+    - Detect size-admission rejection from typed local conditions, not by parsing human rejection strings. Emit only a fixed guidance code and bounded counts.
+    - Keep old receipts readable when classification evidence is absent. Fail closed if new evidence is malformed or no longer matches affectedFiles.
+    - Show beginner copy before technical paths. The copy must say the rule is current policy, not proof that the file is truly generated or truly hand-written.
+    - Run all acceptance commands once and stop after one Candidate. Return unresolved authority or storage questions to Main rather than weakening safety.
+  deliverables:
+    - Canonical category/provenance explanation for Integration paths.
+    - Privacy-safe persisted Preflight evidence plus typed recovery guidance.
+    - Bilingual explanation-first Hub presentation with bounded path details.
+    - Regression tests proving classification and Integration behavior are unchanged.
+  modules:
+    - name: Path policy explanation
+      responsibility: Explain the exact existing classification decision without changing it.
+      consumes:
+        - Validated relative path, snapshot exclusions, built-in patterns, and Task-generated patterns.
+      produces:
+        - Category and one stable provenance value.
+      boundaries:
+        - No filename heuristic and no policy mutation.
+    - name: Preflight evidence
+      responsibility: Bind each affected Integration path to its effective category/provenance and typed recovery guidance.
+      consumes:
+        - Parsed affectedFiles, immutable Task workspace policy, and typed size-gate results.
+      produces:
+        - Ordered receipt evidence and optional fixed guidance code.
+      boundaries:
+        - Existing rejection, digest, expiry, source-drift, apply, backup, and confirmation authority stay unchanged.
+    - name: Main explanation
+      responsibility: Help Main understand the rejection before changing scope or policy.
+      consumes:
+        - Safe receipt evidence and guidance code.
+      produces:
+        - Bilingual summary, category/provenance counts, safe choices, and a closed relative-path disclosure.
+      boundaries:
+        - No automatic action, raw JSON dump, or claim that a default-business path is generated.
+  callChain:
+    - Independent verification produces the existing reviewed Integration patch.
+    - Main requests Preflight after review.
+    - Preflight parses and validates affected paths, asks the immutable PathPolicy to explain each path, evaluates existing safety gates, and stores one receipt.
+    - Daemon, CLI/MCP, and Hub carry the compact evidence without recomputing classification.
+    - Main reads the explanation and either corrects the next Task Contract or keeps the files as source and adjusts task scope; ForkLight does neither automatically.
+  scenarios:
+    - name: Missing generated-path declaration causes a large source patch
+      given: Many validated files are default business under the immutable Task policy and the reviewed patch exceeds the file limit.
+      when: Main runs Integration Preflight.
+      then: Preflight remains rejected, every affected path shows default-business provenance, and one advisory tells Main to review generated-path/exclusion policy versus real source scope without raising limits automatically.
+    - name: Task explicitly classified generated output
+      given: Task-generated patterns or snapshot exclusions already remove build output from the Integration patch.
+      when: Main runs Preflight for the remaining source patch.
+      then: Only actual affected Integration paths appear, their current business provenance is explained, and no fabricated generated path is added.
+    - name: Rejection is unrelated to size
+      given: The patch is within size limits but source drift or applicability check fails.
+      when: Preflight completes.
+      then: Existing rejection remains visible and no generated-policy guidance is emitted.
+    - name: Legacy receipt
+      given: A stored receipt predates path-classification evidence.
+      when: CLI, MCP, Hub, or apply reads it.
+      then: It remains readable and does not invent categories or guidance.
+    - name: Evidence is inconsistent
+      given: A new receipt has duplicate, reordered, missing, absolute, or mismatched classification paths.
+      when: It is stored, projected, or consumed for apply.
+      then: ForkLight fails closed without applying source changes or echoing unsafe content.
+  risks:
+    - Main may treat an advisory as automatic truth, so copy must say default-business is the current contract decision and the user/Main must decide whether the policy or scope is wrong.
+    - Extra path evidence can become noisy, so the primary card summarizes counts and places the ordered relative-path list in a disclosure.
+    - Receipt changes can weaken apply authority if recomputed, so apply must consume and validate the exact stored evidence rather than silently deriving a different list.
+  changeBudget:
+    maxFiles: 18
+    maxDiffLines: 1800
+
+advancedPolicyOverride:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workspace/path-policy.ts
+    - src/core/integration.ts
+    - src/core/types.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/workspace.test.ts
+    - tests/integration.test.ts
+    - tests/integration-operation.test.ts
+    - tests/daemon.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+
+acceptance:
+  criteria:
+    - Every affected Integration path has one ordered deterministic category/provenance explanation derived from the immutable Task PathPolicy, while legacy receipts remain readable.
+    - Size-gate rejection stays rejected and may add only a fixed advisory; no policy, limit, Task, Worker, Candidate, retry, or Integration authority changes automatically.
+    - New evidence is privacy-safe, rejects malformed path/cardinality drift, and never exposes absolute paths, Diff content, commands, outputs, credentials, endpoints, or free-form diagnostics.
+    - Hub explains current policy, rejection reason, and two safe Main choices in plain English and Chinese before bounded technical path details.
+    - Existing patch classification, source compatibility, backup/apply/rollback, Main Review, explicit confirmation, delivery stages, and legacy integrations remain compatible.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/workspace.test.ts tests/integration.test.ts tests/integration-operation.test.ts tests/daemon.test.ts tests/mcp.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check
+
+deliveryProfileId: forklight-self-upgrade

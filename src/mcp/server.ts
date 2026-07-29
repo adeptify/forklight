@@ -755,30 +755,47 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Evidence-aware model routing advisory",
       description:
-        "Provide a read-only, evidence-aware routing advisory for an exact taskClass and two or more provider/model candidates. Recommends a model only when comparable historical evidence is sufficient; otherwise suggests bounded competition. Non-model failures (credentials, provider errors, policy, workspace, interruption) never penalize a model. Official-cost comparison is available only when all candidates have exact same-currency Provider-native quotes. Duration contributes zero weight by default. Never launches work, switches a Worker, disables a model, or mutates settings.",
+        "Provide a read-only, evidence-aware routing advisory for an exact taskClass and two or more provider/model candidates. Recommends a model only when comparable historical evidence is sufficient; otherwise returns unknown. Competition advice is separate from evidence uncertainty and requires Main's explicit intent plus enabled triggers. Non-model failures (credentials, provider errors, policy, workspace, interruption) never penalize a model. Official-cost comparison is available only when all candidates have exact same-currency Provider-native quotes. Duration contributes zero weight by default. Never launches work, switches a Worker, disables a model, or mutates settings.",
       inputSchema: z.object({
         taskClass: z.string().trim().min(1).max(200)
           .describe("Exact task class identifier — never pattern-matched or inferred"),
         candidates: z.array(z.object({
           provider: z.string().trim().min(1).max(100),
           model: z.string().trim().min(1).max(200),
+          runtime: z.string().trim().max(50).optional()
+            .describe("Worker runtime (e.g. claude-code, grok-build). Omitted for legacy comparisons."),
+          effort: z.string().trim().max(10).optional()
+            .describe("Worker effort level. Omitted for legacy comparisons."),
         })).min(2).max(10),
+        taskFamily: z.string().trim().max(80).optional()
+          .describe("Stable task family for cross-project evidence fallback when exact-class evidence is insufficient"),
+        competitionIntent: z.enum(["none", "consider", "required"]).optional()
+          .describe("Main's explicit Competition intent from the routing decision"),
+        competitionTriggers: z.array(z.enum(["critical", "multiple-plausible-solutions", "new-family", "user-requested"])).optional()
+          .describe("Main's Competition triggers from the routing decision"),
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ taskClass, candidates }) => {
+    async ({ taskClass, candidates, taskFamily, competitionIntent, competitionTriggers }) => {
       await ensureDaemon(home);
       const advisory = await daemonRequest<RoutingAdvisoryResponse>(
         "model_routing",
-        { taskClass, candidates },
+        { taskClass, candidates, taskFamily, competitionIntent, competitionTriggers },
         home,
       );
-      return textAndData(
-        advisory,
-        advisory.recommendation
-          ? `Model routing recommends ${advisory.recommendation.provider}/${advisory.recommendation.model} (confidence ${advisory.recommendation.confidence}) for task class "${taskClass}".`
-          : `Model routing advice for "${taskClass}": insufficient or incomparable evidence;${advisory.shouldRunCompetition ? " consider a bounded competition." : " no recommendation."}`,
-      );
+      const rec = advisory.recommendation;
+      const suggestions: string[] = [];
+      if (rec) {
+        suggestions.push(`Model routing recommends ${rec.provider}/${rec.model} (confidence ${rec.confidence}) for task class "${taskClass}".`);
+      } else {
+        suggestions.push(`Model routing advice for "${taskClass}": evidence is unknown (scope=${advisory.evidenceScope}).`);
+      }
+      if (advisory.shouldRunCompetition) {
+        suggestions.push(`Competition advised: intent=${advisory.competition.intent}, matching triggers=${advisory.competition.matchingTriggers.join(", ") || "none"}.`);
+      } else {
+        suggestions.push(`Competition not advised (intent=${advisory.competition.intent}).`);
+      }
+      return textAndData(advisory, suggestions.join(" "));
     },
   );
 
@@ -1222,38 +1239,67 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Verify Main-repaired source delivery",
       description:
-        "Run stored acceptance commands against the current source in an isolated copy. Requires explicit confirm: true. Never resumes a Worker, calls a model, or mutates source. Only failed or interrupted Tasks are eligible, and only one passing final disposition per Task.",
+        "Run acceptance commands against the current source in an isolated copy. Requires explicit confirm: true. Never resumes a Worker, calls a model, or mutates source. Only failed or interrupted Tasks (or succeeded Tasks with a bound Main revise) are eligible, and only one passing final disposition per Task. Optional amendment replaces only exact failed commands from the latest bound verification; passing commands stay immutable.",
       inputSchema: z.object({
         taskId: z.string().uuid(),
         reason: z.string().trim().min(1).max(1000),
         confirm: z.literal(true).describe(
           "Explicit confirmation that Main has repaired the source and wants to verify. Must be true.",
         ),
+        amendment: z.object({
+          verificationEventSequence: z.number().int().positive(),
+          reasonCode: z.literal("contradictory-acceptance"),
+          replacements: z.array(z.object({
+            originalCommand: z.string().min(1).max(4000),
+            replacementCommand: z.string().min(1).max(4000),
+          }).strict()).min(1).max(50),
+        }).strict().optional().describe(
+          "Optional one-to-one failed-command replacements bound to the latest verification event. Never mutates the stored Task Contract.",
+        ),
       }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ taskId, reason }) => {
+    async ({ taskId, reason, amendment }) => {
+      // Exchange receipts carry only lengths/counts — never command text.
       return withMcpExchangeReceipt({
         operation: "forklight_remediation_verify",
         home,
-        args: { taskId, reasonLength: reason.length, confirm: true },
+        args: {
+          taskId,
+          reasonLength: reason.length,
+          confirm: true,
+          ...(amendment === undefined
+            ? {}
+            : {
+                amendmentReplacementCount: amendment.replacements.length,
+                amendmentReasonCode: amendment.reasonCode,
+                amendmentVerificationEventSequence: amendment.verificationEventSequence,
+              }),
+        },
         taskId,
         invoke: async () => {
           await ensureDaemon(home);
           const result = await daemonRequest<Record<string, unknown>>(
             "remediation_verify",
-            { taskId, reason, confirm: true },
+            {
+              taskId,
+              reason,
+              confirm: true,
+              ...(amendment === undefined ? {} : { amendment }),
+            },
             home,
           );
           const check = result.check as Record<string, unknown> | undefined;
           const disposition = result.disposition as Record<string, unknown> | undefined;
+          const basis =
+            disposition?.acceptanceBasis === "amended-acceptance"
+              ? " Amended acceptance basis recorded."
+              : disposition?.status === "verified-repaired-delivered"
+                ? " Final delivery recorded."
+                : "";
           return textAndData(
             result,
-            `Main remediation verification ${check?.status ?? "unknown"}: Task ${taskId}.${
-              disposition?.status === "verified-repaired-delivered"
-                ? " Final delivery recorded."
-                : ""
-            }`,
+            `Main remediation verification ${check?.status ?? "unknown"}: Task ${taskId}.${basis}`,
           );
         },
       });

@@ -608,7 +608,15 @@ export async function executeAttempt(
       workerPid: null,
       error: worker.error ?? "Worker execution failed",
     });
-    store.addEvent(task.id, attemptId, "worker.failed", worker.error ?? "Worker execution failed");
+    store.addEvent(
+      task.id,
+      attemptId,
+      "worker.failed",
+      worker.error ?? "Worker execution failed",
+      worker.failureCategory === undefined
+        ? undefined
+        : { failureCategory: worker.failureCategory },
+    );
     return { task: store.getTask(task.id), attempt: store.getAttempt(attemptId) };
   }
 

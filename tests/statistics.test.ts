@@ -197,7 +197,7 @@ function workerFailedEvent(
   taskId: string,
   attemptId: string,
   sequence: number,
-  failureCategory?: "authentication" | "budget" | "runtime",
+  failureCategory?: "authentication" | "budget" | "runtime" | "connectivity",
 ): EventRecord {
   return {
     id: sequence,
@@ -341,6 +341,7 @@ test("failureImpactForCategory maps every category to the correct impact", () =>
   assert.equal(failureImpactForCategory("workspace"), "non-model");
   assert.equal(failureImpactForCategory("budget"), "non-model");
   assert.equal(failureImpactForCategory("provider"), "non-model");
+  assert.equal(failureImpactForCategory("contract-infeasible"), "non-model");
   assert.equal(failureImpactForCategory("noProgress"), "ambiguous");
   assert.equal(failureImpactForCategory("unclassified"), "ambiguous");
 });
@@ -443,6 +444,86 @@ test("deriveRoutingEvidence handles verification-based model-quality failures", 
   const ds = evidence.get("deepseek\0v4")!;
   assert.equal(ds.modelQualityFailureCount, 1);
   assert.equal(ds.ignoredNonModelFailures["verification"], undefined);
+});
+
+test("full Worker identity evidence does not merge different effort levels", () => {
+  const high = task("identity-high", "succeeded", "deepseek", "v4");
+  const max = task("identity-max", "succeeded", "deepseek", "v4");
+  (high.spec as unknown as Record<string, unknown>).taskClass = "identity-test";
+  (max.spec as unknown as Record<string, unknown>).taskClass = "identity-test";
+  (high.spec as unknown as Record<string, unknown>).runtime = { name: "claude-code", effort: "high" };
+  (max.spec as unknown as Record<string, unknown>).runtime = { name: "claude-code", effort: "max" };
+  const evidence = deriveRoutingEvidence({
+    taskClass: "identity-test",
+    identityMode: "full-worker",
+    history: [
+      { task: high, attempts: [attempt(high.id, 1, "succeeded")], events: [] },
+      { task: max, attempts: [attempt(max.id, 1, "succeeded")], events: [] },
+    ],
+  });
+  assert.equal(evidence.get("deepseek\0v4\0claude-code\0high")!.terminalTaskCount, 1);
+  assert.equal(evidence.get("deepseek\0v4\0claude-code\0max")!.terminalTaskCount, 1);
+});
+
+test("amended-acceptance delivery keeps machine failure but not model-quality blame", () => {
+  const t1 = task("amended-1", "failed", "deepseek", "v4");
+  (t1.spec as unknown as Record<string, unknown>).taskClass = "amended-class";
+  const evidence = deriveRoutingEvidence({
+    taskClass: "amended-class",
+    history: [
+      {
+        task: t1,
+        attempts: [attempt("amended-1", 1, "failed")],
+        events: [],
+        verification: failedVerification,
+      },
+    ],
+    hasPassingDisposition: () => true,
+    getDisposition: () => ({
+      status: "verified-repaired-delivered",
+      checkId: "check-amended",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      acceptanceBasis: "amended-acceptance",
+      amendedCommandCount: 1,
+      reasonCode: "contradictory-acceptance",
+    }),
+  });
+
+  const ds = evidence.get("deepseek\0v4")!;
+  assert.equal(ds.terminalTaskCount, 1);
+  assert.equal(ds.acceptedDeliveryCount, 1, "Main-repaired delivery counted");
+  assert.equal(ds.modelQualityFailureCount, 0, "amended acceptance is not model-quality failure");
+  assert.equal(
+    ds.ignoredNonModelFailures["contract-infeasible"],
+    1,
+    "amended delivery is contract-infeasible non-model evidence",
+  );
+  assert.equal(ds.ignoredNonModelFailures["verification"], undefined,
+    "must not remain model-quality verification category");
+  assert.equal(ds.relevantSampleCount, 1);
+  // Original-acceptance repaired delivery still counts as model-quality when
+  // the underlying verification failure was model behavior.
+  const original = deriveRoutingEvidence({
+    taskClass: "amended-class",
+    history: [
+      {
+        task: t1,
+        attempts: [attempt("amended-1", 1, "failed")],
+        events: [],
+        verification: failedVerification,
+      },
+    ],
+    hasPassingDisposition: () => true,
+    getDisposition: () => ({
+      status: "verified-repaired-delivered",
+      checkId: "check-original",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      acceptanceBasis: "original-acceptance",
+    }),
+  });
+  const od = original.get("deepseek\0v4")!;
+  assert.equal(od.modelQualityFailureCount, 1);
+  assert.equal(od.acceptedDeliveryCount, 1);
 });
 
 test("deriveRoutingEvidence handles tasks with officialCost evidence", () => {
@@ -755,6 +836,45 @@ test("budgetReliability: correction success does not erase an earlier exhausted 
   assert.equal(budget.budgetExhaustionCount, 1);
   assert.equal(budget.completedWithoutExhaustionCount, 1);
   assert.equal(budget.completedWithoutExhaustionRate, 0.5);
+});
+
+test("durable connectivity is Provider/infrastructure non-model evidence", () => {
+  const safeError =
+    "Worker could not reach the Provider service due to a network connectivity failure";
+  const t = task("conn-1", "failed", "xai", "grok-4.5", safeError);
+  (t.spec as unknown as Record<string, unknown>).taskClass = "conn-routing";
+  const a = { ...attempt("conn-1", 1, "failed", undefined, undefined, 1), error: safeError };
+  const history: TaskEvidence[] = [{
+    task: t,
+    attempts: [a],
+    events: [workerFailedEvent(t.id, a.id, 1, "connectivity")],
+  }];
+
+  const summary = computeStatistics(history)[0]!;
+  assert.equal(summary.failureDistribution.provider, 1);
+  assert.equal(summary.failures[0]?.impact, "non-model");
+  assert.equal(summary.failures[0]?.category, "provider");
+  assert.equal(summary.failures[0]?.diagnostic, safeError);
+
+  const routing = deriveRoutingEvidence({
+    taskClass: "conn-routing",
+    history,
+  });
+  const evidence = routing.get("xai\0grok-4.5")!;
+  assert.equal(evidence.modelQualityFailureCount, 0);
+  assert.equal(evidence.relevantSampleCount, 0);
+  assert.equal(evidence.ignoredNonModelFailures.provider, 1);
+  assert.equal(evidence.ignoredNonModelTaskCount, 1);
+});
+
+test("safe connectivity diagnostic classifies as non-model provider without raw transport text", () => {
+  const classified = classifyFailure({
+    taskStatus: "failed",
+    error: "Worker could not reach the Provider service due to a network connectivity failure",
+  });
+  assert.equal(classified.category, "provider");
+  assert.equal(classified.impact, "non-model");
+  assert.equal(failureImpactForCategory("provider"), "non-model");
 });
 
 test("budgetReliability: per-Attempt correction budget overrides remain separate envelopes", () => {

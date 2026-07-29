@@ -84,6 +84,7 @@ import {
 } from "../core/statistics.js";
 import {
   provideRoutingAdvice,
+  type CompetitionTrigger,
   type RoutingAdvisoryResponse,
   type RoutingPolicySettings,
 } from "../core/model-routing.js";
@@ -912,12 +913,16 @@ export class DaemonCoordinator {
    *  evidence from terminal Tasks matching the exact taskClass, resolves
    *  the current flexible routing policy, and returns a privacy-safe
    *  advisory with per-candidate factors, uncertainty flags, competition
-   *  guidance, and an optional recommendation.  Never launches work,
-   *  switches a Worker, disables a model, mutates settings, retries,
-   *  commits, or pushes. */
+   *  guidance, and an optional recommendation.  When taskFamily is
+   *  provided and exact evidence is insufficient, family evidence is
+   *  used as a complete-set fallback.  Never launches work, switches a
+   *  Worker, disables a model, mutates settings, retries, commits, or pushes. */
   modelRouting(
     taskClass: string,
-    candidates: Array<{ provider: string; model: string }>,
+    candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }>,
+    taskFamily?: string,
+    competitionIntent?: "none" | "consider" | "required",
+    competitionTriggers?: string[],
   ): RoutingAdvisoryResponse {
     if (
       typeof taskClass !== "string"
@@ -930,6 +935,7 @@ export class DaemonCoordinator {
       throw new Error("modelRouting requires 2 to 10 provider/model candidates");
     }
     const seen = new Set<string>();
+    const identityModes = new Set<"legacy" | "full" | "partial">();
     for (const c of candidates) {
       if (
         typeof c.provider !== "string"
@@ -945,18 +951,31 @@ export class DaemonCoordinator {
       ) {
         throw new Error("Each candidate model must contain 1 to 200 characters");
       }
-      const key = c.provider.trim() + "\0" + c.model.trim();
+      const hasRuntime = typeof c.runtime === "string" && c.runtime.trim().length > 0;
+      const hasEffort = typeof c.effort === "string" && c.effort.trim().length > 0;
+      identityModes.add(hasRuntime && hasEffort ? "full" : (!hasRuntime && !hasEffort ? "legacy" : "partial"));
+      const key = c.provider.trim() + "\0" + c.model.trim()
+        + (hasRuntime && hasEffort ? `\0${c.runtime!.trim()}\0${c.effort!.trim()}` : "");
       if (seen.has(key)) throw new Error("modelRouting candidates must be unique");
       seen.add(key);
     }
 
+    if (identityModes.has("partial") || identityModes.size !== 1) {
+      throw new Error("modelRouting candidates must either all include runtime and effort, or all omit both for legacy comparison");
+    }
+    const fullIdentity = identityModes.has("full");
+
     const stats = new StatisticsService(this.store);
-    const evidenceMap = stats.routingEvidence(taskClass.trim());
+    const identityMode = fullIdentity ? "full-worker" : "provider-model";
+    const evidenceMap = stats.routingEvidence(taskClass.trim(), identityMode);
     const settings = this.settings.get();
     const policy: RoutingPolicySettings = {
       minRelevantSamples: settings.modelRouting.minRelevantSamples,
+      familyMinRelevantSamples: settings.modelRouting.familyMinRelevantSamples,
       uncertaintyThreshold: settings.modelRouting.uncertaintyThreshold,
       competitionOnUncertainty: settings.modelRouting.competitionOnUncertainty,
+      competitionTriggersEnabled: [...settings.modelRouting.competitionTriggersEnabled],
+      defaultCompetitionCandidates: settings.modelRouting.defaultCompetitionCandidates,
       missingEvidenceMode: settings.modelRouting.missingEvidenceMode,
       weights: {
         acceptedDelivery: settings.modelRouting.weights.acceptedDelivery,
@@ -969,15 +988,51 @@ export class DaemonCoordinator {
       },
     };
 
-    return provideRoutingAdvice({
+    // Validate and normalize competition triggers
+    const VALID_TRIGGERS = new Set(["critical", "multiple-plausible-solutions", "new-family", "user-requested"]);
+    if (competitionTriggers?.some((trigger) => !VALID_TRIGGERS.has(trigger as CompetitionTrigger))) {
+      throw new Error("competitionTriggers contains an unsupported Main reason");
+    }
+    const normalizedTriggers = competitionTriggers as CompetitionTrigger[] | undefined;
+    if (competitionIntent !== undefined
+      && competitionIntent !== "none"
+      && competitionIntent !== "consider"
+      && competitionIntent !== "required") {
+      throw new Error("competitionIntent must be none, consider, or required");
+    }
+    const normalizedIntent = competitionIntent === "none" || competitionIntent === "consider" || competitionIntent === "required"
+      ? competitionIntent
+      : undefined;
+
+    // Derive family evidence when taskFamily is provided
+    const familyEvidenceMap = taskFamily !== undefined && taskFamily.trim().length > 0
+      ? stats.routingEvidenceByFamily(taskFamily.trim(), identityMode)
+      : undefined;
+
+    const adviceInput: Parameters<typeof provideRoutingAdvice>[0] = {
       taskClass: taskClass.trim(),
       candidates: candidates.map((c) => ({
         provider: c.provider.trim(),
         model: c.model.trim(),
+        ...(c.runtime !== undefined ? { runtime: c.runtime.trim() } : {}),
+        ...(c.effort !== undefined ? { effort: c.effort.trim() } : {}),
       })),
       evidenceMap,
       policy,
-    });
+    };
+    if (taskFamily !== undefined && taskFamily.trim().length > 0) {
+      adviceInput.taskFamily = taskFamily.trim();
+    }
+    if (familyEvidenceMap !== undefined) {
+      adviceInput.familyEvidenceMap = familyEvidenceMap;
+    }
+    if (normalizedIntent !== undefined) {
+      adviceInput.competitionIntent = normalizedIntent;
+    }
+    if (normalizedTriggers !== undefined) {
+      adviceInput.competitionTriggers = normalizedTriggers;
+    }
+    return provideRoutingAdvice(adviceInput);
   }
 
   /** Return a detached deeply-frozen portfolio economics summary for all
@@ -1750,11 +1805,17 @@ export class DaemonCoordinator {
     taskId: string,
     reason: string,
     confirm: true,
+    amendment?: import("../core/types.js").RemediationAcceptanceAmendment,
   ): Promise<RemediationVerifyView> {
     const verificationTimeoutMs = this.settings.get().integration.verificationTimeoutMs;
     const result = await verifyMainRemediation(
       this.store,
-      { taskId, reason, confirm },
+      {
+        taskId,
+        reason,
+        confirm,
+        ...(amendment === undefined ? {} : { amendment }),
+      },
       verificationTimeoutMs,
     );
     const task = this.store.getTask(taskId);

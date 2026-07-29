@@ -23,7 +23,7 @@ export interface HubSettingsView {
   defaultModel: string;
   defaultEndpoint: string;
   /** Evidence-aware model routing advisory settings. */
-  modelRouting: ForkLightSettings["modelRouting"];
+  modelRouting: HubModelRoutingView;
   /** Reusable Delivery Profile registry (profiles, project bindings, default). */
   deliveryProfiles: ForkLightSettings["deliveryProfiles"];
 }
@@ -42,8 +42,11 @@ export interface HubSettingsPatch {
   /** Bounded modelRouting policy patch. Weights can be partially provided. */
   modelRouting?: {
     minRelevantSamples?: number;
+    familyMinRelevantSamples?: number;
     uncertaintyThreshold?: number;
     competitionOnUncertainty?: boolean;
+    competitionTriggersEnabled?: string[];
+    defaultCompetitionCandidates?: number;
     missingEvidenceMode?: "strict" | "flexible";
     weights?: {
       acceptedDelivery?: number;
@@ -62,8 +65,11 @@ export interface HubSettingsPatch {
 
 export interface HubModelRoutingView {
   minRelevantSamples: number;
+  familyMinRelevantSamples: number;
   uncertaintyThreshold: number;
   competitionOnUncertainty: boolean;
+  competitionTriggersEnabled: readonly string[];
+  defaultCompetitionCandidates: number;
   missingEvidenceMode: "strict" | "flexible";
   weights: {
     acceptedDelivery: number;
@@ -101,8 +107,11 @@ export function viewHubSettings(settings: ForkLightSettings): HubSettingsView {
 export function viewModelRoutingSettings(settings: ForkLightSettings): HubModelRoutingView {
   return {
     minRelevantSamples: settings.modelRouting.minRelevantSamples,
+    familyMinRelevantSamples: settings.modelRouting.familyMinRelevantSamples,
     uncertaintyThreshold: settings.modelRouting.uncertaintyThreshold,
     competitionOnUncertainty: settings.modelRouting.competitionOnUncertainty,
+    competitionTriggersEnabled: [...settings.modelRouting.competitionTriggersEnabled],
+    defaultCompetitionCandidates: settings.modelRouting.defaultCompetitionCandidates,
     missingEvidenceMode: settings.modelRouting.missingEvidenceMode,
     weights: { ...settings.modelRouting.weights },
   };

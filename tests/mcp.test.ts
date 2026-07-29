@@ -31,6 +31,30 @@ import { createPathPolicy } from "../src/workspace/path-policy.js";
 import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
 import { recordMainReview } from "../src/core/main-review.js";
 
+test("MCP remediation_verify carries optional amendment without leaking command text in receipts", async () => {
+  const src = await readFile(new URL("../src/mcp/server.ts", import.meta.url), "utf8");
+  assert.ok(src.includes("forklight_remediation_verify"), "remediation tool registered");
+  assert.ok(src.includes('reasonCode: z.literal("contradictory-acceptance")'),
+    "MCP requires fixed contradictory-acceptance reason code");
+  assert.ok(src.includes("originalCommand"), "MCP accepts structured originalCommand");
+  assert.ok(src.includes("replacementCommand"), "MCP accepts structured replacementCommand");
+  assert.ok(src.includes("amendmentReplacementCount"),
+    "exchange receipt uses replacement count only");
+  assert.ok(src.includes("amendmentVerificationEventSequence"),
+    "exchange receipt binds verification sequence only");
+  // Receipt args must not include raw command fields.
+  const receiptArgsIdx = src.indexOf("amendmentReplacementCount");
+  assert.ok(receiptArgsIdx > 0);
+  const receiptWindow = src.slice(receiptArgsIdx - 200, receiptArgsIdx + 400);
+  assert.ok(!receiptWindow.includes("originalCommand:"),
+    "receipt args must not pass originalCommand content");
+  assert.ok(!receiptWindow.includes("replacementCommand:"),
+    "receipt args must not pass replacementCommand content");
+  // Technical compact reason code may appear in schema; beginner Hub copy is separate.
+  assert.ok(src.includes("contradictory-acceptance"),
+    "MCP schema keeps the technical reason code");
+});
+
 test("MCP exposes ForkLight tools and reaches the daemon", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-"));
   const daemon = new ForkLightDaemon(home, 1);
@@ -74,7 +98,7 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_plan_submit",
         "forklight_provider_probe",
         "forklight_provider_status",
-        "forklight_remediation_verify",
+        "forklight_remediation_verify", // optional amendment: structured failed-command replacements only
         "forklight_resume",
         "forklight_settings_get",
         "forklight_settings_reset",
@@ -158,7 +182,11 @@ test("MCP model_routing returns privacy-safe advisory for empty history", async 
     const advisory = result.structuredContent as Record<string, unknown>;
     assert.equal(advisory.taskClass, "nonexistent-class");
     assert.equal((advisory.candidates as unknown[]).length, 2);
-    assert.equal(advisory.shouldRunCompetition, true);
+    assert.equal(advisory.knowledge, "unknown");
+    assert.equal(advisory.evidenceScope, "none");
+    assert.equal(advisory.shouldRunCompetition, false);
+    const comp = advisory.competition as Record<string, unknown>;
+    assert.equal(comp.intent, "none");
     // Privacy-safe: no Task ids, logs, or credentials
     const json = JSON.stringify(advisory);
     assert.doesNotMatch(json, /error/);
@@ -767,6 +795,55 @@ test("MCP integration preflight persists audit receipt and is source-safe", asyn
     assert.notEqual(receipt2.id, receipt.id);
     assert.deepEqual(receipt2.affectedFiles, receipt.affectedFiles);
     assert.equal(await readFile(path.join(sourceDir, "readme.md"), "utf8"), before);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP integration preflight carries path classification evidence without recomputing", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-intpe-"));
+  const store = new StateStore(home);
+  const { task } = await seedSucceededTask(store, home);
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const pf = await client.callTool({
+      name: "forklight_integration_preflight",
+      arguments: { taskId: task.id },
+    });
+    assert.equal(pf.isError, undefined);
+    const receipt = pf.structuredContent as IntegrationReceiptRecord;
+    assert.equal(receipt.rejectionReasons.length, 0);
+    // Evidence is one-to-one with affectedFiles, ordered, privacy-safe
+    assert.ok(Array.isArray(receipt.pathEvidence));
+    assert.equal(receipt.pathEvidence!.length, receipt.affectedFiles.length);
+    receipt.pathEvidence!.forEach((entry, i) => {
+      assert.equal(entry.path, receipt.affectedFiles[i]);
+      assert.ok(["business", "generated", "internal"].includes(entry.category));
+      assert.ok([
+        "internal-forklight",
+        "snapshot-exclusion",
+        "builtin-generated-pattern",
+        "task-generated-pattern",
+        "default-business",
+      ].includes(entry.provenance));
+    });
+    const readme = receipt.pathEvidence!.find((e) => e.path === "readme.md");
+    assert.ok(readme);
+    assert.equal(readme!.provenance, "default-business");
+    // Passing receipt carries no recovery guidance
+    assert.equal(receipt.recoveryGuidance, undefined);
+    // Privacy: no absolute source path leaks through the MCP projection
+    const serialized = JSON.stringify(receipt.pathEvidence);
+    assert.ok(!serialized.includes(task.sourcePath));
   } finally {
     await client.close();
     await server.close();

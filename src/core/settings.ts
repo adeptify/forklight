@@ -1,5 +1,5 @@
 import type { StateStore } from "../state/store.js";
-import type { PolicyMode } from "./types.js";
+import type { CompetitionTrigger, PolicyMode } from "./types.js";
 import {
   assertProviderRuntimePair,
   isRuntimeName,
@@ -76,15 +76,27 @@ export interface ModelRoutingSettings {
    *  produced.  Must be ≥ 1.  Below this threshold the advisory reports
    *  insufficient evidence and optionally suggests competition. */
   minRelevantSamples: number;
+  /** Minimum relevant samples per candidate for taskFamily evidence.
+   *  Must be ≥ 1. Defaults to the same value as minRelevantSamples. */
+  familyMinRelevantSamples: number;
   /** Score-gap ratio below which two top candidates are considered too
    *  close to call.  Must be in [0, 1].  When the top-to-second gap divided by
    *  the maximum possible score is below this threshold, every candidate
    *  is marked with insufficient-gap uncertainty. */
   uncertaintyThreshold: number;
   /** When true and evidence is insufficient or scores are too close, the
-   *  advisory recommends a bounded competition instead of picking a
-   *  single winner. */
+   *  advisory reports a bounded competition instead of picking a
+   *  single winner.  Kept as a compatibility master switch — alone it is
+   *  never a sufficient reason for Competition.  Intent and enabled triggers
+   *  are required for a positive shouldRunCompetition. */
   competitionOnUncertainty: boolean;
+  /** Which Competition triggers Main must explicitly set for consider intent
+   *  to produce a positive shouldRunCompetition.  Any listed trigger that
+   *  Main also includes in the decision will be allowed.  Default: an empty
+   *  set (no consider trigger is enabled). */
+  competitionTriggersEnabled: CompetitionTrigger[];
+  /** Default number of candidates to suggest when Competition is advised. */
+  defaultCompetitionCandidates: number;
   /** Whether unavailable enabled factors block advice or remain visible warnings. */
   missingEvidenceMode: "strict" | "flexible";
   /** Non-negative routing factor weights. */
@@ -387,8 +399,11 @@ const DEFAULTS: ForkLightSettings = {
   },
   modelRouting: {
     minRelevantSamples: 5,
+    familyMinRelevantSamples: 5,
     uncertaintyThreshold: 0.15,
     competitionOnUncertainty: true,
+    competitionTriggersEnabled: [],
+    defaultCompetitionCandidates: 2,
     missingEvidenceMode: "flexible",
     weights: {
       acceptedDelivery: 1,
@@ -431,8 +446,9 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
   workerProfiles: ["defaultProfileId", "profiles"],
   deliveryProfiles: ["defaultProfileId", "profiles", "projectBindings"],
   modelRouting: [
-    "minRelevantSamples", "uncertaintyThreshold", "competitionOnUncertainty",
-    "missingEvidenceMode", "weights",
+    "minRelevantSamples", "familyMinRelevantSamples", "uncertaintyThreshold",
+    "competitionOnUncertainty", "competitionTriggersEnabled",
+    "defaultCompetitionCandidates", "missingEvidenceMode", "weights",
   ],
 };
 
@@ -728,12 +744,52 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
       (mr.minRelevantSamples as number) <= 10_000,
       "modelRouting.minRelevantSamples must not exceed 10000",
     );
+    assertPositiveInteger(mr.familyMinRelevantSamples, "modelRouting.familyMinRelevantSamples");
+    assert(
+      (mr.familyMinRelevantSamples as number) >= 1,
+      "modelRouting.familyMinRelevantSamples must be at least 1",
+    );
+    assert(
+      (mr.familyMinRelevantSamples as number) <= 10_000,
+      "modelRouting.familyMinRelevantSamples must not exceed 10000",
+    );
     assertNonNegativeNumber(mr.uncertaintyThreshold, "modelRouting.uncertaintyThreshold");
     assert(
       (mr.uncertaintyThreshold as number) <= 1,
       "modelRouting.uncertaintyThreshold must not exceed 1",
     );
     assertBoolean(mr.competitionOnUncertainty, "modelRouting.competitionOnUncertainty");
+    // competitionTriggersEnabled: array of valid CompetitionTrigger strings
+    assert(
+      Array.isArray(mr.competitionTriggersEnabled),
+      "modelRouting.competitionTriggersEnabled must be an array",
+    );
+    const VALID_TRIGGERS = new Set(["critical", "multiple-plausible-solutions", "new-family", "user-requested"]);
+    for (let i = 0; i < (mr.competitionTriggersEnabled as unknown[]).length; i++) {
+      const t = (mr.competitionTriggersEnabled as unknown[])[i];
+      assert(
+        typeof t === "string" && VALID_TRIGGERS.has(t),
+        `modelRouting.competitionTriggersEnabled[${i}] must be one of critical, multiple-plausible-solutions, new-family, user-requested`,
+      );
+    }
+    // defaultCompetitionCandidates: positive integer between 1 and maxCandidates
+    assertPositiveInteger(mr.defaultCompetitionCandidates, "modelRouting.defaultCompetitionCandidates");
+    assert(
+      (mr.defaultCompetitionCandidates as number) >= 1,
+      "modelRouting.defaultCompetitionCandidates must be at least 1",
+    );
+    const maxCandidates: number = (() => {
+      const compSection = (doc as Record<string, unknown>).competition;
+      if (compSection !== null && typeof compSection === "object") {
+        const max = (compSection as Record<string, unknown>).maxCandidates;
+        if (typeof max === "number" && Number.isFinite(max) && Number.isInteger(max) && max >= 1) return max;
+      }
+      return 10;
+    })();
+    assert(
+      (mr.defaultCompetitionCandidates as number) <= maxCandidates,
+      "modelRouting.defaultCompetitionCandidates must not exceed competition.maxCandidates",
+    );
     assert(
       mr.missingEvidenceMode === "strict" || mr.missingEvidenceMode === "flexible",
       "modelRouting.missingEvidenceMode must be strict or flexible",

@@ -595,6 +595,54 @@ test("buildSafeTaskJourney treats Main-repaired verified delivery as done withou
   assert.equal(journey.nextAction.label, "done", "verified final delivery needs no retry");
 });
 
+test("buildSafeTaskJourney projects compact amended-acceptance basis only", async () => {
+  const { buildSafeTaskJourney } = await import("../src/hub/server.js");
+  const task = {
+    id: "j-amended",
+    name: "Amended acceptance",
+    status: "failed",
+    spec: {
+      version: 1,
+      provider: { name: "xai", model: "grok-4-5" },
+      runtime: { name: "claude-code" },
+      goal: "Ship Grok connectivity",
+      constraints: [],
+      acceptance: { commands: ["npm run typecheck"] },
+    },
+  };
+  const journey = buildSafeTaskJourney(task, {
+    failureCategory: "verification",
+    verification: { passed: false, commands: [{ command: "npm run typecheck", exitCode: 1 }] },
+    remediationDisposition: {
+      status: "verified-repaired-delivered",
+      acceptanceBasis: "amended-acceptance",
+      amendedCommandCount: 1,
+      reasonCode: "contradictory-acceptance",
+      checkId: "check-1",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      reason: "private",
+      command: "npm run typecheck",
+    },
+  });
+  assert.equal(journey.cause.what, "failed", "machine outcome remains failed");
+  assert.equal(
+    journey.finalDelivery.remediationDisposition?.status,
+    "verified-repaired-delivered",
+  );
+  assert.equal(
+    journey.finalDelivery.remediationDisposition?.acceptanceBasis,
+    "amended-acceptance",
+  );
+  assert.equal(journey.finalDelivery.remediationDisposition?.amendedCommandCount, 1);
+  assert.equal(
+    journey.finalDelivery.remediationDisposition?.reasonCode,
+    "contradictory-acceptance",
+  );
+  const serialized = JSON.stringify(journey.finalDelivery.remediationDisposition);
+  assert.doesNotMatch(serialized, /private|typecheck/);
+  assert.equal(journey.nextAction.label, "done");
+});
+
 test("buildSafeTaskJourney projections bounded — no raw prompt, diff, log, credential data leaked", async () => {
   const { buildSafeTaskJourney } = await import("../src/hub/server.js");
   const task = {
@@ -709,6 +757,16 @@ test("buildSafeTaskJourney handles queued, running, and succeeded cause separati
   assert.equal(fr.cause.failureCategory, "runtime");
   assert.equal(fr.nextAction.label, "runtime");
 
+  // Failed connectivity (TUI may work while Daemon transport fails)
+  const fc = buildSafeTaskJourney({ ...baseTask, status: "failed" }, { failureCategory: "connectivity" });
+  assert.equal(fc.cause.what, "failed");
+  assert.equal(fc.cause.failureCategory, "connectivity");
+  assert.equal(fc.nextAction.label, "connectivity");
+  assert.match(fc.cause.why, /network|TUI|Daemon|infrastructure|connectivity/i);
+  assert.ok(!fc.cause.why.includes("HTTP_PROXY"));
+  assert.ok(!fc.cause.why.includes("cli-chat-proxy"));
+  assert.ok(!/https?:\/\//.test(fc.cause.why), "cause must not include URLs");
+
   // Failed verification
   const fv = buildSafeTaskJourney({ ...baseTask, status: "failed" }, {
     verification: { passed: false, behaviorPassed: false, policyPassed: true, sourceCompatible: true,
@@ -718,9 +776,37 @@ test("buildSafeTaskJourney handles queued, running, and succeeded cause separati
   assert.equal(fv.cause.failureCategory, "verification");
 
   // All what != why
-  [q, r, s, fa, fb, fr, fv].forEach(function(j) {
+  [q, r, s, fa, fb, fr, fc, fv].forEach(function(j) {
     assert.notEqual(j.cause.what, j.cause.why, `what and why must differ for state ${j.cause.what}`);
   });
+});
+
+test("buildSafeTaskJourney connectivity recovery path stays privacy-safe", async () => {
+  const { buildSafeTaskJourney } = await import("../src/hub/server.js");
+  const journey = buildSafeTaskJourney(
+    {
+      id: "conn-journey",
+      name: "Grok connectivity",
+      status: "failed",
+      error: "Worker could not reach the Provider service due to a network connectivity failure",
+      spec: {
+        version: 2,
+        provider: { name: "xai", model: "grok-4.5" },
+        runtime: { name: "grok-build" },
+        contract: { outcome: "Smoke check after network recovery" },
+        acceptance: { commands: ["true"] },
+      },
+    },
+    { failureCategory: "connectivity" },
+  );
+  assert.equal(journey.cause.failureCategory, "connectivity");
+  assert.equal(journey.nextAction.label, "connectivity");
+  assert.match(journey.cause.why, /model quality/i);
+  const json = JSON.stringify(journey);
+  assert.ok(!json.includes("HTTP_PROXY"));
+  assert.ok(!json.includes("HTTPS_PROXY"));
+  assert.ok(!json.includes("super-secret"));
+  assert.ok(!json.includes("cli-chat-proxy.grok.com"));
 });
 
 test("Hub /api/ops/tasks preserves compact final-delivery disposition only", async () => {
@@ -798,7 +884,7 @@ test("Hub /api/ops/tasks preserves compact final-delivery disposition only", asy
     assert.equal(rep1.remediationDisposition!.status, "verified-repaired-delivered");
     assert.equal(rep1.remediationDisposition!.checkId, "check-abc");
     assert.equal(rep1.remediationDisposition!.createdAt, "2026-07-26T00:00:00.000Z");
-    // Privacy boundary: only status, checkId, createdAt - no extra keys.
+    // Privacy boundary: only compact fields - no command/reason/path payloads.
     const keys = Object.keys(rep1.remediationDisposition!).sort();
     assert.deepEqual(keys, ["checkId", "createdAt", "status"]);
     // Other shapes must not leak a disposition.
@@ -865,6 +951,82 @@ test("Hub /api/ops/tasks strips disposition keys that fall outside the compact s
     const keys = Object.keys(t.remediationDisposition!).sort();
     assert.deepEqual(keys, ["checkId", "createdAt", "status"],
       "private remediation fields must not be passed through");
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("Hub /api/ops/tasks projects compact amended-acceptance basis only", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-tasks-amended-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const sample = [
+    {
+      taskId: "amended-1",
+      name: "amended",
+      status: "failed",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      runtime: "claude-code",
+      remediationDisposition: {
+        status: "verified-repaired-delivered",
+        checkId: "check-amended",
+        createdAt: "2026-07-26T00:00:00.000Z",
+        acceptanceBasis: "amended-acceptance",
+        amendedCommandCount: 1,
+        reasonCode: "contradictory-acceptance",
+        reason: "private Main reasoning that must never reach Hub",
+        command: "npm run typecheck",
+        replacement: "npm run build",
+      },
+    },
+  ];
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-test-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true }),
+    daemonRequest: async <T>(method: string) => {
+      if (method === "list_summaries") return sample as T;
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(`http://127.0.0.1:${port}/api/ops/tasks`, "GET", server.getToken());
+    assert.equal(res.status, 200);
+    const body = res.body as Array<{
+      id: string;
+      status: string;
+      remediationDisposition?: Record<string, unknown>;
+    }>;
+    const t = body[0]!;
+    assert.equal(t.status, "failed", "machine failure preserved");
+    assert.ok(t.remediationDisposition);
+    assert.equal(t.remediationDisposition!.status, "verified-repaired-delivered");
+    assert.equal(t.remediationDisposition!.acceptanceBasis, "amended-acceptance");
+    assert.equal(t.remediationDisposition!.amendedCommandCount, 1);
+    assert.equal(t.remediationDisposition!.reasonCode, "contradictory-acceptance");
+    const keys = Object.keys(t.remediationDisposition!).sort();
+    assert.deepEqual(keys, [
+      "acceptanceBasis",
+      "amendedCommandCount",
+      "checkId",
+      "createdAt",
+      "reasonCode",
+      "status",
+    ]);
+    const serialized = JSON.stringify(t.remediationDisposition);
+    assert.doesNotMatch(serialized, /typecheck|npm run build|private Main|replacement/);
   } finally {
     await server.stop();
     store.close();

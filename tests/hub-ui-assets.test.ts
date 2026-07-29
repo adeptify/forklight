@@ -638,6 +638,172 @@ test("Hub Insights renders official ranges as a separate, truthful family", asyn
     "range renderer must not reuse exact quote totals");
 });
 
+test("Hub preflight card explains path classification and recovery guidance bilingually", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const enSection = i18n.slice(0, i18n.indexOf("zh: {"));
+  const zhSection = i18n.slice(i18n.indexOf("zh: {"));
+  // Renderer binds the new evidence and guidance fields from the receipt.
+  assert.ok(src.includes("result.pathEvidence"), "renderer reads pathEvidence");
+  assert.ok(src.includes("result.recoveryGuidance"), "renderer reads recoveryGuidance");
+  assert.ok(src.includes('"preflight-classification"'), "classification section marker");
+  assert.ok(src.includes('"preflight-guidance"'), "guidance section marker");
+  assert.ok(src.includes("taskPreflightPathDisclosure"), "bounded path disclosure title");
+  // Bounded disclosure for ordered paths - not a wall of text.
+  assert.ok(src.includes('collapsedSection(t("taskPreflightPathDisclosure")'));
+  // Every classification and provenance key exists in both locales.
+  for (const key of [
+    "taskPreflightClassificationTitle",
+    "taskPreflightClassificationHint",
+    "taskPreflightClassificationBusiness",
+    "taskPreflightClassificationGenerated",
+    "taskPreflightClassificationInternal",
+    "taskPreflightClassificationLine",
+    "taskPreflightProvInternalForklight",
+    "taskPreflightProvSnapshotExclusion",
+    "taskPreflightProvBuiltinGenerated",
+    "taskPreflightProvTaskGenerated",
+    "taskPreflightProvDefaultBusiness",
+    "taskPreflightGuidanceTitle",
+    "taskPreflightGuidanceBody",
+    "taskPreflightGuidanceChoicePolicy",
+    "taskPreflightGuidanceChoiceScope",
+    "taskPreflightGuidanceCaveat",
+    "taskPreflightPathDisclosure",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key} present`);
+    assert.ok(zhSection.includes(key), `zh ${key} present`);
+  }
+  // Beginner copy says the rule is current policy, not proof of generated/hand-written.
+  assert.ok(enSection.includes("not proof that a file is truly generated"));
+  assert.ok(zhSection.includes("并不能证明某个文件一定是生成物"));
+  // Guidance forbids raising limits blindly and offers two safe choices.
+  assert.ok(enSection.includes("Do not raise limits blindly"));
+  assert.ok(enSection.includes("correct the generated-path or exclusion policy"));
+  assert.ok(enSection.includes("reduce the Task scope"));
+  assert.ok(zhSection.includes("不要盲目放宽限制"));
+  assert.ok(zhSection.includes("修正生成物路径或排除策略"));
+  assert.ok(zhSection.includes("收窄任务范围"));
+});
+
+test("Hub preflight card renders ordered path evidence without throwing", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const fnSource = extractFunctionSource(src, "renderPreflightResult");
+
+  // Minimal DOM stubs: renderPreflightResult only needs createElement,
+  // createTextNode, appendChild, setAttribute, and className/textContent.
+  const renderedTexts: string[] = [];
+  function fakeEl(tag: string) {
+    return {
+      tagName: tag,
+      className: "",
+      textContent: undefined as string | undefined,
+      children: [] as unknown[],
+      attrs: {} as Record<string, string>,
+      setAttribute(k: string, v: string) { this.attrs[k] = v; },
+      appendChild(c: unknown) { this.children.push(c); return c; },
+      querySelector() { return null; },
+      addEventListener() {},
+    };
+  }
+  function h(tag: string, cls: string, text: unknown) {
+    const el = fakeEl(tag);
+    el.className = cls || "";
+    if (text !== undefined) {
+      el.textContent = String(text);
+      renderedTexts.push(String(text));
+    }
+    return el;
+  }
+  function t(key: string) { return `[${key}]`; }
+  function collapsedSection(title: string, node: unknown) {
+    const el = fakeEl("details");
+    renderedTexts.push(String(title));
+    if (node) el.appendChild(node);
+    return el;
+  }
+  function boundedDiagnostic(v: unknown) { return String(v); }
+  function deliveryPlanExpectation() { return "not-configured"; }
+  const DELIVERY_STAGE_KEYS = ["sourceApply", "sourceVerify", "artifactBuild", "runtimeActivation"];
+  const DELIVERY_STAGE_LABEL_KEYS: Record<string, string> = {
+    sourceApply: "stageSourceApply",
+    sourceVerify: "stageSourceVerify",
+    artifactBuild: "stageArtifactBuild",
+    runtimeActivation: "stageRuntimeActivation",
+  };
+  const documentStub = {
+    createElement: fakeEl,
+    createTextNode(text: unknown) { renderedTexts.push(String(text)); return { text: String(text) }; },
+  };
+
+  const factory = new Function(
+    "h", "t", "collapsedSection", "boundedDiagnostic", "deliveryPlanExpectation",
+    "DELIVERY_STAGE_KEYS", "DELIVERY_STAGE_LABEL_KEYS", "document",
+    `${fnSource}\nreturn renderPreflightResult;`,
+  );
+  const renderPreflightResult = factory(
+    h, t, collapsedSection, boundedDiagnostic, deliveryPlanExpectation,
+    DELIVERY_STAGE_KEYS, DELIVERY_STAGE_LABEL_KEYS, documentStub,
+  ) as (result: Record<string, unknown>) => { attrs: Record<string, string> };
+
+  const pathEvidence = [
+    { path: "src/a.ts", category: "business", provenance: "default-business" },
+    { path: "src/b.ts", category: "business", provenance: "default-business" },
+    { path: "src/c.ts", category: "generated", provenance: "snapshot-exclusion" },
+  ];
+  const result = {
+    id: "rec-1",
+    expiresAt: "2026-07-29T00:00:00.000Z",
+    rejectionReasons: ["Patch changes 6 files (limit: 5)"],
+    affectedFiles: ["src/a.ts", "src/b.ts", "src/c.ts"],
+    deliveryPlan: { stages: {} },
+    pathEvidence,
+    recoveryGuidance: {
+      code: "review-generated-or-exclusion-policy-vs-source-scope",
+      defaultBusinessPathCount: 2,
+      filesChanged: 6,
+      changedLines: 12,
+      reviewedPatchMaxFiles: 5,
+      reviewedPatchMaxLines: 400,
+    },
+  };
+
+  // The disclosure must iterate pathEvidence (not the DOM container) and must
+  // not throw a TypeError when path evidence is present.
+  let card: { attrs: Record<string, string> } | undefined;
+  assert.doesNotThrow(() => {
+    card = renderPreflightResult(result);
+  }, "renderPreflightResult must not throw with non-empty path evidence");
+  assert.equal(card!.attrs["data-fl-role"], "preflight-result");
+
+  // Every path entry is rendered, in evidence order, as a "path - ..." line.
+  // The " - " suffix uniquely identifies the disclosure line (the affectedFiles
+  // summary line is comma-separated and never contains "path - ").
+  let searchFrom = 0;
+  pathEvidence.forEach((entry) => {
+    const needle = `${entry.path} - `;
+    let idx = -1;
+    for (let i = searchFrom; i < renderedTexts.length; i += 1) {
+      const line = renderedTexts[i];
+      if (line !== undefined && line.includes(needle)) { idx = i; break; }
+    }
+    assert.ok(idx >= 0, `path ${entry.path} must be rendered in the disclosure`);
+    searchFrom = idx + 1;
+  });
+
+  // The bounded disclosure title is rendered (paths are in a disclosure, not a
+  // wall of text), and the beginner classification hint renders before the
+  // first technical path line.
+  assert.ok(
+    renderedTexts.some((s) => s.includes("taskPreflightPathDisclosure")),
+    "path disclosure title rendered",
+  );
+  const hintIdx = renderedTexts.findIndex((s) => s.includes("taskPreflightClassificationHint"));
+  const firstPathIdx = renderedTexts.findIndex((s) => s.includes(`${pathEvidence[0]!.path} - `));
+  assert.ok(hintIdx >= 0 && firstPathIdx >= 0 && hintIdx < firstPathIdx,
+    "beginner classification copy appears before technical path lines");
+});
+
 test("shipped tree has no Console product server or Setup UI server", async () => {
   const { existsSync } = await import("node:fs");
   assert.equal(existsSync(path.join(root, "src", "console")), false);
@@ -1014,6 +1180,41 @@ test("Hub surfaces contract-infeasible as revise-contract with bilingual plain l
   assert.ok(i18n.includes("Do not retry with the same boundary"), "en next action forbids same-boundary retry");
 });
 
+test("Hub surfaces connectivity as Daemon network recovery with bilingual plain language", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  assert.ok(src.includes("connectivity: \"journeyFailureConnectivity\"")
+    || src.includes('connectivity: "journeyFailureConnectivity"'),
+    "failureCategoryLabel maps connectivity");
+  assert.ok(src.includes('"connectivity": "journeyNextConnectivity"')
+    || src.includes("connectivity: \"journeyNextConnectivity\""),
+    "nextActionLabel maps connectivity");
+  assert.ok(src.includes('category === "connectivity"'),
+    "resolveCauseWhy handles connectivity");
+  for (const key of [
+    "journeyFailureConnectivity",
+    "journeyNextConnectivity",
+    "journeyCauseWhyConnectivity",
+  ]) {
+    assert.ok(i18n.includes(key + ":"), `i18n has ${key}`);
+  }
+  // English: TUI/Daemon distinction and recovery path without secrets.
+  assert.ok(i18n.includes("interactive Grok TUI"), "en explains TUI can work while Daemon fails");
+  assert.ok(i18n.includes("Daemon process network environment"), "en recovery mentions Daemon environment");
+  assert.ok(i18n.includes("bounded smoke check"), "en recovery recommends one smoke check");
+  assert.ok(i18n.includes("not model quality"), "en excludes model-quality blame");
+  // Chinese: same semantics for operators.
+  assert.ok(i18n.includes("网络连通性"), "zh connectivity label");
+  assert.ok(i18n.includes("交互式 Grok TUI"), "zh explains TUI/Daemon environment distinction");
+  assert.ok(i18n.includes("Daemon 进程的网络环境"), "zh recovery mentions Daemon environment");
+  assert.ok(i18n.includes("有界冒烟验证"), "zh recovery recommends smoke check");
+  assert.ok(i18n.includes("不是模型质量问题"), "zh excludes model-quality blame");
+  // Privacy: no raw proxy values, credentials, or endpoint hostnames in copy.
+  assert.ok(!i18n.includes("HTTP_PROXY="));
+  assert.ok(!i18n.includes("cli-chat-proxy.grok.com"));
+  assert.ok(!i18n.includes("super-secret"));
+});
+
 test("Hub economics and routing bridges use task service plain language, not raw Daemon jargon", async () => {
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   // Extract the two bridge strings in both locales by key.
@@ -1129,6 +1330,28 @@ test("Hub task summary follows the end-to-end stage after machine verification",
     summarize({ status: "failed", decisionStage: "main-rejected" }),
     "taskProgressFailedMainRejected",
   );
+  assert.equal(
+    summarize({
+      status: "failed",
+      remediationDisposition: {
+        status: "verified-repaired-delivered",
+        acceptanceBasis: "amended-acceptance",
+      },
+    }),
+    "taskProgressAmendedDelivered",
+    "a Main acceptance correction must not be presented as Worker failure",
+  );
+  assert.equal(
+    summarize({
+      status: "succeeded",
+      remediationDisposition: {
+        status: "verified-repaired-delivered",
+        acceptanceBasis: "original-acceptance",
+      },
+    }),
+    "taskProgressRepairedAfterMachinePass",
+    "a machine-successful Task must not be presented as Worker failure",
+  );
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   for (const key of [
     "taskProgressReadyIntegration",
@@ -1141,6 +1364,8 @@ test("Hub task summary follows the end-to-end stage after machine verification",
     "taskProgressDeliveredNoActivation",
     "taskProgressActivated",
     "taskProgressIntegrationFailed",
+    "taskProgressRepairedAfterMachinePass",
+    "taskProgressAmendedDelivered",
   ]) {
     assert.ok(i18n.indexOf(key) !== i18n.lastIndexOf(key), `${key} exists in both locales`);
   }
@@ -1150,6 +1375,39 @@ test("Hub task summary follows the end-to-end stage after machine verification",
   assert.ok(i18n.includes(
     'journeyNextReadyIntegrate: "Main accepted the result. It is waiting for your authorization to integrate."',
   ));
+});
+
+test("Hub final-delivery UI explains amended-acceptance without command text", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  assert.ok(src.includes('acceptanceBasis === "amended-acceptance"'),
+    "UI branches on amended-acceptance basis");
+  assert.ok(src.includes("taskFinalDeliveryAmended") || src.includes("taskDualOutcomeAmendedHint"),
+    "UI references amended delivery copy keys");
+  assert.ok(i18n.includes("taskFinalDeliveryAmended"),
+    "EN/ZH i18n includes amended delivery label");
+  assert.ok(i18n.includes("taskDualOutcomeAmendedHint"),
+    "EN/ZH i18n includes amended dual-outcome hint");
+  assert.ok(i18n.includes("journeyRemediationAmended"),
+    "EN/ZH i18n includes amended remediation journey copy");
+  assert.ok(i18n.includes("storyCurrentAmended"),
+    "EN/ZH i18n includes amended current-result story");
+  assert.ok(i18n.includes("storyFinalAmended"),
+    "EN/ZH i18n includes amended final-result story");
+  // Privacy: command text and free-form reason text must not appear as UI data bindings.
+  assert.ok(!src.includes("replacementCommand"),
+    "app.js must not bind replacementCommand");
+  assert.ok(!src.includes("originalCommand"),
+    "app.js must not bind originalCommand");
+  assert.ok(!i18n.includes("npm run typecheck"),
+    "i18n must not hardcode command text");
+  // Beginner EN/ZH copy must not surface the internal reason code.
+  assert.ok(!i18n.includes("contradictory-acceptance"),
+    "beginner i18n copy must not show contradictory-acceptance reason code");
+  assert.ok(i18n.includes("Main corrected its own acceptance definition"),
+    "EN beginner copy explains Main corrected acceptance");
+  assert.ok(i18n.includes("Main 修正了自己的验收定义"),
+    "ZH beginner copy explains Main corrected acceptance");
 });
 
 test("Hub final-delivery UI never exposes remediation reason, command, or output", async () => {
@@ -1321,6 +1579,19 @@ test("Hub Task story executes the shared fixture as an ordered input-process-out
     "terminal Task truth overrides a stale running Attempt state");
   assert.equal(terminalView.steps.find((step) => step.id === "worker-output")?.state, "failed",
     "recorded file differences are not shown as waiting after the Task has failed");
+
+  const acceptanceWasWrong = JSON.parse(JSON.stringify(fixture)) as {
+    status: string;
+    journey: {
+      workerExecution: { attempts: Array<{ status: string }> };
+      finalDelivery: { remediationDisposition: { status: string; acceptanceBasis?: string } };
+    };
+  };
+  acceptanceWasWrong.status = "failed";
+  acceptanceWasWrong.journey.finalDelivery.remediationDisposition.acceptanceBasis = "amended-acceptance";
+  const amendedView = adapter(acceptanceWasWrong);
+  assert.equal(amendedView.steps.find((step) => step.id === "worker-process")?.state, "complete",
+    "an amended acceptance record keeps Worker execution separate from the wrong Main check");
 
   assert.ok(src.includes("function renderTaskStory"));
   assert.ok(src.includes("function renderTaskWorkbench"), "full-page task workbench is shipped");

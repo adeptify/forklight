@@ -5,6 +5,7 @@ import type {
   AttemptRecord,
   AttemptStatus,
   EventRecord,
+  RemediationDisposition,
   TaskRecord,
   TaskStatus,
   VerificationResult,
@@ -18,7 +19,9 @@ export type FailureCategory =
   | "budget"
   | "provider"
   | "noProgress"
-  | "unclassified";
+  | "unclassified"
+  /** Main-authored acceptance contradiction after verified amended delivery. */
+  | "contract-infeasible";
 
 export interface ClassifyFailureInput {
   taskStatus: TaskStatus;
@@ -56,6 +59,8 @@ export interface StatisticsFilter {
   until?: string;
   /** Exact taskClass filter — never pattern-matched, never inferred. */
   taskClass?: string;
+  /** Stable taskFamily filter — never pattern-matched, never inferred. */
+  taskFamily?: string;
 }
 
 export interface FailureEvidence extends FailureClassification {
@@ -108,6 +113,7 @@ export function failureImpactForCategory(category: FailureCategory): FailureImpa
     case "workspace":
     case "budget":
     case "provider":
+    case "contract-infeasible":
       return "non-model";
     case "noProgress":
     case "unclassified":
@@ -235,6 +241,8 @@ export function classifyFailure(input: ClassifyFailureInput): FailureClassificat
       "econnreset",
       "etimedout",
       "econnaborted",
+      "network connectivity failure",
+      "could not reach the provider service",
       "http 500",
       "http 502",
       "http 503",
@@ -324,13 +332,20 @@ function summaryFor(
   for (const item of evidence) {
     if (item.task.status === "succeeded") continue;
     const attempt = latestAttempt(item.attempts);
-    const classification = classifyFailure({
-      taskStatus: item.task.status,
-      ...(attempt === undefined ? {} : { attemptStatus: attempt.status }),
-      ...(attempt?.exitCode === undefined ? {} : { attemptExitCode: attempt.exitCode }),
-      ...(item.verification === undefined ? {} : { verification: item.verification }),
-      ...(item.task.error === undefined ? {} : { error: item.task.error }),
-    });
+    const classification = failureCategoryFromEvents(item.events) === "connectivity"
+      ? {
+          category: "provider" as const,
+          reason: "Provider connectivity or transport failure",
+          diagnostic: item.task.error ?? "",
+          impact: "non-model" as const,
+        }
+      : classifyFailure({
+          taskStatus: item.task.status,
+          ...(attempt === undefined ? {} : { attemptStatus: attempt.status }),
+          ...(attempt?.exitCode === undefined ? {} : { attemptExitCode: attempt.exitCode }),
+          ...(item.verification === undefined ? {} : { verification: item.verification }),
+          ...(item.task.error === undefined ? {} : { error: item.task.error }),
+        });
     failures.push({
       taskId: item.task.id,
       ...(attempt === undefined ? {} : { attemptId: attempt.id }),
@@ -412,6 +427,7 @@ export function computeStatistics(
     && (filter.providerName === undefined || task.spec.provider.name === filter.providerName)
     && (filter.modelName === undefined || task.spec.provider.model === filter.modelName)
     && (filter.taskClass === undefined || task.spec.taskClass === filter.taskClass)
+    && (filter.taskFamily === undefined || task.spec.taskFamily === filter.taskFamily)
     && (since === undefined || Date.parse(task.createdAt) >= since)
     && (until === undefined || Date.parse(task.createdAt) <= until));
   const groups = new Map<string, TaskEvidence[]>();
@@ -607,6 +623,15 @@ function classifyAttemptFailure(
       impact: "non-model",
     };
   }
+  // Durable Worker connectivity is Provider/infrastructure, never model quality.
+  if (failureCategoryFromEvents(events) === "connectivity") {
+    return {
+      category: "provider",
+      reason: "Provider connectivity or transport failure",
+      diagnostic: attempt.error ?? "",
+      impact: "non-model",
+    };
+  }
   const attemptVerification = verificationFrom(events);
   return classifyFailure({
     taskStatus: attempt.status,
@@ -619,8 +644,19 @@ function classifyAttemptFailure(
 
 export interface DeriveRoutingEvidenceInput {
   taskClass: string;
+  /** When set, match tasks by taskFamily instead of taskClass.
+   *  Family evidence is for complete-set fallback only — never mixed with exact. */
+  taskFamily?: string;
   history: TaskEvidence[];
   hasPassingDisposition?: (taskId: string) => boolean;
+  /**
+   * Optional disposition lookup. When a verified amended-acceptance delivery
+   * exists, model-quality blame is suppressed while machine failure stays visible.
+   */
+  getDisposition?: (taskId: string) => RemediationDisposition | undefined;
+  /** New decisions compare the complete frozen Worker identity. Legacy callers
+   * may explicitly aggregate by provider/model. */
+  identityMode?: "provider-model" | "full-worker";
 }
 
 function officialCostUnavailableReason(attempt: AttemptRecord): string {
@@ -635,10 +671,21 @@ function officialCostUnavailableReason(attempt: AttemptRecord): string {
  * ambiguous failures remain visible but do not increase sample sufficiency or
  * model-quality failure rate unless independent behavior itself passed. */
 export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<string, RoutingEvidence> {
+  const useFamily = input.taskFamily !== undefined;
   const groups = new Map<string, TaskEvidence[]>();
   for (const item of input.history) {
-    if (!isTerminalTaskStatus(item.task.status) || item.task.spec.taskClass !== input.taskClass) continue;
-    const key = item.task.spec.provider.name + "\0" + item.task.spec.provider.model;
+    if (!isTerminalTaskStatus(item.task.status)) continue;
+    if (useFamily) {
+      if (item.task.spec.taskFamily !== input.taskFamily) continue;
+    } else {
+      if (item.task.spec.taskClass !== input.taskClass) continue;
+    }
+    const providerModel = item.task.spec.provider.name + "\0" + item.task.spec.provider.model;
+    const runtime = item.task.spec.runtime;
+    if (input.identityMode === "full-worker" && runtime === undefined) continue;
+    const key = input.identityMode === "full-worker"
+      ? providerModel + "\0" + runtime!.name + "\0" + runtime!.effort
+      : providerModel;
     groups.set(key, [...(groups.get(key) ?? []), item]);
   }
 
@@ -685,17 +732,41 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
     let candidateEnvelopeMixed = false;
 
     for (const item of items) {
-      const passingDisposition = input.hasPassingDisposition?.(item.task.id) ?? false;
+      const disposition = input.getDisposition?.(item.task.id);
+      const passingDisposition =
+        disposition !== undefined
+        || (input.hasPassingDisposition?.(item.task.id) ?? false);
+      // Main-authored acceptance mistakes must not become model-quality evidence
+      // after a verified amended-acceptance delivery. Machine failure stays
+      // visible via terminal Task status and failure listings elsewhere.
+      const amendedAcceptance = disposition?.acceptanceBasis === "amended-acceptance";
       let classification: FailureClassification | undefined;
       if (item.task.status !== "succeeded") {
         const attempt = latestAttempt(item.attempts);
-        classification = classifyFailure({
-          taskStatus: item.task.status,
-          ...(attempt === undefined ? {} : { attemptStatus: attempt.status }),
-          ...(attempt?.exitCode === undefined ? {} : { attemptExitCode: attempt.exitCode }),
-          ...(item.verification === undefined ? {} : { verification: item.verification }),
-          ...(item.task.error === undefined ? {} : { error: item.task.error }),
-        });
+        classification = failureCategoryFromEvents(item.events) === "connectivity"
+          ? {
+              category: "provider",
+              reason: "Provider connectivity or transport failure",
+              diagnostic: item.task.error ?? "",
+              impact: "non-model",
+            }
+          : classifyFailure({
+              taskStatus: item.task.status,
+              ...(attempt === undefined ? {} : { attemptStatus: attempt.status }),
+              ...(attempt?.exitCode === undefined ? {} : { attemptExitCode: attempt.exitCode }),
+              ...(item.verification === undefined ? {} : { verification: item.verification }),
+              ...(item.task.error === undefined ? {} : { error: item.task.error }),
+            });
+        if (amendedAcceptance && classification.impact === "model-quality") {
+          // Main-authored acceptance mistakes are contract-infeasible non-model
+          // evidence after verified amended delivery — never model-quality.
+          classification = {
+            category: "contract-infeasible",
+            reason: "Main amended acceptance after verified amended delivery",
+            diagnostic: classification.diagnostic,
+            impact: "non-model",
+          };
+        }
         if (classification.impact === "non-model") {
           evidence.ignoredNonModelTaskCount += 1;
           evidence.ignoredNonModelFailures[classification.category] =
@@ -743,7 +814,8 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
         const exhausted = attemptClassification?.category === "budget";
         const completedWithoutExhaustion = attempt.status === "succeeded"
           || attemptClassification?.impact === "model-quality"
-          || verificationFrom(ownEvents)?.behaviorPassed === true;
+          || verificationFrom(ownEvents)?.behaviorPassed === true
+          || (passingDisposition && amendedAcceptance);
         if (!exhausted && !completedWithoutExhaustion) {
           evidence.budgetReliability.excludedExternalFailureCount += 1;
           continue;
@@ -768,7 +840,10 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
       if (!relevant) continue;
 
       evidence.relevantSampleCount += 1;
-      if (classification?.impact === "model-quality") evidence.modelQualityFailureCount += 1;
+      // Amended-acceptance deliveries are non-model contract evidence.
+      if (classification?.impact === "model-quality" && !amendedAcceptance) {
+        evidence.modelQualityFailureCount += 1;
+      }
       if (item.task.status === "succeeded" || passingDisposition) evidence.acceptedDeliveryCount += 1;
       if (item.verification !== undefined) {
         evidence.verifiedBehaviorSampleCount += 1;
@@ -871,7 +946,10 @@ export class StatisticsService {
 
   /** Derive routing evidence for the exact taskClass from all terminal
    *  Tasks.  Read-only — never mutates state. */
-  routingEvidence(taskClass: string): Map<string, RoutingEvidence> {
+  routingEvidence(
+    taskClass: string,
+    identityMode: "provider-model" | "full-worker" = "provider-model",
+  ): Map<string, RoutingEvidence> {
     const history = this.store.listTasks()
       .filter((task) => isTerminalTaskStatus(task.status))
       .map((task): TaskEvidence => {
@@ -886,9 +964,44 @@ export class StatisticsService {
       });
     return deriveRoutingEvidence({
       taskClass,
+      identityMode,
       history,
       hasPassingDisposition: (taskId) =>
         this.store.getRemediationDisposition(taskId) !== undefined,
+      getDisposition: (taskId) => this.store.getRemediationDisposition(taskId),
+    });
+  }
+
+  /** Derive routing evidence for an explicit taskFamily from all terminal
+   *  Tasks with that family.  Read-only — never mutates state.
+   *  Family evidence is only comparable when every candidate has enough
+   *  family-scoped samples; it never replaces exact taskClass for audit or
+   *  Direct Codex Token calibration. */
+  routingEvidenceByFamily(
+    taskFamily: string,
+    identityMode: "provider-model" | "full-worker" = "provider-model",
+  ): Map<string, RoutingEvidence> {
+    // Collect all terminal tasks (deriveRoutingEvidence filters by family inside).
+    const history = this.store.listTasks()
+      .filter((task) => isTerminalTaskStatus(task.status))
+      .map((task): TaskEvidence => {
+        const events = this.store.listEvents(task.id);
+        const verification = verificationFrom(events);
+        return {
+          task,
+          attempts: this.store.listAttempts(task.id),
+          events,
+          ...(verification === undefined ? {} : { verification }),
+        };
+      });
+    return deriveRoutingEvidence({
+      taskClass: taskFamily, // retained for output labeling; actual filter is taskFamily
+      taskFamily,
+      identityMode,
+      history,
+      hasPassingDisposition: (taskId) =>
+        this.store.getRemediationDisposition(taskId) !== undefined,
+      getDisposition: (taskId) => this.store.getRemediationDisposition(taskId),
     });
   }
 }

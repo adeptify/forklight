@@ -7,6 +7,7 @@ import {
   type FailureCategory,
   type RoutingEvidence,
 } from "./statistics.js";
+import type { FrozenWorkerIdentity } from "./types.js";
 
 export type FailureImpact = "model-quality" | "non-model" | "ambiguous";
 
@@ -34,22 +35,46 @@ export interface RoutingWeightSettings {
 }
 
 export type MissingEvidenceMode = "strict" | "flexible";
+export type EvidenceScope = "exact-class" | "task-family" | "none";
+export type CompetitionTrigger = "critical" | "multiple-plausible-solutions" | "new-family" | "user-requested";
+export type CompetitionIntent = "none" | "consider" | "required";
+
+/** Reason code for Main's worker selection. */
+export type SelectionReasonCode =
+  | "relevant-delivery"
+  | "runtime-capability"
+  | "user-specified"
+  | "only-available"
+  | "main-judgment";
 
 export interface RoutingPolicySettings {
   minRelevantSamples: number;
+  /** Minimum relevant samples per candidate for family-scope evidence. */
+  familyMinRelevantSamples: number;
   /** Minimum normalized score gap required for a recommendation, in [0, 1]. */
   uncertaintyThreshold: number;
+  /** Compatibility master switch — alone never sufficient for Competition. */
   competitionOnUncertainty: boolean;
+  /** Which triggers are enabled for consider intent. */
+  competitionTriggersEnabled: CompetitionTrigger[];
+  /** Default candidate count when Competition is advised. */
+  defaultCompetitionCandidates: number;
   /** Strict blocks on any enabled-but-unavailable factor. Flexible ranks only
    * comparable evidence and reports the omitted factors as warnings. */
   missingEvidenceMode: MissingEvidenceMode;
   weights: RoutingWeightSettings;
 }
 
+export const DEFAULT_TRIGGERS_ENABLED: CompetitionTrigger[] = [];
+export const DEFAULT_COMPETITION_CANDIDATES = 2;
+
 export const DEFAULT_ROUTING_POLICY: RoutingPolicySettings = {
   minRelevantSamples: 5,
+  familyMinRelevantSamples: 5,
   uncertaintyThreshold: 0.15,
   competitionOnUncertainty: true,
+  competitionTriggersEnabled: [...DEFAULT_TRIGGERS_ENABLED],
+  defaultCompetitionCandidates: DEFAULT_COMPETITION_CANDIDATES,
   missingEvidenceMode: "flexible",
   weights: {
     acceptedDelivery: 1,
@@ -102,9 +127,17 @@ export type RoutingUncertaintyReason =
   | "score-gap-too-small"
   | "no-active-factors";
 
+// Re-export the canonical FrozenWorkerIdentity from types.ts so consumers
+// get the same type without importing from two places.
+export type { FrozenWorkerIdentity } from "./types.js";
+
 export interface RoutingCandidateResult {
   provider: string;
   model: string;
+  /** Runtime and effort from the Worker identity, when available.
+   *  Legacy provider/model-only input omits these. */
+  runtime?: string;
+  effort?: string;
   /** Historical failure never permanently removes a candidate. */
   eligible: true;
   evidence: RoutingEvidence;
@@ -126,10 +159,37 @@ export interface RoutingRecommendation {
   reasoning: string;
 }
 
+/** Knowledge state: recommendation when evidence supports a clear best;
+ *  unknown when evidence cannot separate candidates. */
+export type RoutingKnowledge = "recommendation" | "unknown";
+
+/** Competition advice derived from intent + triggers + settings, not uncertainty. */
+export interface CompetitionAdvisory {
+  /** Whether Competition is advised under the current policy. */
+  shouldRunCompetition: boolean;
+  /** Intent from Main's decision snapshot. */
+  intent: CompetitionIntent;
+  /** Triggers that were evaluated. */
+  evaluatedTriggers: CompetitionTrigger[];
+  /** Triggers that were enabled by settings and matched Main's intent. */
+  matchingTriggers: CompetitionTrigger[];
+  /** Suggested candidate count when Competition is advised. */
+  suggestedCandidates: number;
+}
+
 export interface RoutingAdvisoryResponse {
   taskClass: string;
+  /** Optional taskFamily used for evidence when exact-class was insufficient. */
+  taskFamily?: string;
+  /** Which evidence scope was used for comparison. */
+  evidenceScope: EvidenceScope;
+  /** Knowledge state: recommendation or unknown. */
+  knowledge: RoutingKnowledge;
   candidates: RoutingCandidateResult[];
   recommendation?: RoutingRecommendation;
+  /** Competition advice separated from evidence uncertainty. */
+  competition: CompetitionAdvisory;
+  /** Legacy: kept for backward compatibility with existing consumers. */
   shouldRunCompetition: boolean;
   resolvedPolicy: RoutingPolicySettings;
   /** Enabled factors excluded for every candidate because evidence was not comparable. */
@@ -389,41 +449,173 @@ function zeroEvidence(provider: string, model: string): RoutingEvidence {
   };
 }
 
+/** Stable comparison key. New routing decisions use the complete frozen Worker
+ * identity; provider/model-only keys remain an explicit legacy mode. */
+export function routingIdentityKey(
+  candidate: Pick<FrozenWorkerIdentity, "provider" | "model"> &
+    Partial<Pick<FrozenWorkerIdentity, "runtime" | "effort">>,
+): string {
+  const base = `${candidate.provider}\0${candidate.model}`;
+  return candidate.runtime !== undefined && candidate.effort !== undefined
+    ? `${base}\0${candidate.runtime}\0${candidate.effort}`
+    : base;
+}
+
+function candidateKeys(
+  candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }>,
+): string[] {
+  return candidates.map(routingIdentityKey);
+}
+
 export interface ProvideRoutingAdviceInput {
   taskClass: string;
-  candidates: Array<{ provider: string; model: string }>;
+  /** Optional taskFamily for evidence fallback. */
+  taskFamily?: string;
+  /** Candidates to compare. Runtime and effort are optional — legacy
+   *  provider/model input omits them and evidence is keyed by provider/model. */
+  candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }>;
+  /** Exact-class evidence map keyed by provider\0model. */
   evidenceMap: Map<string, RoutingEvidence>;
+  /** Optional family-scope evidence map keyed by provider\0model. */
+  familyEvidenceMap?: Map<string, RoutingEvidence>;
   policy: RoutingPolicySettings;
+  /** Main's Competition intent from the routing decision. */
+  competitionIntent?: CompetitionIntent;
+  /** Main's Competition triggers from the routing decision. */
+  competitionTriggers?: CompetitionTrigger[];
+}
+
+/** Resolve the comparable evidence scope: exact-class, task-family, or none.
+ *  Every candidate must meet the threshold for a scope to be used. */
+function resolveEvidenceScope(
+  evidence: RoutingEvidence[],
+  familyEvidence: RoutingEvidence[] | undefined,
+  policy: RoutingPolicySettings,
+): EvidenceScope {
+  const exactSufficient = evidence.every(
+    (item) => item.relevantSampleCount >= policy.minRelevantSamples,
+  );
+  if (exactSufficient) return "exact-class";
+
+  if (familyEvidence !== undefined && familyEvidence.length === evidence.length) {
+    const familySufficient = familyEvidence.every(
+      (item) => item.relevantSampleCount >= policy.familyMinRelevantSamples,
+    );
+    if (familySufficient) return "task-family";
+  }
+
+  return "none";
+}
+
+/** Determine whether Competition should be advised based on Main's intent,
+ *  enabled triggers, the compatibility switch, and evidence context.
+ *  Evidence uncertainty alone never authorizes Competition. */
+function evaluateCompetitionAdvice(
+  intent: CompetitionIntent | undefined,
+  triggers: CompetitionTrigger[] | undefined,
+  policy: RoutingPolicySettings,
+  familyEvidenceAvailable: boolean,
+): CompetitionAdvisory {
+  const evaluatedTriggers = triggers ?? [];
+  const enabledTriggers = policy.competitionTriggersEnabled;
+
+  if (intent === "required") {
+    // Required always suggests competition regardless of triggers/settings.
+    return {
+      shouldRunCompetition: true,
+      intent: "required",
+      evaluatedTriggers,
+      matchingTriggers: evaluatedTriggers.filter((t) => enabledTriggers.includes(t)),
+      suggestedCandidates: policy.defaultCompetitionCandidates,
+    };
+  }
+
+  if (intent === "consider") {
+    // Compatibility switch must be enabled for consider to produce advice.
+    if (!policy.competitionOnUncertainty) {
+      return {
+        shouldRunCompetition: false,
+        intent: "consider",
+        evaluatedTriggers,
+        matchingTriggers: [],
+        suggestedCandidates: 0,
+      };
+    }
+    // new-family trigger requires genuinely missing family evidence.
+    const effectiveTriggers = evaluatedTriggers.filter((t) => {
+      if (!enabledTriggers.includes(t)) return false;
+      if (t === "new-family" && familyEvidenceAvailable) return false;
+      return true;
+    });
+    const matchingTriggers = effectiveTriggers;
+    if (matchingTriggers.length > 0) {
+      return {
+        shouldRunCompetition: true,
+        intent: "consider",
+        evaluatedTriggers,
+        matchingTriggers,
+        suggestedCandidates: policy.defaultCompetitionCandidates,
+      };
+    }
+  }
+
+  // None or consider with no matching triggers — no competition advice.
+  return {
+    shouldRunCompetition: false,
+    intent: intent ?? "none",
+    evaluatedTriggers,
+    matchingTriggers: [],
+    suggestedCandidates: 0,
+  };
 }
 
 export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingAdvisoryResponse {
   if (input.candidates.length < 2) {
     throw new Error("Routing advice requires at least two provider/model candidates");
   }
-  const evidence = input.candidates.map((candidate) =>
-    input.evidenceMap.get(`${candidate.provider}\0${candidate.model}`)
-      ?? zeroEvidence(candidate.provider, candidate.model));
-  const allSufficient = evidence.every(
-    (item) => item.relevantSampleCount >= input.policy.minRelevantSamples,
-  );
+  const keys = candidateKeys(input.candidates);
+  const evidence = keys.map((key) =>
+    input.evidenceMap.get(key)
+      ?? zeroEvidence(
+        input.candidates.find((c) => `${c.provider}\0${c.model}` === key)?.provider ?? "unknown",
+        input.candidates.find((c) => `${c.provider}\0${c.model}` === key)?.model ?? "unknown",
+      ));
+
+  const familyEvidence = input.familyEvidenceMap
+    ? keys.map((key) =>
+        input.familyEvidenceMap!.get(key)
+          ?? zeroEvidence(
+            input.candidates.find((c) => `${c.provider}\0${c.model}` === key)?.provider ?? "unknown",
+            input.candidates.find((c) => `${c.provider}\0${c.model}` === key)?.model ?? "unknown",
+          ))
+    : undefined;
+
+  const evidenceScope = resolveEvidenceScope(evidence, familyEvidence, input.policy);
+
+  // Use the evidence from the resolved scope for scoring.
+  const scoringEvidence = evidenceScope === "task-family" && familyEvidence
+    ? familyEvidence
+    : evidence;
+
+  const allSufficient = evidenceScope !== "none";
   const plans: FactorPlan[] = [
     basePlan(
       "acceptedDelivery", input.policy.weights.acceptedDelivery,
-      evidence.map((item) => item.acceptedDeliveryRate), allSufficient, false,
+      scoringEvidence.map((item) => item.acceptedDeliveryRate), allSufficient, false,
     ),
-    behaviorPlan(input.policy.weights.verifiedBehavior, evidence, allSufficient),
+    behaviorPlan(input.policy.weights.verifiedBehavior, scoringEvidence, allSufficient),
     basePlan(
       "modelQualityFailure", input.policy.weights.modelQualityFailure,
-      evidence.map((item) => item.modelQualityFailureRate), allSufficient, true,
+      scoringEvidence.map((item) => item.modelQualityFailureRate), allSufficient, true,
     ),
     basePlan(
       "correctionChurn", input.policy.weights.correctionChurn,
-      evidence.map((item) => item.correctionChurnRate), allSufficient, true,
+      scoringEvidence.map((item) => item.correctionChurnRate), allSufficient, true,
     ),
-    costPlan(input.policy.weights.officialCost, evidence, allSufficient),
-    durationPlan(input.policy.weights.duration, evidence, allSufficient),
+    costPlan(input.policy.weights.officialCost, scoringEvidence, allSufficient),
+    durationPlan(input.policy.weights.duration, scoringEvidence, allSufficient),
     budgetReliabilityPlan(
-      input.policy.weights.budgetReliability, evidence, allSufficient,
+      input.policy.weights.budgetReliability, scoringEvidence, allSufficient,
       input.policy.minRelevantSamples,
     ),
   ];
@@ -442,7 +634,7 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
   const results: RoutingCandidateResult[] = evidence.map((item, index) => {
     const factors = plans.map((plan) => factorResult(plan, index));
     const reasons: RoutingUncertaintyReason[] = [];
-    if (item.relevantSampleCount < input.policy.minRelevantSamples) {
+    if (evidenceScope === "none") {
       reasons.push("insufficient-relevant-samples");
     }
     if (input.policy.missingEvidenceMode === "strict" && positiveUnavailable) {
@@ -450,15 +642,18 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     }
     if (activeWeight === 0) reasons.push("no-active-factors");
     const cost = factors.find((factor) => factor.factor === "officialCost")!;
+    const candidate = input.candidates[index];
     return {
       provider: item.provider,
       model: item.model,
+      ...(candidate?.runtime !== undefined ? { runtime: candidate.runtime } : {}),
+      ...(candidate?.effort !== undefined ? { effort: candidate.effort } : {}),
       eligible: true,
       evidence: item,
       factors,
       totalScore: factors.reduce((sum, factor) => sum + factor.weightedScore, 0),
       uncertainty: {
-        insufficientSamples: item.relevantSampleCount < input.policy.minRelevantSamples,
+        insufficientSamples: evidenceScope === "none",
         insufficientGap: false,
         incompatibleCost: cost.weight > 0 && !cost.available,
         incompatibleCurrency: cost.unavailableReason === "official-cost-mixed-currency"
@@ -474,35 +669,58 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
   const gap = results[0]!.totalScore - results[1]!.totalScore;
   const gapRatio = activeWeight > 0 ? gap / activeWeight : 0;
   const insufficientGap = gapRatio <= input.policy.uncertaintyThreshold;
-  if (insufficientGap) {
+  if (insufficientGap && evidenceScope !== "none") {
     for (const result of results) {
       result.uncertainty.insufficientGap = true;
-      result.uncertainty.reasons.push("score-gap-too-small");
+      if (!result.uncertainty.reasons.includes("score-gap-too-small")) {
+        result.uncertainty.reasons.push("score-gap-too-small");
+      }
     }
   }
 
-  const uncertain = !allSufficient
-    || (input.policy.missingEvidenceMode === "strict" && positiveUnavailable)
-    || activeWeight === 0
-    || insufficientGap;
+  const knowledge: RoutingKnowledge = (evidenceScope !== "none" && !insufficientGap
+    && !(input.policy.missingEvidenceMode === "strict" && positiveUnavailable)
+    && activeWeight > 0)
+    ? "recommendation"
+    : "unknown";
+
   const top = results[0]!;
-  const recommendation = uncertain
-    ? undefined
-    : {
+  const recommendation = knowledge === "recommendation"
+    ? {
         provider: top.provider,
         model: top.model,
         confidence: Math.max(0, Math.min(1, gapRatio)),
         reasoning: `clear-score-gap:${gapRatio.toFixed(4)};relevant-samples:${top.evidence.relevantSampleCount}`,
-      };
+      }
+    : undefined;
+
+  // Competition advice: derived from intent + triggers, not uncertainty.
+  // familyAvailable is used to gate new-family trigger:
+  // new-family only produces advice when family evidence is truly missing.
+  const familyAvailable = familyEvidence?.some((item) => item.terminalTaskCount > 0) ?? false;
+
+  const competition = evaluateCompetitionAdvice(
+    input.competitionIntent,
+    input.competitionTriggers,
+    input.policy,
+    familyAvailable,
+  );
+
   const resolvedPolicy: RoutingPolicySettings = {
     ...input.policy,
     weights: { ...input.policy.weights },
+    competitionTriggersEnabled: [...input.policy.competitionTriggersEnabled],
   };
+
   return {
     taskClass: input.taskClass,
+    ...(input.taskFamily !== undefined ? { taskFamily: input.taskFamily } : {}),
+    evidenceScope,
+    knowledge,
     candidates: results,
     ...(recommendation === undefined ? {} : { recommendation }),
-    shouldRunCompetition: uncertain && input.policy.competitionOnUncertainty,
+    competition,
+    shouldRunCompetition: competition.shouldRunCompetition,
     resolvedPolicy,
     omittedFactors,
   };

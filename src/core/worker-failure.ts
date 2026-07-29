@@ -1,27 +1,33 @@
 /**
- * Durable terminal failure classification (FL-D15/D16 + M2 contract-infeasible).
- * Prefer the normalizer-written payload.failureCategory over free-text parsing.
+ * Durable terminal failure classification (FL-D15/D16 + M2 contract-infeasible
+ * + Provider connectivity).
+ * Prefer the normalizer- or adapter-written payload.failureCategory over
+ * free-text parsing.
  *
- * Real runs often record two worker.failed rows: first the Claude normalizer
- * event (with failureCategory), then a bare runner summary event without
- * payload. Always scan newest-first for a classified payload so the bare
- * double-write cannot erase auth/budget classification.
+ * Real runs often record two worker.failed rows: first a normalizer/adapter
+ * event (with failureCategory), then a bare or classified runner summary.
+ * Always scan newest-first for a classified payload so an older runtime
+ * classification cannot erase a newer connectivity (or auth/budget) category.
  *
  * Contract-infeasible is also durable on verification.completed when independent
  * acceptance proves the Task Contract itself cannot be satisfied. Same-policy
  * Worker retry and adaptation must stop; Main revises the contract boundary.
+ *
+ * Connectivity is Provider/infrastructure evidence: never model quality.
  */
 
 export type WorkerFailureCategory =
   | "authentication"
   | "budget"
   | "runtime"
+  | "connectivity"
   | "contract-infeasible";
 
 const CATEGORIES = new Set<WorkerFailureCategory>([
   "authentication",
   "budget",
   "runtime",
+  "connectivity",
   "contract-infeasible",
 ]);
 

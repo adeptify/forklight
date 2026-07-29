@@ -25,9 +25,35 @@ gate was still open is historical evidence, not the current milestone state.
 ForkLight is now an **engineering Alpha** rather than a concept prototype. The
 core `one Main → bounded Workers → independent verification → Main review →
 safe Integration` loop is real and has been dogfooded with DeepSeek Pro,
-MiniMax-M3 and Volcengine GLM. M0 is complete again after closing the reload
-lifecycle gap; M1 resumes with the clean-user journey and representative M1.4
-Tasks.
+MiniMax-M3, Volcengine GLM and Grok 4.5. M1 continues with the clean-user
+journey and representative M1.4 Tasks. The automatic M0 upgrade chain remains
+proved. After every self-build, a long-lived Main must still re-check its MCP
+identity before mutation; the matched CLI remains the safe fallback while a
+client reload is pending.
+
+**Latest runtime truth (2026-07-29):** the current source, built CLI, formal
+Daemon PID `37797`, and Hub PID `39681` use build
+`b7561b77575b9fe23050639170df7e842b6fd4275413a981b9336c983cb1d08e`.
+The Hub is `current` on the sole listener `127.0.0.1:62302`; the Daemon has no
+active or queued Task, defaults to `grok-build`, and inherited the names
+`HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` without exposing their values. This
+closes the measured TUI/Daemon environment mismatch for the current process.
+It does not promise that a future restart will inherit the same environment;
+future connectivity failures must be classified and explained rather than
+blindly retried.
+
+**Historical reload truth (2026-07-29):** the final clean-run pack rebuilt ForkLight
+to `7426d0f154901f14b61cc7073afe853040734b561161cdf617b0bdc086b6c684`.
+The built CLI, formal Daemon PID `48999`, and Hub PID `49395` on port `64920`
+use that build and have no active or queued Task. This loaded Main task's MCP
+still reports the pre-pack build
+`da669a7baf2f02d8ec8de392b0b747247f96a762805d1ecb157bf159aa13c143`
+and correctly reports `build-mismatch`. All Relay R8 validation, submission,
+review, correction, and Integration mutations therefore used the matched CLI;
+the stale MCP was used only for read-only health/eligibility. A Codex App-level
+reload or restart is required before the next MCP mutation. This is an active
+operational M0 guard, not a fabricated Task failure; no old MCP was killed in
+turn and no commit or push was performed.
 
 **M0 reload closure (2026-07-29):** restarting the Codex App created fresh MCP
 connections. A read-only MCP health call, the built CLI, and the formal Daemon
@@ -1065,7 +1091,16 @@ evidence rather than another implementation retry.
    ten-Task candidate inventory is recorded in
    `docs/m1-real-task-portfolio.md`, including current source-overlap risk,
    user-facing outcomes, module boundaries, acceptance commands, and bounded
-   execution policy. The operator procedure and evidence worksheet are recorded
+   execution policy. A same-day source-drift recheck has now stopped unsafe
+   execution of that historical inventory: the saved Dia path no longer exists;
+   Adeptify A1's original core checks already pass while its remaining UI/
+   projection chain overlaps active work; NovelRPGPlay N3 is already implemented
+   end to end in the current baseline; and the remaining candidates overlap
+   ongoing Session, File Tool, production, review, personal-action, or connection
+   work. No Worker was launched and no Token was spent merely to increase the
+   task count. M1.4 now needs a user-prioritized fresh outcome or an updated Dia
+   path before the next real-project submission. The operator procedure and
+   evidence worksheet are recorded
    in `docs/m1-clean-user-runbook.md`; the current Mac has only the existing
    development user. The latest world-readable clean-run bundle is frozen under
    `/Users/Shared/ForkLight-Clean-Run.TrcwKU`: external `bundle-evidence.json`
@@ -1138,6 +1173,14 @@ evidence rather than another implementation retry.
    `4be4bee7-ef54-4314-a50f-75c835d36e6d` 关闭：`run` 与 `validate-plan` 现在复用同一个完整
    settings-to-policy mapper；新 build 中直接 `forklight run` 同一 Grok 文件已真实成功，不再报告
    `Unknown worker profile`。
+   ForkLight 自身的 Grok 连通性解释又完成一轮真实 dogfood：Task
+   `00b0cd43-eeba-40d1-9d6e-c5b5e6c73c1b` 使用一个 Grok 4.5 Attempt 产出 14-file
+   Candidate。Task 的机器状态保持 failed，因为 Main 在不可变验收合同中误写了仓库不存在的
+   `npm run typecheck`；Main 没有重跑 Worker，而是保留 Candidate、补上终态事件脱敏，并把未来
+   合同改为真实的 `npm run build`。聚焦 171/171、最终全量 1,595/1,595、build、Hub JavaScript
+   syntax 和 diff hygiene 均通过。今后明确的 Grok 网络连通失败会作为 Provider/运行环境证据，
+   不计入模型质量；Task Detail 用白话解释 TUI 与后台 Daemon 可能继承不同网络环境，并只给安全
+   恢复动作。原始代理值、凭据和 endpoint 细节不会进入公开 Task 表面。
    Keep using shared resolvers so the form,
    preview, saved policy, and Task admission cannot drift into separate meanings.
 3. **Contract feasibility:** shipped as a durable failure category
@@ -1177,9 +1220,80 @@ evidence rather than another implementation retry.
    as accepted quality evidence and negative efficiency evidence: before the
    next small Task, tighten context/read guidance or choose Main-direct work
    rather than using success alone to justify delegation.
-6. Collect more accepted exact-pair samples across task classes and Main
-   profiles before raising calibration confidence; keep timing separate from
-   quality unless the user enables a time preference.
+   A 2026-07-29 read-only evidence audit now makes the M3 limit concrete:
+   229 stored Tasks include 114 without `taskClass`; the remaining 115 are
+   fragmented across 88 exact classes, 71 of which have only one sample. Only
+   four classes have at least three Tasks and two models, and none can satisfy
+   the current five-relevant-samples-per-candidate gate. Passing all four saved
+   Workers to a new class therefore produces a competition suggestion because
+   evidence is absent, not because multiple implementations are valuable.
+   Until a new schema is aligned, Main must shortlist one Worker for ordinary
+   deterministic work and at most two for explicit criticality, multiple
+   plausible high-risk solutions, a genuinely new task family, or a user
+   request. Keep machine-first success, final accepted delivery, and Main-
+   repaired delivery separate: DeepSeek 1M, MiniMax M3, GLM 5.2 and Grok 4.5
+   currently account for 36 accepted deliveries that required Main repair.
+   The proposed next product slice is a configurable stable task family plus an
+   explicit competition-trigger reason; missing evidence alone should mean
+   “unknown”, not silently authorize extra spend. Full evidence and caveats are
+   recorded in `docs/model-selection-evidence-audit-2026-07-29.md`.
+   A no-code implementation blueprint is now recorded in
+   `docs/model-selection-strategy-v1.md`. It keeps exact `taskClass` for audit
+   and Direct Codex calibration, adds an explicit stable family only for
+   broader routing evidence, separates “evidence is unknown” from “competition
+   is worth its extra spend”, and freezes Main's shortlist/selection reason for
+   Hub explanation. A source-level call-chain audit found that current routing
+   identifies candidates only by provider/model, while Competition clones the
+   parent runtime/Profile and changes only provider/model. That is insufficient
+   for truthful Worker selection or mixed-runtime candidates. The blueprint now
+   freezes provider/model/runtime/effort identity, requires each Competition
+   candidate to resolve its own Worker Profile, and separates machine comparison
+   from Main's final accept/revise/reject/retained-partial decision. Implementation
+   is split into two sequential, non-competitive Tasks: DeepSeek 1M for routing
+   evidence and selection snapshots, then Volcengine GLM 5.2 1M for mixed-runtime
+   Competition and result judgment after the first Task is integrated. Each has
+   at most one same-Candidate correction. No schema, API, setting, Worker, or
+   runtime has been changed before user alignment.
+   A companion Hub acceptance matrix is now recorded in
+   `docs/model-selection-ux-acceptance-v1.md`. Read-only evidence proves that a
+   zero-sample four-candidate query currently returns `shouldRunCompetition=true`,
+   historical Competition records do not retain a reason or each candidate's
+   runtime/Profile identity, and machine recommendations are not bound to a Main
+   final decision. The matrix defines one shared explanation order across Models,
+   Competition Detail and Task Detail, including explicit unknown/no-competition,
+   machine-result-waiting-for-Main, revision, rejection and retained-partial
+   states. It is a data/copy acceptance contract, not visual proof: the live Hub
+   session was unauthenticated, so authenticated browser QA remains mandatory
+   after implementation. Runtime behavior remains unchanged pending user alignment.
+   Two executable but unsubmitted sequential Contracts are now frozen at
+   `examples/dogfood/m3-routing-decision-evidence-deepseek.yaml` and
+   `examples/dogfood/m3-competition-main-decision-glm.yaml`. Current ForkLight
+   validation resolves the first to DeepSeek `deepseek-v4-pro[1M]` and the
+   second to Volcengine `glm-5.2[1M]`; both have unlimited per-Task budget, one
+   base Attempt, zero automatic extra Attempts/adaptation, at most one explicit
+   Main correction, and 100-point admitted contract quality. The GLM Contract
+   cannot start until the DeepSeek Candidate is accepted, integrated, built,
+   activated, and identity-checked. Validation created no Task and launched no
+   Worker. Submission still waits for the one product-principle confirmation.
+6. **M4 exact-pair evidence audit (2026-07-29):** two version-1 profile
+   calibrations are already published, each from one accepted sample with low
+   confidence. They truthfully prove lower Main exchange for those two exact
+   cases, but the task classes and Codex profiles differ, so they cannot be
+   merged into a general ForkLight saving rate. The current reports show
+   86.13%–97.73% and 82.49%–97.13% saved **Main** Tokens respectively; neither
+   percentage is a total-system Token or cost claim. The first legacy pair has
+   independent verification and an applied patch but lacks modern Main Review
+   and complete Candidate lineage; the second includes a failed first check,
+   one same-Candidate correction, independent verification, and semantic Main
+   acceptance, but has not been integrated. Publication confidence is currently
+   Main-declared rather than inferred from sample count. The minimal next
+   portfolio is one real accepted pair each for small fix, standard feature,
+   and refactor, all from frozen same-condition baselines; no competition and
+   at most one fully counted same-Candidate correction. Add samples only when
+   the first result changes a decision or needs variance checking, and require
+   explicit user approval before every intentionally duplicated pair. Full
+   evidence, current values, caveats, and proposed configurable confidence
+   thresholds are recorded in `docs/main-token-value-evidence-plan.md`.
 7. **Provider-native exact cost coverage:** Worker `pricingRoute` and a truthful
    aggregate-tier range are shipped. Next capture Provider/runtime-supported
    per-request usage rows so multi-tier Attempts can become exact; until then
@@ -1196,9 +1310,15 @@ evidence rather than another implementation retry.
     Patch/Integration size gates is shipped for declared workspace exclusions;
     raw and generated audit evidence is retained while the Integration payload
     stays source-only. Preflight now shows the immutable four-stage delivery
-    plan and uses the real affected-file list. Next show each affected path's
-    effective category and provenance, help Task authors preview missing
-    exclusions, distinguish
+    plan and uses the real affected-file list. It now also stores and renders
+    every affected path's effective category and provenance in order, explains
+    that this is the current Task policy rather than proof about the file, and
+    offers two advisory recovery choices when a default-business classification
+    contributes to a size rejection. It never reclassifies paths, changes
+    limits, mutates the Task, or retries automatically. Next translate the
+    existing raw patch-applicability diagnostic into a beginner-readable cause,
+    action and collapsed bounded technical detail; help Task authors preview
+    missing exclusions before Worker launch; distinguish
     `terminal result received`, Worker process cleanup failure, independent
     delivery verification, artifact build, and runtime activation, and continue
     requiring real browser/DOM QA for material Hub changes.
@@ -1851,3 +1971,40 @@ Daemon 和 Hub，没有把 package build 留成运行态 mismatch。整个流程
 Attempt、competition、retry 或模型 Token。它证明最新安装输入已准备好，但仍不能代替新 macOS
 用户、VM 或新 Mac 的 Keychain、Main 安装、理解问答和 15–30 分钟计时；M1.3 保持 active。
 没有 commit 或 push。
+
+## Latest dogfood — 2026-07-29 Main can correct its own acceptance without rerunning Grok
+
+ForkLight 现在支持一种此前缺失的收口：当 Worker 已完成工作、但 Main 写进 Task Contract 的某条
+验收命令本身有误时，Main 可以只替换那条确切失败的命令，在当前源码上重新核验，不启动新的
+Worker、Attempt、retry 或 adaptation。原 Task 与原检查失败仍保留，新的交付记录会明确标注
+`amended-acceptance`，不会把 Main 的错误归因给模型。
+
+实现由真实 Grok Task `de405e61-296b-458a-849d-be157d71d3fe` 完成。Grok 4.5 先后使用同一
+Candidate 的两个有界 Attempt：31 turns 的基础实现和 18 turns 的一次结构化 correction；runtime
+estimate 合计约 **USD 2.3043892**。Grok runtime 未提供完整 usage，因此 Worker Token 与官方费用
+保持 unavailable，不写成 0。候选构建生成了 `dist`，使机器 Diff 达到 53 files / 3,377 lines，
+自动 Integration 按安全边界拒绝。Main 没有放宽门槛，而是只选择 17 个源码/测试文件，排除生成物，
+再补两个确定性边界：命令选择必须在整套验收中唯一，保存的 amendment 数量必须与实际执行结果完全
+对应。
+
+功能 Task 的当前源码复核为 4/4，并记录 `verified-repaired-delivered`。随后 Main 用旧 Task
+`00b0cd43-eeba-40d1-9d6e-c5b5e6c73c1b` 做反向 dogfood：它的 Grok Attempt 实际 exit 0，失败来自
+Main 写入不存在的 `npm run typecheck`。新链路只把这一个失败槽替换为真实 build 检查，5/5 通过；
+原 Task 仍为 failed、Attempt 仍只有一个、新增 Worker 为 0。Hub 现在把这段过程显示为“Worker 已完成
+执行；Main 修正了自己的验收定义；没有重跑 Worker”，同时保留原机器验证失败可见。
+
+这轮还修正了通用 Hub 文案：`verified-repaired-delivered` 不再一律写成“Worker 执行失败”。机器检查
+先通过再被 Main 定点补正、Main 修正自己的验收、以及普通保留候选修复，分别使用不同白话说明。
+浏览器已在真实旧 Task 上确认看板和 Task Detail 的输入、执行、原检查、Main 修正与最终结果互不覆盖。
+
+当前 full check **1,612/1,612** 通过；最终 UI 定点回归 **71/71**、TypeScript build、Hub JavaScript
+syntax 和 diff hygiene 通过。CLI / Daemon build 均为
+`2a1af014d710de1418e69e6c07dfe6fdafd2e7d8a9779280aa5df6f2c67b9175`，Daemon PID `52335`，
+Hub PID `52169`、port `57778`、status `current`，无 active/queued Task。
+
+关于最初的 Grok 超时，旧日志能证明当时是模型设置请求的 transport timeout / connection refused，
+不是模型输出超时；当前 Daemon 与手动 TUI 的代理变量名和取值摘要一致，且新 ForkLight→Grok Task 已
+成功。旧 Daemon 已退出，无法再独立重放其历史环境，因此不再把“旧 Daemon 一定缺代理变量”写成可
+复现事实。TUI 常驻使用完整 `~/.grok` 状态，而 ForkLight 每个 Task 使用隔离 `GROK_HOME` 并冷启动，
+这仍解释了为什么二者在瞬时网络/代理故障下表现可能不同。没有 exact-pair direct-Codex baseline，
+本轮不声称节约 Main Token。没有 commit 或 push。

@@ -1627,9 +1627,263 @@ test("Claude token enforcement is labeled post-observation, never preemptive", (
     "Claude Code must NOT claim preemptive Token enforcement — usage is terminal only");
 });
 
+// --- taskFamily and routingDecision parsing (M3 V1) ---
+
+test("parses taskFamily from task YAML", () => {
+  const spec = parseTaskSpec(
+    {
+      ...contractSpec(),
+      taskFamily: "ui-readability",
+    },
+    process.cwd(),
+  );
+  assert.equal(spec.taskFamily, "ui-readability");
+});
+
+test("taskFamily rejects empty and overlong strings", () => {
+  assert.throws(
+    () => parseTaskSpec({ ...contractSpec(), taskFamily: "" }, process.cwd()),
+    /task\.taskFamily/,
+  );
+  assert.throws(
+    () => parseTaskSpec({ ...contractSpec(), taskFamily: "x".repeat(81) }, process.cwd()),
+    /task\.taskFamily/,
+  );
+});
+
+test("parses a complete routingDecision snapshot", () => {
+  const spec = parseTaskSpec(
+    {
+      ...contractSpec(),
+      taskFamily: "ui-readability",
+      workerProfileId: "default",
+      routingDecision: {
+        shortlist: [
+          { provider: "deepseek", model: "deepseek-v4-flash", runtime: "claude-code", effort: "high" },
+          { provider: "qwen", model: "plus", runtime: "claude-code", effort: "high", workerProfileId: "qwen-worker" },
+        ],
+        selectedWorker: { provider: "deepseek", model: "deepseek-v4-flash", runtime: "claude-code", effort: "high", workerProfileId: "default" },
+        selectedBecause: { code: "relevant-delivery", note: "DeepSeek has strong delivery history for backend state contracts" },
+        competition: { intent: "none", triggers: [] },
+        evidenceSnapshot: {
+          scope: "none",
+          exactSampleCounts: { "deepseek\0deepseek-v4-flash\0claude-code\0high": 0, "qwen\0plus\0claude-code\0high": 0 },
+        },
+      },
+    } satisfies Record<string, unknown>,
+    process.cwd(),
+  );
+  assert.equal(spec.taskFamily, "ui-readability");
+  assert.ok(spec.routingDecision);
+  assert.equal(spec.routingDecision!.shortlist.length, 2);
+  assert.equal(spec.routingDecision!.selectedWorker.provider, "deepseek");
+  assert.equal(spec.routingDecision!.selectedWorker.runtime, "claude-code");
+  assert.equal(spec.routingDecision!.selectedBecause.code, "relevant-delivery");
+  assert.equal(spec.routingDecision!.competition.intent, "none");
+  assert.equal(spec.routingDecision!.evidenceSnapshot.scope, "none");
+});
+
+test("routingDecision rejects invalid intents and missing triggers on consider", () => {
+  const base = {
+    taskFamily: "ui",
+    routingDecision: {
+      shortlist: [{ provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high" }],
+      selectedWorker: { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high" },
+      selectedBecause: { code: "main-judgment", note: "Test" },
+      evidenceSnapshot: { scope: "none", exactSampleCounts: { "deepseek\0v4": 0 } },
+    },
+  };
+  // Invalid intent
+  assert.throws(
+    () => parseTaskSpec({
+      ...contractSpec(),
+      ...base,
+      routingDecision: { ...base.routingDecision, competition: { intent: "auto", triggers: [] } },
+    }, process.cwd()),
+    /task\.routingDecision\.competition\.intent/,
+  );
+  // Consider with no triggers
+  assert.throws(
+    () => parseTaskSpec({
+      ...contractSpec(),
+      ...base,
+      routingDecision: { ...base.routingDecision, competition: { intent: "consider", triggers: [] } },
+    }, process.cwd()),
+    /triggers must be non-empty when intent is consider or required/,
+  );
+});
+
+test("routingDecision with task-family scope requires familySampleCounts", () => {
+  const base = {
+    taskFamily: "ui",
+    routingDecision: {
+      shortlist: [{ provider: "deepseek", model: "deepseek-v4-flash", runtime: "claude-code", effort: "high" }],
+      selectedWorker: { provider: "deepseek", model: "deepseek-v4-flash", runtime: "claude-code", effort: "high" },
+      selectedBecause: { code: "main-judgment", note: "T" },
+      competition: { intent: "none", triggers: [] },
+    },
+  };
+  // Missing familySampleCounts when scope is task-family
+  assert.throws(
+    () => parseTaskSpec({
+      ...contractSpec(),
+      ...base,
+      routingDecision: {
+        ...base.routingDecision,
+        evidenceSnapshot: { scope: "task-family", exactSampleCounts: {} },
+      },
+    }, process.cwd()),
+    /familySampleCounts is required when scope is task-family/,
+  );
+  // Valid with familySampleCounts
+  const spec = parseTaskSpec({
+    ...contractSpec(),
+    ...base,
+    routingDecision: {
+      ...base.routingDecision,
+      evidenceSnapshot: {
+        scope: "task-family",
+        exactSampleCounts: {},
+        familySampleCounts: { "deepseek\0deepseek-v4-flash\0claude-code\0high": 12 },
+      },
+    },
+  }, process.cwd());
+  assert.equal(spec.routingDecision!.evidenceSnapshot.scope, "task-family");
+  assert.equal(spec.routingDecision!.evidenceSnapshot.familySampleCounts!["deepseek\0deepseek-v4-flash\0claude-code\0high"], 12);
+});
+
+test("legacy Task without taskFamily or routingDecision is still readable", () => {
+  const spec = parseTaskSpec(contractSpec(), process.cwd());
+  assert.equal(spec.taskFamily, undefined);
+  assert.equal(spec.routingDecision, undefined);
+  // Legacy fields still work
+  assert.ok(spec.name);
+  assert.equal(spec.version, 2);
+});
+
+test("routingDecision frozen identity includes runtime and effort", () => {
+  const spec = parseTaskSpec({
+    ...contractSpec(),
+    workerProfileId: "volcengine-glm52-1m",
+    routingDecision: {
+      shortlist: [{ provider: "volcengine", model: "glm-5.2[1M]", runtime: "claude-code", effort: "high", workerProfileId: "volcengine-glm52-1m" }],
+      selectedWorker: { provider: "volcengine", model: "glm-5.2[1M]", runtime: "claude-code", effort: "high", workerProfileId: "volcengine-glm52-1m" },
+      selectedBecause: { code: "runtime-capability", note: "GLM handles large context" },
+      competition: { intent: "consider", triggers: ["new-family"] },
+      evidenceSnapshot: { scope: "none", exactSampleCounts: { "volcengine\0glm-5.2[1M]\0claude-code\0high": 0 } },
+    },
+  }, process.cwd());
+  assert.equal(spec.routingDecision!.selectedWorker.effort, "high");
+  assert.equal(spec.routingDecision!.selectedWorker.runtime, "claude-code");
+  assert.equal(spec.routingDecision!.selectedWorker.workerProfileId, "volcengine-glm52-1m");
+});
+
+test("routingDecision evidenceSnapshot settingsDigest is optional", () => {
+  const without = parseTaskSpec({
+    ...contractSpec(),
+    routingDecision: {
+      shortlist: [{ provider: "deepseek", model: "deepseek-v4-flash", runtime: "claude-code", effort: "high" }],
+      selectedWorker: { provider: "deepseek", model: "deepseek-v4-flash", runtime: "claude-code", effort: "high" },
+      selectedBecause: { code: "main-judgment", note: "T" },
+      competition: { intent: "none", triggers: [] },
+      evidenceSnapshot: { scope: "none", exactSampleCounts: { "deepseek\0deepseek-v4-flash\0claude-code\0high": 0 } },
+    },
+  }, process.cwd());
+  assert.equal(without.routingDecision!.evidenceSnapshot.settingsDigest, undefined);
+
+  const withDigest = parseTaskSpec({
+    ...contractSpec(),
+    routingDecision: {
+      shortlist: [{ provider: "deepseek", model: "deepseek-v4-flash", runtime: "claude-code", effort: "high" }],
+      selectedWorker: { provider: "deepseek", model: "deepseek-v4-flash", runtime: "claude-code", effort: "high" },
+      selectedBecause: { code: "main-judgment", note: "T" },
+      competition: { intent: "none", triggers: [] },
+      evidenceSnapshot: { scope: "none", exactSampleCounts: { "deepseek\0deepseek-v4-flash\0claude-code\0high": 0 }, settingsDigest: "abc123" },
+    },
+  }, process.cwd());
+  assert.equal(withDigest.routingDecision!.evidenceSnapshot.settingsDigest, "abc123");
+});
+
 test("Grok token enforcement is labeled unsupported", () => {
   const caps = enforcementCapabilityForRuntime("grok-build");
   assert.equal(caps.tokenEnforcement, "unsupported");
+});
+
+// --- routingDecision identity drift rejection (M3 V1 Gap 3) ---
+
+const rdBase = {
+  shortlist: [
+    { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high", workerProfileId: "default" },
+    { provider: "qwen", model: "plus", runtime: "claude-code", effort: "high" },
+  ],
+  selectedBecause: { code: "relevant-delivery", note: "Consistent delivery history" },
+  competition: { intent: "none" as const, triggers: [] as string[] },
+  evidenceSnapshot: { scope: "none" as const, exactSampleCounts: { "deepseek\0v4": 0, "qwen\0plus": 0 } },
+};
+
+test("selectedWorker must be in the shortlist by all four identity fields", () => {
+  // selectedWorker NOT in shortlist (different effort)
+  assert.throws(
+    () => parseTaskSpec({
+      ...contractSpec(),
+      provider: { name: "deepseek", model: "v4" },
+      runtime: { effort: "high" },
+      routingDecision: {
+        ...rdBase,
+        selectedWorker: { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "medium" },
+      },
+    }, process.cwd()),
+    /must match an entry in the shortlist/,
+  );
+});
+
+test("selectedWorker provider must match resolved Task provider", () => {
+  assert.throws(
+    () => parseTaskSpec({
+      ...contractSpec(),
+      provider: { name: "deepseek", model: "v4" },
+      runtime: { effort: "high" },
+      routingDecision: {
+        ...rdBase,
+        shortlist: [{ provider: "qwen", model: "v4", runtime: "claude-code", effort: "high" }],
+        selectedWorker: { provider: "qwen", model: "v4", runtime: "claude-code", effort: "high" },
+      },
+    }, process.cwd()),
+    /does not match resolved Task provider/,
+  );
+});
+
+test("selectedWorker runtime must match resolved Task runtime", () => {
+  assert.throws(
+    () => parseTaskSpec({
+      ...contractSpec(),
+      provider: { name: "xai", model: "grok-4.5" },
+      runtime: { name: "grok-build", effort: "high" },
+      routingDecision: {
+        ...rdBase,
+        shortlist: [{ provider: "xai", model: "grok-4.5", runtime: "claude-code", effort: "high" }],
+        selectedWorker: { provider: "xai", model: "grok-4.5", runtime: "claude-code", effort: "high" },
+      },
+    }, process.cwd()),
+    /does not match resolved Task runtime/,
+  );
+});
+
+test("routingDecision taskFamily must match top-level taskFamily when both present", () => {
+  assert.throws(
+    () => parseTaskSpec({
+      ...contractSpec(),
+      provider: { name: "deepseek", model: "v4" },
+      runtime: { effort: "high" },
+      taskFamily: "ui",
+      routingDecision: {
+        ...rdBase,
+        taskFamily: "backend",
+        selectedWorker: { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high" },
+      },
+    }, process.cwd()),
+    /taskFamily.*must be identical/,
+  );
 });
 
 // --- Bounded policy adaptation transition chain ---

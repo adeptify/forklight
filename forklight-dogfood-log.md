@@ -3146,6 +3146,36 @@ receipt 得到 **157,974–971,114 Tokens** 的 Main exchange envelope。没有 
 direct-Main baseline，因此不把 `396,427–1,209,567` 边界差额称为节省的 Main Token。
 没有 commit 或 push。
 
+## 2026-07-29 Grok TUI 与 Daemon 连通环境差异
+
+历史失败 Task `d576b0dd-4ada-4ae0-ac0e-153692f79b46` 的 Grok 进程无法访问其 CLI
+服务；同一时刻，一骏手动打开的 Grok TUI 可以正常使用。只读进程环境审计发现：TUI 继承了
+`HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`，当时的 ForkLight Daemon 三项都没有。Operator
+auth 与 Task 私有副本的 hash 和大小一致，因此排除了鉴权复制差异。结论是后台进程启动环境不同，
+不是 Grok 模型能力或账号失效。
+
+Task `00b0cd43-eeba-40d1-9d6e-c5b5e6c73c1b` 随后用保存的 xAI `grok-4.5` /
+`grok-build` Worker 实现持久化分类、统计口径和双语 Task Detail 解释。只有一个基础 Attempt，
+30 turns，runtime estimate **USD 1.195446**；Grok runtime 没有返回完整 usage，因此 Worker Tokens
+和官方 Provider 账单保持 unavailable。Candidate 为 14 files / 534 changed lines，超过 12-file
+软提醒但没有因数字机械失败。
+
+原合同五条独立检查中唯一失败的是 `npm run typecheck`，而仓库根本没有这个 script；真实类型/构建
+入口是 `npm run build`。这是 Main 写错不可变验收合同，不是 Worker 或模型失败。Main 没有启动
+retry、correction、competition 或 adaptation，也没有把原 Task 改写成成功；它保留完整 Candidate，
+只补上一个隐私缺口：连接失败形状的 Grok terminal event 在持久化前也必须替换为固定安全摘要，
+原始行只留在私有 Attempt log。未来合同已改用真实 build 命令。
+
+最终聚焦测试 **171/171**、全量 **1,595/1,595**、`npm run build`、Hub JavaScript syntax 和
+`git diff --check` 全部通过。新的 `connectivity` 分类不会成为模型质量负证据；Hub 用白话说明
+“手动 TUI 与后台 Daemon 可能继承不同网络环境”，建议从同一可用终端安全重启并重新检查，不展示
+代理值、凭据或 endpoint 细节，也不自动重启、重试、改路由或修改设置。
+
+当前正式 Daemon PID `15555` 与 CLI 使用 build
+`66246015907045d58bb7610ca36602d4ea5be601ae5cebc8249a074263cc6838`，无 active/queued Task，
+并确认只存在三项代理变量名；Hub PID `16298` 在 `127.0.0.1:56263` 为 `current`。本轮没有自动
+Integration，没有 commit 或 push。
+
 ## 2026-07-29 Relay R4：跳到产品层，交付可解释的“今日简报”
 
 一骏选择先跳过更多 ForkLight 内部打磨，直接用它推进 Relay 的后续产品能力。Main 把第一条
@@ -4220,3 +4250,98 @@ SHA-256 `cb0359ef30e3e088c2cbc339e60a8e1912f3a901e34ef372da56671ef9652d98`，bui
 运行身份真值。没有 Provider 请求、Worker、Attempt 或模型 Token。当前证据仍只证明现有 Mac 的
 package/input ready；真正 M1.3 退出仍需要新 macOS 用户、VM 或新 Mac 完成首次 Keychain、Main、
 首个 Task、理解问答、恢复与计时。没有 commit 或 push。
+
+## 2026-07-29 Relay R8：Grok 4.5 把 Agent 页面改成用户决策页
+
+Main 选择 Relay 中未与并行改动重叠的 Agent 页面作为 Grok 真实样本。合同把调用链限定为现有
+Runtime / Job / Item → pure presentation mapper → 页面卡片，只允许三个文件，不改 API、Store、
+Domain、数据库、设置或执行逻辑。Task `55c09d94-15df-49bc-8afc-a28f77754b54` 用 xAI
+`grok-4.5` / `grok-build`，100 分校验后由 matched CLI 提交。
+
+首次 Attempt 9 turns，三条独立验收通过，但 3 files / 779 lines 超过 520 行软提醒。Main 没有按
+行数机械拒绝，也没有直接接受：保留纯 mapper、折叠技术信息和语义测试，指出顶部无条件指派入口会
+与不可用状态冲突、恢复动作不可点击、零 Runtime 时页面空白。一次同 Candidate correction 用 4
+turns 关闭三项缺口；没有 competition、普通 retry、adaptation、新 Task 或第三轮。最终 Candidate
+3 files / 836 lines，16/16、目标 ESLint 9、diff hygiene 通过。测试占 364 行，软阈值保持 warning，
+没有为了压数字牺牲状态覆盖。
+
+Main accept 后，Integration `b36aace6-bff6-4c1d-bac7-3b2a58cec1bb` 的 source apply 和 source
+verify 全部通过。真实浏览器又发现卡片名称重复与免责声明逐卡重复；Main 对已合入源做两处确定性
+微调，不再调用 Worker，并重新通过 16/16、ESLint 和 diff hygiene。桌面两列、390px 单列均可读，
+窄屏无横向溢出；七个“技术细节”默认全部关闭，展开后才显示原始运行信息。
+
+两次 runtime estimate 合计 **USD 0.348266**。Grok usage 缺失，Worker Tokens 与官方费用保持
+unavailable；28 条 receipt 的 Main exchange 低置信区间为 **247,417–1,493,852 Tokens**。没有
+exact-pair direct-Codex baseline，不声明 Main Token 节约。当前 CLI/Daemon/Hub 为 build
+`7426d0f154901f14b61cc7073afe853040734b561161cdf617b0bdc086b6c684`，本 loaded task MCP 仍为
+`da669a7baf2f02d8ec8de392b0b747247f96a762805d1ecb157bf159aa13c143`；所有 mutation 都走 matched
+CLI，旧 MCP 只做只读 health/eligibility。下次 MCP mutation 前需要 App-level reload。没有 commit
+或 push。
+
+## 2026-07-29 Main 修正自己的验收：Grok 实现、零 Worker 反向验证
+
+Task `de405e61-296b-458a-849d-be157d71d3fe` 由本地 Grok 4.5 Worker 实现“验收 amendment”。
+Attempt 1 为 31 turns，Main 保留实现并指出选择器唯一性、持久化数量一致性、真实 CLI 前置拒绝和
+公共投影测试缺口；唯一一次同 Candidate correction 为 18 turns。两个 Attempt 的 runtime estimate
+分别约 **USD 1.2453652** 与 **USD 1.059024**，合计 **USD 2.3043892**。Grok 没返回完整 usage，
+Worker Token 和官方费用保持 unavailable。
+
+Candidate 的生产源码和测试实际为 17 个文件，但 `npm run build` 在工作区重建 `dist`，机器 Diff
+因此显示 53 files / 3,377 lines，并被自动 Integration 的 20-file 安全门拒绝。这个拒绝是正确的；
+Main 没有放宽门槛，而是排除生成物，只选择 17 个源码/测试文件，再补两个确定性缺口。候选聚焦测试
+327/327；Main 收口后聚焦 329/329，full check 1,612/1,612，build、Hub syntax、diff hygiene 通过。
+功能 Task 当前源码 remediation 为 4/4，处置记录为 `verified-repaired-delivered`。
+
+Main 随后对旧 Grok Task `00b0cd43-eeba-40d1-9d6e-c5b5e6c73c1b` 运行 amendment。该 Task 只有
+一个 Grok Attempt，30 turns、exit 0；四条真实检查通过，唯一失败是 Main 写入仓库不存在的
+`npm run typecheck`。新链路只替换这个确切失败槽，当前源码 5/5 通过并记录 check
+`afc43246-f5f0-4eb0-987e-96759ed01b32`。原 Task/Attempt/verification 失败保持不变，新 Worker、
+Attempt、retry、correction、adaptation 均为 0。
+
+真实 Hub 浏览器验收又发现通用文案把所有 repaired delivery 都写成“Worker 执行失败”。Main 直接
+修正展示层和测试，不再启动模型。现在看板与 Task Detail 能分别说明：Worker 已完成执行、Main 原验收
+定义有误、原验证失败仍可见、Main 未重跑 Worker、修正后独立核验通过；机器检查先通过再被 Main
+定点补正的 Task 也使用独立文案。最终 UI 回归 71/71 通过。
+
+当前 build `2a1af014d710de1418e69e6c07dfe6fdafd2e7d8a9779280aa5df6f2c67b9175`；Daemon
+PID `52335`、Hub PID `52169` / port `57778`，identity matched、无 active/queued Task。旧 Grok
+超时日志可以确认 transport timeout / connection refused，但旧 Daemon 已退出，无法重新证明其环境；
+当前 Daemon 与 TUI 的代理摘要一致，且新 ForkLight→Grok Task 已成功。没有 direct-Codex exact-pair
+baseline，不声称 Main Token 节约。没有 commit 或 push。
+
+## 2026-07-29 GLM：合入前解释路径判定，Main 审查抓住机器绿灯遗漏
+
+Main 把 M1 的下一个窄缺口限定为 Integration Preflight 的路径判定证据：对真实 affected files 按
+冻结的 workspace policy 生成有序 category/provenance，持久化到 receipt/event，并在 Hub 用白话
+解释。拒绝时只允许给建议，不得自动改路径分类、改 Task、提额度、重试或合入。Task 文件为
+`examples/dogfood/preflight-path-provenance-glm.yaml`，Task id
+`525cf643-5cee-49d9-8fbe-8e8623c944c1`，使用 Volcengine `glm-5.2[1M]` / Claude Code；没有
+competition、普通 retry、adaptation 或第二模型。
+
+基础 Attempt `f2910d64-45e7-450d-9e8b-b4bf84497616` 用 94 turns 交付 10 files / 924 changed
+lines，原合同 340 个聚焦测试、build、Hub JavaScript syntax 和 diff hygiene 全绿，runtime estimate
+约 **USD 14.229183**。Main 没有把机器绿灯当成交付：语义审查发现 `renderPreflightResult` 对 DOM
+`pathBody` 调用 `forEach`，一旦真实 `pathEvidence` 非空就会抛错。Main 记录 `revise`，保留全部
+10 个已知可用路径，只授权一个精确 Gap Contract 的同 Candidate correction。
+
+第二 Attempt `3c30d35b-686b-483e-afab-de3b071e5bfa` 用 11 turns 修正循环对象，并新增会提取、执行
+renderer 的最小 DOM stub 测试，覆盖非空有序 path evidence；runtime estimate 约
+**USD 2.549887**。Main 接受 revision `3c3b746d-71b1-4fe1-9e9d-58a081c936ac`，绑定 patch digest
+`00f67a45582d76d92389aa68dce59cf5f6dfe4dea2132e632b11ae500082f623`。Integration receipt
+`562a9a70-bc15-47cf-ad99-1538f37bd170`、operation
+`8cba9c8d-526c-4bb6-905c-81a4e1fa6845` 的 source apply、四条 source verification、artifact build
+和 runtime activation 全部 passed。
+
+最终 Candidate 为 10 files / 1,042 changed lines。新 build
+`b7561b77575b9fe23050639170df7e842b6fd4275413a981b9336c983cb1d08e`，Daemon PID `37797`，
+Hub PID `39681` / port `62302`，identity current、无 active/queued Task。真实 Hub 浏览器确认：页面先
+显示“应用会失败—不会改动源码”、当前策略的路径分类与 10/0/0 分类数量，技术路径默认折叠，console
+错误为空；当前仓库全量回归 **1,624/1,624**。补丁已经合入后再运行只读 Preflight，receipt
+`ea7c8a85-dcea-4151-ae6c-51d434a73cbe` 因补丁不再能干净应用而正确拒绝，同时保留 10 条有序
+`default-business` 证据；当前 raw applicability diagnostic 仍过于技术化，作为下一轮独立 UX 缺口，
+不继续循环纠正本 Task。
+
+两次 Attempt 合计 input **350,608**、output **126,430**、cache read **23,730,560**，即
+**24,207,598 gross Worker Tokens**；top-level 与 per-model 完全一致。Main exchange 只有低置信
+区间 **159,870–967,304 Tokens**。缺少 exact-pair direct-Codex baseline，因此不把 boundary
+reduction 写成“节约的 Main Token”。没有 commit 或 push。

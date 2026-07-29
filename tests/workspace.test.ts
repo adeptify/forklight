@@ -721,3 +721,100 @@ test("preparation cleanup propagates unexpected filesystem errors", async () => 
   }
   assert.equal(await isWorkspaceReady(paths), true);
 });
+
+// --- PathPolicy explanation (category + bounded provenance) ---
+
+test("PathPolicy.explain returns category plus one bounded provenance for every rule", async () => {
+  const { createPathPolicy, PATH_CATEGORIES, PATH_PROVENANCES } = await import(
+    "../src/workspace/path-policy.js"
+  );
+  const taskSpec = spec("/tmp/project");
+  // dist and coverage are excluded from the snapshot but NOT declared in
+  // generatedPaths, so exclusion alone classifies them as generated evidence.
+  taskSpec.workspace.exclude = [".git", "node_modules", "dist", "coverage"];
+  taskSpec.workspace.generatedPaths = ["**/.custom-cache/**"];
+  const policy = createPathPolicy(taskSpec);
+
+  // Internal ForkLight path
+  assert.deepEqual(policy.explain(".forklight"), {
+    category: "internal", provenance: "internal-forklight",
+  });
+  assert.deepEqual(policy.explain(".forklight/workspace-context.md"), {
+    category: "internal", provenance: "internal-forklight",
+  });
+
+  // Configured snapshot exclusion -> generated
+  assert.deepEqual(policy.explain("dist/bundle.js"), {
+    category: "generated", provenance: "snapshot-exclusion",
+  });
+  assert.deepEqual(policy.explain("apps/web/coverage/report.json"), {
+    category: "generated", provenance: "snapshot-exclusion",
+  });
+
+  // Built-in generated pattern -> generated
+  assert.deepEqual(policy.explain("pkg/__pycache__/a.pyc"), {
+    category: "generated", provenance: "builtin-generated-pattern",
+  });
+  assert.deepEqual(policy.explain("pkg/.pytest_cache/v/cache"), {
+    category: "generated", provenance: "builtin-generated-pattern",
+  });
+
+  // Task-declared generated pattern -> generated
+  assert.deepEqual(policy.explain("pkg/.custom-cache/value.bin"), {
+    category: "generated", provenance: "task-generated-pattern",
+  });
+
+  // Default business inclusion - a name containing "generated" is NOT inferred
+  assert.deepEqual(policy.explain("src/generated/client.ts"), {
+    category: "business", provenance: "default-business",
+  });
+  assert.deepEqual(policy.explain("src/value.ts"), {
+    category: "business", provenance: "default-business",
+  });
+
+  // Closed vocabularies - no name heuristic can introduce a new value.
+  assert.deepEqual([...PATH_CATEGORIES].sort(), ["business", "generated", "internal"]);
+  assert.deepEqual([...PATH_PROVENANCES].sort(), [
+    "builtin-generated-pattern",
+    "default-business",
+    "internal-forklight",
+    "snapshot-exclusion",
+    "task-generated-pattern",
+  ]);
+});
+
+test("PathPolicy.classify delegates to explain so category behavior cannot drift", async () => {
+  const { createPathPolicy } = await import("../src/workspace/path-policy.js");
+  const taskSpec = spec("/tmp/project");
+  taskSpec.workspace.exclude = ["dist"];
+  taskSpec.workspace.generatedPaths = ["**/.custom-cache/**"];
+  const policy = createPathPolicy(taskSpec);
+  const paths = [
+    ".forklight/x",
+    "dist/a.js",
+    "pkg/__pycache__/a.pyc",
+    "pkg/.custom-cache/v.bin",
+    "src/generated/c.ts",
+    "src/a.ts",
+  ];
+  for (const p of paths) {
+    assert.equal(
+      policy.classify(p),
+      policy.explain(p).category,
+      `classify must match explain category for ${p}`,
+    );
+  }
+  // A path matching both a built-in and a Task-declared pattern is attributed
+  // to the built-in pattern, preserving the historical combined-pattern order.
+  const both = createPathPolicy({
+    ...spec("/tmp/project"),
+    workspace: {
+      exclude: [],
+      generatedPaths: ["**/__pycache__/**"],
+    },
+  } as TaskSpec);
+  assert.deepEqual(both.explain("pkg/__pycache__/a.pyc"), {
+    category: "generated",
+    provenance: "builtin-generated-pattern",
+  });
+});

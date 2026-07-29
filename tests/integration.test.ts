@@ -1114,3 +1114,370 @@ test("recreated excluded dist does not inflate the integration patch or block ap
     store.close();
   }
 });
+
+// --- Integration path classification evidence + recovery guidance ---
+
+test("preflight receipt carries ordered one-to-one privacy-safe path evidence", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-pe-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"]);
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.equal(receipt.rejectionReasons.length, 0);
+    assert.ok(receipt.pathEvidence, "pathEvidence must be present for affected paths");
+    assert.equal(receipt.pathEvidence!.length, receipt.affectedFiles.length);
+    receipt.pathEvidence!.forEach((entry, i) => {
+      assert.equal(entry.path, receipt.affectedFiles[i],
+        `evidence entry ${i} must match affectedFiles order`);
+      assert.ok(
+        ["business", "generated", "internal"].includes(entry.category),
+        `category ${entry.category} must be in the closed vocabulary`,
+      );
+      assert.ok(
+        [
+          "internal-forklight",
+          "snapshot-exclusion",
+          "builtin-generated-pattern",
+          "task-generated-pattern",
+          "default-business",
+        ].includes(entry.provenance),
+        `provenance ${entry.provenance} must be in the closed vocabulary`,
+      );
+    });
+    // readme.md is default business under the fixture spec
+    const readme = receipt.pathEvidence!.find((e) => e.path === "readme.md");
+    assert.ok(readme, "readme.md evidence present");
+    assert.equal(readme!.category, "business");
+    assert.equal(readme!.provenance, "default-business");
+    // Privacy: no absolute source path, no Diff content, no command text
+    const serialized = JSON.stringify(receipt.pathEvidence);
+    assert.ok(!serialized.includes(task.sourcePath), "no absolute source path");
+    assert.ok(!serialized.includes("changed text"), "no Diff content");
+    assert.ok(!serialized.includes("diff --git"), "no Diff headers");
+    // A passing receipt carries no recovery guidance
+    assert.equal(receipt.recoveryGuidance, undefined);
+  } finally {
+    store.close();
+  }
+});
+
+test("preflight event payload projects path evidence without recomputing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-pe-ev-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"]);
+    await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    const events = store.listEvents(task.id);
+    const preflightEvent = events.find((e) => e.type === "integration.preflight.completed");
+    assert.ok(preflightEvent);
+    const payload = preflightEvent!.payload as Record<string, unknown> | undefined;
+    assert.ok(Array.isArray(payload?.pathEvidence), "event carries path evidence");
+    assert.equal((payload!.pathEvidence as unknown[]).length, 1);
+    assert.equal(payload!.recoveryGuidance, undefined);
+  } finally {
+    store.close();
+  }
+});
+
+test("preflight size rejection adds recovery guidance and default-business provenance", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-size-"));
+  const store = new StateStore(root);
+  try {
+    const sourceDir = path.join(root, "source");
+    const taskHome = path.join(root, "state");
+    await mkdir(sourceDir);
+    const fileNames = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts"];
+    for (const name of fileNames) {
+      await writeFile(path.join(sourceDir, name), "before\n");
+    }
+    const taskSpec = spec(sourceDir, ["true"]);
+    const paths = taskPaths(taskHome, "task-size");
+    await prepareWorkspace(taskSpec, paths);
+    for (const name of fileNames) {
+      await writeFile(path.join(paths.workspace, name), "after\n");
+    }
+    await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+
+    const now = new Date().toISOString();
+    const task: TaskRecord = {
+      id: "task-size",
+      name: taskSpec.name,
+      status: "succeeded",
+      sourcePath: sourceDir,
+      taskFile: "/nonexistent/task.yaml",
+      spec: taskSpec,
+      paths,
+      sessionId: "test-session",
+      currentAttemptId: "attempt-1",
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.createTask(task);
+    const attempt: AttemptRecord = {
+      id: "attempt-1",
+      taskId: task.id,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: task.sessionId,
+      rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      runtimeBudgetUsd: taskSpec.runtime.maxBudgetUsd,
+    };
+    store.createAttempt(attempt);
+    const verification: VerificationResult = {
+      passed: true,
+      behaviorPassed: true,
+      policyPassed: true,
+      sourceCompatible: true,
+      commands: [
+        { command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false },
+      ],
+      diffPath: paths.diff,
+      sourceUnchanged: true,
+    };
+    store.addEvent(
+      task.id,
+      attempt.id,
+      "verification.completed",
+      "Independent verification passed",
+      verification,
+    );
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Scoped source change independently verified",
+      confirm: true,
+    });
+
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    // Size gate stays rejected
+    assert.ok(receipt.rejectionReasons.length > 0);
+    assert.ok(receipt.rejectionReasons.some((r) => /files.*limit/.test(r)));
+    // Every affected path shows default-business provenance
+    assert.equal(receipt.affectedFiles.length, fileNames.length);
+    assert.ok(receipt.pathEvidence);
+    assert.equal(receipt.pathEvidence!.length, fileNames.length);
+    assert.ok(
+      receipt.pathEvidence!.every((e) => e.provenance === "default-business"),
+      "every affected path is default business under the immutable Task policy",
+    );
+    // One advisory guidance code with bounded counts, never auto-raising limits
+    assert.ok(receipt.recoveryGuidance);
+    assert.equal(
+      receipt.recoveryGuidance!.code,
+      "review-generated-or-exclusion-policy-vs-source-scope",
+    );
+    assert.equal(receipt.recoveryGuidance!.defaultBusinessPathCount, fileNames.length);
+    assert.equal(receipt.recoveryGuidance!.filesChanged, fileNames.length);
+    assert.equal(
+      receipt.recoveryGuidance!.reviewedPatchMaxFiles,
+      INTEGRATION_DEFAULTS.reviewedPatchMaxFiles,
+    );
+    // Guidance is privacy-safe: only the fixed code and counts, no paths
+    const guidanceJson = JSON.stringify(receipt.recoveryGuidance);
+    assert.ok(!guidanceJson.includes("/"), "no path separator in guidance");
+    assert.ok(!guidanceJson.includes("a.ts"), "no file name in guidance");
+  } finally {
+    store.close();
+  }
+});
+
+test("preflight non-size rejection emits no recovery guidance", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-noguide-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"]);
+    // Well-formed diff that will not apply cleanly (within size limits).
+    const badDiff =
+      "diff --git a/baseline/nonexistent.txt b/workspace/nonexistent.txt\n" +
+      "--- a/baseline/nonexistent.txt\n" +
+      "+++ b/workspace/nonexistent.txt\n" +
+      "@@ -1,1 +1,1 @@\n" +
+      "-original\n" +
+      "+changed\n";
+    await writeFile(task.paths.diff, badDiff);
+
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(receipt.rejectionReasons.length > 0);
+    assert.ok(
+      !receipt.rejectionReasons.some((r) => /files.*limit|lines.*limit/.test(r)),
+      "no size-limit rejection",
+    );
+    assert.equal(receipt.recoveryGuidance, undefined, "no guidance for non-size rejection");
+    // Evidence still explains the one affected path
+    assert.ok(receipt.pathEvidence);
+    assert.equal(receipt.pathEvidence!.length, receipt.affectedFiles.length);
+    assert.equal(receipt.pathEvidence![0]!.provenance, "default-business");
+  } finally {
+    store.close();
+  }
+});
+
+test("legacy receipt without path evidence remains readable and still applies", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-peleg-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir } = await buildSucceededTask(store, ["true"]);
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.equal(receipt.rejectionReasons.length, 0);
+    assert.ok(receipt.pathEvidence);
+
+    // Store a legacy receipt that predates path-classification evidence.
+    const ts = new Date().toISOString();
+    store.saveIntegrationReceipt({
+      id: "leg-pe",
+      taskId: task.id,
+      patchDigest: receipt.patchDigest,
+      affectedFiles: receipt.affectedFiles,
+      rejectionReasons: [],
+      sourceEvidence: receipt.sourceEvidence,
+      createdAt: ts,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      consumed: false,
+    });
+    const legacy = store.getIntegrationReceipt("leg-pe");
+    assert.ok(legacy);
+    assert.equal(legacy!.pathEvidence, undefined, "legacy receipt has no path evidence");
+    assert.equal(legacy!.recoveryGuidance, undefined, "legacy receipt has no guidance");
+
+    // Applying the legacy receipt (evidence absent) still works
+    const result = await applyIntegration(store, task.id, "leg-pe", INTEGRATION_DEFAULTS);
+    assert.equal(result.status, "applied");
+    assert.match(await readFile(path.join(sourceDir, "readme.md"), "utf8"), /changed text/);
+  } finally {
+    store.close();
+  }
+});
+
+test("apply fails closed when stored path evidence is inconsistent", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-pebad-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir } = await buildSucceededTask(store, ["true"]);
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.equal(receipt.rejectionReasons.length, 0);
+    assert.ok(receipt.pathEvidence);
+    const before = await readFile(path.join(sourceDir, "readme.md"), "utf8");
+
+    // Cardinality mismatch: empty evidence for a one-file affected set
+    store.saveIntegrationReceipt({
+      ...receipt,
+      id: "tamper-card",
+      consumed: false,
+      pathEvidence: [],
+    });
+    const r1 = await applyIntegration(store, task.id, "tamper-card", INTEGRATION_DEFAULTS);
+    assert.equal(r1.status, "rejected");
+    assert.match(r1.error!, /path evidence/i);
+    assert.equal(await readFile(path.join(sourceDir, "readme.md"), "utf8"), before);
+
+    // Path mismatch: evidence entry names a different path than affectedFiles
+    store.saveIntegrationReceipt({
+      ...receipt,
+      id: "tamper-path",
+      consumed: false,
+      pathEvidence: [{ ...receipt.pathEvidence![0]!, path: "wrong.txt" }],
+    });
+    const r2 = await applyIntegration(store, task.id, "tamper-path", INTEGRATION_DEFAULTS);
+    assert.equal(r2.status, "rejected");
+    assert.match(r2.error!, /path evidence/i);
+    assert.equal(await readFile(path.join(sourceDir, "readme.md"), "utf8"), before);
+  } finally {
+    store.close();
+  }
+});
+
+test("explicit Task generated paths keep recreated output out of integration evidence", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-petask-"));
+  const store = new StateStore(root);
+  try {
+    const sourceDir = path.join(root, "source");
+    const taskHome = path.join(root, "state");
+    await mkdir(sourceDir);
+    await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal text.\n");
+    const acceptanceCommands = ["true"];
+    const taskSpec = spec(sourceDir, acceptanceCommands);
+    // dist is declared as generated output, so it stays out of the integration
+    // patch and never appears as a default-business affected path.
+    taskSpec.workspace.generatedPaths = ["dist/**"];
+
+    const paths = taskPaths(taskHome, "task-petask");
+    await prepareWorkspace(taskSpec, paths);
+    await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged text.\n");
+    await mkdir(path.join(paths.workspace, "dist"), { recursive: true });
+    for (let i = 0; i < 10; i += 1) {
+      await writeFile(path.join(paths.workspace, "dist", `bundle-${i}.js`), `// ${i}\n`);
+    }
+    await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+
+    const now = new Date().toISOString();
+    const task: TaskRecord = {
+      id: "task-petask",
+      name: taskSpec.name,
+      status: "succeeded",
+      sourcePath: sourceDir,
+      taskFile: "/nonexistent/task.yaml",
+      spec: taskSpec,
+      paths,
+      sessionId: "test-session",
+      currentAttemptId: "attempt-1",
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.createTask(task);
+    const attempt: AttemptRecord = {
+      id: "attempt-1",
+      taskId: task.id,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: task.sessionId,
+      rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      runtimeBudgetUsd: taskSpec.runtime.maxBudgetUsd,
+    };
+    store.createAttempt(attempt);
+    const verification: VerificationResult = {
+      passed: true,
+      behaviorPassed: true,
+      policyPassed: true,
+      sourceCompatible: true,
+      commands: acceptanceCommands.map((command) => ({
+        command,
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+      })),
+      diffPath: paths.diff,
+      sourceUnchanged: true,
+    };
+    store.addEvent(
+      task.id,
+      attempt.id,
+      "verification.completed",
+      "Independent verification passed",
+      verification,
+    );
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Scoped source change independently verified",
+      confirm: true,
+    });
+
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.deepEqual(receipt.rejectionReasons, []);
+    assert.deepEqual(receipt.affectedFiles, ["readme.md"]);
+    // Only the actual source path appears; no fabricated generated path is added
+    assert.ok(receipt.pathEvidence);
+    assert.equal(receipt.pathEvidence!.length, 1);
+    assert.equal(receipt.pathEvidence![0]!.path, "readme.md");
+    assert.equal(receipt.pathEvidence![0]!.provenance, "default-business");
+    assert.equal(receipt.recoveryGuidance, undefined);
+  } finally {
+    store.close();
+  }
+});

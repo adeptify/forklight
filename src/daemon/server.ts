@@ -4,6 +4,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import YAML from "yaml";
 import { daemonSocketPath } from "../core/config.js";
+import { parseRemediationAmendmentInput } from "../core/main-remediation.js";
 import { SettingsService } from "../core/settings.js";
 import type { StatisticsFilter } from "../core/statistics.js";
 import type { AttemptAuthorization, TaskStatus } from "../core/types.js";
@@ -564,10 +565,12 @@ export class ForkLightDaemon {
         }
         const reason = requiredString(params.reason, "reason").trim();
         if (reason.length > 1000) throw new Error("reason must be at most 1000 characters");
+        const amendment = parseRemediationAmendmentInput(params.amendment);
         return this.coordinator.remediationVerify(
           requiredString(params.taskId, "taskId"),
           reason,
           true,
+          amendment,
         );
       }
       case "candidate_reverify": {
@@ -601,9 +604,29 @@ export class ForkLightDaemon {
           return {
             provider: requiredBoundedString(obj.provider, `candidates[${i}].provider`),
             model: requiredBoundedString(obj.model, `candidates[${i}].model`),
+            ...(typeof obj.runtime === "string" && obj.runtime.trim().length > 0
+              ? { runtime: obj.runtime.trim() } : {}),
+            ...(typeof obj.effort === "string" && obj.effort.trim().length > 0
+              ? { effort: obj.effort.trim() } : {}),
           };
         });
-        return this.coordinator.modelRouting(taskClass, candidates);
+        const taskFamily = typeof params.taskFamily === "string" && params.taskFamily.trim().length > 0
+          ? params.taskFamily.trim()
+          : undefined;
+        const competitionIntent = params.competitionIntent === "none"
+          || params.competitionIntent === "consider"
+          || params.competitionIntent === "required"
+          ? params.competitionIntent as "none" | "consider" | "required"
+          : undefined;
+        const competitionTriggers = Array.isArray(params.competitionTriggers)
+          ? params.competitionTriggers
+              .filter((t): t is string => typeof t === "string")
+              .map((t) => t.trim())
+              .filter((t) => t.length > 0)
+          : undefined;
+        return this.coordinator.modelRouting(
+          taskClass, candidates, taskFamily, competitionIntent, competitionTriggers,
+        );
       }
       default:
         throw new Error(`Unknown daemon method: ${String(request.method)}`);

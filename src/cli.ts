@@ -31,6 +31,7 @@ import {
   authorizeMainCorrection,
   resolvePendingGrantExecutionOptions,
 } from "./core/attempt-authorization.js";
+import { parseRemediationAmendmentInput } from "./core/main-remediation.js";
 import { recordMainReview } from "./core/main-review.js";
 import {
   describeCorrectionRejection,
@@ -161,7 +162,7 @@ Usage:
   forklight adapt preview <task-id> --patch <json> --reason <category> [--json]
   forklight adapt apply <task-id> --patch <json> --reason <category> --confirm [--json]
       # category: duration-budget | size-policy | attempt-budget | completion-policy | concurrency-cap | no-progress-timeout | other-flexible-policy
-  forklight remediate verify <task-id> --reason <text> --confirm [--json]
+  forklight remediate verify <task-id> --reason <text> --confirm [--amendment <file>] [--json]
   forklight reverify <task-id> --reason <text> --confirm [--json]
       # rerun a failed candidate's original acceptance suite without a Worker or new Attempt
   forklight hub [--no-open] [--port <port>]
@@ -1163,6 +1164,9 @@ async function main(): Promise<void> {
   if (command === "routing") {
     const taskClass = required(positional, "task class");
     const rawCandidates = required(option(rest, "--candidates"), "--candidates JSON array");
+    const taskFamily = option(rest, "--family");
+    const compIntentRaw = option(rest, "--comp-intent");
+    const compTriggersRaw = option(rest, "--comp-triggers");
     let candidates: Array<{ provider: string; model: string }>;
     try {
       const parsed: unknown = JSON.parse(rawCandidates);
@@ -1179,16 +1183,49 @@ async function main(): Promise<void> {
     } catch (e) {
       throw new Error(`Invalid --candidates JSON: ${e instanceof Error ? e.message : String(e)}`);
     }
+    let compIntent: string | undefined;
+    if (compIntentRaw !== undefined) {
+      if (compIntentRaw !== "none" && compIntentRaw !== "consider" && compIntentRaw !== "required") {
+        throw new Error("--comp-intent must be none, consider, or required");
+      }
+      compIntent = compIntentRaw;
+    }
+    let compTriggers: string[] | undefined;
+    if (compTriggersRaw !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(compTriggersRaw);
+        if (!Array.isArray(parsed)) throw new Error("not an array");
+        compTriggers = (parsed as string[]).filter((t) => typeof t === "string");
+      } catch (e) {
+        throw new Error(`Invalid --comp-triggers JSON: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     await ensureDaemon();
     const advisory = await daemonRequest<Record<string, unknown>>("model_routing", {
       taskClass,
       candidates,
+      ...(taskFamily !== undefined ? { taskFamily } : {}),
+      ...(compIntent !== undefined ? { competitionIntent: compIntent } : {}),
+      ...(compTriggers !== undefined ? { competitionTriggers: compTriggers } : {}),
     });
     if (json) {
       process.stdout.write(`${JSON.stringify(advisory, null, 2)}\n`);
     } else {
       process.stdout.write(`Task class: ${advisory.taskClass}\n`);
+      if (advisory.taskFamily) {
+        process.stdout.write(`Task family: ${advisory.taskFamily}\n`);
+      }
+      process.stdout.write(`Evidence scope: ${advisory.evidenceScope}\n`);
+      process.stdout.write(`Knowledge: ${advisory.knowledge}\n`);
+      const comp = advisory.competition as Record<string, unknown> | undefined;
       process.stdout.write(`Should run competition: ${advisory.shouldRunCompetition}\n`);
+      if (comp) {
+        process.stdout.write(`Competition intent: ${comp.intent}\n`);
+        const matching = comp.matchingTriggers as string[] | undefined;
+        if (matching && matching.length > 0) {
+          process.stdout.write(`Matching triggers: ${matching.join(", ")}\n`);
+        }
+      }
       if (advisory.recommendation) {
         const rec = advisory.recommendation as Record<string, unknown>;
         process.stdout.write(
@@ -1499,6 +1536,15 @@ async function main(): Promise<void> {
     const disp = result.disposition as Record<string, unknown> | undefined;
     if (disp !== undefined) {
       lines.push(`disposition: ${disp.status}`);
+      if (typeof disp.acceptanceBasis === "string") {
+        lines.push(`acceptanceBasis: ${disp.acceptanceBasis}`);
+      }
+      if (typeof disp.amendedCommandCount === "number") {
+        lines.push(`amendedCommandCount: ${disp.amendedCommandCount}`);
+      }
+      if (typeof disp.reasonCode === "string") {
+        lines.push(`reasonCode: ${disp.reasonCode}`);
+      }
     }
     if (typeof check?.commandCount === "number") {
       lines.push(`commandsPassed: ${check.passedCommandCount}/${check.commandCount}`);
@@ -1543,10 +1589,45 @@ async function main(): Promise<void> {
     if (!rest.includes("--confirm")) {
       throw new Error("remediate verify requires explicit --confirm\n\n" + usage());
     }
+    const amendmentPath = option(rest, "--amendment");
+    let amendment: import("./core/types.js").RemediationAcceptanceAmendment | undefined;
+    if (amendmentPath !== undefined) {
+      let raw: string;
+      try {
+        raw = await readFile(amendmentPath, "utf8");
+      } catch {
+        throw new Error("remediate verify could not read --amendment file");
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new Error("remediate verify --amendment must be valid JSON");
+      }
+      // Shared structured parser: fixed privacy-safe errors, 4000-char bound,
+      // trimmed non-empty commands; never echoes field names or command text.
+      amendment = parseRemediationAmendmentInput(parsed);
+      if (amendment === undefined) {
+        throw new Error("remediate verify --amendment must be a JSON object");
+      }
+    }
+    // Exchange receipts carry only lengths/counts — never command text or file path.
     const { output } = await withCliExchangeReceipt({
       operation: "forklight_remediation_verify",
       home: forklightHome(),
-      args: { taskId, reasonLength: reason.length, confirm: true, json },
+      args: {
+        taskId,
+        reasonLength: reason.length,
+        confirm: true,
+        json,
+        ...(amendment === undefined
+          ? {}
+          : {
+              amendmentReplacementCount: amendment.replacements.length,
+              amendmentReasonCode: amendment.reasonCode,
+              amendmentVerificationEventSequence: amendment.verificationEventSequence,
+            }),
+      },
       taskId,
       invoke: async () => {
         await ensureDaemon();
@@ -1554,6 +1635,7 @@ async function main(): Promise<void> {
           taskId,
           reason,
           confirm: true,
+          ...(amendment === undefined ? {} : { amendment }),
         });
       },
       renderOutput: (result) => json

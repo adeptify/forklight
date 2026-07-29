@@ -12,10 +12,14 @@ import { buildWorkerPrompt, claudeToolProtocolLines } from "../src/core/task.js"
 import {
   buildGrokCliArgs,
   buildGrokSandboxProfile,
+  GROK_CONNECTIVITY_SAFE_ERROR,
   grokAllowTools,
   grokDisallowedTools,
+  isGrokConnectivityEvidence,
+  sanitizeGrokConnectivityEvent,
   seedGrokHomeAuth,
 } from "../src/workers/grok.js";
+import { failureCategoryFromEvents } from "../src/core/worker-failure.js";
 import { GrokEventNormalizer } from "../src/events/grok-normalize.js";
 import type { TaskRecord, TaskSpec } from "../src/core/types.js";
 import { checkpointSatisfied } from "../src/core/checkpoint.js";
@@ -841,6 +845,164 @@ test("observed Token ceiling hard-fails after gross terminal usage", async () =>
     const evidence = event.payload as { observed: number; enforcementPhase: string };
     assert.equal(evidence.observed, 22, "gross usage includes both cache surfaces");
     assert.equal(evidence.enforcementPhase, "post-observation");
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+  }
+});
+
+test("Grok connectivity classifier matches measured transport family only", () => {
+  assert.equal(
+    isGrokConnectivityEvidence("Error: model/settings fetch timeout after 30000ms"),
+    true,
+    "model/settings fetch timeout is connectivity",
+  );
+  assert.equal(
+    isGrokConnectivityEvidence("connect ECONNREFUSED 127.0.0.1:8080 via http://user:secret-token@proxy.local:7890"),
+    true,
+    "connection refused is connectivity",
+  );
+  assert.equal(
+    isGrokConnectivityEvidence("fetch settings timed out while contacting cli-chat-proxy.grok.com"),
+    true,
+    "settings fetch timed out is connectivity",
+  );
+  assert.equal(
+    isGrokConnectivityEvidence(
+      "No effective implementation progress detected within the configured interval; worker was terminated by the progress watchdog",
+    ),
+    false,
+    "no-progress watchdog text is not connectivity",
+  );
+  assert.equal(
+    isGrokConnectivityEvidence("Model refused the edit because the patch was incorrect"),
+    false,
+    "ordinary model error is not connectivity",
+  );
+  assert.equal(
+    isGrokConnectivityEvidence("timeout waiting for tool confirmation"),
+    false,
+    "bare non-transport timeout is not connectivity",
+  );
+
+  const secret = "http://user:secret-token@proxy.internal:7890";
+  const rawTerminal = new GrokEventNormalizer().parseLine(JSON.stringify({
+    type: "error",
+    message: `Failed to fetch models: connection refused via ${secret} at https://private.example/v1`,
+  }))[0]!;
+  const safeTerminal = sanitizeGrokConnectivityEvent(rawTerminal);
+  assert.equal(safeTerminal.summary, GROK_CONNECTIVITY_SAFE_ERROR);
+  assert.equal(
+    (safeTerminal.payload as { failureCategory?: string }).failureCategory,
+    "connectivity",
+  );
+  assert.equal(safeTerminal.terminal?.resultText, GROK_CONNECTIVITY_SAFE_ERROR);
+  const publicEvent = JSON.stringify(safeTerminal);
+  assert.ok(!publicEvent.includes(secret));
+  assert.ok(!publicEvent.includes("secret-token"));
+  assert.ok(!publicEvent.includes("private.example"));
+});
+
+test("runner persists Grok connectivity category with fixed safe public error", async () => {
+  const secretProxy = "http://user:super-secret-proxy-token@proxy.internal:7890";
+  const rawStderr =
+    `Failed model/settings fetch timeout via ${secretProxy} to https://cli-chat-proxy.grok.com path=/Users/private/.grok`;
+  assert.equal(isGrokConnectivityEvidence(rawStderr), true);
+
+  resetWorkerRegistryForTests();
+  getWorkerAdapter("claude-code");
+  const capabilities = getWorkerAdapter("claude-code").capabilities();
+  registerWorkerAdapter({
+    name: "claude-code",
+    displayName: "Connectivity test Worker",
+    defaultExecutable: process.execPath,
+    capabilities: () => capabilities,
+    doctor: () => ({
+      runtime: "claude-code",
+      ok: true,
+      executable: process.execPath,
+      issues: [],
+      capabilities,
+    }),
+    validateSpec: () => {},
+    effortArgs: () => [],
+    toolProtocolAppendix: () => [],
+    checkpointProtocolAppendix: () => [],
+    run: async () => ({
+      status: "failed",
+      exitCode: 1,
+      // Public error must already be the fixed safe summary from the adapter boundary.
+      error: GROK_CONNECTIVITY_SAFE_ERROR,
+      failureCategory: "connectivity",
+    }),
+  });
+
+  const { store, task } = await policyRunnerFixture({});
+  try {
+    const result = await executeAttempt(store, task, false);
+    assert.equal(result.task.status, "failed");
+    assert.equal(result.task.error, GROK_CONNECTIVITY_SAFE_ERROR);
+    assert.equal(result.attempt.error, GROK_CONNECTIVITY_SAFE_ERROR);
+
+    const events = store.listEvents(task.id);
+    assert.equal(failureCategoryFromEvents(events), "connectivity");
+    const failed = events.filter((event) => event.type === "worker.failed");
+    assert.ok(failed.length >= 1);
+    const classified = failed.find(
+      (event) => (event.payload as { failureCategory?: string } | undefined)?.failureCategory === "connectivity",
+    );
+    assert.ok(classified, "terminal worker.failed must carry connectivity category");
+    assert.equal(classified.summary, GROK_CONNECTIVITY_SAFE_ERROR);
+
+    const publicBlob = JSON.stringify({
+      taskError: result.task.error,
+      attemptError: result.attempt.error,
+      events: failed.map((event) => ({ summary: event.summary, payload: event.payload })),
+    });
+    assert.ok(!publicBlob.includes(secretProxy), "proxy URL must not reach public evidence");
+    assert.ok(!publicBlob.includes("super-secret-proxy-token"), "proxy token must not reach public evidence");
+    assert.ok(!publicBlob.includes("cli-chat-proxy.grok.com"), "endpoint must not reach public evidence");
+    assert.ok(!publicBlob.includes("/Users/private"), "local path must not reach public evidence");
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+  }
+});
+
+test("runner leaves ordinary runtime failures without connectivity category", async () => {
+  resetWorkerRegistryForTests();
+  getWorkerAdapter("claude-code");
+  const capabilities = getWorkerAdapter("claude-code").capabilities();
+  registerWorkerAdapter({
+    name: "claude-code",
+    displayName: "Runtime fail Worker",
+    defaultExecutable: process.execPath,
+    capabilities: () => capabilities,
+    doctor: () => ({
+      runtime: "claude-code",
+      ok: true,
+      executable: process.execPath,
+      issues: [],
+      capabilities,
+    }),
+    validateSpec: () => {},
+    effortArgs: () => [],
+    toolProtocolAppendix: () => [],
+    checkpointProtocolAppendix: () => [],
+    run: async () => ({
+      status: "failed",
+      exitCode: 1,
+      error: "Grok Worker exited without a successful result",
+    }),
+  });
+
+  const { store, task } = await policyRunnerFixture({});
+  try {
+    const result = await executeAttempt(store, task, false);
+    assert.equal(result.task.status, "failed");
+    const events = store.listEvents(task.id);
+    assert.equal(failureCategoryFromEvents(events), undefined);
+    assert.ok(!isGrokConnectivityEvidence(result.task.error));
   } finally {
     store.close();
     resetWorkerRegistryForTests();

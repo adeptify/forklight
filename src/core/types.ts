@@ -135,6 +135,64 @@ export interface TaskContract {
   };
 }
 
+/** Frozen Worker identity for routing comparison and audit.
+ *  provider + model + runtime + effort is the comparable identity.
+ *  workerProfileId is provenance only — later settings edits must not rewrite history. */
+export interface FrozenWorkerIdentity {
+  provider: string;
+  model: string;
+  runtime: string;
+  effort: string;
+  /** Worker Profile id that produced this identity at Task creation time.
+   *  Absent when the Task was created from legacy provider/model defaults. */
+  workerProfileId?: string;
+}
+
+/** Immutable Main-written routing decision stored before any Worker starts.
+ *  The frozen identity is used for comparison; workerProfileId is provenance only. */
+export interface RoutingDecisionSnapshot {
+  /** Stable family id for cross-project evidence. Max 80 chars. Explicit only. */
+  taskFamily?: string;
+  /** Every Worker Main actually considered, frozen by identity. */
+  shortlist: FrozenWorkerIdentity[];
+  /** The one Worker Main selected to execute this Task. Must match the Task's
+   *  provider/runtime spec. */
+  selectedWorker: FrozenWorkerIdentity;
+  /** Structured Main reason including code and plain-language explanation. */
+  selectedBecause: {
+    /** Bounded reason code: relevant-delivery, runtime-capability, user-specified,
+     *  only-available, main-judgment, or a custom code of ≤40 chars. */
+    code: string;
+    /** Plain-language explanation of at most 300 characters. */
+    note: string;
+  };
+  /** Main's explicit Competition intent. */
+  competition: {
+    /** Intent decision: none, consider, or required. */
+    intent: "none" | "consider" | "required";
+    /** Explicit triggers when intent is consider or required. */
+    triggers: CompetitionTrigger[];
+  };
+  /** Evidence snapshot at Task creation — scope, sample counts, settings. */
+  evidenceSnapshot: {
+    /** Which evidence scope was used: exact-class, task-family, or none. */
+    scope: "exact-class" | "task-family" | "none";
+    /** Exact taskClass sample count per candidate at decision time. */
+    exactSampleCounts: Record<string, number>;
+    /** Family sample count per candidate when scope is task-family. */
+    familySampleCounts?: Record<string, number>;
+    /** Settings version fingerprint for traceability. Never contains settings values. */
+    settingsDigest?: string;
+  };
+}
+
+/** Trigger reasons for considering or requiring a Competition. */
+export type CompetitionTrigger =
+  | "critical"
+  | "multiple-plausible-solutions"
+  | "new-family"
+  | "user-requested";
+
 interface SharedTaskSpec {
   name: string;
   project: string;
@@ -154,6 +212,13 @@ interface SharedTaskSpec {
    *  Absent on legacy stored Tasks and Tasks with no delivery. */
   deliveryResolution?: DeliveryResolution;
   taskClass?: string;
+  /** Stable family id for cross-project evidence. Max 80 chars.
+   *  Explicit only — never inferred from name or prompt.
+   *  Absent on legacy Tasks; never replaces exact taskClass for audit or Direct Codex. */
+  taskFamily?: string;
+  /** Immutable Main-authored routing decision snapshot frozen at Task creation.
+   *  Absent on legacy Tasks. Settings edits must never change this. */
+  routingDecision?: RoutingDecisionSnapshot;
   /** Exact direct-Codex execution-profile identity selected by the operator.
    *  Must be a canonical profile id validated by the shared normalizer.
    *  Absent for legacy tasks; never inferred from provider, model, or runtime. */
@@ -858,6 +923,64 @@ export interface DeliveryPlanView {
   };
 }
 
+// --- Integration path classification explanation ---
+//
+// Canonical category and bounded provenance for a single Integration-affected
+// relative path. The PathPolicy explains the exact existing classification
+// decision without changing it; provenance names the rule that produced the
+// category so Main can see which contract boundary to review. The values are a
+// closed vocabulary - never inferred from a filename and never mutated.
+
+export type PathCategory = "business" | "generated" | "internal";
+
+export type PathProvenance =
+  /** A ForkLight-internal path under `.forklight`. */
+  | "internal-forklight"
+  /** A path whose segment was excluded from the safe snapshot. */
+  | "snapshot-exclusion"
+  /** A path matching a built-in generated pattern. */
+  | "builtin-generated-pattern"
+  /** A path matching a Task-declared generated pattern. */
+  | "task-generated-pattern"
+  /** A path included as business source by default. */
+  | "default-business";
+
+export interface PathClassification {
+  category: PathCategory;
+  provenance: PathProvenance;
+}
+
+/** One ordered, privacy-safe classification entry bound to an affected
+ *  Integration path. The path is the same validated relative path that appears
+ *  in `IntegrationReceiptRecord.affectedFiles`; the entry never carries an
+ *  absolute path, Diff content, command text, credentials, or diagnostics. */
+export interface IntegrationPathEvidenceEntry {
+  path: string;
+  category: PathCategory;
+  provenance: PathProvenance;
+}
+
+/** Fixed advisory guidance code emitted only when a reviewed-patch file/line
+ *  limit rejected Preflight and at least one affected path is default business.
+ *  Advisory only: it never alters rejectionReasons, the immutable Task,
+ *  PathPolicy, Candidate, or retry state. */
+export type IntegrationRecoveryGuidanceCode =
+  | "review-generated-or-exclusion-policy-vs-source-scope";
+
+export interface IntegrationRecoveryGuidance {
+  code: IntegrationRecoveryGuidanceCode;
+  /** Count of affected paths classified as default business under current policy. */
+  defaultBusinessPathCount: number;
+  /** Reviewed-patch file count observed (privacy-safe; already in rejection text). */
+  filesChanged: number;
+  /** Reviewed-patch changed-line count observed. */
+  changedLines: number;
+  /** Configured reviewed-patch file limit. */
+  reviewedPatchMaxFiles: number;
+  /** Configured reviewed-patch line limit. */
+  reviewedPatchMaxLines: number;
+}
+
 // --- Integration records ---
 
 export interface IntegrationReceiptRecord {
@@ -873,6 +996,14 @@ export interface IntegrationReceiptRecord {
   /** Safe immutable delivery plan visible to Main before authorizing Integration.
    *  Absent on legacy receipts stored before delivery plan support. */
   deliveryPlan?: DeliveryPlanView;
+  /** Ordered one-to-one path classification evidence for `affectedFiles`,
+   *  derived from the immutable Task PathPolicy. Absent on legacy receipts
+   *  stored before path-classification evidence and when no path is affected. */
+  pathEvidence?: IntegrationPathEvidenceEntry[];
+  /** Advisory recovery guidance, present only when a reviewed-patch file or
+   *  line limit rejected Preflight and at least one affected path is default
+   *  business. Never alters rejection or retry authority. */
+  recoveryGuidance?: IntegrationRecoveryGuidance;
 }
 
 export interface IntegrationResultRecord {
@@ -960,7 +1091,7 @@ export interface TaskDecisionView {
   };
   /** Latest terminal failure class when task is failed|interrupted.
    *  Includes Worker classes and contract-infeasible (verification/Main). */
-  failureCategory?: "authentication" | "budget" | "runtime" | "contract-infeasible";
+  failureCategory?: "authentication" | "budget" | "runtime" | "connectivity" | "contract-infeasible";
   /** Independent final-delivery outcome after Main repaired a machine-failed Task. */
   remediationDisposition?: RemediationDisposition;
 }
@@ -1094,6 +1225,41 @@ export interface AdaptationTransitionRecord {
 
 export type RemediationCheckStatus = "failed" | "passed";
 
+/** Whether final delivery used the original acceptance suite or a Main-amended one. */
+export type RemediationAcceptanceBasis =
+  | "original-acceptance"
+  | "amended-acceptance";
+
+/** Fixed privacy-safe reason code when Main amends failed acceptance commands. */
+export type RemediationAmendmentReasonCode = "contradictory-acceptance";
+
+/** One-to-one replacement of an exact failed acceptance command. */
+export interface AcceptanceCommandReplacement {
+  /** Exact command text that failed in the bound verification event. */
+  originalCommand: string;
+  /** Non-empty replacement command Main authorizes for this check only. */
+  replacementCommand: string;
+}
+
+/**
+ * Explicit Main acceptance amendment input. Bound to one verification event;
+ * never mutates the stored Task Contract or original verification history.
+ */
+export interface RemediationAcceptanceAmendment {
+  verificationEventSequence: number;
+  reasonCode: RemediationAmendmentReasonCode;
+  replacements: AcceptanceCommandReplacement[];
+}
+
+/** Private amendment evidence stored with a remediation check. */
+export interface RemediationAmendmentEvidence {
+  verificationEventSequence: number;
+  reasonCode: RemediationAmendmentReasonCode;
+  replacements: AcceptanceCommandReplacement[];
+  /** Full amended suite that was actually executed (private). */
+  amendedCommands: string[];
+}
+
 export interface RemediationCheckRecord {
   id: string;
   taskId: string;
@@ -1101,6 +1267,8 @@ export interface RemediationCheckRecord {
   /** Private audit context. Compact task/list/event projections must not expose it. */
   reason?: string;
   commands: VerificationCommandResult[];
+  /** Private amendment evidence when Main replaced failed commands. */
+  amendment?: RemediationAmendmentEvidence;
   createdAt: string;
 }
 
@@ -1108,6 +1276,15 @@ export interface RemediationDisposition {
   status: "verified-repaired-delivered";
   checkId: string;
   createdAt: string;
+  /**
+   * Optional on read for legacy records. Absent means original-acceptance.
+   * Public projections may include this compact basis but never command text.
+   */
+  acceptanceBasis?: RemediationAcceptanceBasis;
+  /** Count of commands Main replaced; present only for amended-acceptance. */
+  amendedCommandCount?: number;
+  /** Privacy-safe reason code; present only for amended-acceptance. */
+  reasonCode?: RemediationAmendmentReasonCode;
 }
 
 // --- Candidate revision evidence ---

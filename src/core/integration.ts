@@ -5,9 +5,13 @@ import type { IntegrationSettings } from "./settings.js";
 import type { StateStore } from "../state/store.js";
 import type {
   DeliveryPlanView,
+  IntegrationPathEvidenceEntry,
   IntegrationReceiptRecord,
+  IntegrationRecoveryGuidance,
   IntegrationResultRecord,
   IntegrationStageEvidence,
+  PathCategory,
+  PathProvenance,
   ActivationHandoff,
   TaskRecord,
   VerificationCommandResult,
@@ -15,6 +19,7 @@ import type {
 import { buildDeliveryPlanView } from "./delivery-profiles.js";
 import { runCaptured } from "./process.js";
 import { verifierProcessEnvironment } from "../workspace/verifier-git.js";
+import { createPathPolicy, PATH_CATEGORIES, PATH_PROVENANCES } from "../workspace/path-policy.js";
 import { latestMainReview } from "./main-review.js";
 import { copyForVerification } from "./integration-verification-copy.js";
 
@@ -367,6 +372,52 @@ async function detectConcurrentChanges(
 
 // --- Receipt construction ---
 
+/** Validate stored path-classification evidence against the authoritative
+ *  affectedFiles list. Returns undefined when the evidence is absent (legacy
+ *  receipt or no affected path) or consistent; otherwise returns a fixed,
+ *  privacy-safe message so apply fails closed without echoing paths, Diff
+ *  content, or diagnostics. The evidence is never recomputed here - apply
+ *  consumes the exact stored list rather than silently deriving a different one.
+ */
+function validatePathEvidence(
+  evidence: unknown,
+  affectedFiles: string[],
+): string | undefined {
+  if (evidence === undefined) return undefined; // legacy receipt or no affected path
+  if (!Array.isArray(evidence)) {
+    return "Integration path evidence is malformed";
+  }
+  if (evidence.length !== affectedFiles.length) {
+    return "Integration path evidence cardinality mismatch";
+  }
+  for (let i = 0; i < evidence.length; i += 1) {
+    const entry = evidence[i];
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return "Integration path evidence entry is malformed";
+    }
+    const record = entry as Record<string, unknown>;
+    const keys = Object.keys(record);
+    if (
+      keys.length !== 3
+      || typeof record.path !== "string"
+      || typeof record.category !== "string"
+      || typeof record.provenance !== "string"
+    ) {
+      return "Integration path evidence entry has unexpected shape";
+    }
+    if (record.path !== affectedFiles[i]) {
+      return "Integration path evidence path mismatch";
+    }
+    if (!PATH_CATEGORIES.has(record.category as PathCategory)) {
+      return "Integration path evidence category is malformed";
+    }
+    if (!PATH_PROVENANCES.has(record.provenance as PathProvenance)) {
+      return "Integration path evidence provenance is malformed";
+    }
+  }
+  return undefined;
+}
+
 function buildReceipt(
   taskId: string,
   diff: string,
@@ -375,6 +426,8 @@ function buildReceipt(
   reasons: string[],
   ttlMs: number,
   deliveryPlan?: DeliveryPlanView,
+  pathEvidence?: IntegrationPathEvidenceEntry[],
+  recoveryGuidance?: IntegrationRecoveryGuidance,
 ): IntegrationReceiptRecord {
   const now = new Date();
   return {
@@ -388,6 +441,8 @@ function buildReceipt(
     expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
     consumed: false,
     ...(deliveryPlan === undefined ? {} : { deliveryPlan }),
+    ...(pathEvidence === undefined ? {} : { pathEvidence }),
+    ...(recoveryGuidance === undefined ? {} : { recoveryGuidance }),
   };
 }
 
@@ -569,6 +624,18 @@ export async function preflightIntegration(
     if (pathReason) reasons.push(pathReason);
   }
 
+  // Build ordered one-to-one path-classification evidence for the exact
+  // affected Integration paths. The immutable Task PathPolicy explains each
+  // validated relative path without recomputing or mutating the decision; the
+  // evidence never carries absolute paths, Diff content, commands, credentials,
+  // or diagnostics. affectedFiles stays authoritative - evidence is one-to-one
+  // and in the same order, so it cannot silently derive a different list.
+  const pathPolicy = createPathPolicy(task.spec);
+  const pathEvidence: IntegrationPathEvidenceEntry[] | undefined =
+    affectedFiles.length === 0
+      ? undefined
+      : affectedFiles.map((file) => ({ path: file, ...pathPolicy.explain(file) }));
+
   // 6. Real dry-run applicability check
   if (reasons.length === 0) {
     const checkResult = await runCaptured(
@@ -621,9 +688,35 @@ export async function preflightIntegration(
     }
   }
 
+  // Advisory recovery guidance: emitted only when a reviewed-patch file or
+  // line limit rejected Preflight (typed local conditions, never parsed from
+  // the human rejection strings) AND at least one affected path is default
+  // business under the current Task policy. The guidance is advisory only - it
+  // never alters rejectionReasons, the immutable Task, PathPolicy, Candidate,
+  // or retry state, and it never tells Main to raise limits blindly.
+  let recoveryGuidance: IntegrationRecoveryGuidance | undefined;
+  const sizeGateTriggered =
+    metrics.filesChanged > settings.reviewedPatchMaxFiles
+    || metrics.changedLines > settings.reviewedPatchMaxLines;
+  if (sizeGateTriggered && pathEvidence !== undefined) {
+    const defaultBusinessPathCount = pathEvidence.filter(
+      (entry) => entry.provenance === "default-business",
+    ).length;
+    if (defaultBusinessPathCount > 0) {
+      recoveryGuidance = {
+        code: "review-generated-or-exclusion-policy-vs-source-scope",
+        defaultBusinessPathCount,
+        filesChanged: metrics.filesChanged,
+        changedLines: metrics.changedLines,
+        reviewedPatchMaxFiles: settings.reviewedPatchMaxFiles,
+        reviewedPatchMaxLines: settings.reviewedPatchMaxLines,
+      };
+    }
+  }
+
   const receipt = buildReceipt(
     task.id, diff, affectedFiles, sourceEvidence, reasons,
-    settings.reviewReceiptTtlMs, deliveryPlan,
+    settings.reviewReceiptTtlMs, deliveryPlan, pathEvidence, recoveryGuidance,
   );
   store.saveIntegrationReceipt(receipt);
   storePreflightEvent(store, task.id, receipt);
@@ -655,6 +748,8 @@ function storePreflightEvent(
       rejectionReasons: receipt.rejectionReasons,
       affectedFiles: receipt.affectedFiles,
       ...(receipt.deliveryPlan === undefined ? {} : { deliveryPlan: receipt.deliveryPlan }),
+      ...(receipt.pathEvidence === undefined ? {} : { pathEvidence: receipt.pathEvidence }),
+      ...(receipt.recoveryGuidance === undefined ? {} : { recoveryGuidance: receipt.recoveryGuidance }),
     },
   );
 }
@@ -738,6 +833,15 @@ export async function applyIntegration(
     return persistRejection(
       store, operationId, receiptId, task.id, "Affected file set changed since preflight",
     );
+  }
+  // Validate the stored path-classification evidence against the authoritative
+  // affectedFiles. Legacy receipts (evidence absent) remain readable; a new
+  // receipt with duplicate, reordered, missing, absolute, malformed, or
+  // mismatched evidence fails closed before any source mutation, without
+  // echoing paths, Diff content, or diagnostics.
+  const evidenceError = validatePathEvidence(receipt.pathEvidence, receipt.affectedFiles);
+  if (evidenceError) {
+    return persistRejection(store, operationId, receiptId, task.id, evidenceError);
   }
   for (const file of reparsedFiles) {
     const pathReason = await validateSourcePath(task.sourcePath, file);

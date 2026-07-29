@@ -1566,6 +1566,19 @@ export class StateStore {
       ) {
         throw new Error("Invalid remediation outcome");
       }
+      if (disposition.acceptanceBasis === "amended-acceptance") {
+        if (
+          record.amendment === undefined
+          || typeof disposition.amendedCommandCount !== "number"
+          || !Number.isSafeInteger(disposition.amendedCommandCount)
+          || disposition.amendedCommandCount < 1
+          || disposition.reasonCode !== "contradictory-acceptance"
+          || disposition.amendedCommandCount !== record.amendment.replacements.length
+          || record.amendment.amendedCommands.length !== record.commands.length
+        ) {
+          throw new Error("Invalid amended-acceptance remediation outcome");
+        }
+      }
     }
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -1607,6 +1620,52 @@ export class StateStore {
       ) {
         throw new Error("Corrupt remediation check record in state database");
       }
+      // Optional private amendment evidence: deep-validate shape when present.
+      if (record.amendment !== undefined) {
+        const amendment = record.amendment as Partial<
+          NonNullable<RemediationCheckRecord["amendment"]>
+        >;
+        if (
+          amendment === null
+          || typeof amendment !== "object"
+          || !Number.isSafeInteger(amendment.verificationEventSequence)
+          || (amendment.verificationEventSequence as number) < 1
+          || amendment.reasonCode !== "contradictory-acceptance"
+          || !Array.isArray(amendment.replacements)
+          || amendment.replacements.length < 1
+          || !Array.isArray(amendment.amendedCommands)
+          || amendment.amendedCommands.length < 1
+          || amendment.amendedCommands.length !== record.commands.length
+          || amendment.replacements.length > amendment.amendedCommands.length
+        ) {
+          throw new Error("Corrupt remediation check record in state database");
+        }
+        for (const entry of amendment.replacements) {
+          if (
+            entry === null
+            || typeof entry !== "object"
+            || typeof (entry as { originalCommand?: unknown }).originalCommand !== "string"
+            || typeof (entry as { replacementCommand?: unknown }).replacementCommand !== "string"
+            || ((entry as { originalCommand: string }).originalCommand.trim().length < 1)
+            || ((entry as { replacementCommand: string }).replacementCommand.trim().length < 1)
+            || (entry as { originalCommand: string }).originalCommand.length > 4000
+            || (entry as { replacementCommand: string }).replacementCommand.length > 4000
+            || (entry as { originalCommand: string }).originalCommand
+              === (entry as { replacementCommand: string }).replacementCommand
+          ) {
+            throw new Error("Corrupt remediation check record in state database");
+          }
+        }
+        for (const command of amendment.amendedCommands) {
+          if (
+            typeof command !== "string"
+            || command.trim().length < 1
+            || command.length > 4000
+          ) {
+            throw new Error("Corrupt remediation check record in state database");
+          }
+        }
+      }
       return record as RemediationCheckRecord;
     });
   }
@@ -1641,6 +1700,25 @@ export class StateStore {
       || typeof disposition.createdAt !== "string"
     ) {
       throw new Error("Corrupt remediation disposition record in state database");
+    }
+    // Optional fields for amended-acceptance; legacy records omit them.
+    if (disposition.acceptanceBasis !== undefined) {
+      if (
+        disposition.acceptanceBasis !== "original-acceptance"
+        && disposition.acceptanceBasis !== "amended-acceptance"
+      ) {
+        throw new Error("Corrupt remediation disposition record in state database");
+      }
+    }
+    if (disposition.acceptanceBasis === "amended-acceptance") {
+      if (
+        typeof disposition.amendedCommandCount !== "number"
+        || !Number.isSafeInteger(disposition.amendedCommandCount)
+        || disposition.amendedCommandCount < 1
+        || disposition.reasonCode !== "contradictory-acceptance"
+      ) {
+        throw new Error("Corrupt remediation disposition record in state database");
+      }
     }
     return disposition as RemediationDisposition;
   }

@@ -28,10 +28,13 @@ import {
   effectiveQualityPolicyFromGlobal,
 } from "./contract-quality.js";
 import type {
+  CompetitionTrigger,
   ContractTaskSpec,
   DeliveryResolution,
   DeliverySpec,
+  FrozenWorkerIdentity,
   QualityReport,
+  RoutingDecisionSnapshot,
   TaskAdvancedPolicyOverride,
   TaskContract,
   TaskModuleContract,
@@ -127,6 +130,123 @@ function policyModeValue(value: unknown, label: string, fallback: PolicyMode): P
   if (value === undefined) return fallback;
   if (value === "hard" || value === "warn" || value === "score" || value === "off") return value;
   throw new Error(`${label} must be hard, warn, score, or off`);
+}
+
+const VALID_COMPETITION_INTENTS = new Set(["none", "consider", "required"]);
+const VALID_COMPETITION_TRIGGERS = new Set<CompetitionTrigger>([
+  "critical", "multiple-plausible-solutions", "new-family", "user-requested",
+]);
+
+function validateFrozenWorkerIdentity(raw: unknown, label: string): FrozenWorkerIdentity {
+  const obj = object(raw, label);
+  const runtime = stringValue(obj.runtime, `${label}.runtime`);
+  if (!isRuntimeName(runtime)) {
+    throw new Error(`${label}.runtime must be one of: ${supportedRuntimeNamesList()}`);
+  }
+  const effort = stringValue(obj.effort, `${label}.effort`);
+  if (!["low", "medium", "high", "xhigh", "max"].includes(effort)) {
+    throw new Error(`${label}.effort must be low, medium, high, xhigh, or max`);
+  }
+  return {
+    provider: stringValue(obj.provider, `${label}.provider`),
+    model: stringValue(obj.model, `${label}.model`),
+    runtime,
+    effort,
+    ...(obj.workerProfileId === undefined
+      ? {}
+      : { workerProfileId: stringValue(obj.workerProfileId, `${label}.workerProfileId`) }),
+  };
+}
+
+function validateRoutingDecision(raw: unknown): RoutingDecisionSnapshot {
+  const obj = object(raw, "task.routingDecision");
+  // taskFamily is optional inside routingDecision (can come from top-level too)
+  const taskFamily = obj.taskFamily === undefined
+    ? undefined
+    : (() => {
+        const v = obj.taskFamily;
+        if (typeof v !== "string" || v.trim() === "" || v.trim().length > 80)
+          throw new Error("task.routingDecision.taskFamily must be a non-empty string of at most 80 characters");
+        return v.trim();
+      })();
+  const shortlist = objectArray(obj.shortlist, "task.routingDecision.shortlist")
+    .filter((item) => item !== null && typeof item === "object")
+    .map((item, i) => validateFrozenWorkerIdentity(item, `task.routingDecision.shortlist[${i}]`));
+  if (shortlist.length < 1) throw new Error("task.routingDecision.shortlist must contain at least one Worker");
+  const selectedWorker = validateFrozenWorkerIdentity(
+    obj.selectedWorker,
+    "task.routingDecision.selectedWorker",
+  );
+  const selectedBecauseObj = object(obj.selectedBecause, "task.routingDecision.selectedBecause");
+  const reasonCode = stringValue(selectedBecauseObj.code, "task.routingDecision.selectedBecause.code");
+  if (reasonCode.length > 40) throw new Error("task.routingDecision.selectedBecause.code must be at most 40 characters");
+  const reasonNote = stringValue(selectedBecauseObj.note, "task.routingDecision.selectedBecause.note");
+  if (reasonNote.length > 300) throw new Error("task.routingDecision.selectedBecause.note must be at most 300 characters");
+  const competitionObj = object(obj.competition, "task.routingDecision.competition");
+  const intent = competitionObj.intent;
+  if (typeof intent !== "string" || !VALID_COMPETITION_INTENTS.has(intent)) {
+    throw new Error("task.routingDecision.competition.intent must be none, consider, or required");
+  }
+  const triggers = (() => {
+    const raw = competitionObj.triggers;
+    if (!Array.isArray(raw)) throw new Error("task.routingDecision.competition.triggers must be an array");
+    return raw.map((t, i) => {
+      if (typeof t !== "string" || !VALID_COMPETITION_TRIGGERS.has(t as CompetitionTrigger)) {
+        throw new Error(
+          `task.routingDecision.competition.triggers[${i}] must be one of: ${[...VALID_COMPETITION_TRIGGERS].join(", ")}`,
+        );
+      }
+      return t as CompetitionTrigger;
+    });
+  })();
+  if (intent !== "none" && triggers.length === 0) {
+    throw new Error("task.routingDecision.competition.triggers must be non-empty when intent is consider or required");
+  }
+  const evidenceObj = object(obj.evidenceSnapshot, "task.routingDecision.evidenceSnapshot");
+  const scope = evidenceObj.scope;
+  if (scope !== "exact-class" && scope !== "task-family" && scope !== "none") {
+    throw new Error("task.routingDecision.evidenceSnapshot.scope must be exact-class, task-family, or none");
+  }
+  const exactSampleCounts: Record<string, number> = {};
+  const rawExact = object(evidenceObj.exactSampleCounts, "task.routingDecision.evidenceSnapshot.exactSampleCounts");
+  for (const [key, value] of Object.entries(rawExact)) {
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+      throw new Error(`task.routingDecision.evidenceSnapshot.exactSampleCounts["${key}"] must be a non-negative integer`);
+    }
+    exactSampleCounts[key] = value;
+  }
+  let familySampleCounts: Record<string, number> | undefined;
+  if (scope === "task-family") {
+    if (evidenceObj.familySampleCounts === undefined) {
+      throw new Error("task.routingDecision.evidenceSnapshot.familySampleCounts is required when scope is task-family");
+    }
+    familySampleCounts = {};
+    const rawFamily = object(
+      evidenceObj.familySampleCounts,
+      "task.routingDecision.evidenceSnapshot.familySampleCounts",
+    );
+    for (const [key, value] of Object.entries(rawFamily)) {
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+        throw new Error(`task.routingDecision.evidenceSnapshot.familySampleCounts["${key}"] must be a non-negative integer`);
+      }
+      familySampleCounts[key] = value;
+    }
+  }
+  return {
+    ...(taskFamily !== undefined ? { taskFamily } : {}),
+    shortlist,
+    selectedWorker,
+    selectedBecause: { code: reasonCode, note: reasonNote },
+    competition: { intent: intent as "none" | "consider" | "required", triggers },
+    evidenceSnapshot: {
+      scope,
+      exactSampleCounts,
+      ...(familySampleCounts === undefined ? {} : { familySampleCounts }),
+      ...(evidenceObj.settingsDigest !== undefined
+        ? { settingsDigest: stringValue(evidenceObj.settingsDigest, "task.routingDecision.evidenceSnapshot.settingsDigest") }
+        : {}),
+    },
+  };
 }
 
 function positiveInteger(value: unknown, label: string): number {
@@ -394,6 +514,18 @@ export function parseTaskSpec(
       throw new Error("task.taskClass must be a non-empty string of at most 80 characters when supplied");
     return raw.trim();
   })();
+  const taskFamily = (() => {
+    const raw = root.taskFamily;
+    if (raw === undefined) return undefined;
+    if (typeof raw !== "string" || raw.trim() === "" || raw.trim().length > 80)
+      throw new Error("task.taskFamily must be a non-empty string of at most 80 characters when supplied");
+    return raw.trim();
+  })();
+  const routingDecision = (() => {
+    const raw = root.routingDecision;
+    if (raw === undefined) return undefined;
+    return validateRoutingDecision(raw);
+  })();
   const directCodexProfileId = (() => {
     const raw = root.directCodexProfileId;
     if (raw === undefined) return undefined;
@@ -540,6 +672,8 @@ export function parseTaskSpec(
     ...(resolvedDelivery === undefined ? {} : { delivery: resolvedDelivery }),
     ...(deliveryResolution === undefined ? {} : { deliveryResolution }),
     ...(taskClass !== undefined ? { taskClass } : {}),
+    ...(taskFamily !== undefined ? { taskFamily } : {}),
+    ...(routingDecision !== undefined ? { routingDecision } : {}),
     ...(directCodexProfileId !== undefined ? { directCodexProfileId } : {}),
     ...(selectedProfileId !== undefined ? { workerProfileId: selectedProfileId } : {}),
     ...(advancedPolicyOverride !== undefined ? { advancedPolicyOverride } : {}),
@@ -548,6 +682,53 @@ export function parseTaskSpec(
       changeBudgetMode,
     },
   };
+
+  // Post-resolve validation: routingDecision must bind to the resolved Task identity.
+  if (routingDecision !== undefined) {
+    const sw = routingDecision.selectedWorker;
+    // selectedWorker must be in the shortlist by frozen identity match.
+    const inShortlist = routingDecision.shortlist.some(
+      (w) => w.provider === sw.provider && w.model === sw.model
+        && w.runtime === sw.runtime && w.effort === sw.effort,
+    );
+    if (!inShortlist) {
+      throw new Error(
+        "task.routingDecision.selectedWorker must match an entry in the shortlist by provider, model, runtime, and effort",
+      );
+    }
+    // selectedWorker must match the resolved Task identity.
+    if (sw.provider !== common.provider.name) {
+      throw new Error(
+        `task.routingDecision.selectedWorker.provider "${sw.provider}" does not match resolved Task provider "${common.provider.name}"`,
+      );
+    }
+    if (sw.model !== common.provider.model) {
+      throw new Error(
+        `task.routingDecision.selectedWorker.model "${sw.model}" does not match resolved Task model "${common.provider.model}"`,
+      );
+    }
+    if (sw.runtime !== common.runtime.name) {
+      throw new Error(
+        `task.routingDecision.selectedWorker.runtime "${sw.runtime}" does not match resolved Task runtime "${common.runtime.name}"`,
+      );
+    }
+    if (sw.effort !== common.runtime.effort) {
+      throw new Error(
+        `task.routingDecision.selectedWorker.effort "${sw.effort}" does not match resolved Task effort "${common.runtime.effort}"`,
+      );
+    }
+    if (sw.workerProfileId !== undefined && sw.workerProfileId !== common.workerProfileId) {
+      throw new Error(
+        `task.routingDecision.selectedWorker.workerProfileId "${sw.workerProfileId}" does not match resolved Task Worker Profile "${common.workerProfileId ?? "none"}"`,
+      );
+    }
+    // taskFamily must be consistent.
+    if (routingDecision.taskFamily !== undefined && routingDecision.taskFamily !== common.taskFamily) {
+      throw new Error(
+        "task.taskFamily and task.routingDecision.taskFamily must be identical when both are present",
+      );
+    }
+  }
 
   if (root.version === 1) {
     return {

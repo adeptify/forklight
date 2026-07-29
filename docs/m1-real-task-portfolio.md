@@ -1,6 +1,6 @@
 # M1 真实任务候选池
 
-更新时间：2026-07-28
+更新时间：2026-07-29
 
 这份候选池服务于 M1.4：ForkLight 必须在 Adeptify、Dia 和
 NovelRPGPlay 中完成至少十个具有代表性的真实任务。它不是为了制造成功率，
@@ -25,8 +25,31 @@ NovelRPGPlay 中完成至少十个具有代表性的真实任务。它不是为�
 | 项目 | 当前事实 | 准入处理 |
 | --- | --- | --- |
 | Adeptify | Nexus AI runtime 正在进行一轮真实编码闭环修复，工作树有未提交改动 | 只选不触碰当前 `rethink`、executor、context prompt 和文件 Tool validation 的任务 |
-| Dia | 当前目录不是 Git 工作树，但 ForkLight 可以从文件快照建立 baseline；原目录没有 Git 回滚能力 | Worker 可以隔离执行；真正合入前必须再次展示受影响文件和 ForkLight 备份/恢复路径 |
+| Dia | 历史目录 `/Users/yijunwang/code/dia-ng-src` 当前不存在 | 等一骏提供新路径后重新审计；不从历史快照或猜测目录启动 |
 | NovelRPGPlay | 生产、模型连接、故事门禁、工坊 UI 和多组测试正在大范围迭代 | 优先选择当前干净的协议、服务和独立流程；重叠任务暂缓 |
+
+### 2026-07-29 晚间 source-drift 复核
+
+本表不能按早先结论直接启动 Worker。Main 在提交前重新检查了真实目录、工作树、目标调用链和
+既有验收，得到以下更新：
+
+- **Dia 路径失效：** `/Users/yijunwang/code/dia-ng-src` 当前不存在，在一骏提供新路径前，D1–D3
+  都停止，不能从历史快照或同名猜测目录启动。
+- **A1 需要重新定义：** 两条原聚焦测试当前已经 **16/16** 通过，`commandReceipts` 的创建、持久化、
+  恢复和投递状态也已存在；真正剩余缺口更可能是产品 UI 没有消费这份回执。同时 Task Synthesis、
+  Session projection 和 Nexus UI 正在被其他工作修改，因此不能按旧合同派 Worker。若继续 A1，
+  必须先对齐为“让用户在 Task Board 看见权威命令结果”，并在当前改动收口后重做 focus paths 和 UI
+  行为验收。
+- **N3 已成为现有能力：** 当前基线已经证明公共主线发布不会自动移动房间、普通成员无权升级、
+  房主必须显式安装新 Release；Rooms UI 也会分别告诉成员等待房主、告诉房主升级会保留角色和进度。
+  `desktop-service-cross-layer-e2e` 覆盖两个身份的完整发布与显式升级链。重复提交 N3 只会制造重复代码，
+  所以它从“可准备”改为“基线已实现，不计 ForkLight 新交付”。
+- **其余候选仍重叠：** A2/A3 与当前 Session/File Tool 改动重叠；N1/N2/N4 与 portable review、
+  personal action、连接健康和生产恢复改动重叠。它们保持暂缓或先对齐，不能为了凑 M1.4 数量启动。
+
+因此当前没有一个旧候选同时满足“目标仍未实现、边界不重叠、方案已由一骏确认”三个提交条件。
+下一步应由一骏在更新 Dia 路径、等待 Adeptify 当前链路收口后重做 A1，或为 NovelRPGPlay 选择一个
+新的干净用户结果之间做产品优先级选择。此准入停止不算 Task 失败，也不会产生 Worker Token。
 
 状态含义：
 
@@ -38,7 +61,7 @@ NovelRPGPlay 中完成至少十个具有代表性的真实任务。它不是为�
 
 ### A1 · Adeptify：命令执行结果真正进入 Task Board
 
-**状态：可准备。建议 Worker：DeepSeek，单 Worker，无竞争。**
+**状态：暂缓并重新对齐。原核心测试已 16/16 通过，剩余 UI/Projection 链与当前工作重叠。**
 
 - 用户结果：Nexus 运行 `npm test` 等命令后，Task Board 能显示执行了什么、退出状态、
   结果摘要和对应回执，不再出现命令真实执行但 `commandReceipts` 为空。
@@ -79,7 +102,7 @@ NovelRPGPlay 中完成至少十个具有代表性的真实任务。它不是为�
 
 ### D1 · Dia：旧服务请求失败不再伪装成空数据
 
-**状态：可准备。建议 Worker：DeepSeek，单 Worker，无竞争。**
+**状态：路径失效。提供新的 Dia 项目路径后重新审计。**
 
 - 用户结果：数据源接入遇到 401、网关错误或三种历史响应格式时，用户得到正确跳转、
   明确错误或真实数据，不再把服务失败显示成“没有内容”。
@@ -91,7 +114,7 @@ NovelRPGPlay 中完成至少十个具有代表性的真实任务。它不是为�
 
 ### D2 · Dia：编辑历史问题后安全截断旧回答
 
-**状态：先对齐。建议 Worker：DeepSeek，单 Worker。**
+**状态：路径失效；原交互选择仍需对齐。提供新路径后重新审计。**
 
 - 用户结果：用户编辑一条历史问题后，旧问题之后的回答不会继续冒充当前上下文；
   页面明确确认影响范围，并从新问题继续对话。
@@ -105,7 +128,7 @@ NovelRPGPlay 中完成至少十个具有代表性的真实任务。它不是为�
 
 ### D3 · Dia：对话回放成为清楚的只读页面
 
-**状态：可准备。建议 Worker：MiniMax，单 Worker；Main 做浏览器验收。**
+**状态：路径失效。提供新的 Dia 项目路径后重新审计。**
 
 - 用户结果：打开 `/playback/:convId` 能按顺序阅读对话，没有输入框；不存在、加载失败和
   空对话都有能看懂的提示与返回动作。
@@ -116,7 +139,7 @@ NovelRPGPlay 中完成至少十个具有代表性的真实任务。它不是为�
 
 ### N1 · NovelRPGPlay：无剧透委托边界的反向证明
 
-**状态：可准备。建议 Worker：DeepSeek，单 Worker，无竞争。**
+**状态：暂缓。portable review 与 story protocol 目标文件正在修改。**
 
 - 用户结果：房主把生产委托给制作人后，房主、玩家、制作人和复核者只能看到各自允许的
   材料；越权读取在进入 UI 或传输前被拒绝，并给出可理解原因。
@@ -141,7 +164,7 @@ NovelRPGPlay 中完成至少十个具有代表性的真实任务。它不是为�
 
 ### N3 · NovelRPGPlay：公共主线更新必须由房间主动切换
 
-**状态：可准备。建议 Worker：DeepSeek；这是中等跨模块任务，不做竞争。**
+**状态：当前基线已实现，不再启动重复 Worker，也不计作新的 ForkLight 交付。**
 
 - 用户结果：公共主线发布新版本后，旧房间收到“有更新”通知但继续留在原版本；只有房主
   明确确认后才切换，其他成员能看懂发生了什么。
@@ -261,6 +284,114 @@ dogfood 项目。它用于尽早验证真实项目的任务拆分、部分成果
   没有 exact-pair direct-Codex baseline，因此仍不能称为“节约的 Main Token”。
 
 该样本没有 commit 或 push，也不替代三个正式项目和 clean-user journey 的退出要求。
+
+### R11 · ForkLight：合入前解释每个路径为什么被当作源码
+
+**状态：GLM Worker、一次同 Candidate 纠正、自动 Integration、运行版本切换和真实 Hub 验收均完成。**
+
+- 用户结果：Integration Preflight 不再只说补丁太大或不可应用。它会先说明当前 Task 策略怎样看待
+  每个受影响路径，分别统计业务源码、生成物/排除项和 ForkLight 内部路径，并强调“当前分类”不等于
+  对文件性质的绝对证明。技术路径默认折叠，用户先看到原因和安全选择。
+- 输入与调用链：已验证 Candidate 的真实 affected files → 冻结的 workspace path policy → 有序
+  `pathEvidence` → 持久化 Preflight receipt/event → Hub 初学者说明。只有默认业务分类参与 size gate
+  拒绝时才提供“修正 Task 排除规则后新建 Task”或“保留规则并由 Main 重新收窄交付范围”两个建议；
+  系统不会自动改策略、提额度、重试或合入。
+- 实际模型路径：Task `525cf643-5cee-49d9-8fbe-8e8623c944c1` 使用 Volcengine
+  `glm-5.2[1M]` / Claude Code。基础 Attempt 94 turns，原合同 340 个聚焦测试、build、Hub JavaScript
+  syntax 和 diff hygiene 均通过，但 Main 语义审查发现 UI 对 DOM 节点调用 `forEach`，真实有路径证据
+  时会抛错。Main 保留全部 10 个文件，只授权一次同 Candidate 结构化纠正；第二次 11 turns，修复
+  调用并新增会真正执行 renderer 的 DOM stub 测试。没有普通 retry、adaptation、competition、
+  新 Task 或第三轮。
+- Main 与交付：最终 10 files / 1,042 changed lines；Main accept 绑定 patch digest
+  `00f67a45582d76d92389aa68dce59cf5f6dfe4dea2132e632b11ae500082f623`。Integration operation
+  `8cba9c8d-526c-4bb6-905c-81a4e1fa6845` 的 source apply、四条 source verification、artifact build
+  和 runtime activation 全部 passed。当前仓库全量回归 **1,624/1,624**，真实 Hub 中路径解释正常
+  渲染，浏览器 console 无错误。
+- 复核边界：补丁已经应用后再次只读运行 Preflight，会因“补丁不再能干净应用”正确拒绝，同时仍
+  持久化 10 条有序 `default-business` 路径证据。当前原始 applicability 错误仍是一堵技术文本墙，
+  已列为后续独立 UX 缺口，不进入本轮无限纠正。
+- 经济性：两次 Attempt 共 **24,207,598 gross Worker Tokens**（350,608 input、126,430 output、
+  23,730,560 cache read），两边用量完全对齐。Main exchange 只有低置信区间
+  **159,870–967,304 Tokens**；缺少 exact-pair direct-Codex baseline，因此不声称节约 Main Token。
+  Claude runtime estimate 分别约 **USD 14.229183** 与 **USD 2.549887**，不是 Provider 账单。
+
+该样本证明 Main 不能把机器绿灯等同于产品可用，也证明一次精确纠正比整单重跑更合适；它是
+ForkLight 自举样本，不替代 Adeptify、Dia、NovelRPGPlay 的十个正式项目任务或 clean-user journey。
+没有 commit 或 push。
+
+### R10 · ForkLight：Main 写错验收时只改验收，不重跑 Worker
+
+**状态：Grok 实现、一次同 Candidate 纠正、Main 定点收口、旧失败 Task 反向 dogfood 与真实 Hub 验收完成。**
+
+- 用户结果：Worker 已完成、但 Main 的某条验收命令有误时，Main 可以只替换那一个确切失败槽，在
+  当前源码上重新核验；原失败历史不被改写，也不会为了纠正 Main 的错误再向模型付一次成本。
+- 输入与调用链：当前 Task + 最新 Attempt + 最新 verification sequence + 最新 Main `revise` review
+  + 有界 amendment → 隔离当前源码 → 只执行修正后的验收套件 → 原子记录独立交付结果。自由文本原因、
+  命令与输出不进入 Hub 公共投影。
+- 实际模型路径：Grok `grok-4.5` / `grok-build`，基础 Attempt 31 turns，一次同 Candidate 结构化
+  correction 18 turns；没有 competition、普通 retry、adaptation 或第三轮。runtime estimate 合计
+  **USD 2.3043892**；usage missing，所以 Worker Token 和官方费用保持 unavailable。
+- Main 取舍：构建生成的 `dist` 把 Candidate 扩到 53 files / 3,377 lines，自动 Integration 正确拒绝。
+  Main 只选择 17 个源码/测试文件，不把生成物混进 source delivery，并补“替换目标必须全套唯一”与
+  “记录数量必须和实际结果相等”两个边界。
+- 真实反向验证：旧 Grok Task `00b0cd43-eeba-40d1-9d6e-c5b5e6c73c1b` 的 Worker exit 0，失败来自
+  Main 写入不存在的 typecheck script。新链路 5/5 通过，原 Task 保持 failed、Attempt 数保持 1、
+  新增 Worker/模型调用为 0；Hub 明确写出 Main 修正自己的验收，没有再把它显示为 Worker 失败。
+- 最终证据：功能 Task remediation 4/4；full check **1,612/1,612**；最终 Hub 定点回归 **71/71**、
+  build、JavaScript syntax 和 diff hygiene 通过。真实浏览器同时确认“执行过程已完成”“原检查未通过”
+  和“修正验收后已核验交付”三项事实并列可见。
+
+该样本补上 Main 自我纠错与零 Worker 收口的真实任务类型，也暴露 `dist` 生成物应在合同/交付规划阶段
+更早分类的后续缺口。它不替代三个正式项目和 clean-user journey 的退出要求。没有 commit 或 push。
+
+### R9 · ForkLight：Grok 连不上时先解释运行环境，不责怪模型
+
+**状态：保留 Grok Candidate，Main 定点补正，完整验收通过；原 Task 诚实保留机器失败。**
+
+- 用户结果：当 Grok TUI 能用、ForkLight Worker 却超时时，Task Detail 直接说明手动 TUI 与后台
+  Daemon 可能继承了不同网络环境，给出一个安全恢复动作，不再把它笼统归为模型失败。
+- 输入与调用链：Grok terminal/runtime event → connectivity 分类 → Task/statistics → Hub 的原因和
+  下一步；原始网络错误只留在私有 Attempt log，公开页面不展示代理值、凭据或 endpoint 细节。
+- 实际模型路径：一个 xAI `grok-4.5` / `grok-build` Attempt，30 turns；14 files / 534 lines 的
+  Candidate 被保留，没有普通 retry、correction、competition 或 adaptation。
+- 失败事实：Main 在不可变合同里误写了不存在的 `npm run typecheck`，所以原 Task 保持 failed；
+  Main 没有让 Worker 为合同错误重做，而是补上终态事件脱敏并把未来合同改为 `npm run build`。
+- 最终验收：聚焦 **171/171**、全量 **1,595/1,595**、build、Hub JavaScript syntax 和 diff hygiene
+  全部通过。明确 connectivity 只算 Provider/运行环境证据，不作为模型能力负样本。
+- 经济性：runtime estimate **USD 1.195446**；Grok 没返回完整 usage，Worker Tokens 和官方账单
+  保持 unavailable。没有 exact-pair direct-Codex baseline，不声称节约 Main Token。
+
+该样本证明部分 Candidate 可以在不整单重跑的情况下交付，也证明 Main 的合同错误必须与模型执行
+失败分开统计。它不替代 Adeptify、Dia、NovelRPGPlay 和 clean-user journey 的 M1.4 退出要求。
+
+### R8 · Relay：Agent 页面先回答“谁能做、是否可用、下一步是什么”
+
+**状态：Grok Worker、一次保留成果纠正、ForkLight 自动 Integration、Main 视觉微调和真实浏览器验收均完成。**
+
+- 用户结果：Agent 页面不再先讲 Runtime、Multica、执行织物、Host 和 Capabilities；每张卡先展示
+  助手是否可用、适合做什么、当前是否有任务和唯一下一步。主机、类型、能力标识和工作区路径只在
+  默认关闭的“技术细节”里出现。
+- 输入与调用链：现有 Runtime / Job / Item → pure `buildAgentPresentation` mapper → Agent 页面
+  卡片；没有改 API、Store、Domain、数据库、执行、设置或指派状态机。
+- 实际模型路径：Task `55c09d94-15df-49bc-8afc-a28f77754b54` 使用 xAI `grok-4.5` / `grok-build`。
+  首次 Attempt 为 9 turns；Main 保留三文件 Candidate，指出无条件指派入口、恢复动作不可点击和零
+  Runtime 空白页三个缺口，再用同一 Candidate 做一次 4-turn correction。没有 competition、普通
+  retry、adaptation、新 Task 或第三轮。
+- 质量判定：两轮独立验收均通过。最终 Candidate 为 3 files / 836 changed lines，超过 520 行软提醒；
+  Main 没把软限制当 hard gate，因为 364 行是覆盖所有 RuntimeStatus、工作量去重、空状态和主/技术
+  信息边界的语义测试。最终 16/16、目标 ESLint 9 和 diff hygiene 通过。
+- 安全合入：Main accept 后，Integration `b36aace6-bff6-4c1d-bac7-3b2a58cec1bb` 完成 source apply
+  与三条 source verify；只写入约定的三个路径，没有 commit 或 push。浏览器随后发现卡片名称重复和
+  连通性免责声明逐卡重复，Main 直接做两处确定性微调并再次通过 16/16、目标 ESLint 和 diff hygiene。
+- 真实体验：桌面为两列卡片；390px 窄屏为单列且 `scrollWidth=390`、无横向溢出。七个技术细节默认
+  全部关闭；展开后才显示主机、类型、能力标识、工作区路径和原始说明。
+- 经济性：两次 Attempt 的 runtime estimate 分别为 **USD 0.1974916** 和 **USD 0.1507744**，合计
+  **USD 0.348266**。Grok 未返回 usage，Worker Token 和官方费用保持 unavailable，不写成 0；28 条
+  receipt 的 Main exchange 仅为低置信 **247,417–1,493,852 Tokens**。没有 exact-pair direct-Codex
+  baseline，因此不声称节约 Main Token。
+
+该样本证明 Grok 4.5 不只是“配置存在”，而是完成了真实读写、独立验收、同 Candidate 纠正和安全合入；
+也说明视觉验收仍能发现机器测试遗漏。它不替代三个正式项目和 clean-user journey 的退出要求。
 
 ### R6 · Relay：在启动 Worker 前拒绝不安全或无效的项目目录
 

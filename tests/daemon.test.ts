@@ -90,6 +90,89 @@ test("Main remediation transport does not expire before configured verification"
   );
 });
 
+test("remediation amendment parser enforces privacy-safe structured shape", async () => {
+  const { parseRemediationAmendmentInput } = await import("../src/core/main-remediation.js");
+
+  const valid = parseRemediationAmendmentInput({
+    verificationEventSequence: 3,
+    reasonCode: "contradictory-acceptance",
+    replacements: [{
+      originalCommand: "npm run typecheck",
+      replacementCommand: "npm run build",
+    }],
+  });
+  assert.equal(valid?.verificationEventSequence, 3);
+  assert.equal(valid?.replacements.length, 1);
+  assert.equal(valid?.replacements[0]?.originalCommand, "npm run typecheck");
+
+  // Unknown top-level fields: fixed error, never echoes attacker-controlled names.
+  assert.throws(
+    () => parseRemediationAmendmentInput({
+      verificationEventSequence: 1,
+      reasonCode: "contradictory-acceptance",
+      replacements: [{ originalCommand: "a", replacementCommand: "b" }],
+      evilField: "SECRET_LEAK",
+    }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /amendment contains unknown fields/);
+      assert.doesNotMatch(message, /evilField|SECRET_LEAK/);
+      return true;
+    },
+  );
+
+  // Unknown replacement fields: fixed error, never echoes field names.
+  assert.throws(
+    () => parseRemediationAmendmentInput({
+      verificationEventSequence: 1,
+      reasonCode: "contradictory-acceptance",
+      replacements: [{
+        originalCommand: "a",
+        replacementCommand: "b",
+        attackerKey: "path/to/secret",
+      }],
+    }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /amendment replacement contains unknown fields/);
+      assert.doesNotMatch(message, /attackerKey|path\/to\/secret/);
+      return true;
+    },
+  );
+
+  // Whitespace-only and identical replacements reject before mutation.
+  assert.throws(
+    () => parseRemediationAmendmentInput({
+      verificationEventSequence: 1,
+      reasonCode: "contradictory-acceptance",
+      replacements: [{ originalCommand: "   ", replacementCommand: "npm run build" }],
+    }),
+    /originalCommand must be 1-/,
+  );
+  assert.throws(
+    () => parseRemediationAmendmentInput({
+      verificationEventSequence: 1,
+      reasonCode: "contradictory-acceptance",
+      replacements: [{
+        originalCommand: "npm run typecheck",
+        replacementCommand: "npm run typecheck",
+      }],
+    }),
+    /must differ from originalCommand/,
+  );
+  assert.throws(
+    () => parseRemediationAmendmentInput({
+      verificationEventSequence: 1,
+      reasonCode: "contradictory-acceptance",
+      replacements: [{
+        originalCommand: "npm run typecheck",
+        replacementCommand: "x".repeat(4001),
+      }],
+    }),
+    /replacementCommand must be 1-/,
+  );
+});
+
 function standaloneSucceededTask(
   store: StateStore, name: string, status: TaskRecord["status"] = "succeeded",
 ): TaskRecord {
@@ -3693,7 +3776,10 @@ test("model_routing coordinator returns privacy-safe advisory for empty history"
     assert.equal(result.taskClass, "nonexistent-class");
     assert.equal(result.candidates.length, 2);
     // No recommendation with zero samples
-    assert.equal(result.shouldRunCompetition, true);
+    assert.equal(result.knowledge, "unknown");
+    assert.equal(result.evidenceScope, "none");
+    assert.equal(result.shouldRunCompetition, false); // no intent → no competition
+    assert.equal(result.competition.intent, "none");
     // Privacy-safe: no Task ids, no error text
     const json = JSON.stringify(result);
     assert.doesNotMatch(json, /error/i);

@@ -4,6 +4,8 @@ import {
   DEFAULT_ROUTING_POLICY,
   failureImpactFor,
   provideRoutingAdvice,
+  type CompetitionIntent,
+  type CompetitionTrigger,
   type RoutingPolicySettings,
 } from "../src/core/model-routing.js";
 import {
@@ -185,6 +187,12 @@ function advice(
   left: RoutingEvidence,
   right: RoutingEvidence,
   policy: RoutingPolicySettings = DEFAULT_ROUTING_POLICY,
+  opts?: {
+    taskFamily?: string;
+    familyEvidenceMap?: Map<string, RoutingEvidence>;
+    competitionIntent?: CompetitionIntent;
+    competitionTriggers?: CompetitionTrigger[];
+  },
 ) {
   return provideRoutingAdvice({
     taskClass: "coding:test",
@@ -197,6 +205,10 @@ function advice(
       [right.provider + "\0" + right.model, right],
     ]),
     policy,
+    ...(opts?.taskFamily !== undefined ? { taskFamily: opts.taskFamily } : {}),
+    ...(opts?.familyEvidenceMap !== undefined ? { familyEvidenceMap: opts.familyEvidenceMap } : {}),
+    ...(opts?.competitionIntent !== undefined ? { competitionIntent: opts.competitionIntent } : {}),
+    ...(opts?.competitionTriggers !== undefined ? { competitionTriggers: opts.competitionTriggers } : {}),
   });
 }
 
@@ -290,17 +302,22 @@ test("official cost records every quote, missing record, and native currency", (
   assert.equal(actual.officialCostByCurrency[0]!.currency, "USD");
 });
 
-test("insufficient or close evidence produces no recommendation and optional competition", () => {
+test("insufficient or close evidence produces no recommendation and no competition without intent", () => {
+  // Sparse evidence, no competition intent → should NOT suggest competition
   const sparse = advice(
     evidence("deepseek", "v4", { terminalTaskCount: 2, relevantSampleCount: 2 }),
     evidence("qwen", "plus", { terminalTaskCount: 1, relevantSampleCount: 1 }),
   );
   assert.equal(sparse.recommendation, undefined);
-  assert.equal(sparse.shouldRunCompetition, true);
+  assert.equal(sparse.knowledge, "unknown");
+  assert.equal(sparse.evidenceScope, "none");
+  assert.equal(sparse.shouldRunCompetition, false);
+  assert.equal(sparse.competition.intent, "none");
 
+  // Close scores, no intent → no competition
   const close = advice(evidence("deepseek", "v4"), evidence("qwen", "plus"));
   assert.equal(close.recommendation, undefined);
-  assert.equal(close.shouldRunCompetition, true);
+  assert.equal(close.shouldRunCompetition, false);
   assert.ok(close.candidates.every((candidate) => candidate.uncertainty.insufficientGap));
 });
 
@@ -317,6 +334,8 @@ test("complete evidence with a clear gap produces one advisory recommendation", 
   });
   const result = advice(evidence("deepseek", "v4"), weaker);
   assert.equal(result.shouldRunCompetition, false);
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.evidenceScope, "exact-class");
   assert.equal(result.recommendation?.provider, "deepseek");
   assert.equal(result.candidates.find((candidate) => candidate.provider === "qwen")?.eligible, true);
 });
@@ -836,4 +855,320 @@ test("budgetReliability: response payload stays privacy-safe and preserves immut
   // Immutability: the policy snapshot is detached from the caller's policy.
   policy.weights.budgetReliability = 9;
   assert.equal(result.resolvedPolicy.weights.budgetReliability, 1);
+});
+
+// --- Evidence scope, knowledge, and competition separation (M3 V1) ----------
+
+test("unknown + none: zero evidence with intent none never suggests competition", () => {
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    competitionTriggersEnabled: ["critical", "new-family"],
+  };
+  const result = advice(
+    evidence("deepseek", "v4", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+    evidence("qwen", "plus", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+    policy,
+    { competitionIntent: "none" },
+  );
+  assert.equal(result.knowledge, "unknown");
+  assert.equal(result.evidenceScope, "none");
+  assert.equal(result.recommendation, undefined);
+  assert.equal(result.shouldRunCompetition, false);
+  assert.equal(result.competition.intent, "none");
+  assert.deepEqual(result.competition.matchingTriggers, []);
+});
+
+test("exact evidence wins: sufficient exact class samples use exact scope and ignore family", () => {
+  const strong = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+  const weak = evidence("qwen", "plus", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+    modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+    verifiedBehaviorCount: 2, verifiedBehaviorRate: 0.2,
+  });
+  // Even if family evidence exists, exact scope wins
+  const familyEvidence = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 100, relevantSampleCount: 100, acceptedDeliveryCount: 100 })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 100, relevantSampleCount: 100, acceptedDeliveryCount: 50,
+      acceptedDeliveryRate: 0.5 })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+  const result = advice(strong, weak, DEFAULT_ROUTING_POLICY, {
+    taskFamily: "coding",
+    familyEvidenceMap: familyEvidence,
+  });
+  assert.equal(result.evidenceScope, "exact-class");
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.recommendation?.provider, "deepseek");
+});
+
+test("family evidence is complete fallback when exact is insufficient", () => {
+  const sparse = evidence("deepseek", "v4", { terminalTaskCount: 1, relevantSampleCount: 1 });
+  const sparse2 = evidence("qwen", "plus", { terminalTaskCount: 1, relevantSampleCount: 1 });
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 20, relevantSampleCount: 15, acceptedDeliveryCount: 15,
+      modelQualityFailureCount: 0, modelQualityFailureRate: 0,
+    })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 20, relevantSampleCount: 10, acceptedDeliveryCount: 5,
+      acceptedDeliveryRate: 0.5,
+      modelQualityFailureCount: 5, modelQualityFailureRate: 0.5,
+    })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+  const result = advice(sparse, sparse2, DEFAULT_ROUTING_POLICY, {
+    taskFamily: "coding:backend",
+    familyEvidenceMap: familyMap,
+  });
+  assert.equal(result.evidenceScope, "task-family");
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.recommendation?.provider, "deepseek");
+  assert.equal(result.taskFamily, "coding:backend");
+});
+
+test("family fallback fails when not all candidates meet family threshold", () => {
+  const sparse = evidence("deepseek", "v4", { terminalTaskCount: 1, relevantSampleCount: 1 });
+  const sparse2 = evidence("qwen", "plus", { terminalTaskCount: 1, relevantSampleCount: 1 });
+  // Only deepseek has family evidence
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 20, relevantSampleCount: 15 })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 1, relevantSampleCount: 1 })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+  const result = advice(sparse, sparse2, DEFAULT_ROUTING_POLICY, {
+    taskFamily: "coding:backend",
+    familyEvidenceMap: familyMap,
+  });
+  assert.equal(result.evidenceScope, "none");
+  assert.equal(result.knowledge, "unknown");
+  assert.equal(result.shouldRunCompetition, false);
+});
+
+test("critical work with consider intent and enabled trigger suggests competition", () => {
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    competitionTriggersEnabled: ["critical"],
+  };
+  // Good evidence for a recommendation, but criticality overrides for competition advice
+  const weak = evidence("qwen", "plus", {
+    modelQualityFailureCount: 5, modelQualityFailureRate: 0.5,
+    correctionChurn: 5, correctionChurnRate: 0.5,
+    acceptedDeliveryCount: 5, acceptedDeliveryRate: 0.5,
+    verifiedBehaviorCount: 5, verifiedBehaviorRate: 0.5,
+  });
+  const result = advice(evidence("deepseek", "v4"), weak, policy, {
+    competitionIntent: "consider",
+    competitionTriggers: ["critical"],
+  });
+  // Routing still has a recommendation based on evidence
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.recommendation?.provider, "deepseek");
+  // But competition is advised because of criticality, not uncertainty
+  assert.equal(result.shouldRunCompetition, true);
+  assert.equal(result.competition.intent, "consider");
+  assert.deepEqual(result.competition.matchingTriggers, ["critical"]);
+});
+
+test("consider intent with disabled trigger does NOT suggest competition", () => {
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    competitionTriggersEnabled: [], // nothing enabled
+  };
+  const result = advice(
+    evidence("deepseek", "v4"),
+    evidence("qwen", "plus"),
+    policy,
+    {
+      competitionIntent: "consider",
+      competitionTriggers: ["critical"],
+    },
+  );
+  // Evidence may support recommendation
+  assert.equal(result.shouldRunCompetition, false);
+  assert.equal(result.competition.intent, "consider");
+  assert.deepEqual(result.competition.matchingTriggers, []);
+});
+
+test("required intent always suggests competition regardless of triggers", () => {
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    competitionTriggersEnabled: [], // nothing enabled
+  };
+  const result = advice(
+    evidence("deepseek", "v4"),
+    evidence("qwen", "plus"),
+    policy,
+    {
+      competitionIntent: "required",
+      competitionTriggers: ["user-requested"],
+    },
+  );
+  assert.equal(result.shouldRunCompetition, true);
+  assert.equal(result.competition.intent, "required");
+  assert.equal(result.competition.suggestedCandidates, 2);
+});
+
+test("response includes evidence scope, knowledge, and competition fields", () => {
+  const result = advice(
+    evidence("deepseek", "v4", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+    evidence("qwen", "plus", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+  );
+  // Verify new fields exist with correct types
+  assert.ok(typeof result.evidenceScope === "string");
+  assert.ok(typeof result.knowledge === "string");
+  assert.ok(typeof result.competition === "object");
+  assert.ok(typeof result.competition.shouldRunCompetition === "boolean");
+  assert.ok(typeof result.competition.intent === "string");
+  assert.ok(Array.isArray(result.competition.matchingTriggers));
+  assert.ok(typeof result.competition.suggestedCandidates === "number");
+  // Legacy shouldRunCompetition still present
+  assert.equal(result.shouldRunCompetition, result.competition.shouldRunCompetition);
+});
+
+test("policy carries familyMinRelevantSamples and new fields", () => {
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    familyMinRelevantSamples: 8,
+    competitionTriggersEnabled: ["critical", "new-family"],
+    defaultCompetitionCandidates: 3,
+  };
+  const result = advice(
+    evidence("deepseek", "v4"),
+    evidence("qwen", "plus"),
+    policy,
+  );
+  assert.equal(result.resolvedPolicy.familyMinRelevantSamples, 8);
+  assert.deepEqual(result.resolvedPolicy.competitionTriggersEnabled, ["critical", "new-family"]);
+  assert.equal(result.resolvedPolicy.defaultCompetitionCandidates, 3);
+  // Immutability: resolved policy is a copy
+  assert.notEqual(result.resolvedPolicy.competitionTriggersEnabled, policy.competitionTriggersEnabled);
+});
+
+test("taskFamily is propagated to response when provided", () => {
+  const result = advice(
+    evidence("deepseek", "v4"),
+    evidence("qwen", "plus"),
+    DEFAULT_ROUTING_POLICY,
+    { taskFamily: "ui-readability" },
+  );
+  assert.equal(result.taskFamily, "ui-readability");
+});
+
+test("competitionOnUncertainty off blocks consider advice even with matching triggers", () => {
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    competitionOnUncertainty: false, // master switch off
+    competitionTriggersEnabled: ["critical"],
+  };
+  const result = advice(
+    evidence("deepseek", "v4"),
+    evidence("qwen", "plus"),
+    policy,
+    { competitionIntent: "consider", competitionTriggers: ["critical"] },
+  );
+  assert.equal(result.shouldRunCompetition, false);
+  assert.equal(result.competition.intent, "consider");
+  assert.deepEqual(result.competition.matchingTriggers, []);
+});
+
+test("new-family trigger is inactive when family evidence is already available", () => {
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    competitionOnUncertainty: true,
+    competitionTriggersEnabled: ["new-family"],
+  };
+  // Exact evidence is insufficient but family evidence is sufficient
+  const sparse = evidence("deepseek", "v4", { terminalTaskCount: 2, relevantSampleCount: 2 });
+  const sparse2 = evidence("qwen", "plus", { terminalTaskCount: 2, relevantSampleCount: 2 });
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 20, relevantSampleCount: 15 })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 20, relevantSampleCount: 15 })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+  const result = advice(sparse, sparse2, policy, {
+    taskFamily: "coding",
+    familyEvidenceMap: familyMap,
+    competitionIntent: "consider",
+    competitionTriggers: ["new-family"],
+  });
+  // Family evidence is available → new-family should not match
+  assert.equal(result.evidenceScope, "task-family");
+  assert.equal(result.shouldRunCompetition, false);
+  assert.deepEqual(result.competition.matchingTriggers, []);
+});
+
+test("new-family trigger is active when family evidence is genuinely missing", () => {
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    competitionOnUncertainty: true,
+    competitionTriggersEnabled: ["new-family"],
+  };
+  // No family evidence → new-family trigger should match
+  const result = advice(
+    evidence("deepseek", "v4", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+    evidence("qwen", "plus", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+    policy,
+    { competitionIntent: "consider", competitionTriggers: ["new-family"] },
+  );
+  assert.equal(result.evidenceScope, "none");
+  assert.equal(result.shouldRunCompetition, true);
+  assert.deepEqual(result.competition.matchingTriggers, ["new-family"]);
+});
+
+test("candidate results carry runtime and effort when provided", () => {
+  const result = provideRoutingAdvice({
+    taskClass: "coding:test",
+    candidates: [
+      { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high" },
+      { provider: "qwen", model: "plus", runtime: "claude-code", effort: "medium" },
+    ],
+    evidenceMap: new Map([
+      ["deepseek\0v4\0claude-code\0high", evidence("deepseek", "v4")],
+      ["qwen\0plus\0claude-code\0medium", evidence("qwen", "plus")],
+    ]),
+    policy: DEFAULT_ROUTING_POLICY,
+  });
+  const deepseek = result.candidates.find((c) => c.provider === "deepseek")!;
+  const qwen = result.candidates.find((c) => c.provider === "qwen")!;
+  assert.equal(deepseek.runtime, "claude-code");
+  assert.equal(deepseek.effort, "high");
+  assert.equal(qwen.effort, "medium");
+});
+
+test("same provider/model with different runtime or effort stays separate", () => {
+  const result = provideRoutingAdvice({
+    taskClass: "coding:test",
+    candidates: [
+      { provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high" },
+      { provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "max" },
+    ],
+    evidenceMap: new Map([
+      ["xai\0grok-4.5\0grok-build\0high", evidence("xai", "grok-4.5", { relevantSampleCount: 8, acceptedDeliveryRate: 1 })],
+      ["xai\0grok-4.5\0grok-build\0max", evidence("xai", "grok-4.5", { relevantSampleCount: 8, acceptedDeliveryRate: 0 })],
+    ]),
+    policy: DEFAULT_ROUTING_POLICY,
+  });
+  assert.equal(result.evidenceScope, "exact-class");
+  assert.notEqual(result.candidates[0]!.totalScore, result.candidates[1]!.totalScore);
+});
+
+test("legacy provider/model-only candidates omit runtime and effort", () => {
+  const result = advice(evidence("deepseek", "v4"), evidence("qwen", "plus"));
+  assert.equal(result.candidates[0]!.runtime, undefined);
+  assert.equal(result.candidates[0]!.effort, undefined);
+});
+
+test("competition advisory fields are present and have correct types in every response", () => {
+  const result = advice(evidence("deepseek", "v4"), evidence("qwen", "plus"));
+  assert.ok(typeof result.knowledge === "string");
+  assert.ok(typeof result.evidenceScope === "string");
+  const comp = result.competition;
+  assert.ok(typeof comp.shouldRunCompetition === "boolean");
+  assert.ok(typeof comp.intent === "string");
+  assert.ok(Array.isArray(comp.evaluatedTriggers));
+  assert.ok(Array.isArray(comp.matchingTriggers));
+  assert.ok(typeof comp.suggestedCandidates === "number");
+  assert.equal(result.shouldRunCompetition, comp.shouldRunCompetition);
 });

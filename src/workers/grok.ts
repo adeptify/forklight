@@ -227,6 +227,114 @@ function interruptedExitCode(code: number | null): number {
   return code === null || code === 0 ? 130 : code;
 }
 
+/**
+ * Fixed public summary for Grok Provider transport failures.
+ * Never includes raw stderr, proxy values, credentials, endpoints, or paths.
+ */
+export const GROK_CONNECTIVITY_SAFE_ERROR =
+  "Worker could not reach the Provider service due to a network connectivity failure";
+
+/**
+ * Detect explicit Grok service transport evidence only.
+ * Bare "timeout", model-quality errors, and no-progress watchdog text must not match.
+ */
+export function isGrokConnectivityEvidence(text: string | undefined): boolean {
+  if (!text || !text.trim()) return false;
+  const lower = text.toLowerCase();
+
+  // Explicit OS/transport error codes and connection refusal family.
+  if (
+    lower.includes("econnrefused")
+    || lower.includes("connection refused")
+    || lower.includes("etimedout")
+    || lower.includes("econnreset")
+    || lower.includes("enotfound")
+    || lower.includes("econnaborted")
+    || lower.includes("enetunreach")
+    || lower.includes("ehostunreach")
+    || lower.includes("socket hang up")
+    || lower.includes("getaddrinfo")
+    || lower.includes("fetch failed")
+    || lower.includes("network request failed")
+  ) {
+    return true;
+  }
+
+  // Measured model/settings fetch timeout family from Grok CLI stderr.
+  if (
+    /model\s*\/\s*settings/.test(lower)
+    && (lower.includes("timeout") || lower.includes("timed out"))
+  ) {
+    return true;
+  }
+  if (
+    /fetch\s+(models?|settings)/.test(lower)
+    && (lower.includes("timeout") || lower.includes("timed out"))
+  ) {
+    return true;
+  }
+
+  // Transport-scoped timeout / connect failures (not generic policy timeouts).
+  // Use word-aware markers so "confirmation" does not match "connect".
+  if (
+    (lower.includes("timed out") || /\btimeouts?\b/.test(lower))
+    && (
+      /\bconnect(?:ion|ed|ing)?\b/.test(lower)
+      || /\bfetch\b/.test(lower)
+      || /\bproxy\b/.test(lower)
+      || /\bnetwork\b/.test(lower)
+      || lower.includes("request failed")
+      || /\bdns\b/.test(lower)
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /\bunable to connect\b/.test(lower)
+    || /\bcould not connect\b/.test(lower)
+    || /\bfailed to connect\b/.test(lower)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Keep the raw streaming line in the private Attempt log, but never persist a
+ * connectivity-shaped terminal result as a public Task event. Grok can report
+ * transport detail on stdout as well as stderr, so sanitizing only the final
+ * adapter return would be too late.
+ */
+export function sanitizeGrokConnectivityEvent(
+  event: NormalizedWorkerEvent,
+): NormalizedWorkerEvent {
+  if (event.type !== "worker.failed") return event;
+  const evidence = [
+    event.summary,
+    event.terminal?.resultText,
+    event.terminal?.failureReason,
+  ].filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    .join("\n");
+  if (!isGrokConnectivityEvidence(evidence)) return event;
+
+  return {
+    ...event,
+    summary: GROK_CONNECTIVITY_SAFE_ERROR,
+    payload: { failureCategory: "connectivity" },
+    ...(event.terminal === undefined
+      ? {}
+      : {
+          terminal: {
+            ...event.terminal,
+            resultText: GROK_CONNECTIVITY_SAFE_ERROR,
+            failureReason: GROK_CONNECTIVITY_SAFE_ERROR,
+          },
+        }),
+  };
+}
+
 export class GrokBuildAdapter implements WorkerAdapter {
   readonly name = "grok-build" as const;
   readonly displayName = "Grok Build";
@@ -458,7 +566,8 @@ export class GrokBuildAdapter implements WorkerAdapter {
 
     scheduleWatchdog();
 
-    const onNormalized = (event: NormalizedWorkerEvent): void => {
+    const onNormalized = (rawEvent: NormalizedWorkerEvent): void => {
+      const event = sanitizeGrokConnectivityEvent(rawEvent);
       if (event.type === "worker.completed" || event.type === "worker.failed") {
         watchdogTerminal = true;
         clearWatchdog();
@@ -539,6 +648,22 @@ export class GrokBuildAdapter implements WorkerAdapter {
       };
     }
     if (exitCode !== 0 || terminal?.isError) {
+      const haystack = [
+        terminal?.resultText,
+        stderr,
+      ].filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+        .join("\n");
+      // Connectivity classification uses private stderr for evidence only.
+      // Public Task/Attempt error stays a fixed safe summary.
+      if (isGrokConnectivityEvidence(haystack)) {
+        return {
+          status: "failed",
+          exitCode,
+          ...terminalFields(terminal),
+          error: GROK_CONNECTIVITY_SAFE_ERROR,
+          failureCategory: "connectivity",
+        };
+      }
       return {
         status: "failed",
         exitCode,

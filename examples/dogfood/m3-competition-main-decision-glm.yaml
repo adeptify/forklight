@@ -1,0 +1,197 @@
+version: 2
+name: Make mixed-runtime Competition explain its reason and wait for Main judgment
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-competition-main-decision
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: volcengine-glm52-1m
+
+contract:
+  outcome: >-
+    A reasoned Competition can create candidates from different saved Worker
+    Profiles without falsifying their runtimes or policies, compare only results
+    that meet the quality gate, preserve useful partial work, and wait for Main
+    to accept, revise, or reject an exact Candidate Revision before anything is
+    called the final choice or becomes eligible for Integration.
+  presentation:
+    summary: 竞争说明为什么值得多跑一次；机器只负责比较，Main 才决定接受、修正、保留或停止。
+    language: zh-CN
+  context:
+    - This Task may start only after examples/dogfood/m3-routing-decision-evidence-deepseek.yaml has been accepted, integrated, built, activated, and identity-checked. Its new frozen Worker identity and routing-decision types are the required baseline.
+    - The aligned design source is docs/model-selection-strategy-v1.md and the UI/data acceptance source is docs/model-selection-ux-acceptance-v1.md.
+    - Current CandidateOverride changes provider/model while cloning the parent runtime and Profile, so it cannot truthfully create a Claude Code Worker and a Grok Build Worker in one Competition.
+    - Current Competition stores no structured reason and machine evaluation may expose a recommendation without a Competition-level Main final decision bound to a Candidate Revision.
+    - Machine verification and scoring are evidence, not product acceptance. Failed Candidates may contain reusable work, but they must not be declared delivered or silently rerun.
+    - Preserve every unrelated worktree change. Do not broaden this Task back into routing statistics or repeat the first Task's implementation.
+  inScope:
+    - Accept Competition candidates as saved Worker Profile references and resolve each independently into a frozen provider, model, runtime, effort, policy, and provenance snapshot.
+    - Validate candidate uniqueness, Provider/runtime pairing, readiness, permissions, candidate count, and required reason before any workspace preparation or Worker launch.
+    - Persist bounded Competition intent/triggers/Main reason and the resolved candidate shortlist. Keep legacy explicit CLI/MCP Competition compatible as reason unavailable without inventing history.
+    - Keep independent behavior verification as the eligibility gate. Rank eligible Candidates by configured quality/cost/time evidence but label the output machine comparison rather than final Winner.
+    - Add a Competition-level Main decision that references the exact candidate Task, Attempt, verification evidence, and Candidate Revision for accept/revise/reject. Allow bounded retained-partial metadata for non-selected Candidates.
+    - Ensure revise authorizes at most one same-Candidate correction through the existing limit, reject authorizes no retry, and retained-partial preserves reusable paths and remaining gaps for later M2 handoff without starting it.
+    - Gate Integration on an accepted exact Candidate Revision and existing explicit confirmation. Machine recommendation alone must never make a Candidate integrable.
+    - Project the canonical reason, each Worker identity, machine result, Main judgment, retained work, and next action through Daemon, CLI, MCP, Competition Detail, and Task Detail.
+    - Add bilingual explanation-first UI and semantic tests for mixed runtimes, legacy records, privacy, Main authority, no-winner states, partial retention, and Integration refusal.
+  outOfScope:
+    - Implementing M2 cross-Worker execution handoff, automatically starting a successor Worker, automatically accepting a recommendation, automatic Integration, or changing source without explicit confirmation.
+    - Reimplementing taskFamily/statistics/routing settings from the prerequisite Task, changing Provider credentials, pricing, runtime adapters, model prompts, or Direct Codex calibration.
+    - Running a live model Competition as part of tests, tuning score weights through repeated trials, retrying failed Candidates, or weakening readiness/safety to support mixed runtimes.
+    - Commit or push.
+  executionSteps:
+    - Verify the prerequisite build is active, then trace Worker Profile resolution, Competition creation/storage, candidate Task cloning, evaluation, Main Review, retained Candidate evidence, Integration Preflight, and Hub drawers.
+    - Replace provider/model-only overrides with one canonical per-candidate resolved Worker snapshot and reject mismatches before any mutation beyond the Competition admission record.
+    - Store why the Competition exists and preserve legacy reason-unavailable records without backfill.
+    - Keep machine eligibility and ranking deterministic, then add a separate Main decision bound to exact immutable evidence.
+    - Reuse existing correction, retained Candidate, Main Review, and Integration authority where their semantics match; do not create a parallel retry engine.
+    - "Render one ordered story: why multiple Workers ran, what each returned, what machine checks found, what Main decided, what was retained, and what happens next."
+    - Run the focused acceptance suite once, repair only Candidate-caused failures, then run full tests/build/diff hygiene once. Stop after one Candidate and return remaining gaps to Main.
+  deliverables:
+    - Reasoned mixed-runtime Competition admission with frozen per-candidate Worker identity.
+    - Machine comparison separated from exact-revision Main judgment.
+    - Bounded retained-partial evidence and Integration gating without automatic retry or handoff.
+    - Consistent bilingual Competition and Task Detail explanation with executable regressions.
+  modules:
+    - name: Competition admission
+      responsibility: Resolve and freeze each selected Worker and the Main reason before execution.
+      consumes:
+        - Competition intent/triggers/reason, Worker Profile ids, current settings, readiness, and contract Task.
+      produces:
+        - Immutable Competition snapshot plus independently resolved candidate Task specs.
+      boundaries:
+        - Invalid or reasonless new requests stop before Provider calls; legacy explicit records remain readable.
+    - name: Machine comparison and Main judgment
+      responsibility: Separate verified candidate ordering from semantic acceptance of one exact revision.
+      consumes:
+        - Candidate Task outcomes, independent verification, costs, duration, correction history, Candidate Revisions, and Main decision.
+      produces:
+        - Machine comparison, optional exact-revision Main decision, and bounded retained-partial evidence.
+      boundaries:
+        - No fabricated winner, automatic correction, automatic successor, or automatic Integration.
+    - name: Competition story and delivery gate
+      responsibility: Explain the complete decision chain and allow delivery only from Main-accepted evidence.
+      consumes:
+        - Competition snapshot, candidate journeys, machine comparison, Main judgment, and retained evidence.
+      produces:
+        - CLI/MCP/Daemon data, bilingual Hub story, and Integration eligibility decision.
+      boundaries:
+        - Technical scores and IDs stay secondary; existing explicit Integration confirmation remains mandatory.
+  callChain:
+    - Main supplies a bounded reason and two to four Worker Profile ids after routing advice.
+    - Admission resolves and freezes each candidate's complete Worker identity and effective policy.
+    - Coordinator creates isolated candidate Tasks using their own runtimes and runs them under existing concurrency and safety limits.
+    - Independent verification determines which Candidate Revisions are eligible for machine comparison.
+    - Machine comparison orders eligible evidence or reports no deliverable result without selecting a failed first item.
+    - Main accepts, revises, or rejects an exact Candidate Revision and may retain bounded partial evidence from others.
+    - Hub explains the chain; Integration Preflight proceeds only for an exact accepted revision and still waits for explicit apply confirmation.
+  scenarios:
+    - name: Claude Code and Grok Build compete truthfully
+      given: Main selects one Claude Code Profile and one Grok Build Profile with an allowed explicit reason.
+      when: Competition admission resolves them.
+      then: Each candidate keeps its own provider/model/runtime/effort/policy and an illegal pairing stops before either Worker launches.
+    - name: Machine first is not final
+      given: One eligible Candidate has the highest configured machine score and Main has not reviewed it.
+      when: Competition Detail and Integration Preflight are opened.
+      then: Hub says machine comparison is waiting for Main and Integration refuses to treat it as accepted.
+    - name: Main accepts an exact revision
+      given: Main reviews one verified Candidate Revision and records accept.
+      when: The Competition and delivery gate are read.
+      then: That exact revision is the final choice, the reason and evidence binding are visible, and Integration still requires explicit confirmation.
+    - name: Useful failed work is retained once
+      given: A non-selected or failed Candidate contains bounded reusable paths but still has named gaps.
+      when: Main marks it retained-partial.
+      then: The original failure remains, reusable evidence is visible, and no Worker retry or M2 successor starts automatically.
+    - name: No candidate reaches quality
+      given: Every Candidate fails independent behavior verification.
+      when: Machine comparison completes.
+      then: It reports no deliverable result, preserves each failure and partial evidence, and does not select the first list item.
+    - name: Legacy Competition lacks a reason
+      given: A stored Competition predates reason and full identity snapshots.
+      when: It is opened.
+      then: Hub says the historical reason or execution identity is unavailable and never fabricates either.
+  risks:
+    - Candidate cloning can silently retain the wrong runtime, so each child spec must be produced from its own resolved immutable Profile and asserted before launch.
+    - A new Main decision could conflict with Task-level Main Review, so there must be one canonical exact-revision authority or an explicit derivation rather than two independent truths.
+    - Partial retention can become an automatic retry loophole, so it stores evidence only and defers execution handoff to M2.
+    - Large Competition output can overwhelm users, so Hub must lead with reason, target outcome, Main decision, retained value, and next action before candidate tables.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 2600
+
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/competition.ts
+    - src/core/worker-profiles.ts
+    - src/core/task.ts
+    - src/core/types.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/competition.test.ts
+    - tests/worker-profiles.test.ts
+    - tests/task.test.ts
+    - tests/integration.test.ts
+    - tests/daemon.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Every new Candidate resolves from its own saved Worker Profile into a frozen provider/model/runtime/effort/policy identity, and invalid pairings or missing reasons stop before Worker launch.
+    - Machine comparison eligibility and ranking remain deterministic but never imply final Winner or Integration authority without Main acceptance of an exact Candidate Revision.
+    - Main accept/revise/reject and retained-partial evidence preserve failures, enforce correction limits, and never start retries, handoffs, or Integration automatically.
+    - Legacy Competitions remain readable and expose unavailable reason/identity rather than inferred data.
+    - Daemon, CLI, MCP, Competition Detail, Task Detail, and Integration consume one canonical decision in plain English and Chinese.
+    - Existing explicit confirmation, source compatibility, backup, apply, rollback, runtime readiness, and Provider security boundaries remain intact.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/competition.test.ts tests/worker-profiles.test.ts tests/task.test.ts tests/integration.test.ts tests/daemon.test.ts tests/mcp.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

@@ -310,6 +310,79 @@ test("Decision View omits failureCategory on running task with historical worker
   assert.equal(failureCategoryForTask("interrupted", events), "authentication");
 });
 
+test("connectivity failureCategory is durable through Decision View and list surfaces", async () => {
+  const safeSummary =
+    "Worker could not reach the Provider service due to a network connectivity failure";
+  const secretProxy = "http://user:leak-me-token@proxy.example:3128";
+  const events: EventRecord[] = [
+    {
+      id: 1,
+      taskId: "task-conn",
+      attemptId: "attempt-1",
+      sequence: 3,
+      timestamp: TS,
+      // Private normalizer-style noise that must not win over the runner category.
+      type: "worker.failed",
+      summary: `runtime noise containing ${secretProxy}`,
+      payload: { failureCategory: "runtime" },
+    },
+    {
+      id: 2,
+      taskId: "task-conn",
+      attemptId: "attempt-1",
+      sequence: 4,
+      timestamp: TS,
+      type: "worker.failed",
+      summary: safeSummary,
+      payload: { failureCategory: "connectivity" },
+    },
+  ];
+  assert.equal(failureCategoryFromEvents(events), "connectivity");
+  assert.equal(failureCategoryForTask("failed", events), "connectivity");
+
+  const attempt: AttemptRecord = {
+    id: "attempt-1",
+    taskId: "task-conn",
+    ordinal: 1,
+    status: "failed",
+    sessionId: "session-1",
+    rawLogPath: "/log",
+    startedAt: TS,
+    finishedAt: TS,
+    exitCode: 1,
+    error: safeSummary,
+  };
+  const view = buildTaskDecisionView({
+    task: { ...makeTask("task-conn", "failed"), error: safeSummary },
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+    nowMs: Date.parse(TS),
+  });
+  assert.equal(view.failureCategory, "connectivity");
+
+  const surface = projectTaskSurface(makeTask("task-conn", "failed"), {
+    failureCategory: "connectivity",
+    nowMs: Date.parse(TS),
+  });
+  assert.equal(surface.failureCategory, "connectivity");
+
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-conn-fail-"));
+  const store = new StateStore(home);
+  const task = makeTask("33333333-3333-4333-8333-333333333333", "failed");
+  store.createTask({ ...task, error: safeSummary });
+  store.addEvent(task.id, "attempt-1", "worker.failed", safeSummary, {
+    failureCategory: "connectivity",
+  });
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store));
+  const surfaces = coordinator.listTaskSurfaces(["failed"], 10);
+  assert.equal(surfaces[0]!.failureCategory, "connectivity");
+  const publicJson = JSON.stringify({ view, surfaces });
+  assert.ok(!publicJson.includes(secretProxy), "secret-like proxy material must not appear on surfaces");
+  assert.ok(!publicJson.includes("leak-me-token"), "proxy token must not appear on surfaces");
+  store.close();
+});
+
 test("buildStatusProgress exposes real lastEventType for wait reconstruction", () => {
   const progress = buildStatusProgress(
     makeTask("t-type", "running"),
