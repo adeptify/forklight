@@ -415,3 +415,105 @@ test("empty results produce an empty human section without throwing", () => {
   assert.equal(humanWorkerReadinessLines([]), "workers: (none)\n");
   assert.deepEqual(projectWorkerReadinessJson([]), []);
 });
+
+// --- xAI local-sign-in with old probe failure → unverified ---
+
+test("safeProviderVerificationSnapshot treats old explicit-probe xAI failure as unverified when local-sign-in exists", async () => {
+  const settings = settingsWithProfiles();
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-xai-"));
+  const store = new StateStore(home);
+  try {
+    const now = Date.now();
+    const failedEvidence: ProbeEvidence = {
+      provider: "xai",
+      model: settings.providerDefaults.xai.defaultModel,
+      endpointOrigin: new URL(settings.providerDefaults.xai.defaultEndpoint).origin,
+      status: "failed",
+      latencyMs: 0,
+      timestamp: new Date(now - 1000).toISOString(),
+      failureCategory: "authentication",
+      failureSummary: "xAI keychain entry missing (used with runtime grok-build)",
+      source: "explicit-probe",
+    };
+    store.saveProbeEvidence(failedEvidence);
+    const providers = providerEvidence({
+      xai: { ready: true, authMode: "local-sign-in" },
+    });
+    const snapshot = safeProviderVerificationSnapshot(
+      store,
+      settings,
+      providers,
+      now,
+    );
+    // Old probe failure ignored because local-sign-in is a viable launch path
+    assert.equal(snapshot.xai?.status, "unverified");
+    // Privacy: failureSummary must never appear
+    const serialized = JSON.stringify(snapshot);
+    assert.equal(serialized.includes("keychain entry missing"), false);
+  } finally {
+    store.close();
+  }
+});
+
+test("safeProviderVerificationSnapshot reports worker-run evidence as verified for xAI", async () => {
+  const settings = settingsWithProfiles();
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-xai-wr-"));
+  const store = new StateStore(home);
+  try {
+    const now = Date.now();
+    store.saveProbeEvidence({
+      provider: "xai",
+      model: settings.providerDefaults.xai.defaultModel,
+      endpointOrigin: new URL(settings.providerDefaults.xai.defaultEndpoint).origin,
+      status: "verified",
+      latencyMs: 0,
+      timestamp: new Date(now - 1000).toISOString(),
+      source: "worker-run",
+    });
+    const providers = providerEvidence({
+      xai: { ready: true, authMode: "local-sign-in" },
+    });
+    const snapshot = safeProviderVerificationSnapshot(
+      store,
+      settings,
+      providers,
+      now,
+    );
+    assert.equal(snapshot.xai?.status, "verified");
+  } finally {
+    store.close();
+  }
+});
+
+test("safeProviderVerificationSnapshot does not treat explicit-probe xAI failure as unverified when auth mode is api-key", async () => {
+  // When auth mode is api-key (Keychain exists), a probe failure is real.
+  const settings = settingsWithProfiles();
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-xai-key-"));
+  const store = new StateStore(home);
+  try {
+    const now = Date.now();
+    store.saveProbeEvidence({
+      provider: "xai",
+      model: settings.providerDefaults.xai.defaultModel,
+      endpointOrigin: new URL(settings.providerDefaults.xai.defaultEndpoint).origin,
+      status: "failed",
+      latencyMs: 0,
+      timestamp: new Date(now - 1000).toISOString(),
+      failureCategory: "authentication",
+      source: "explicit-probe",
+    });
+    const providers = providerEvidence({
+      xai: { ready: true, authMode: "api-key" },
+    });
+    const snapshot = safeProviderVerificationSnapshot(
+      store,
+      settings,
+      providers,
+      now,
+    );
+    // api-key mode: probe failure IS a real connectivity failure
+    assert.equal(snapshot.xai?.status, "failed");
+  } finally {
+    store.close();
+  }
+});

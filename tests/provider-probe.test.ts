@@ -8,6 +8,7 @@ import { SettingsService } from "../src/core/settings.js";
 import { StateStore } from "../src/state/store.js";
 import {
   createClaudeProbeRunner,
+  normalizeProbeStatusWithLocalSignIn,
   providerProbeBatchFailed,
   ProviderProbeService,
   type ProbeRunner,
@@ -415,4 +416,254 @@ test("getAllProviderStatuses returns all registered providers including xai", ()
     assert.ok(n in all, `${n} missing from getAllProviderStatuses`);
   }
   assert.ok("xai" in all);
+});
+
+// --- normalizeProbeStatusWithLocalSignIn ---
+
+test("normalizeProbeStatusWithLocalSignIn downgrades probe-failed when local-sign-in is available", () => {
+  // Old explicit-probe failure is not a real connectivity failure when
+  // local sign-in provides a viable launch path.
+  assert.equal(
+    normalizeProbeStatusWithLocalSignIn("failed", { source: "explicit-probe" }, true),
+    "unverified",
+  );
+});
+
+test("normalizeProbeStatusWithLocalSignIn preserves worker-run failure", () => {
+  // A worker-run failure is real evidence (model quality, etc.) and must
+  // not be downgraded by local-sign-in availability.
+  assert.equal(
+    normalizeProbeStatusWithLocalSignIn("failed", { source: "worker-run" }, true),
+    "failed",
+  );
+});
+
+test("normalizeProbeStatusWithLocalSignIn preserves verified and stale regardless of local-sign-in", () => {
+  assert.equal(
+    normalizeProbeStatusWithLocalSignIn("verified", undefined, true),
+    "verified",
+  );
+  assert.equal(
+    normalizeProbeStatusWithLocalSignIn("stale", undefined, true),
+    "stale",
+  );
+  assert.equal(
+    normalizeProbeStatusWithLocalSignIn("unverified", undefined, true),
+    "unverified",
+  );
+});
+
+test("normalizeProbeStatusWithLocalSignIn does nothing when local-sign-in is not available", () => {
+  assert.equal(
+    normalizeProbeStatusWithLocalSignIn("failed", { source: "explicit-probe" }, false),
+    "failed",
+  );
+  assert.equal(
+    normalizeProbeStatusWithLocalSignIn("verified", undefined, false),
+    "verified",
+  );
+});
+
+test("normalizeProbeStatusWithLocalSignIn handles undefined evidence", () => {
+  assert.equal(
+    normalizeProbeStatusWithLocalSignIn("failed", undefined, true),
+    "unverified",
+  );
+});
+
+// --- xAI local-sign-in & evidence source ---
+
+function grokSignInReady(bool: boolean): () => boolean {
+  return () => bool;
+}
+
+test("xAI probe with Keychain reports launchable but unverified without a network request", async () => {
+  const store = makeStore();
+  const svc = makeSettings(store);
+  const clock = stubClock(1700000000000);
+  const service = new ProviderProbeService(
+    store, svc, stubRunner({}),
+    stubKeychain(new Set(["forklight.xai.api-key"])),
+    stubKeychainReader(), clock, grokSignInReady(false),
+  );
+  const evidence = await service.probeProvider("xai");
+  assert.equal(evidence.status, "unverified");
+  assert.equal(evidence.source, "explicit-probe");
+  assert.equal(evidence.provider, "xai");
+  assert.equal(store.getProbeEvidence("xai"), undefined);
+});
+
+test("xAI probe without Keychain or local-sign-in persists failed evidence", async () => {
+  const store = makeStore();
+  const svc = makeSettings(store);
+  const clock = stubClock(1700000000000);
+  const service = new ProviderProbeService(
+    store, svc, stubRunner({}),
+    stubKeychain(new Set()), // no Keychain
+    stubKeychainReader(), clock, grokSignInReady(false), // no local-sign-in
+  );
+  const evidence = await service.probeProvider("xai");
+  assert.equal(evidence.status, "failed");
+  assert.equal(evidence.source, "explicit-probe");
+  assert.equal(evidence.failureCategory, "authentication");
+  const stored = store.getProbeEvidence("xai");
+  assert.ok(stored !== undefined);
+  assert.equal(stored!.status, "failed");
+  assert.equal(stored!.source, "explicit-probe");
+});
+
+test("xAI probe without Keychain but with local-sign-in returns unverified and does not persist false failed evidence", async () => {
+  const store = makeStore();
+  const svc = makeSettings(store);
+  const clock = stubClock(1700000000000);
+  const service = new ProviderProbeService(
+    store, svc, stubRunner({}),
+    stubKeychain(new Set()), // no Keychain
+    stubKeychainReader(), clock, grokSignInReady(true), // local-sign-in available
+  );
+  const evidence = await service.probeProvider("xai");
+  // Local sign-in alone is launch readiness, not remote verification
+  assert.equal(evidence.status, "unverified");
+  assert.equal(evidence.source, "explicit-probe");
+  // Nothing persisted — ForkLight cannot perform a real Grok connectivity probe
+  assert.equal(store.getProbeEvidence("xai"), undefined);
+});
+
+test("getProviderStatus for xAI ignores old explicit-probe failure when local-sign-in is available", () => {
+  const store = makeStore();
+  const svc = makeSettings(store);
+  const clock = stubClock(1700000000000);
+  // Seed old probe failed evidence
+  store.saveProbeEvidence({
+    provider: "xai",
+    model: "grok-4.5",
+    endpointOrigin: "https://api.x.ai",
+    status: "failed",
+    latencyMs: 0,
+    timestamp: new Date(clock()).toISOString(),
+    failureCategory: "authentication",
+    failureSummary: "xAI keychain entry missing (used with runtime grok-build)",
+    source: "explicit-probe",
+  });
+  const service = new ProviderProbeService(
+    store, svc, stubRunner({}),
+    stubKeychain(new Set()), // no Keychain
+    stubKeychainReader(), clock, grokSignInReady(true), // local-sign-in available
+  );
+  const status = service.getProviderStatus("xai");
+  assert.equal(status.status, "unverified");
+  assert.equal(status.evidence?.source, "explicit-probe");
+  assert.equal(status.evidence?.status, "failed");
+  // The stored evidence remains (not deleted), but the derived status ignores it
+});
+
+test("getProviderStatus for xAI reports worker-run evidence as verified even without Keychain", () => {
+  const store = makeStore();
+  const svc = makeSettings(store);
+  const clock = stubClock(1700000000000);
+  store.saveProbeEvidence({
+    provider: "xai",
+    model: "grok-4.5",
+    endpointOrigin: "https://api.x.ai",
+    status: "verified",
+    latencyMs: 0,
+    timestamp: new Date(clock()).toISOString(),
+    source: "worker-run",
+  });
+  const service = new ProviderProbeService(
+    store, svc, stubRunner({}),
+    stubKeychain(new Set()), // no Keychain
+    stubKeychainReader(), clock, grokSignInReady(true),
+  );
+  const status = service.getProviderStatus("xai");
+  assert.equal(status.status, "verified");
+  assert.equal(status.evidence?.source, "worker-run");
+});
+
+test("xAI local-sign-in-only probe preserves existing worker-run evidence and does not overwrite", async () => {
+  const store = makeStore();
+  const svc = makeSettings(store);
+  const clock = stubClock(1700000000000);
+  // Seed worker-run verified evidence
+  store.saveProbeEvidence({
+    provider: "xai",
+    model: "grok-4.5",
+    endpointOrigin: "https://api.x.ai",
+    status: "verified",
+    latencyMs: 0,
+    timestamp: new Date(clock() - 60000).toISOString(),
+    source: "worker-run",
+  });
+  const service = new ProviderProbeService(
+    store, svc, stubRunner({}),
+    stubKeychain(new Set()), // no Keychain
+    stubKeychainReader(), clock, grokSignInReady(true), // local-sign-in available
+  );
+  const evidence = await service.probeProvider("xai");
+  // Must return the existing worker-run evidence unchanged
+  assert.equal(evidence.status, "verified");
+  assert.equal(evidence.source, "worker-run");
+  assert.equal(evidence.timestamp, new Date(clock() - 60000).toISOString());
+  // Store must still have the original worker-run evidence
+  const stored = store.getProbeEvidence("xai");
+  assert.equal(stored?.source, "worker-run");
+  assert.equal(stored?.status, "verified");
+});
+
+test("xAI auth-only probe does not return mismatched Worker-run evidence", async () => {
+  const store = makeStore();
+  const svc = makeSettings(store);
+  const clock = stubClock(1700000000000);
+  store.saveProbeEvidence({
+    provider: "xai",
+    model: "different-grok-model",
+    endpointOrigin: "https://api.x.ai",
+    status: "verified",
+    latencyMs: 0,
+    timestamp: new Date(clock() - 60000).toISOString(),
+    source: "worker-run",
+  });
+  const service = new ProviderProbeService(
+    store, svc, stubRunner({}),
+    stubKeychain(new Set()), stubKeychainReader(), clock, grokSignInReady(true),
+  );
+  const evidence = await service.probeProvider("xai");
+  assert.equal(evidence.status, "unverified");
+  assert.equal(evidence.model, "grok-4.5");
+  assert.equal(store.getProbeEvidence("xai")?.model, "different-grok-model");
+});
+
+test("worker-run evidence supersedes older explicit-probe evidence for the same Provider", () => {
+  const store = makeStore();
+  const svc = makeSettings(store);
+  const clock = stubClock(1700000000000);
+  // First: seed explicit-probe failed
+  store.saveProbeEvidence({
+    provider: "xai",
+    model: "grok-4.5",
+    endpointOrigin: "https://api.x.ai",
+    status: "failed",
+    latencyMs: 0,
+    timestamp: new Date(clock() - 60000).toISOString(),
+    source: "explicit-probe",
+    failureCategory: "authentication",
+  });
+  // Then: worker-run verified overwrites via INSERT OR REPLACE
+  store.saveProbeEvidence({
+    provider: "xai",
+    model: "grok-4.5",
+    endpointOrigin: "https://api.x.ai",
+    status: "verified",
+    latencyMs: 0,
+    timestamp: new Date(clock()).toISOString(),
+    source: "worker-run",
+  });
+  const service = new ProviderProbeService(
+    store, svc, stubRunner({}),
+    stubKeychain(new Set()), stubKeychainReader(), clock, grokSignInReady(true),
+  );
+  const status = service.getProviderStatus("xai");
+  assert.equal(status.status, "verified");
+  assert.equal(status.evidence?.source, "worker-run");
+  assert.equal(status.evidence?.status, "verified");
 });

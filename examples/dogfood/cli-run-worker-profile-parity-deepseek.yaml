@@ -1,0 +1,145 @@
+version: 2
+name: Make CLI run resolve the same saved Worker as submit
+project: /Users/yijunwang/code/forklight
+taskClass: cli-entrypoint-parity
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+contract:
+  outcome: >-
+    A Task Contract that names a saved custom Worker Profile resolves to the
+    same Provider, model, runtime, and advanced policy whether the user chooses
+    CLI run, CLI validate, Daemon submit, or plan validation. The direct run
+    path must no longer reject a valid saved Worker as unknown.
+  presentation:
+    summary: 让 run 和 submit 使用同一份 Worker 设置，不再出现一个能跑、一个说不存在。
+    language: zh-CN
+  context:
+    - A real file using workerProfileId local-grok-builder passed CLI validate and Daemon submit, but `forklight run` rejected it as `Unknown worker profile`.
+    - The run branch manually builds an incomplete TaskPolicy and omits workerProfiles and modelCatalog; taskPolicyFromSettings already defines the complete canonical snapshot used by admission.
+    - validate-plan contains the same incomplete manual TaskPolicy construction and should not retain the same latent drift.
+    - Daemon validate_file and submit_file already use the complete SettingsService snapshot and are the reference behavior.
+    - Preserve the very dirty worktree and every unrelated change. Do not commit or push.
+  inScope:
+    - Replace incomplete CLI TaskPolicy assembly with the existing canonical complete settings-to-policy boundary.
+    - Cover direct `forklight run` with a saved non-default Worker Profile through a real CLI process without making a Provider request.
+    - Cover validate-plan if the shared root cause applies, so plan and single-Task entrypoints cannot drift.
+    - Preserve existing validation errors for genuinely absent Worker Profile ids.
+  outOfScope:
+    - Provider networking, Grok authentication, Worker routing, task execution semantics, daemon submission changes, settings schema changes, retries, competition, Hub UI, or new configuration fields.
+    - Launching a real external model in tests, source-string assertions as the only regression proof, or weakening authentication preflight.
+  executionSteps:
+    - Trace the TaskPolicy consumed by run, validate, validate-plan, MCP validation, and Daemon admission.
+    - Reuse one canonical producer instead of adding another field list.
+    - Add an end-to-end CLI regression using an isolated FORKLIGHT_HOME and a custom saved profile whose missing authentication stops before Provider execution.
+    - Prove the failure moves past profile parsing to the existing bounded authentication preflight, and prove the saved identity is preserved in the registered Task.
+    - Run focused tests once, then full tests, strict TypeScript, build, and diff hygiene once.
+  deliverables:
+    - Canonical complete TaskPolicy consumption for local CLI run and plan validation.
+    - Behavior-level regression proving saved custom Worker resolution without a Provider call.
+  modules:
+    - name: CLI task entrypoints
+      responsibility: Feed the exact current settings snapshot into Task parsing and policy resolution.
+      consumes:
+        - ForkLightSettings from the local StateStore and a Task or Plan file.
+      produces:
+        - A canonical TaskPolicy identical in meaning to validation and Daemon admission.
+      boundaries:
+        - No Provider request, no settings mutation, and no change to execution semantics after admission.
+    - name: Canonical settings-to-policy mapper
+      responsibility: Remain the only field-selection boundary for complete Task policy snapshots.
+      consumes:
+        - ForkLightSettings including Worker Profiles, model catalog, Provider defaults, execution, quality, completion, and delivery settings.
+      produces:
+        - TaskPolicy used consistently by all local CLI file entrypoints.
+      boundaries:
+        - Do not introduce another duplicated object literal.
+    - name: CLI parity regression
+      responsibility: Reproduce the user-visible command behavior without spending model Tokens.
+      consumes:
+        - Isolated home, custom saved profile, bounded Task file, and deliberately unavailable local authentication.
+      produces:
+        - Evidence that parsing succeeds, exact Worker identity is registered, and authentication preflight stops before workspace/Worker execution.
+      boundaries:
+        - No live daemon, Provider call, Keychain write, credential readout, or original-project mutation.
+  callChain:
+    - CLI run reads current settings from the local ForkLight StateStore.
+    - The canonical mapper creates the complete TaskPolicy including Worker Profiles and model catalog.
+    - Task parsing resolves the requested saved Worker to its exact Provider, model, runtime, and policy.
+    - Existing authentication preflight either allows execution or stops safely before workspace and Worker creation.
+    - Daemon submit continues to resolve the same Task from the same settings meaning.
+  scenarios:
+    - name: Saved custom Worker via run
+      given: An isolated home contains a valid non-default Worker Profile and a Task names it.
+      when: The user invokes `forklight run`.
+      then: The profile resolves exactly and the command never reports `Unknown worker profile`.
+    - name: Authentication absent after successful resolution
+      given: The custom Worker Provider intentionally has no readable local authentication.
+      when: Direct run reaches launch preflight.
+      then: It stops before workspace and model execution while the registered Task preserves the exact custom Worker identity.
+    - name: Truly absent Worker
+      given: A Task names an id not present in saved settings.
+      when: Any file admission entrypoint parses it.
+      then: The existing bounded unknown-profile error remains unchanged.
+    - name: Saved Worker inside a plan
+      given: A valid plan contains a Task using a saved custom Worker.
+      when: CLI validate-plan reads it.
+      then: It uses the same complete settings meaning rather than built-in-only defaults.
+  risks:
+    - A test that reaches a real Provider would waste Tokens and become flaky, so stop deterministically at authentication preflight.
+    - Fixing only the observed run branch would leave the same copied omission in validate-plan, so audit both manual TaskPolicy constructors.
+    - Importing CLI entrypoint code directly may trigger process behavior; prefer an isolated real CLI subprocess or a small testable boundary.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 350
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: 900000
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 300000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - src/core/task-preview.ts
+    - tests/cli-task-preview.test.ts
+    - tests/daemon-cli.test.ts
+acceptance:
+  criteria:
+    - Direct CLI run resolves a saved non-default Worker Profile through the same canonical TaskPolicy fields used by validate and Daemon submit.
+    - The behavior test proves resolution without reaching a Provider and preserves the existing missing-authentication boundary.
+    - validate-plan does not retain an incomplete copied TaskPolicy construction.
+    - Unknown ids remain rejected and no unrelated runtime, Provider, or Hub behavior changes.
+  commands:
+    - node --test --import tsx tests/cli-task-preview.test.ts tests/daemon-cli.test.ts
+    - npm test
+    - npx tsc --noEmit
+    - npm run build
+    - git diff --check

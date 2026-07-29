@@ -1,0 +1,147 @@
+version: 2
+name: Make Relay Agent status understandable without runtime jargon
+project: /Users/yijunwang/code/relay
+taskClass: relay-agent-status-readability
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    Relay's Agent page tells a non-technical user which assistants can take
+    work now, what each one is useful for, whether it is currently working,
+    and the one sensible next action. Runtime internals remain available only
+    as secondary technical details.
+  presentation:
+    summary: 让 Agent 页面先回答谁能做什么、现在能不能用、下一步做什么。
+    language: zh-CN
+  context:
+    - The current page leads with Runtime, Multica, execution fabric, Host, Capabilities, and Workspaces; these are implementation facts rather than user decisions.
+    - Existing Runtime, Job, and Item records are the only authority. Do not invent provider connectivity, health probes, failure causes, model quality, or completion.
+    - The Relay worktree is very dirty from parallel product work, but the three focus paths are currently clean. Preserve every unrelated change and do not commit or push.
+    - Follow AGENTS.md, docs/DEVELOPMENT.md, and docs/ARCHITECTURE.md. Keep UI dependent only on existing store facts and a pure presentation mapper.
+  inScope:
+    - Add one pure presentation mapper for a Runtime plus its existing Jobs and Items.
+    - Make the Agent page lead with plain-language availability, suitable work, current workload, and one next action.
+    - Keep host, workspace paths, runtime type, and raw capability strings inside a collapsed technical-details section rather than primary copy.
+    - Add semantic tests for all current RuntimeStatus values, active-work counting, truthful fallbacks, and page copy boundaries.
+  outOfScope:
+    - Any API, store, database, domain type, runtime, ForkLight dispatch, settings, navigation, connector, Team, or persistence change.
+    - New health probes, Provider calls, configuration controls, model ranking, competition, task assignment actions, or invented status details.
+    - Broad visual redesign, new dependencies, generated files, commits, or pushes.
+  executionSteps:
+    - Read the bounded workspace context and the three focus paths plus existing Activity presentation conventions.
+    - Define a small pure mapper whose output directly answers availability, suitable work, workload, and next action from existing facts.
+    - Rewire only the Agent page to consume the mapper and move raw technical facts into a closed details element.
+    - Add behavior tests that prevent raw implementation jargon from returning to the primary page story.
+    - Stop after the focused acceptance suite passes; do not expand into adjacent pages or global design work.
+  deliverables:
+    - src/components/agent-presentation.ts with a pure, exhaustively tested presentation boundary.
+    - A revised src/app/agents/page.tsx that renders the plain-language story and keeps technical facts secondary.
+    - tests/agent-presentation.test.ts covering status, workload, fallbacks, and page semantics.
+  modules:
+    - name: Agent presentation mapper
+      responsibility: Translate existing Runtime, Job, and Item facts into a concise user decision model.
+      consumes:
+        - One Runtime and the existing Job and Item arrays.
+      produces:
+        - Availability label and explanation, suitable-work copy, workload copy, tone, and one next action.
+      boundaries:
+        - Pure and deterministic; no React, IO, store access, probes, or invented causes.
+    - name: Agent page
+      responsibility: Render the decision model first and raw runtime facts only on demand.
+      consumes:
+        - Existing useStore Runtime, Job, and Item collections plus mapper output.
+      produces:
+        - Plain-language Agent cards and a closed technical-details disclosure.
+      boundaries:
+        - No state mutation, API call, assignment flow, navigation change, or duplicated status logic.
+    - name: Semantic regression suite
+      responsibility: Prove the page remains understandable and factually bounded.
+      consumes:
+        - Representative Runtime statuses, active and terminal Jobs, assigned Items, and page source.
+      produces:
+        - Deterministic assertions over user-facing meaning and technical-copy placement.
+      boundaries:
+        - No browser, network, Provider, snapshots, or unrelated repository tests.
+  callChain:
+    - Relay Store supplies existing Runtime, Job, and Item facts.
+    - The pure mapper derives one bounded presentation per Runtime.
+    - The Agent page renders availability, suitable work, workload, and next action as the primary card story.
+    - A closed technical-details element renders host, workspaces, runtime type, and raw capabilities only when requested.
+  scenarios:
+    - name: Available assistant
+      given: A Runtime is online with no queued or running Job.
+      when: The page builds its presentation.
+      then: It says the assistant can take work and offers a clear task-assignment next action without claiming Provider verification.
+    - name: Assistant already working
+      given: A Runtime is busy or has queued/running Jobs and matching active Items.
+      when: The page builds its presentation.
+      then: It reports the factual active workload count and directs the user to view progress rather than assign more work blindly.
+    - name: Assistant needs attention
+      given: A Runtime is degraded, offline, or unavailable.
+      when: The page builds its presentation.
+      then: It uses a plain-language bounded status and one recovery-oriented next action without inventing a failure cause.
+    - name: Technical facts remain secondary
+      given: Runtime host, workspace paths, type, and capability strings are present.
+      when: The page first renders.
+      then: Those facts are inside a closed details disclosure and the primary copy does not lead with Multica, execution fabric, Host, Capabilities, or Workspaces.
+    - name: Sparse or unfamiliar metadata
+      given: A Runtime has an unfamiliar type or no capabilities/workspaces.
+      when: The mapper runs.
+      then: It returns a neutral useful fallback without exposing undefined values or fabricating abilities.
+  risks:
+    - Runtime status does not prove live Provider connectivity, so availability copy must stay bounded to Relay's stored status.
+    - Counting both Jobs and Items can double-count one piece of work; choose one authoritative workload count and use the other only as context.
+    - Source-string tests can become brittle; assert product semantics and disclosure boundaries rather than CSS layout details.
+    - The surrounding worktree is dirty; changing any non-focus path would risk overwriting parallel work.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 520
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: 900000
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 300000
+  workerStopGraceMs: 10000
+  fileLimit: 3
+  fileLimitMode: warn
+  changedLineLimit: 520
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - .next
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/components/agent-presentation.ts
+    - src/app/agents/page.tsx
+    - tests/agent-presentation.test.ts
+acceptance:
+  criteria:
+    - Every current RuntimeStatus maps to a plain-language, truthful availability state and one next action.
+    - Active workload is derived without double-counting terminal Jobs or unrelated Items.
+    - Primary page copy explains user decisions and raw runtime facts remain in a closed technical-details disclosure.
+    - No API, domain, store, persistence, dispatch, settings, or non-focus file changes occur.
+  commands:
+    - node --import tsx --test tests/agent-presentation.test.ts
+    - npx eslint@9 src/components/agent-presentation.ts src/app/agents/page.tsx tests/agent-presentation.test.ts
+    - git diff --check

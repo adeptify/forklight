@@ -1067,12 +1067,14 @@ evidence rather than another implementation retry.
    user-facing outcomes, module boundaries, acceptance commands, and bounded
    execution policy. The operator procedure and evidence worksheet are recorded
    in `docs/m1-clean-user-runbook.md`; the current Mac has only the existing
-   development user. A world-readable clean-run bundle is frozen under
-   `/Users/Shared/ForkLight-Clean-Run.cDgmCh`: tarball SHA-256
-   `5c0609a14b9df7e19c4949907954bf58fd87eb00fac686df370538fbca86e9d5`,
-   package build `e0072e64953a6994f503b4f7e72b7f755ef72e0b3d4f1728ec07f516273279ad`,
-   full prepack check, isolated install, CLI load, exact installed identity
-   comparison, and sensitive-filename scan all pass. It was not activated in
+   development user. The latest world-readable clean-run bundle is frozen under
+   `/Users/Shared/ForkLight-Clean-Run.TrcwKU`: external `bundle-evidence.json`
+   binds tarball SHA-256
+   `cb0359ef30e3e088c2cbc339e60a8e1912f3a901e34ef372da56671ef9652d98`,
+   package build `7426d0f154901f14b61cc7073afe853040734b561161cdf617b0bdc086b6c684`,
+   full prepack **1,587/1,587**, isolated install, CLI/MCP load, exact installed
+   identity comparison, and sensitive-filename scan. The old `cDgmCh` bundle and
+   one intermediate package are explicitly marked superseded. The bundle was not activated in
    the existing development user. An independent macOS user, VM, or Mac still
    needs to be authorized and used. Finish that approximately 15-minute clean-machine
    journey, including a fresh Main connection and restart/recovery checkpoint,
@@ -1123,8 +1125,19 @@ evidence rather than another implementation retry.
    `653da815-03b0-4a2c-89fd-cf05e3179ebf` 记录为 `verified-repaired-delivered`，两个原 Attempt
    事实均保留。该样本同时暴露一个 ForkLight 缺口：reverify 能证明 Main 修复后的 Candidate，
    但不会捕获新的 CandidateRevision，导致 fresh Main accept 与 automatic Integration 因 revision
-   mismatch 安全拒绝。下一条 ForkLight 自身任务应关闭这条 revision handoff，而不是让 Main 长期
-   手工复制已验证补丁。
+   mismatch 安全拒绝。该 revision handoff 已由 ForkLight R8 关闭：零 Worker reverify 现在会为
+   当前 Diff 和当前 verification sequence 捕获新 CandidateRevision，fresh Main accept 与自动
+   Integration 已在真实 self-upgrade 中通过，不再需要 Main 长期手工复制已验证补丁。
+   本轮又关闭了 Grok readiness 的旧误判：本地登录只说明“可启动”，只有真实
+   `worker.completed` 才说明“已连通”。Task
+   `cf54d876-eabf-4f3f-aa7f-cfb3718eb792` 用一次只读 Grok 4.5 Attempt 完成验证后，保存的
+   `local-grok-builder` 从 `connection-unverified` 变为 `ready`；再次显式检查 xAI 也保留
+   `worker-run` 证据，不会退回旧的 Keychain 失败。复杂 coding Task 中 Grok 的无工具思考循环仍
+   保留为 routing 负样本，不能用这次 smoke success 推导复杂实现能力。本次 smoke 发现的
+   `run` / `submit` Worker Profile 解析差异也已由 Task
+   `4be4bee7-ef54-4314-a50f-75c835d36e6d` 关闭：`run` 与 `validate-plan` 现在复用同一个完整
+   settings-to-policy mapper；新 build 中直接 `forklight run` 同一 Grok 文件已真实成功，不再报告
+   `Unknown worker profile`。
    Keep using shared resolvers so the form,
    preview, saved policy, and Task admission cannot drift into separate meanings.
 3. **Contract feasibility:** shipped as a durable failure category
@@ -1732,3 +1745,109 @@ Worker volume, not a saved-Main-Token claim. The current loaded Codex MCP remain
 the pre-upgrade process and needs a real Codex App/plugin reload before its
 identity can match the new build; matched CLI remains the safe control surface
 until then. No commit or push has been performed.
+
+## Latest dogfood — 2026-07-29 Grok connection truth and bounded fallback
+
+手动 Grok TUI 可用而 ForkLight 超时的直接原因是运行环境不同：旧 Daemon 没有继承
+`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`，其 Grok 子进程无法连接模型代理；鉴权文件副本的
+大小与 SHA-256 一致，不是鉴权复制损坏。Main 在无活跃任务后从正确环境重启 Daemon，并用小型
+Grok Task `6e07c4ab-1c57-4973-85fe-ceb70b0d0840` 证明真实路径可用。
+
+这也暴露了第二个独立问题：Hub 仍把旧的“缺 xAI Keychain”记录当成连接失败，尽管 Grok 使用的是
+可读本地登录。Main 先把修复任务交给 Grok 4.5（Task
+`f297f232-05d8-47a1-85ed-d49fe760ddf6`），但它在复杂多模块任务中反复输出思考、没有执行任何
+工具或产生工作区修改。Main 在一次 Attempt 内有界终止，没有自动重试、adaptation 或竞争，也
+没有把进程启动误写成模型成功。
+
+随后同一任务合同由 DeepSeek `deepseek-v4-pro[1M]` 执行（Task
+`fee9d2c6-3c7e-4eb2-8af4-b268173aee6d`）。Attempt 1 产出可复用的七文件 Candidate；Main 只授权
+一次结构化 correction，关闭“本地登录被当成远端验证”“未要求同 Attempt 的标准完成事件”“重复
+判断逻辑”和 TypeScript 边界。Attempt 2 仍遗漏一个联合类型值，Main 不再启动 Worker，只在保留
+Candidate 中完成定点修复并运行一次零 Worker reverify。该复验明确记录
+`workerInvoked=false`、新增 Worker Tokens **0**、新增模型费用 **0**，聚焦 **77/77**、Daemon
+**121/121**、全量 **1,585/1,585**、strict TypeScript、build 与 diff hygiene 全部通过。
+
+Main 接受 CandidateRevision `419fca8d-d765-46f6-8e34-9374f2553a8e`。Integration operation
+`9a98f399-38a0-4f3d-83f8-533839677801` 的 source apply、六条 source verify、artifact build、
+runtime activation 四阶段全部 passed。新 CLI / Daemon build 为
+`c90af447821493c71e246f8903cdb1c2fb319dec67c649a0ca35dc1548adcb35`；新 Daemon PID `3126`
+仍继承三项代理变量名，Hub 已切换到新 build。
+
+最终只读 Grok Task `cf54d876-eabf-4f3f-aa7f-cfb3718eb792` 在一个 Attempt 内约 24 秒完成，产生
+同 Attempt 的 `worker.completed`、通过独立验收、Candidate 为空补丁并由 Main 接受。Grok Worker
+现在为 `ready / ready / none`；显式 xAI probe 返回相同的 `worker-run` verified 证据，没有覆盖
+它。DeepSeek 两次 Attempt 共 **7,657,029 gross Worker Tokens**（123,243 input、48,474 output、
+7,485,312 cache read）。Main exchange 仅为低置信区间 **537,821–3,284,726 Tokens**；缺少
+exact-pair direct-Codex baseline，所以仍不声称节约 Main Token。Grok CLI 未提供完整 Token usage，
+因此两个 Grok Task 的 Worker Token 量保持 unavailable，不编造为 0。没有 commit 或 push。
+
+该段当时记录的入口一致性缺口现已关闭。最终证据见下一条 dogfood：同一 smoke 文件已经通过新
+build 的直接 `forklight run` 路径完成，不再依赖 `submit` 绕行。
+
+## Latest dogfood — 2026-07-29 direct run and submit share saved Worker truth
+
+真实 Grok smoke 暴露 `forklight validate` 和 Daemon `submit` 能识别保存的
+`local-grok-builder`，但直接 `forklight run` 报 `Unknown worker profile`。根因不是 Provider、
+网络或鉴权：`run` 手工构造的 TaskPolicy 遗漏 `workerProfiles` 与 `modelCatalog`；
+`validate-plan` 还保留同样的潜在遗漏。现有 `taskPolicyFromSettings` 已是完整统一边界。
+
+路由器因 `cli-entrypoint-parity` 零样本建议 competition。Main 基于两文件、确定性验收和已有
+DeepSeek 后端证据覆盖为单 Worker，避免生成两份相同实现。DeepSeek Task
+`4be4bee7-ef54-4314-a50f-75c835d36e6d` 用一个 69-turn Attempt 正确把两条 CLI 入口切到统一 mapper，
+但它的测试合同缺第二场景而先被质量门拒绝，测试又依赖当前机器 Grok 登录，存在意外访问 Provider
+的风险。Main 没有启动 correction Worker：保留生产改动，把测试改为隔离 `FORKLIGHT_HOME`、空
+PATH 和未鉴权自定义 Qwen Worker，验证 exact Worker/provider/model/runtime 已落库、Attempt 数为
+0，并额外覆盖 `validate-plan`。零 Worker reverify 记录新增 Worker Tokens / 模型费用均为 **0**；
+聚焦 **9/9**、全量 **1,587/1,587**、strict TypeScript、build、diff hygiene 全部通过。
+
+Main 接受 CandidateRevision `c7d8525a-b8ab-4b7a-9361-5cbc0c9f3875`。Integration operation
+`ab55bd60-b8c0-411d-ae3e-9051cac09c06` 的 source apply、五条 source verify、artifact build、
+runtime activation 四阶段全部 passed。当前 CLI / Daemon build 为
+`45c15a076faeaca810cae8a145b5f0dac5d5bf0ce0838ecd16cdf47f67656595`，source digest 为
+`3f569c895c290d93e4428e9bed2ce2042c9951343dc257930dc12f2a907ef5da`。Hub PID `7835` 在
+`127.0.0.1:57006` 为 `current`，Daemon PID `4358` 无 active/queued Task。
+
+新 build 随后直接执行 `forklight run examples/dogfood/grok-readonly-live-smoke.yaml`。Task
+`58626b45-9544-4b52-baf4-cf8e2c018b29` 在约 11 秒内用保存的 Grok 4.5 Worker 完成，独立验收通过、
+零文件变化并由 Main 接受，证明最初失败的直接入口已经恢复。DeepSeek Attempt 使用
+**4,104,671 gross Worker Tokens**（74,861 input、24,434 output、4,005,376 cache read）；官方
+PAYG 估算 **USD 0.068341603**，runtime estimate **USD 2.987843**。Main exchange 为低置信区间
+**411,213–2,506,154 Tokens**；没有 exact-pair direct-Codex baseline，因此不声称节约 Main Token。
+这个两文件修复的 69 turns / 4.1M gross 仍是负效率样本：下一次同等级确定性入口修复应优先 Main
+直做，或把测试夹具入口写得更具体，而不是因为最终成功就继续委派。Grok runtime usage 仍不可得，
+不把未知写成 0。没有 commit 或 push。
+
+## Latest dogfood — 2026-07-29 refreshed clean-run artifact without self-referential SHA
+
+M1.3 审计首先判定旧 `/Users/Shared/ForkLight-Clean-Run.cDgmCh` 已过期：它的 build 早于当前
+`run` / `submit` 和 Grok readiness 修复，runbook 又明确禁止混用旧包。Main 没有启动 Worker，
+而是直接执行真实 `npm pack`、独立 prefix 安装、tarball/安装后身份对照、CLI/MCP 入口加载和敏感
+文件名扫描。
+
+第一次新包预检完整通过，但也暴露文档结构问题：会被打进 tarball 的 runbook 和 acceptance 文档
+硬编码“当前 tarball SHA”，更新 SHA 后重新打包会再次改变 SHA。Main 把构建权威值移到 tarball
+外部同目录的 `bundle-evidence.json`；包内文档只规定校验协议，不再自引用具体 artifact。
+
+按新协议做最终冻结时，第一次 prepack 在全量 **1,587** 项中出现 1 个 Hub fixture 失败。失败测试
+使用独立临时 home，不会接触正式 Hub；它把已监听本地测试服务的 HTTP probe 限为 50ms，并行全套
+测试时把调度延迟误判成 Hub control page 未就绪。Main 没有整套碰运气重跑，只把这一条成功场景的
+测试等待放宽到 500ms probe / 1,000ms wait，不改产品默认。定点测试连续 **5/5** 通过后，只执行
+一次最终完整 pack，prepack **1,587/1,587** 通过。
+
+最终目录 `/Users/Shared/ForkLight-Clean-Run.TrcwKU` 为 world-readable，包含 tarball、外部
+`bundle-evidence.json`、包内权威 `build-identity.json` 副本和无具体 SHA 的 runbook。Tarball SHA-256
+为 `cb0359ef30e3e088c2cbc339e60a8e1912f3a901e34ef372da56671ef9652d98`；build id 为
+`7426d0f154901f14b61cc7073afe853040734b561161cdf617b0bdc086b6c684`，source digest 为
+`3f569c895c290d93e4428e9bed2ce2042c9951343dc257930dc12f2a907ef5da`。独立安装加入 95 个包；
+安装后 identity 与 tarball 逐字一致，CLI 和 MCP entry 均正常退出，敏感文件名扫描无命中。
+
+Main 还用安装后的二进制和隔离 `FORKLIGHT_HOME` 启动了一套临时 Hub/Daemon：Hub 被判定为
+`current`，Daemon build 与 tarball 完全一致且没有 Task。随后两者均通过正常停止流程退出，PID
+和监听端口消失；全过程没有读取或写入正式 ForkLight 数据。这补上了“安装包不仅能加载入口，也能
+拉起完整本地栈”的证据，但仍不是陌生用户首次使用证明。
+
+两次 pack 都会重新生成 build identity。每次之后 Main 都只在无 active/queued Task 时受控重启
+Daemon 和 Hub，没有把 package build 留成运行态 mismatch。整个流程没有 Provider 请求、Worker、
+Attempt、competition、retry 或模型 Token。它证明最新安装输入已准备好，但仍不能代替新 macOS
+用户、VM 或新 Mac 的 Keychain、Main 安装、理解问答和 15–30 分钟计时；M1.3 保持 active。
+没有 commit 或 push。

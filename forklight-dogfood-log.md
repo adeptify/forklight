@@ -4128,3 +4128,95 @@ activation 四阶段全部 passed。新 CLI / Daemon build 均为
 - 失败任务：`d576b0dd-4ada-4ae0-ac0e-153692f79b46`。
 - 安全恢复：Main 只停止了卡住的那一个 Worker；待无活跃任务后，在已配置代理环境的 shell 中重启空闲 daemon。新 daemon（PID 50571）已确认带有上述三个变量名；本记录不写任何变量值或凭据。
 - 本条结果：本 Task 是重启后的真实 Grok 4.5 冒烟验证——能完成此有界日志写入，说明重启后的 Grok 执行路径可用。这只证明本次路径可跑，不保证以后所有网络条件都正常。没有改源码、配置、凭据，也没有 commit 或 push。
+
+## 2026-07-29 Grok readiness 真实证据：复杂任务失败、一次接力、零 Worker 收口
+
+代理修复后的真实 Grok 小任务已经成功，但 Hub 仍显示 `connection-failed`。原因是旧 xAI probe
+只检查 Keychain；Grok Builder 实际使用 `~/.grok/auth.json` 本地登录。旧检查既没访问 Grok
+网络，也不能代表远端连接失败。
+
+Main 首先按计划让 Grok 4.5 修自己的状态误判，Task
+`f297f232-05d8-47a1-85ed-d49fe760ddf6` 只允许一次 Attempt。Grok 进程能启动、流中持续有思考，
+但数分钟内没有一次工具调用、没有工作区修改，并重复同一“下一步要读文件”的内容。Main 只终止
+该精确 Worker PID 并停止，不做普通 retry 或 adaptation。结论是：Grok 当前连接路径可用，但这次
+复杂 coding 执行力不合格；两件事分别记录。
+
+Main 随后让 DeepSeek `deepseek-v4-pro[1M]` 接力同一明确边界，Task
+`fee9d2c6-3c7e-4eb2-8af4-b268173aee6d` 最多一次 Main correction。第一次 Candidate 的聚焦、
+Daemon 和全量行为测试通过，但 strict TypeScript/build 抓到一个 optional property 错误；Main
+还发现本地登录被错误当成 verified、连接成功没有强制同 Attempt 的标准完成事件、CLI/Service
+重复判断。唯一 correction 修复主要问题并使全量 **1,585/1,585** 通过，但漏掉
+`ProbeResultStatus` 的 `unverified` 类型。Main 不再调用模型，在 retained Candidate 中定点补齐类型
+并加同 Attempt 完成事件测试；零 Worker reverify 六条命令全部通过，新增 Worker Tokens 和模型
+费用均为 0。
+
+最终 8-file Candidate 只在“adapter 成功 + 同 Attempt 存在 `worker.completed`”时记录精确
+Provider/model/origin 的 `worker-run` 证据；本地登录单独表示 launchable/unverified；旧显式检查
+不能覆盖真实成功。Main accept 后，Integration operation
+`9a98f399-38a0-4f3d-83f8-533839677801` 四阶段通过，新 Daemon PID `3126` 保留代理环境变量名，
+Hub 切换到新 build。
+
+最后的只读 Grok Task `cf54d876-eabf-4f3f-aa7f-cfb3718eb792` 只读取 package metadata，不允许
+修改文件；单 Attempt 在约 24 秒内 `worker.completed`、独立验收 passed、空 Candidate 由 Main
+accept。`local-grok-builder` 随即变为 `ready`，再次执行 xAI probe 仍返回同一 `worker-run`
+verified 证据。DeepSeek 两次 Attempt 共 **7,657,029 gross Worker Tokens**；低置信 Main exchange
+区间为 **537,821–3,284,726 Tokens**。没有 exact-pair direct-Codex baseline，不能把差额叫“节约
+Main Token”；Grok runtime 没返回完整 usage，不能把未知量写成 0。没有 commit 或 push。
+
+同一 smoke 还暴露 `run` / `submit` 入口不一致：`forklight run` 对保存的
+`local-grok-builder` 报 unknown profile，Daemon `submit` 却能正确解析并完成。该问题与网络、
+鉴权和模型能力无关；现已由下一个 dogfood Task 关闭。
+
+## 2026-07-29 M1.3：直接 run 与 submit 统一保存的 Worker Profile
+
+根因是 `src/cli.ts` 的 `run` 和 `validate-plan` 各自手工拼 TaskPolicy，漏掉 `workerProfiles` 与
+`modelCatalog`；`validate`、Daemon 和 MCP 已使用完整设置。Main 将任务限定为复用现有
+`taskPolicyFromSettings` 与真实 CLI 回归。零历史样本使 routing 建议 competition，但这只是两文件
+确定性修复，Main 选择单 DeepSeek `deepseek-v4-pro[1M]`，没有重复实现。
+
+Task `4be4bee7-ef54-4314-a50f-75c835d36e6d` 的一个 Attempt 正确修改生产入口，但测试先因只有一个
+scenario 被质量门拒绝；它还使用 Grok Profile，当前机器已有 Grok 登录，不能证明测试绝不访问
+Provider。Main 没有授权第二次 Worker，而是在 retained Candidate 中把测试改为隔离 home、空 PATH
+和未鉴权自定义 Qwen Worker。测试现在证明 Task 已保存 exact Worker/provider/model/runtime，鉴权
+前置检查后 Attempt 数仍为 0；同一设置下 `validate-plan` 也通过。零 Worker reverify 的五条命令
+全部通过：聚焦 9/9、全量 1,587/1,587、strict TypeScript、build、diff hygiene；新增模型 Token 和
+费用均为 0。
+
+Main accept revision `c7d8525a-b8ab-4b7a-9361-5cbc0c9f3875` 后，Integration
+`ab55bd60-b8c0-411d-ae3e-9051cac09c06` 四阶段 passed。新 build 中直接运行原 Grok smoke 文件，
+Task `58626b45-9544-4b52-baf4-cf8e2c018b29` 约 11 秒成功、独立验收通过、空 Candidate 由 Main
+接受。Hub/Daemon build matched，Hub 为 current，无 active/queued Task。
+
+本次 DeepSeek Attempt 共 **4,104,671 gross Worker Tokens**，官方 PAYG 估算
+**USD 0.068341603**，runtime estimate **USD 2.987843**；低置信 Main exchange 区间为
+**411,213–2,506,154 Tokens**。无 exact-pair direct-Codex baseline，不声称节约 Main Token。
+69 turns 对两文件入口修复过重，作为 M3 routing 负效率证据保留：相似确定性小修优先 Main 直做，
+除非需要长程持久执行。Grok usage 缺失，保持 unavailable。没有 commit 或 push。
+
+## 2026-07-29 M1.3：重新冻结可安装包并移除 SHA 自引用
+
+旧 clean-run bundle 的 build 已落后于当前源码，不能继续作为新用户输入。Main 直接重做打包与
+独立安装，没有调用 Worker。审计同时发现包内 runbook 硬编码自身 tarball SHA 会形成自引用：
+更新 SHA 后重打包会再次改变 SHA。现改为 tarball 外的 `bundle-evidence.json` 保存 artifact
+文件名、SHA、build/source identity 和验证结论；包内文档只描述读取与校验规则。
+
+最终 pack 前，全量测试第一次为 1,586/1,587。唯一失败是独立 Hub fixture 的 50ms 本地 HTTP
+probe 在高并发下超时，不是正式 Hub、Provider 或业务失败。Main 没有盲目重跑，只把该已监听成功
+场景放宽为 500ms probe / 1,000ms wait，产品默认不变。目标测试连续 5/5 后，最终 prepack
+1,587/1,587 通过。
+
+冻结目录 `/Users/Shared/ForkLight-Clean-Run.TrcwKU` 权限为 755，四个文件均为 644。Tarball
+SHA-256 `cb0359ef30e3e088c2cbc339e60a8e1912f3a901e34ef372da56671ef9652d98`，build
+`7426d0f154901f14b61cc7073afe853040734b561161cdf617b0bdc086b6c684`，source digest
+`3f569c895c290d93e4428e9bed2ce2042c9951343dc257930dc12f2a907ef5da`。独立 prefix 安装成功；
+包内与安装后 identity 一致，CLI/MCP entry 可加载，敏感文件名扫描无命中。旧正式 bundle 和一次
+中间包均有 `SUPERSEDED.md`，不会静默混用。
+
+随后用安装后 CLI 配合隔离 `FORKLIGHT_HOME` 启动临时 Hub/Daemon。Hub 状态为 `current`，Daemon
+使用最终冻结 build 且零 Task；正常停止后 PID 与监听端口均消失，也没有触碰正式数据目录。这证明
+冻结包能启动完整本地栈，但不能替代真正陌生用户的首次安装与理解测试。
+
+打包重新生成 identity 后，Main 在无 active/queued Task 时受控重启正式 Daemon/Hub，保持 M0
+运行身份真值。没有 Provider 请求、Worker、Attempt 或模型 Token。当前证据仍只证明现有 Mac 的
+package/input ready；真正 M1.3 退出仍需要新 macOS 用户、VM 或新 Mac 完成首次 Keychain、Main、
+首个 Task、理解问答、恢复与计时。没有 commit 或 push。

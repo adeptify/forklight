@@ -31,17 +31,17 @@ Codex 配置。创建系统用户需要一骏单独授权，本手册本身不�
 
 如果打包后源码、build identity 或 tarball 变化，本次记录作废并重新开始，不能混用两次构建。
 
-当前已冻结的验收包：
+每个冻结验收目录必须只把同目录的 `bundle-evidence.json` 当作本次构建的权威索引。该文件在
+tarball 生成后写入，至少包含 tarball 文件名、SHA-256、包内 build identity、source digest、
+生成时间，以及 prepack、独立安装、CLI/MCP 加载、身份对照和敏感文件名扫描结果。操作者先核对
+JSON 中的 SHA，再使用它指向的 tarball。
 
-- 目录：`/Users/Shared/ForkLight-Clean-Run.cDgmCh`
-- tarball：`forklight-0.2.0.tgz`
-- SHA-256：`5c0609a14b9df7e19c4949907954bf58fd87eb00fac686df370538fbca86e9d5`
-- build identity：`e0072e64953a6994f503b4f7e72b7f755ef72e0b3d4f1728ec07f516273279ad`
-- source digest：`5d8fcaf120116c145cfe77f578bd2372a57d1dc247eb1eb0b75e5321bebe67de`
+不要在这份会被打进 tarball 的文档里硬编码“当前 tarball SHA”。否则更新 SHA 后重新打包会再次
+改变 tarball，形成自引用。`bundle-evidence.json` 必须放在 tarball 外、与 tarball 和本手册副本
+同目录，且不能包含 API Key、Hub 私有 URL或本地凭据路径。
 
-这个 tarball 已通过完整 `prepack` 检查、临时 prefix 安装、安装后 CLI 加载、tarball/安装后
-identity 逐字对照和敏感文件名扫描。它没有在现有开发用户中启动 Hub 或 Daemon。clean run
-必须直接使用这一个文件；若源码继续变化，应明确废弃本包并重新冻结，不能静默替换。
+clean run 必须使用证据文件指向的精确 tarball；若源码、包内 build identity 或 tarball 变化，
+应创建新的冻结目录并把旧目录标记为 superseded，不能静默替换。
 
 ## 操作者规则
 

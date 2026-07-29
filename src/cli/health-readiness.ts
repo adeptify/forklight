@@ -15,7 +15,7 @@ import {
   type WorkerReadinessInput,
   type WorkerReadinessResult,
 } from "../core/worker-readiness.js";
-import { deriveProviderHealthStatus } from "../core/provider-probe.js";
+import { deriveProviderHealthStatus, normalizeProbeStatusWithLocalSignIn } from "../core/provider-probe.js";
 import type { ForkLightSettings } from "../core/settings.js";
 import { providerNames, resolveProvider, type ProviderName, type ProviderReadiness } from "../core/providers.js";
 import type { RuntimeName } from "../core/runtime-names.js";
@@ -46,7 +46,7 @@ export function safeProviderVerificationSnapshot(
     if (evidence === undefined) continue;
     const config = resolveProvider(name, {}, settings.providerDefaults[name]);
     const currentEndpointOrigin = new URL(config.endpoint).origin;
-    const status: ProviderHealthStatus = deriveProviderHealthStatus(
+    let status: ProviderHealthStatus = deriveProviderHealthStatus(
       providers[name].ready,
       evidence,
       config.model,
@@ -54,6 +54,15 @@ export function safeProviderVerificationSnapshot(
       cacheLifetimeMs,
       now,
     );
+    // Shared normalization: an old explicit-probe failure is not a real
+    // connectivity failure when local sign-in provides a viable launch path.
+    if (name === "xai") {
+      status = normalizeProbeStatusWithLocalSignIn(
+        status,
+        evidence,
+        providers[name].authMode === "local-sign-in",
+      );
+    }
     result[name] = { status };
   }
   return result;

@@ -1,0 +1,102 @@
+version: 2
+name: Verify Grok 4.5 with one bounded read-only run
+project: /Users/yijunwang/code/forklight
+taskClass: provider-runtime-live-smoke
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    Grok 4.5 reads ForkLight's package metadata and returns one concise factual
+    report without editing the workspace. This live run proves the configured
+    Worker can actually reach the model; it does not claim coding quality.
+  presentation:
+    summary: 用一次只读任务确认 Grok 4.5 真的能连通并返回结果。
+    language: zh-CN
+  context:
+    - ForkLight now separates local sign-in readiness from real Provider connectivity.
+    - The daemon has the same proxy environment required by the working Grok TUI.
+    - This is a bounded smoke check, not a coding benchmark and not an invitation to retry.
+    - Preserve the dirty worktree. Do not edit, commit, push, install, or run network commands.
+  inScope:
+    - Read .forklight/workspace-context.md first.
+    - Read package.json and report the exact package name and version.
+    - State that the task was read-only and no project file was changed.
+  outOfScope:
+    - Any source change, package installation, test run, network request, retry, diagnosis, or architecture proposal.
+  executionSteps:
+    - Read the bounded workspace context.
+    - Read package.json once.
+    - Return the package name, version, and read-only confirmation in a short final response.
+  deliverables:
+    - One factual terminal response from the configured Grok 4.5 Worker.
+  modules:
+    - name: Package metadata read
+      responsibility: Read existing local metadata without mutation.
+      consumes:
+        - .forklight/workspace-context.md and package.json.
+      produces:
+        - Package name, package version, and read-only confirmation.
+      boundaries:
+        - No edits and no commands beyond local file reading.
+  callChain:
+    - ForkLight launches the saved local-grok-builder profile.
+    - Grok reads the task-local context and package.json.
+    - Grok returns a canonical completed response.
+    - ForkLight records exact Provider/model/origin connection evidence independently from acceptance.
+  scenarios:
+    - name: Genuine completion
+      given: Grok local sign-in and proxy access are available.
+      when: The Worker reads package.json and returns the requested facts.
+      then: The Task succeeds with no workspace changes and connection evidence becomes verified.
+    - name: No terminal response
+      given: The runtime starts but the model never completes.
+      when: The bounded watchdog ends the Attempt.
+      then: The Task fails once and no verified connection evidence is fabricated.
+  risks:
+    - This proves connectivity only; it must not be interpreted as proof that Grok handles complex coding tasks well.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 1
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: 300000
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 120000
+  workerStopGraceMs: 10000
+  fileLimit: 0
+  fileLimitMode: hard
+  changedLineLimit: 0
+  changedLineLimitMode: hard
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: hard
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - package.json
+acceptance:
+  criteria:
+    - Worker returns the exact package name and version from package.json.
+    - Workspace remains unchanged by the Worker.
+  commands:
+    - node -e "const p=require('./package.json'); if (p.name !== 'forklight' || p.version !== '0.2.0') process.exit(1)"

@@ -17,13 +17,16 @@ import {
   seedGrokHomeAuth,
 } from "../src/workers/grok.js";
 import { GrokEventNormalizer } from "../src/events/grok-normalize.js";
-import type { TaskSpec } from "../src/core/types.js";
+import type { TaskRecord, TaskSpec } from "../src/core/types.js";
 import { checkpointSatisfied } from "../src/core/checkpoint.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { StateStore } from "../src/state/store.js";
-import { executeAttempt } from "../src/core/runner.js";
+import {
+  executeAttempt,
+  recordWorkerConnectionEvidenceFromCompletedEvent,
+} from "../src/core/runner.js";
 import type { WorkerAdapter, WorkerDoctorResult } from "../src/workers/types.js";
 import { registerWorkerAdapter } from "../src/workers/registry.js";
 import { spawn } from "node:child_process";
@@ -203,6 +206,73 @@ test("GrokEventNormalizer maps stream lines", () => {
   assert.equal(cancelled[0]?.type, "worker.failed");
   const tool = n.parseLine(JSON.stringify({ type: "tool_start", tool: "read_file" }));
   assert.equal(tool[0]?.type, "worker.tool.started");
+});
+
+test("Worker connection evidence requires the same Attempt's canonical completion", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-worker-evidence-"));
+  const store = new StateStore(home);
+  const spec = parseTaskSpec(
+    minimalContract({
+      provider: { name: "xai", model: "grok-4.5", keychainService: "forklight.xai.api-key" },
+      runtime: { name: "grok-build", executable: "grok", effort: "high", maxBudgetUsd: null },
+    }),
+    "/tmp",
+    policy(),
+  );
+  const task: TaskRecord = {
+    id: "81818181-8181-4181-8181-818181818181",
+    name: spec.name,
+    status: "running",
+    sourcePath: "/tmp/project",
+    taskFile: "/tmp/task.yaml",
+    spec,
+    paths: {
+      root: "/tmp/run",
+      baseline: "/tmp/run/baseline",
+      workspace: "/tmp/run/workspace",
+      logs: "/tmp/run/logs",
+      claudeConfig: "/tmp/run/claude",
+      diff: "/tmp/run/result.diff",
+    },
+    sessionId: "82828282-8282-4282-8282-828282828282",
+    createdAt: "2026-07-29T00:00:00.000Z",
+    updatedAt: "2026-07-29T00:00:00.000Z",
+  };
+  store.createTask(task);
+
+  assert.equal(
+    recordWorkerConnectionEvidenceFromCompletedEvent(
+      store, task, "attempt-1", "succeeded", "2026-07-29T00:01:00.000Z",
+    ),
+    false,
+  );
+  store.addEvent(task.id, "other-attempt", "worker.completed", "completed elsewhere");
+  assert.equal(
+    recordWorkerConnectionEvidenceFromCompletedEvent(
+      store, task, "attempt-1", "succeeded", "2026-07-29T00:02:00.000Z",
+    ),
+    false,
+  );
+  store.addEvent(task.id, "attempt-1", "worker.completed", "completed here");
+  assert.equal(
+    recordWorkerConnectionEvidenceFromCompletedEvent(
+      store, task, "attempt-1", "succeeded", "2026-07-29T00:03:00.000Z",
+    ),
+    true,
+  );
+  const evidence = store.getProbeEvidence("xai");
+  assert.equal(evidence?.source, "worker-run");
+  assert.equal(evidence?.model, "grok-4.5");
+  assert.equal(evidence?.endpointOrigin, "https://api.x.ai");
+  assert.equal(evidence?.timestamp, "2026-07-29T00:03:00.000Z");
+  assert.equal(
+    recordWorkerConnectionEvidenceFromCompletedEvent(
+      store, task, "attempt-1", "failed", "2026-07-29T00:04:00.000Z",
+    ),
+    false,
+  );
+  assert.equal(store.getProbeEvidence("xai")?.timestamp, "2026-07-29T00:03:00.000Z");
+  store.close();
 });
 
 test("seedGrokHomeAuth copies operator OAuth files into task-local home", async () => {

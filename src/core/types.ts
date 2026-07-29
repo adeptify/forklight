@@ -979,7 +979,7 @@ export interface ActivationHandoff {
 
 // --- Provider probe ---
 
-export type ProbeResultStatus = "verified" | "failed";
+export type ProbeResultStatus = "unverified" | "verified" | "failed";
 
 export type ProbeFailureCategory = "authentication" | "timeout" | "connectivity" | "unknown";
 
@@ -994,6 +994,8 @@ export interface ProbeEvidence {
   timestamp: string;
   failureCategory?: ProbeFailureCategory;
   failureSummary?: string;
+  /** Evidence origin. "worker-run" supersedes "explicit-probe" for the same Provider. */
+  source?: "explicit-probe" | "worker-run";
 }
 
 export interface ProviderStatus {

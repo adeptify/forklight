@@ -28,7 +28,7 @@ M1 closes only after all three gates pass:
 
 | Journey step | Current evidence | Disposition |
 | --- | --- | --- |
-| Install package and open one Hub | Frozen tarball `5c0609a…e9d5`, full prepack check, isolated-prefix install, CLI load, exact installed build-identity match, package/build tests, and real one-owner Hub handoffs | Exact clean-run input is ready; new-user timing and Hub journey remain |
+| Install package and open one Hub | A frozen external `bundle-evidence.json` names the exact tarball and SHA, with full prepack, isolated-prefix install, CLI/MCP load, exact installed build-identity match, sensitive-filename scan, and real one-owner Hub handoffs | Latest exact artifact evidence is recorded outside the self-referential package docs; new-user timing and Hub journey remain |
 | Detect prerequisites | SetupService and Hub status tests | Implemented |
 | Save a Provider key | Hub Keychain route, rollback tests, exact discarded-output launch read, content-free argv, future-readable Keychain ACL, and a controlled Daemon restart reading all three existing items | Current-machine persistence verified; clean-user entry and prompt comprehension remain |
 | Create a saved Worker and preview effective policy | Hub form, canonical Worker Profile, readiness and admission preview tests | Implemented |

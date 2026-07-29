@@ -128,7 +128,14 @@ test("a published authenticated Hub is reused with the same URL", async () => {
     close = live.close;
     publishHubInstance(home, claim, live.port, token, TEST_BUILD);
 
-    const second = await discoverOrClaimHub(home, options({ runIdentity: TEST_BUILD }));
+    // The full suite runs many daemon/Hub fixtures in parallel. Give this
+    // already-listening local server enough scheduling headroom so host load is
+    // not misclassified as an authenticated Hub that cannot be reused.
+    const second = await discoverOrClaimHub(home, options({
+      runIdentity: TEST_BUILD,
+      waitTimeoutMs: 1_000,
+      probeTimeoutMs: 500,
+    }));
     assert.equal(second.kind, "reuse");
     assert.equal(second.port, live.port);
     assert.equal(second.url, `http://127.0.0.1:${live.port}/#${token}`);

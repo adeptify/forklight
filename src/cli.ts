@@ -43,9 +43,10 @@ import type { IntegrationOperationView } from "./core/types.js";
 import {
   buildTaskAdmissionPreview,
   formatTaskAdmissionPreviewHuman,
+  taskPolicyFromSettings,
 } from "./core/task-preview.js";
 import { createKeychainStore } from "./core/secrets.js";
-import { SettingsService, type TaskPolicy } from "./core/settings.js";
+import { SettingsService } from "./core/settings.js";
 import {
   daemonRequest,
   ensureDaemon,
@@ -1017,13 +1018,7 @@ async function main(): Promise<void> {
     const store = new StateStore(forklightHome());
     try {
       const settings = new SettingsService(store).get();
-      const policy: TaskPolicy = {
-        contractQuality: settings.contractQuality,
-        execution: settings.execution,
-        providerDefaults: settings.providerDefaults,
-        completionPolicy: settings.completionPolicy,
-        deliveryProfiles: settings.deliveryProfiles,
-      };
+      const policy = taskPolicyFromSettings(settings);
       const report = await loadWorkPlan(required(positional, "plan file"), policy);
       if (json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       else {
@@ -1948,13 +1943,7 @@ async function main(): Promise<void> {
   try {
     if (command === "run") {
       const settings = new SettingsService(store).get();
-      const policy: TaskPolicy = {
-        contractQuality: settings.contractQuality,
-        execution: settings.execution,
-        providerDefaults: settings.providerDefaults,
-        completionPolicy: settings.completionPolicy,
-        deliveryProfiles: settings.deliveryProfiles,
-      };
+      const policy = taskPolicyFromSettings(settings);
       const result = await runNewTask(
         store,
         required(positional, "task file"),

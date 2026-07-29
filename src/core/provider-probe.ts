@@ -8,6 +8,7 @@ import type { ProviderHealthStatus, ProviderStatus } from "./types.js";
 import type { StateStore } from "../state/store.js";
 import type { SettingsService, ProbeSettings } from "./settings.js";
 import {
+  hasLocalGrokSignIn,
   providerNames,
   resolveProvider,
   providerEnvironment,
@@ -257,9 +258,30 @@ export function deriveProviderHealthStatus(
   if (evidence.model !== currentModel || evidence.endpointOrigin !== currentEndpointOrigin) {
     return "unverified";
   }
+  if (evidence.status === "unverified") return "unverified";
   if (evidence.status === "failed") return "failed";
   const ageMs = now - new Date(evidence.timestamp).getTime();
   return ageMs > cacheLifetimeMs ? "stale" : "verified";
+}
+
+/** Normalize a derived Provider health status for providers that offer
+ *  non-Keychain authentication.  An old explicit-probe failure is not a
+ *  real connectivity failure when local sign-in provides a viable launch
+ *  path.  Both ProviderProbeService and CLI health projections must share
+ *  this function so the decision has exactly one meaning. */
+export function normalizeProbeStatusWithLocalSignIn(
+  derivedStatus: ProviderHealthStatus,
+  evidence: Pick<ProbeEvidence, "source"> | undefined,
+  localSignInReady: boolean,
+): ProviderHealthStatus {
+  if (
+    derivedStatus === "failed"
+    && evidence?.source !== "worker-run"
+    && localSignInReady
+  ) {
+    return "unverified";
+  }
+  return derivedStatus;
 }
 
 // --- Core service ---
@@ -272,6 +294,7 @@ export class ProviderProbeService {
     private readonly keychainExists: KeychainChecker,
     private readonly readKeychain: KeychainReader,
     private readonly now: Clock,
+    private readonly grokSignInReady: () => boolean = hasLocalGrokSignIn,
   ) {}
 
   /** Return a frozen snapshot of the probe policy from current settings. */
@@ -287,19 +310,44 @@ export class ProviderProbeService {
     // xAI is for Grok Build only — keychain existence, never Claude/Anthropic probe.
     if (name === "xai") {
       const keyOk = this.keychainExists(config.keychainService);
+      const localSignInReady = this.grokSignInReady();
+
+      // ForkLight does not perform a real Grok network request in this probe.
+      // Either supported authentication path therefore proves launchability,
+      // not remote connectivity. Preserve matching real Worker evidence;
+      // otherwise return an ephemeral unverified result without overwriting it.
+      if (keyOk || localSignInReady) {
+        const existing = this.store.getProbeEvidence(name);
+        const currentOrigin = endpointOrigin(config.endpoint);
+        if (
+          existing?.source === "worker-run"
+          && existing.model === config.model
+          && existing.endpointOrigin === currentOrigin
+        ) {
+          return existing;
+        }
+        return {
+          provider: name,
+          model: config.model,
+          endpointOrigin: currentOrigin,
+          status: "unverified",
+          latencyMs: 0,
+          timestamp: new Date(this.now()).toISOString(),
+          source: "explicit-probe",
+        };
+      }
+
+      // Neither Keychain nor local sign-in: persist authentication failure.
       const evidence: ProbeEvidence = {
         provider: name,
         model: config.model,
         endpointOrigin: endpointOrigin(config.endpoint),
-        status: keyOk ? "verified" : "failed",
+        status: "failed",
         latencyMs: 0,
         timestamp: new Date(this.now()).toISOString(),
-        ...(keyOk
-          ? {}
-          : {
-              failureCategory: "authentication" as const,
-              failureSummary: "xAI keychain entry missing (used with runtime grok-build)",
-            }),
+        failureCategory: "authentication",
+        failureSummary: "xAI keychain entry missing (used with runtime grok-build)",
+        source: "explicit-probe",
       };
       this.store.saveProbeEvidence(evidence);
       return evidence;
@@ -317,6 +365,7 @@ export class ProviderProbeService {
       status: outcome.ok ? "verified" : "failed",
       latencyMs: outcome.latencyMs,
       timestamp: new Date(this.now()).toISOString(),
+      source: "explicit-probe",
       ...(outcome.category === undefined ? {} : { failureCategory: outcome.category }),
       ...(outcome.summary === undefined ? {} : { failureSummary: outcome.summary }),
     };
@@ -332,15 +381,26 @@ export class ProviderProbeService {
     const keychainOk = this.keychainExists(config.keychainService);
     const evidence = this.store.getProbeEvidence(name);
 
+    // Authentication readiness: Keychain, or for xAI the supported
+    // local-sign-in path.  Both are launch readiness, not remote verification.
+    const localSignInReady = name === "xai" && this.grokSignInReady();
+    const authReady = keychainOk || localSignInReady;
+
     const policy = this.probePolicy();
-    const status = deriveProviderHealthStatus(
-      keychainOk,
+    const derivedStatus = deriveProviderHealthStatus(
+      authReady,
       evidence ?? null,
       config.model,
       endpointOrigin(config.endpoint),
       policy.cacheLifetimeMs,
       this.now(),
     );
+
+    // Shared normalization: an old explicit-probe failure for xAI is not a
+    // real connectivity failure when local sign-in provides a viable path.
+    const status = name === "xai"
+      ? normalizeProbeStatusWithLocalSignIn(derivedStatus, evidence, localSignInReady)
+      : derivedStatus;
 
     return {
       provider: name,

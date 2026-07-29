@@ -49,6 +49,7 @@ import type { WorkerExecutionResult } from "../workers/types.js";
 import {
   providerLabel,
   providerLaunchAuthentication,
+  resolveProvider,
   type ProviderAuthInspector,
 } from "./providers.js";
 
@@ -64,6 +65,51 @@ export class TaskLaunchAuthenticationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "TaskLaunchAuthenticationError";
+  }
+}
+
+/** Persist remote connection evidence only when the selected adapter returned
+ * success and the same Attempt emitted the canonical terminal event. This is
+ * intentionally independent from later code-quality verification. */
+export function recordWorkerConnectionEvidenceFromCompletedEvent(
+  store: StateStore,
+  task: TaskRecord,
+  attemptId: string,
+  workerStatus: WorkerExecutionResult["status"],
+  observedAt: string,
+  providerDefaults?: ProviderDefaultsSettings,
+): boolean {
+  if (workerStatus !== "succeeded") return false;
+  const completed = store.listEvents(task.id).some(
+    (event) => event.type === "worker.completed" && event.attemptId === attemptId,
+  );
+  if (!completed) return false;
+
+  try {
+    const providerParams: { model: string; endpoint?: string } = {
+      model: task.spec.provider.model,
+    };
+    if (task.spec.provider.endpoint !== undefined) {
+      providerParams.endpoint = task.spec.provider.endpoint;
+    }
+    const resolved = resolveProvider(
+      task.spec.provider.name,
+      providerParams,
+      providerDefaults?.[task.spec.provider.name],
+    );
+    store.saveProbeEvidence({
+      provider: task.spec.provider.name,
+      model: resolved.model,
+      endpointOrigin: new URL(resolved.endpoint).origin,
+      status: "verified",
+      latencyMs: 0,
+      timestamp: observedAt,
+      source: "worker-run",
+    });
+    return true;
+  } catch {
+    // Readiness evidence must never change the Task outcome.
+    return false;
   }
 }
 
@@ -565,6 +611,23 @@ export async function executeAttempt(
     store.addEvent(task.id, attemptId, "worker.failed", worker.error ?? "Worker execution failed");
     return { task: store.getTask(task.id), attempt: store.getAttempt(attemptId) };
   }
+
+  // Genuine Worker connection succeeded — record verified evidence for the
+  // exact Provider, model, and endpoint origin.  This evidence supersedes
+  // any older explicit-probe failure and never exposes prompts, output,
+  // credentials, or paths.
+  //
+  // Requires both adapter status "succeeded" AND a canonical worker.completed
+  // event for this Attempt so launch failure, interruption, and absence of a
+  // terminal response never fabricate connection evidence.
+  recordWorkerConnectionEvidenceFromCompletedEvent(
+    store,
+    task,
+    attempt.id,
+    worker.status,
+    workerFinishedAt,
+    providerDefaults,
+  );
 
   // Post-observation Token enforcement from the immutable Task snapshot.
   const snap = task.effectivePolicy;

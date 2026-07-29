@@ -189,3 +189,61 @@ test("readiness output is bounded and omits credentials, endpoints, paths, and d
     assert.equal(serialized.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
   }
 });
+
+// --- Worker-run evidence supersedes probe failure ---
+
+test("worker-run verified evidence supersedes old explicit-probe failure for Grok Worker", () => {
+  const result = resolveWorkerReadiness(input({
+    providers: providerEvidence({
+      xai: { ready: true, authMode: "local-sign-in" },
+    }),
+    providerVerification: { xai: { status: "verified" } },
+  }));
+  const grok = result.find((r) => r.workerId === "grok-worker")!;
+  assert.equal(grok.state, "ready");
+  assert.equal(grok.canLaunch, true);
+  assert.equal(grok.reason, "ready");
+  assert.equal(grok.checks.connection, "verified");
+});
+
+test("Grok Worker with local-sign-in and no evidence is launchable, not failed", () => {
+  const result = resolveWorkerReadiness(input({
+    providers: providerEvidence({
+      xai: { ready: true, authMode: "local-sign-in" },
+    }),
+    providerVerification: { xai: { status: "unverified" } },
+  }));
+  const grok = result.find((r) => r.workerId === "grok-worker")!;
+  assert.equal(grok.state, "launchable");
+  assert.equal(grok.canLaunch, true);
+  assert.equal(grok.reason, "connection-unverified");
+  assert.equal(grok.checks.authentication, "local-sign-in");
+});
+
+test("Grok Worker with local-sign-in and old failed evidence is launchable when evidence treated as unverified", () => {
+  // When the old probe-only failure is correctly classified as unverified
+  // (because local-sign-in exists), the Worker should be launchable.
+  const result = resolveWorkerReadiness(input({
+    providers: providerEvidence({
+      xai: { ready: true, authMode: "local-sign-in" },
+    }),
+    providerVerification: { xai: { status: "unverified" } },
+  }));
+  const grok = result.find((r) => r.workerId === "grok-worker")!;
+  assert.equal(grok.state, "launchable");
+  assert.equal(grok.canLaunch, true);
+  assert.equal(grok.reason, "connection-unverified");
+});
+
+test("Worker with failed connection evidence stays needs-attention for non-xAI providers", () => {
+  const providers = providerEvidence({
+    deepseek: { ready: true, authMode: "api-key" },
+  });
+  const [result] = resolveWorkerReadiness(input({
+    providers,
+    providerVerification: { deepseek: { status: "failed" } },
+  }));
+  assert.equal(result!.state, "needs-attention");
+  assert.equal(result!.reason, "connection-failed");
+  assert.equal(result!.canLaunch, true);
+});
