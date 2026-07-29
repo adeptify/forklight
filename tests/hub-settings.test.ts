@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { get, request } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SettingsService } from "../src/core/settings.js";
+import {
+  providerNames,
+  type ProviderName,
+  type ProviderReadiness,
+} from "../src/core/providers.js";
 import { buildHubSettingsPatch, viewHubSettings } from "../src/hub/settings-api.js";
 import { HubServer } from "../src/hub/server.js";
 import { SetupService } from "../src/setup/service.js";
 import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
 import { StateStore } from "../src/state/store.js";
+import { currentBuildIdentity } from "../src/core/build-identity.js";
 
 class MemoryKeychain implements SetupKeychainStore {
   readonly values = new Map<string, string>();
@@ -94,6 +101,22 @@ async function makeHub() {
     keychain,
     staticRoot: staticDir,
     account: () => "hub-test-user",
+    inspectProviderReadiness: () => {
+      const effective = settings.get();
+      const providers = Object.fromEntries(providerNames().map((name) => {
+        const defaults = effective.providerDefaults[name];
+        const ready = name === "deepseek" || name === "xai";
+        return [name, {
+          ready,
+          authMode: name === "xai" ? "local-sign-in" : ready ? "api-key" : "none",
+          endpoint: defaults.defaultEndpoint,
+          defaultModel: defaults.defaultModel,
+          keychainService: defaults.defaultKeychainService,
+          ...(ready ? {} : { error: "Local authentication not found" }),
+        } satisfies ProviderReadiness];
+      })) as Record<ProviderName, ProviderReadiness>;
+      return { anyReady: true, providers };
+    },
     port: 0,
     ensureDaemon: async () => {
       ensureCount += 1;
@@ -136,6 +159,7 @@ async function makeHub() {
     getDaemonRunning: () => daemonRunning,
     setDaemonRunning: (v: boolean) => { daemonRunning = v; },
     getEnsureCount: () => ensureCount,
+    setHealth: (next: Record<string, unknown>) => { health = next; },
     cleanup: async () => {
       await server.stop();
       store.close();
@@ -179,6 +203,82 @@ test("viewModelRoutingSettings projects modelRouting policy fields only", async 
     assert.equal(view.weights.budgetReliability, 0);
   } finally {
     store.close();
+  }
+});
+
+test("Hub status returns one privacy-safe readiness result per saved Worker", async () => {
+  const ctx = await makeHub();
+  try {
+    const status = await doHttp(
+      `http://127.0.0.1:${ctx.port}/api/status`,
+      "GET",
+      ctx.token,
+    );
+    assert.equal(status.status, 200);
+    const body = status.body as {
+      workerProfiles: { profiles: Array<{ id: string }> };
+      workerReadiness: Array<Record<string, unknown>>;
+      providers: Array<{ name: string; configured: boolean; authMode: string }>;
+    };
+    assert.equal(body.workerReadiness.length, body.workerProfiles.profiles.length);
+    const defaultReadiness = body.workerReadiness.find((row) => row.workerId === "default");
+    assert.ok(defaultReadiness);
+    assert.equal(defaultReadiness.canLaunch, true);
+    assert.equal(defaultReadiness.state, "launchable");
+    assert.equal(defaultReadiness.reason, "connection-unverified");
+    const xai = body.providers.find((provider) => provider.name === "xai");
+    assert.equal(xai?.configured, true);
+    assert.equal(xai?.authMode, "local-sign-in");
+
+    const serialized = JSON.stringify(body.workerReadiness);
+    for (const forbidden of [
+      "keychainService", "endpoint", "auth.json", "/Users/", "token", "secret", "issues",
+    ]) {
+      assert.equal(serialized.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("Hub status prefers exact-build Daemon launch truth over contradictory local inspection", async () => {
+  const ctx = await makeHub();
+  try {
+    const effective = ctx.settings.get();
+    const daemonProviders = Object.fromEntries(providerNames().map((name) => {
+      const ready = name === "deepseek" || name === "minimax" || name === "volcengine" || name === "xai";
+      return [name, {
+        ready,
+        authMode: name === "xai" && ready ? "local-sign-in" : ready ? "api-key" : "none",
+        endpoint: effective.providerDefaults[name].defaultEndpoint,
+        defaultModel: effective.providerDefaults[name].defaultModel,
+        keychainService: effective.providerDefaults[name].defaultKeychainService,
+        ...(ready ? {} : { error: "Local authentication not found" }),
+      }];
+    }));
+    ctx.setHealth({
+      ok: true,
+      pid: 4242,
+      buildIdentity: currentBuildIdentity(),
+      providers: daemonProviders,
+    });
+
+    const status = await doHttp(
+      `http://127.0.0.1:${ctx.port}/api/status`,
+      "GET",
+      ctx.token,
+    );
+    assert.equal(status.status, 200);
+    const body = status.body as {
+      providerReadinessSource: string;
+      providers: Array<{ name: string; configured: boolean; authMode: string }>;
+      workerReadiness: Array<{ workerId: string; canLaunch: boolean }>;
+    };
+    assert.equal(body.providerReadinessSource, "daemon");
+    assert.equal(body.providers.find((provider) => provider.name === "minimax")?.configured, true);
+    assert.equal(body.workerReadiness.find((worker) => worker.workerId === "volcengine-glm52-1m")?.canLaunch, true);
+  } finally {
+    await ctx.cleanup();
   }
 });
 
@@ -1405,4 +1505,153 @@ test("Hub /api/ops/tasks with daemon bridge returns console-shaped task list", a
     await server.stop();
     store.close();
   }
+});
+
+function revisionDigest(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function retainedCandidateJourney(options: {
+  taskId: string;
+  recordedDiff: string;
+  currentDiff?: string;
+  affectedPaths?: string[];
+  verificationPassed?: boolean;
+  taskStatus?: string;
+  decision?: Record<string, unknown>;
+  malformedPayload?: Record<string, unknown>;
+}) {
+  const { buildSafeTaskJourney } = await import("../src/hub/server.js");
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-retained-"));
+  const diffPath = path.join(home, "result.diff");
+  await writeFile(diffPath, options.currentDiff ?? options.recordedDiff, "utf8");
+  const affectedPaths = options.affectedPaths ?? ["src/feature.ts"];
+  const payload = options.malformedPayload ?? {
+    id: "revision-1",
+    taskId: options.taskId,
+    attemptId: "attempt-1",
+    attemptOrdinal: 2,
+    verificationEventSequence: 7,
+    patchDigest: revisionDigest(options.recordedDiff),
+    affectedPaths,
+    filesChanged: affectedPaths.length,
+    changedLines: 42,
+    verificationPassed: options.verificationPassed ?? true,
+    createdAt: "2026-07-28T00:00:00.000Z",
+    privateArtifactPath: "/private/revisions/revision-1.patch",
+  };
+  return buildSafeTaskJourney({
+    id: options.taskId,
+    name: "Retained Candidate fixture",
+    status: options.taskStatus ?? "succeeded",
+    paths: { diff: diffPath },
+    spec: {
+      version: 1,
+      provider: { name: "deepseek", model: "deepseek-v4-pro[1M]" },
+      runtime: { name: "claude-code" },
+      goal: "Exercise retained Candidate evidence",
+      acceptance: { commands: ["npm test"] },
+    },
+  }, options.decision ?? {}, {
+    events: [{
+      type: "candidate.revision.captured",
+      sequence: 8,
+      timestamp: "2026-07-28T00:00:01.000Z",
+      summary: "Candidate captured",
+      attemptId: "attempt-1",
+      payload,
+    }],
+    attempts: [{ id: "attempt-1", ordinal: 2, status: "succeeded" }],
+    diff: options.currentDiff ?? options.recordedDiff,
+  });
+}
+
+test("retained Candidate projection proves a matching revision and caps safe paths", async () => {
+  const paths = Array.from({ length: 45 }, (_, index) => `src/file-${index + 1}.ts`);
+  const diff = "diff --git a/src/feature.ts b/src/feature.ts\n+retained\n";
+  const journey = await retainedCandidateJourney({
+    taskId: "retained-main-revise",
+    recordedDiff: diff,
+    affectedPaths: paths,
+    decision: {
+      mainReview: { decision: "revise", reason: "Tighten the copy" },
+      verification: { passed: true, commands: [{ command: "npm test", exitCode: 0 }] },
+    },
+  });
+
+  assert.equal(journey.retainedCandidate.status, "available");
+  if (journey.retainedCandidate.status !== "available") return;
+  assert.equal(journey.retainedCandidate.attemptOrdinal, 2);
+  assert.equal(journey.retainedCandidate.verificationPassed, true);
+  assert.equal(journey.retainedCandidate.affectedPathCount, 45);
+  assert.equal(journey.retainedCandidate.affectedPaths.length, 40);
+  assert.equal(journey.finalDelivery.mainReview?.decision, "revise");
+  const safeJson = JSON.stringify(journey);
+  assert.ok(!safeJson.includes(revisionDigest(diff)), "full digest stays private");
+  assert.ok(!safeJson.includes("privateArtifactPath"), "private artifact key stays private");
+  assert.ok(!safeJson.includes("/private/revisions"), "private artifact path stays private");
+  assert.ok(!safeJson.includes("+retained"), "raw Diff content stays private");
+});
+
+test("retained Candidate projection fails closed for stale or malformed evidence", async () => {
+  const stale = await retainedCandidateJourney({
+    taskId: "retained-stale",
+    recordedDiff: "recorded candidate",
+    currentDiff: "changed after capture",
+  });
+  assert.deepEqual(stale.retainedCandidate, { status: "evidence-unavailable" });
+
+  const malformed = await retainedCandidateJourney({
+    taskId: "retained-malformed",
+    recordedDiff: "same bytes",
+    malformedPayload: {
+      id: "revision-unsafe",
+      taskId: "retained-malformed",
+      attemptId: "attempt-1",
+      attemptOrdinal: 2,
+      verificationEventSequence: 7,
+      patchDigest: revisionDigest("same bytes"),
+      affectedPaths: ["../secret"],
+      filesChanged: 1,
+      changedLines: 1,
+      verificationPassed: true,
+      createdAt: "2026-07-28T00:00:00.000Z",
+    },
+  });
+  assert.deepEqual(malformed.retainedCandidate, { status: "evidence-unavailable" });
+});
+
+test("retained Candidate stays separate from a later Main-repaired delivery", async () => {
+  const journey = await retainedCandidateJourney({
+    taskId: "retained-main-repair",
+    recordedDiff: "original Worker candidate",
+    verificationPassed: false,
+    taskStatus: "failed",
+    decision: {
+      remediationDisposition: { status: "verified-repaired-delivered" },
+      verification: { passed: false, commands: [{ command: "npm test", exitCode: 1 }] },
+    },
+  });
+  assert.equal(journey.retainedCandidate.status, "available");
+  if (journey.retainedCandidate.status !== "available") return;
+  assert.equal(journey.retainedCandidate.verificationPassed, false);
+  assert.equal(journey.finalDelivery.remediationDisposition?.status, "verified-repaired-delivered");
+  assert.equal(journey.cause.what, "failed", "original machine failure remains visible");
+  assert.equal(journey.nextAction.label, "done");
+});
+
+test("legacy Task reports unavailable retained evidence without denying historical work", async () => {
+  const { buildSafeTaskJourney } = await import("../src/hub/server.js");
+  const journey = buildSafeTaskJourney({
+    id: "retained-legacy",
+    status: "failed",
+    spec: {
+      version: 1,
+      provider: { name: "minimax", model: "MiniMax-M3" },
+      runtime: { name: "claude-code" },
+      goal: "Legacy task",
+      acceptance: { commands: ["npm test"] },
+    },
+  }, {}, { events: [], attempts: [], diff: "historical observation" });
+  assert.deepEqual(journey.retainedCandidate, { status: "evidence-unavailable" });
 });

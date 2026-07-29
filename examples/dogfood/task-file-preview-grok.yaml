@@ -1,0 +1,155 @@
+version: 2
+name: Preview the exact saved Worker before Task submission
+project: ../..
+taskClass: forklight-task-file-admission-preview
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    A Main or Hub can validate a Task Contract file without creating a Task and
+    receive one safe preview of the exact saved Worker, model, runtime, and
+    effective execution policy that the daemon would use if the file were
+    submitted. The CLI validate command uses the same saved Worker Profiles and
+    model catalog instead of silently falling back to built-in defaults.
+  presentation:
+    summary: 提交任务前先确认真正会用哪个 Worker、模型、运行环境和限制；预览不会创建或启动任务。
+    language: zh-CN
+  context:
+    - The daemon submit_file path already loads Task files with the complete current taskPolicy, including saved workerProfiles and modelCatalog, and then snapshots the effective advanced policy.
+    - The CLI validate path currently omits workerProfiles and modelCatalog, so a custom workerProfileId can be rejected or resolved differently from real submission.
+    - The Hub currently submits an absolute Task file directly after confirmation. A later bounded UI task will consume this preview; this task should provide the single daemon authority first rather than duplicate admission logic in the Hub.
+    - The preview is an explanation and validation step, not submission authority. It must not register, queue, prepare, verify, integrate, probe a Provider, or call a Worker.
+  inScope:
+    - Add one shared safe Task-file admission preview that starts from the same complete ForkLightSettings snapshot used by submit_file, loads and validates the Task Contract once, resolves the exact saved Worker and model, derives the effective advanced policy using the selected runtime capabilities, and assesses existing contract quality and Integration feasibility.
+    - >-
+      Return only bounded user-relevant facts: Task name, selected Worker Profile
+      ID and display label when available, Provider, model, runtime, effort,
+      budget behavior, effective advanced-policy values and provenance, quality
+      pass/score, Integration applicability, and a content-free contract
+      revision digest suitable for a later stale-preview check.
+    - Exclude endpoint, Keychain service, credentials, OAuth material, absolute project/task paths, raw Task Contract text, prompts, acceptance commands, runtime commands, Provider responses, doctor diagnostics, and private settings fields from the daemon preview.
+    - Add a read-only daemon method named validate_file. It accepts one absolute Task Contract file path, uses current saved settings, returns the safe preview, and never mutates Tasks, events, workspaces, queues, plans, competitions, settings, or Provider verification.
+    - Make CLI `forklight validate <file> [--json]` use the same shared preview and complete saved taskPolicy. Preserve the existing quality and Integration explanation while adding the exact effective Worker/model/runtime/policy facts.
+    - Add deterministic tests proving custom Profile resolution, invalid Profile rejection, privacy, read-only behavior, effective-policy provenance, and CLI/daemon agreement.
+  outOfScope:
+    - Hub UI changes, changing the submit_file confirmation contract, binding submission to the preview digest, Task creation, Worker execution, Provider probe, routing, competition, retry, correction, adaptation, Integration behavior changes, commit, or push.
+    - Guessing a Worker from runtime/model, returning built-in defaults when a named saved Profile is missing, exposing raw errors to the Hub, or claiming the Provider connection has succeeded.
+    - Redesigning Task Contract authoring, Task Detail, Board layout, settings pages, or Worker readiness.
+  executionSteps:
+    - Trace CLI validate, daemon submit_file, taskPolicy, effective-policy resolution, quality reporting, and Integration feasibility before editing.
+    - Implement one canonical preview builder or service and reuse it from both CLI validation and the new daemon read-only method; do not copy a second resolution path.
+    - Register validate_file as read-only and prove it performs no Task registration, queueing, workspace preparation, Worker call, Provider call, or setting mutation.
+    - Add focused custom-Profile and privacy tests, then run the existing full acceptance once. Report unrelated failures without widening scope or starting a retry loop.
+  deliverables:
+    - Canonical safe admission-preview result derived from real saved settings.
+    - Read-only daemon validate_file operation.
+    - CLI validate output that agrees with real submission Profile resolution.
+    - Deterministic regressions for truth, privacy, and zero mutation.
+  modules:
+    - name: Task admission preview
+      responsibility: Resolve and explain the exact Task selection and effective policy from one immutable current settings snapshot without creating work.
+      consumes:
+        - Absolute Task Contract file path, current ForkLightSettings, Worker Profiles, model catalog, runtime capabilities, quality policy, and Integration settings.
+      produces:
+        - Bounded safe selection, effective-policy/provenance, quality and Integration summary, plus a content-free contract digest.
+      boundaries:
+        - No endpoint, credential reference, path, raw contract, command, Task mutation, queue, workspace, Provider request, or Worker process.
+    - name: Read-only daemon admission API
+      responsibility: Make the canonical preview available to Main and Hub under the daemon's current saved settings.
+      consumes:
+        - validate_file with one absolute file path.
+      produces:
+        - The canonical safe preview or a bounded validation rejection.
+      boundaries:
+        - Registered as read-only; no submit_file delegation and no mutation before or after failure.
+    - name: CLI validation presentation
+      responsibility: Show the user the same Worker and policy that real submission would use while preserving existing quality and Integration feedback.
+      consumes:
+        - Canonical preview and --json choice.
+      produces:
+        - Human-readable lines or safe JSON with exact effective selection.
+      boundaries:
+        - No daemon submission, no secrets, no raw Task content, and no independent fallback policy.
+  callChain:
+    - Main, CLI, or a future Hub supplies an absolute Task Contract file path for validation.
+    - The canonical preview loads the file with the complete current taskPolicy, including saved Worker Profiles and model catalog.
+    - The selected runtime capabilities and saved Worker policy resolve one immutable effective-policy preview; quality and Integration assessments run without Task creation.
+    - Daemon validate_file or CLI validate returns the same bounded facts and exits without registering or executing anything.
+    - A later separately authorized submit_file call remains the only path that can create and queue the Task.
+  scenarios:
+    - name: Custom Grok Profile resolves exactly
+      given: A Task file specifies local-grok-builder and current settings map it to xAI grok-4.5 through grok-build with profile-specific advanced values.
+      when: CLI validate and daemon validate_file preview it.
+      then: Both show the same saved Profile, Provider, model, runtime, budget behavior, and effective-policy provenance; neither creates a Task or starts a Worker.
+    - name: Missing named Profile fails closed
+      given: A Task file names a Worker Profile absent from current settings.
+      when: It is previewed.
+      then: Validation rejects it before any durable mutation and does not fall back to the default Worker or built-in catalog.
+    - name: Preview stays private
+      given: The Task and settings contain endpoint, Keychain, project path, acceptance commands, and internal advanced-policy data.
+      when: The safe preview is serialized.
+      then: It contains only the allowed selection and policy summary, with no endpoint, secret reference, absolute path, raw command, prompt, or Task text.
+    - name: Settings determine future Tasks only
+      given: A saved Worker Profile is changed after one preview.
+      when: The same file is previewed again before submission.
+      then: The second preview reflects the new current settings and has a new content-free revision identity where applicable; no already-created Task is changed because preview creates none.
+  risks:
+    - A second policy resolver could drift from submit_file, so both preview and submission must share the existing complete taskPolicy and effective-policy derivation seams.
+    - Returning the parsed Task or settings object would leak paths and commands, so the preview type must be an explicit allowlist rather than object spreading.
+    - Marking validate_file mutating would unnecessarily block old clients; marking a mutating implementation read-only would be unsafe, so tests must prove zero durable and filesystem mutation.
+    - A digest can be mistaken for submission binding; copy and types must call it preview revision evidence only until a later task explicitly binds submit_file to it.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 1000
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-preview.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - tests/task-preview.test.ts
+    - tests/daemon.test.ts
+    - tests/cli-task-preview.test.ts
+acceptance:
+  criteria:
+    - CLI validate and daemon validate_file resolve a named custom Worker using the actual saved Worker Profiles/model catalog and agree on effective Provider, model, runtime, budget, and policy provenance.
+    - validate_file is read-only and creates no Task, event, workspace, queue entry, Provider request, or Worker process on success or rejection.
+    - The preview is an explicit safe allowlist and exposes no endpoint, Keychain service, credential/OAuth fact, absolute path, raw contract/prompt/command, Provider response, or private settings object.
+    - Missing or invalid named Profiles fail closed without falling back; changing current settings affects a later preview but cannot mutate historical Tasks.
+    - Focused behavior, full tests, strict TypeScript, Hub JavaScript syntax, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-preview.test.ts tests/cli-task-preview.test.ts tests/daemon.test.ts tests/worker-profiles.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

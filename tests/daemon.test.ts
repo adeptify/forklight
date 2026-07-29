@@ -17,21 +17,19 @@ import {
   daemonLaunchArguments,
   daemonRequest,
   daemonRequestTimeoutMs,
-  ensureDaemon,
-  restartDaemon,
   routeMutation,
-  startDaemonProcess,
   stopDaemon,
   stopDaemonForHandoff,
 } from "../src/daemon/client.js";
 import { requiresMatchingBuildIdentity } from "../src/daemon/protocol.js";
 import { daemonSocketPath } from "../src/core/config.js";
+import { DetachedDaemonFixture } from "./helpers/detached-daemon.js";
 import { DaemonCoordinator, probeProvidersBounded } from "../src/daemon/coordinator.js";
 import { assertWorkPlan } from "../src/core/plan.js";
 import { buildTaskRecord, checkReviseEligibility, executeAttempt, prepareTaskWorkspace, registerTaskFromSpec } from "../src/core/runner.js";
 import { parseTaskSpec } from "../src/core/task.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
-import { SettingsService } from "../src/core/settings.js";
+import { SettingsService, type ForkLightSettings } from "../src/core/settings.js";
 import { StateStore } from "../src/state/store.js";
 import {
   PROTOCOL_VERSION,
@@ -44,6 +42,13 @@ import {
 } from "../src/core/attempt-authorization.js";
 import { isWorkspaceReady } from "../src/workspace/copy.js";
 import { captureCandidateRevision } from "../src/core/candidate-revision.js";
+import { upsertModelConfig } from "../src/core/model-catalog.js";
+import { upsertWorkerProfile } from "../src/core/worker-profiles.js";
+import {
+  buildTaskAdmissionPreview,
+  type SafeTaskAdmissionPreview,
+} from "../src/core/task-preview.js";
+import type { ProviderAuthInspector } from "../src/core/providers.js";
 
 // File-scope no-op SIGTERM handler: the coordinator's
 // authorizeActivationHandoffShutdown sends SIGTERM to its own pid,
@@ -60,6 +65,9 @@ test("identity matching protects state changes but lets a new build stop an old 
   assert.equal(requiresMatchingBuildIdentity("integration_apply"), true);
   assert.equal(requiresMatchingBuildIdentity("shutdown"), false);
   assert.equal(requiresMatchingBuildIdentity("health"), false);
+  // Task-file admission preview is read-only; submit is mutating.
+  assert.equal(requiresMatchingBuildIdentity("validate_file"), false);
+  assert.equal(requiresMatchingBuildIdentity("submit_file"), true);
   // Adaptation preview is read-only; apply is mutating.
   assert.equal(requiresMatchingBuildIdentity("adaptation_preview"), false);
   assert.equal(requiresMatchingBuildIdentity("adaptation_apply"), true);
@@ -168,8 +176,13 @@ function seedPassingVerification(
 
 function testCoordinator(store: StateStore, maxConcurrency: number): DaemonCoordinator {
   const settings = new SettingsService(store);
-  return new DaemonCoordinator(store, settings, maxConcurrency);
+  return new DaemonCoordinator(store, settings, maxConcurrency, TEST_PROVIDER_AUTH_READY);
 }
+
+const TEST_PROVIDER_AUTH_READY: ProviderAuthInspector = {
+  hasReadableKeychainValue: () => true,
+  hasLocalGrokSignIn: () => true,
+};
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -360,7 +373,7 @@ test("daemon exposes checkpoint_run with bounded command-id input", async () => 
 
 test("daemon submission returns a task before workspace preparation finishes", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-daemon-submit-"));
-  const daemon = new ForkLightDaemon(home, 1);
+  const daemon = new ForkLightDaemon(home, 1, TEST_PROVIDER_AUTH_READY);
   await daemon.start();
   try {
     const task = await daemonRequest<TaskRecord>(
@@ -511,6 +524,439 @@ test("plan-file submission atomically registers tasks before applying dependency
     store.close();
   }
 });
+
+// --- validate_file read-only admission preview ---
+
+async function writeAdmissionTaskFile(
+  workerProfileId: string,
+  options: { acceptanceCommand?: string; name?: string } = {},
+): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-validate-file-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  const command = options.acceptanceCommand ?? "true";
+  const name = options.name ?? "Daemon Validate Preview";
+  await writeFile(
+    taskFile,
+    `version: 2
+name: ${name}
+project: ./project
+workerProfileId: ${workerProfileId}
+provider:
+  endpoint: https://secret-daemon-endpoint.example.invalid/v1
+  keychainService: forklight.secret.daemon-preview
+worker:
+  focusPaths: [src]
+contract:
+  outcome: Daemon validate_file returns the exact saved Worker selection
+  context: [current settings]
+  inScope: [preview]
+  outOfScope: [mutation]
+  executionSteps: [validate]
+  deliverables: [safe preview]
+  modules:
+    - name: daemon
+      responsibility: expose read-only admission preview over the socket
+      consumes: [file path]
+      produces: [safe preview]
+      boundaries: [no Task mutation]
+  callChain: [client, daemon, preview]
+  scenarios:
+    - name: custom
+      given: saved profile
+      when: validate_file
+      then: exact selection
+    - name: missing
+      given: absent profile
+      when: validate_file
+      then: reject closed
+  risks: [policy drift]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 100
+acceptance:
+  criteria: [safe]
+  commands:
+    - "${command}"
+`,
+  );
+  return taskFile;
+}
+
+function seedGrokBuilderSettings(settings: SettingsService): void {
+  const current = settings.get();
+  const catalog = upsertModelConfig(current.modelCatalog, {
+    id: "xai-grok-builder",
+    label: "xAI Grok Builder",
+    provider: "xai",
+    model: "grok-4.5",
+    endpoint: "https://secret-daemon-endpoint.example.invalid/v1",
+  });
+  const profiles = upsertWorkerProfile(current.workerProfiles, {
+    id: "local-grok-builder",
+    label: "Local Grok Builder",
+    runtime: "grok-build",
+    modelConfigId: "xai-grok-builder",
+    effort: "high",
+    maxBudgetUsd: 1.25,
+    advancedPolicy: {
+      baseMaxAttempts: 6,
+      maxExtraAttempts: 1,
+      maxConcurrency: 1,
+      noProgressTimeoutMs: 600_000,
+      completionMode: "warn",
+    },
+  }, catalog);
+  settings.update({ modelCatalog: catalog, workerProfiles: profiles });
+}
+
+test("validate_file resolves custom Profile and agrees with shared preview builder", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-validate-agree-"));
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+  } finally {
+    seedStore.close();
+  }
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const taskFile = await writeAdmissionTaskFile("local-grok-builder");
+    const viaDaemon = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+    assert.equal(viaDaemon.workerProfileId, "local-grok-builder");
+    assert.equal(viaDaemon.workerProfileLabel, "Local Grok Builder");
+    assert.equal(viaDaemon.provider, "xai");
+    assert.equal(viaDaemon.model, "grok-4.5");
+    assert.equal(viaDaemon.runtime, "grok-build");
+    assert.equal(viaDaemon.effort, "high");
+    assert.equal(viaDaemon.budget.maxBudgetUsd, 1.25);
+    assert.equal(viaDaemon.effectivePolicy.values.baseMaxAttempts, 6);
+    assert.equal(viaDaemon.effectivePolicy.provenance.baseMaxAttempts, "worker");
+    assert.equal(viaDaemon.effectivePolicy.values.noProgressTimeoutMs, 600_000);
+    assert.equal(viaDaemon.effectivePolicy.provenance.noProgressTimeoutMs, "worker");
+
+    const store2 = new StateStore(home);
+    try {
+      const viaShared = await buildTaskAdmissionPreview(taskFile, new SettingsService(store2).get());
+      assert.deepEqual(viaDaemon, viaShared);
+    } finally {
+      store2.close();
+    }
+
+    const serialized = JSON.stringify(viaDaemon);
+    assert.doesNotMatch(serialized, /secret-daemon-endpoint/);
+    assert.doesNotMatch(serialized, /forklight\.secret\.daemon-preview/);
+    assert.doesNotMatch(serialized, /keychain/i);
+    assert.doesNotMatch(serialized, /"taskFile"/);
+    assert.doesNotMatch(serialized, /endpoint/i);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("validate_file is read-only on success and rejection", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-validate-readonly-"));
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+  } finally {
+    seedStore.close();
+  }
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const okFile = await writeAdmissionTaskFile("local-grok-builder", {
+      acceptanceCommand: "npm test -- --secret-cmd",
+    });
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile: okFile },
+      home,
+    );
+    assert.equal(preview.workerProfileId, "local-grok-builder");
+    assert.doesNotMatch(JSON.stringify(preview), /npm test/);
+
+    const missingFile = await writeAdmissionTaskFile("missing-profile-id");
+    await assert.rejects(
+      async () => daemonRequest("validate_file", { taskFile: missingFile }, home),
+      /Unknown worker profile: missing-profile-id/,
+    );
+    await assert.rejects(
+      async () => daemonRequest("validate_file", { taskFile: "relative-task.yaml" }, home),
+      /requires an absolute Task Contract file path/,
+    );
+
+    const after = new StateStore(home);
+    try {
+      assert.deepEqual(after.listTasks(), []);
+      const settings = new SettingsService(after).get();
+      assert.ok(settings.workerProfiles.profiles.some((p) => p.id === "local-grok-builder"));
+      // Queue stays empty: validate never creates work.
+      const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
+      assert.deepEqual(health.queuedTaskIds, []);
+      assert.deepEqual(health.activeTaskIds, []);
+    } finally {
+      after.close();
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("validate_file reflects current settings without mutating prior Tasks", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-validate-settings-"));
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+  } finally {
+    seedStore.close();
+  }
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const taskFile = await writeAdmissionTaskFile("local-grok-builder");
+    const first = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+    assert.equal(first.model, "grok-4.5");
+    assert.equal(first.budget.maxBudgetUsd, 1.25);
+
+    // Update via the same pure helpers used by seed, then settings_update replace.
+    const current = await daemonRequest<ForkLightSettings>("settings_get", {}, home);
+    const nextProfiles = upsertWorkerProfile(
+      current.workerProfiles,
+      {
+        id: "local-grok-builder",
+        label: "Local Grok Builder Updated",
+        runtime: "grok-build",
+        modelConfigId: "xai-grok-builder",
+        effort: "xhigh",
+        maxBudgetUsd: 3.5,
+        advancedPolicy: {
+          baseMaxAttempts: 11,
+          maxExtraAttempts: 1,
+          maxConcurrency: 1,
+          noProgressTimeoutMs: 600_000,
+          completionMode: "warn",
+        },
+      },
+      current.modelCatalog,
+    );
+    await daemonRequest("settings_update", {
+      patch: { workerProfiles: nextProfiles },
+    }, home);
+
+    const second = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+    assert.equal(second.workerProfileLabel, "Local Grok Builder Updated");
+    assert.equal(second.effort, "xhigh");
+    assert.equal(second.budget.maxBudgetUsd, 3.5);
+    assert.equal(second.effectivePolicy.values.baseMaxAttempts, 11);
+    assert.equal(second.effectivePolicy.provenance.baseMaxAttempts, "worker");
+    // The effective selection/policy changed with settings, so the bound
+    // preview revision must change (it no longer tracks file bytes alone).
+    assert.notEqual(second.previewRevisionDigest, first.previewRevisionDigest);
+
+    const after = new StateStore(home);
+    try {
+      assert.deepEqual(after.listTasks(), []);
+    } finally {
+      after.close();
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+// --- bound submit_file: optional expectedPreviewRevisionDigest ---
+
+async function startSeededDaemon(home: string): Promise<ForkLightDaemon> {
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+  } finally {
+    seedStore.close();
+  }
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  return daemon;
+}
+
+async function assertNoMutation(home: string): Promise<void> {
+  const after = new StateStore(home);
+  try {
+    assert.deepEqual(after.listTasks(), [], "no Task row may be created on a bound-submit rejection");
+    const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    assert.deepEqual(health.queuedTaskIds, [], "no queue entry may remain on a bound-submit rejection");
+    assert.deepEqual(health.activeTaskIds, [], "no active job may remain on a bound-submit rejection");
+  } finally {
+    after.close();
+  }
+}
+
+test("submit_file without expectedPreviewRevisionDigest stays backward compatible", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-submit-compat-"));
+  const daemon = await startSeededDaemon(home);
+  try {
+    const taskFile = await writeAdmissionTaskFile("local-grok-builder");
+    const task = await daemonRequest<TaskRecord>("submit_file", { taskFile }, home);
+    assert.equal(task.spec.provider.name, "xai");
+    assert.equal(task.spec.provider.model, "grok-4.5");
+    assert.equal(task.spec.workerProfileId, "local-grok-builder");
+    assert.equal(task.status, "queued");
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("submit_file with matching expectedPreviewRevisionDigest creates the exact effective Task", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-submit-bound-"));
+  const daemon = await startSeededDaemon(home);
+  try {
+    const taskFile = await writeAdmissionTaskFile("local-grok-builder");
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+    const task = await daemonRequest<TaskRecord>(
+      "submit_file",
+      { taskFile, expectedPreviewRevisionDigest: preview.previewRevisionDigest },
+      home,
+    );
+    // The registered Task matches exactly what the preview displayed.
+    assert.equal(task.spec.workerProfileId, "local-grok-builder");
+    assert.equal(task.spec.provider.name, preview.provider);
+    assert.equal(task.spec.provider.model, preview.model);
+    assert.equal(task.spec.runtime.name, preview.runtime);
+    assert.equal(task.effectivePolicy?.values.baseMaxAttempts, 6);
+    assert.equal(task.effectivePolicy?.profileId, "local-grok-builder");
+    assert.equal(task.status, "queued");
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("submit_file rejects a missing or malformed expectedPreviewRevisionDigest before any mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-submit-malformed-"));
+  const daemon = await startSeededDaemon(home);
+  try {
+    const taskFile = await writeAdmissionTaskFile("local-grok-builder");
+    // An empty string is "present but missing"; a non-hex string is malformed.
+    // Both must fail closed before any Task/event/workspace/queue mutation.
+    for (const bad of ["", "not-a-hex-digest", "abc", "0".repeat(63), null, 7, {}]) {
+      await assert.rejects(
+        () => daemonRequest("submit_file", {
+          taskFile,
+          expectedPreviewRevisionDigest: bad,
+        }, home),
+        /out of date/,
+      );
+      await assertNoMutation(home);
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("submit_file rejects a mismatched expectedPreviewRevisionDigest before any mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-submit-mismatch-"));
+  const daemon = await startSeededDaemon(home);
+  try {
+    const taskFile = await writeAdmissionTaskFile("local-grok-builder");
+    await assert.rejects(
+      () => daemonRequest("submit_file", {
+        taskFile,
+        expectedPreviewRevisionDigest: "0".repeat(64),
+      }, home),
+      /out of date/,
+    );
+    await assertNoMutation(home);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("submit_file rejects when the Task file changed after preview before any mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-submit-filedrift-"));
+  const daemon = await startSeededDaemon(home);
+  try {
+    const taskFile = await writeAdmissionTaskFile("local-grok-builder");
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+    // Change file bytes (a YAML comment) without changing the parsed spec.
+    const original = await readFile(taskFile, "utf8");
+    await writeFile(taskFile, `${original}\n# file drift after preview\n`);
+    await assert.rejects(
+      () => daemonRequest("submit_file", {
+        taskFile,
+        expectedPreviewRevisionDigest: preview.previewRevisionDigest,
+      }, home),
+      /out of date/,
+    );
+    await assertNoMutation(home);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("submit_file rejects when Worker settings changed after preview before any mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-submit-settingsdrift-"));
+  const daemon = await startSeededDaemon(home);
+  try {
+    const taskFile = await writeAdmissionTaskFile("local-grok-builder");
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+    // Change the saved Profile model/budget/effort/policy after the preview.
+    const current = await daemonRequest<ForkLightSettings>("settings_get", {}, home);
+    const nextProfiles = upsertWorkerProfile(
+      current.workerProfiles,
+      {
+        id: "local-grok-builder",
+        label: "Local Grok Builder Drifted",
+        runtime: "grok-build",
+        modelConfigId: "xai-grok-builder",
+        effort: "xhigh",
+        maxBudgetUsd: 3.5,
+        advancedPolicy: {
+          baseMaxAttempts: 11,
+          maxExtraAttempts: 1,
+          maxConcurrency: 1,
+          noProgressTimeoutMs: 600_000,
+          completionMode: "warn",
+        },
+      },
+      current.modelCatalog,
+    );
+    await daemonRequest("settings_update", { patch: { workerProfiles: nextProfiles } }, home);
+    await assert.rejects(
+      () => daemonRequest("submit_file", {
+        taskFile,
+        expectedPreviewRevisionDigest: preview.previewRevisionDigest,
+      }, home),
+      /out of date/,
+    );
+    await assertNoMutation(home);
+  } finally {
+    await daemon.close();
+  }
+});
+
 
 test("duplicate plan registration rolls back only the second staged execution", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-plan-duplicate-"));
@@ -2449,17 +2895,16 @@ test("late daemon close preserves a replacement endpoint", async () => {
 });
 
 test("stop and restart wait for the exact old daemon PID", async () => {
-  const home = await mkdtemp(path.join(tmpdir(), "forklight-exact-stop-"));
+  const fixture = await DetachedDaemonFixture.create("forklight-exact-stop-");
   try {
-    startDaemonProcess(home);
-    const first = await ensureDaemon(home);
+    const first = await fixture.ensureReady();
     const firstPid = first.pid as number;
     assert.ok(Number.isSafeInteger(firstPid) && firstPid > 0);
-    const replacement = await restartDaemon(home);
+    const replacement = await fixture.restart();
     assert.notEqual(replacement.pid, firstPid);
     assert.throws(() => process.kill(firstPid, 0), /ESRCH/);
   } finally {
-    await stopDaemon(home);
+    await fixture.cleanup();
   }
 });
 
@@ -3040,16 +3485,15 @@ test("handoff authorization stays live while the target daemon is draining", asy
 
     // A replacement daemon on a different home must reject the handoff
     // because it has no matching Integration operation.
-    const home2 = await mkdtemp(path.join(tmpdir(), "forklight-drain-repl-"));
+    const fixture2 = await DetachedDaemonFixture.create("forklight-drain-repl-");
     try {
-      startDaemonProcess(home2);
-      await ensureDaemon(home2);
+      await fixture2.ensureReady();
       await assert.rejects(
-        () => stopDaemonForHandoff(home2, ids.operationId, ids.taskId, ids.receiptId),
+        () => stopDaemonForHandoff(fixture2.home, ids.operationId, ids.taskId, ids.receiptId),
         /activation handoff shutdown failed/,
       );
     } finally {
-      await stopDaemon(home2);
+      await fixture2.cleanup();
     }
 
     // Original daemon is still alive — same PID, draining.
@@ -3063,18 +3507,17 @@ test("handoff authorization stays live while the target daemon is draining", asy
 });
 
 test("ordinary stop still waits for the exact PID and does not accept endpoint-only relinquishment", async () => {
-  const home = await mkdtemp(path.join(tmpdir(), "forklight-ordinary-stop-pid-"));
+  const fixture = await DetachedDaemonFixture.create("forklight-ordinary-stop-pid-");
   try {
-    startDaemonProcess(home);
-    const health = await ensureDaemon(home);
+    const health = await fixture.ensureReady();
     const firstPid = health.pid as number;
     assert.ok(Number.isSafeInteger(firstPid) && firstPid > 0);
 
-    const replacement = await restartDaemon(home);
+    const replacement = await fixture.restart();
     assert.notEqual(replacement.pid, firstPid);
     assert.throws(() => process.kill(firstPid, 0), /ESRCH/);
   } finally {
-    await stopDaemon(home);
+    await fixture.cleanup();
   }
 });
 
@@ -3679,6 +4122,56 @@ function makePrepTaskSpec(project: string, name: string): TaskRecord["spec"] {
   };
 }
 
+test("launch authentication rejection fails before workspace, Attempt, or Worker", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-launch-auth-"));
+  const project = path.join(home, "source");
+  await mkdir(project);
+  await writeFile(path.join(project, "value.txt"), "source\n");
+  const store = new StateStore(home);
+  const coordinator = new DaemonCoordinator(
+    store,
+    new SettingsService(store),
+    1,
+    {
+      hasReadableKeychainValue: () => false,
+      hasLocalGrokSignIn: () => false,
+    },
+  );
+  const task = registerTaskFromSpec(
+    store,
+    makePrepTaskSpec(project, "unreadable launch authentication"),
+    "forklight://test/unreadable-launch-authentication",
+  );
+  try {
+    coordinator.queueTask(task.id);
+    for (let i = 0; i < 100 && store.getTask(task.id).status !== "failed"; i += 1) {
+      await sleep(10);
+    }
+    const failed = store.getTask(task.id);
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error ?? "", /authentication is not readable/);
+    assert.equal(store.listAttempts(task.id).length, 0);
+    assert.equal(await isWorkspaceReady(task.paths), false);
+    const events = store.listEvents(task.id);
+    assert.deepEqual(events.map((event) => event.type), [
+      "task.created",
+      "task.launch-preflight.failed",
+    ]);
+    assert.deepEqual(events.at(-1)?.payload, {
+      failureCategory: "authentication",
+      reasonCode: "provider-auth-unreadable",
+      provider: "deepseek",
+      workerInvoked: false,
+      workspacePrepared: false,
+      attemptCreated: false,
+    });
+    assert.doesNotMatch(JSON.stringify(events), /forklight\.test\.api-key/);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
 test("prepareTaskWorkspace persists ordered stage events and exposes the live stage", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-prep-events-"));
   const project = path.join(home, `${PREP_PROBE}-source`);
@@ -4107,7 +4600,7 @@ test("structured correction binds the exact reusable candidate and rejects stale
   }
 });
 
-test("correct rejects succeeded tasks with clear reason", async () => {
+test("correct rejects succeeded tasks without Main revise review", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-status-"));
   const store = new StateStore(home);
   const coordinator = testCoordinator(store, 0);
@@ -4115,7 +4608,7 @@ test("correct rejects succeeded tasks with clear reason", async () => {
   try {
     assert.throws(
       () => coordinator.correct(task.id, "Feedback", null, true),
-      /cannot be corrected from status succeeded/,
+      /has not recorded a valid revise/,
     );
   } finally {
     await coordinator.shutdown();
@@ -4211,6 +4704,183 @@ test("pending correction cannot be replayed with different Main feedback", async
       /conflicts with requested authorization/,
     );
     assert.equal(store.getTask(task.id).status, "failed");
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+// --- Succeeded + Main revise correction path ---
+
+test("structured correction succeeds for succeeded task with valid Main revise review", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-succeeded-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = standaloneSucceededTask(store, "succeeded-correct-ok");
+  const attemptId = seedPassingVerification(store, task);
+  store.setTaskStatus(task.id, "succeeded", { error: null });
+  await mkdir(task.paths.root, { recursive: true });
+  await writeFile(task.paths.diff, "succeeded candidate bytes\n");
+  const revision = await captureCandidateRevision(
+    store, store.getTask(task.id), store.getAttempt(attemptId),
+    1, true, ["src/module.ts", "src/utils.ts"], 2, 6,
+  );
+  // Seed a Main revise review bound to the latest verification
+  const verSeq = store.listEvents(task.id)
+    .filter((e) => e.type === "verification.completed" && e.attemptId === attemptId)
+    .reduce((latest, e) => latest === undefined || e.sequence > latest.sequence ? e : latest, undefined as { sequence: number } | undefined);
+  assert.ok(verSeq !== undefined, "verification event must exist");
+  store.addEvent(task.id, attemptId, "main-review.completed",
+    "Main review: revise", {
+      decision: "revise",
+      reason: "Keep the useful module work and repair two remaining gaps",
+      attemptId,
+      verificationEventSequence: verSeq.sequence,
+    });
+  try {
+    const result = coordinator.correct(
+      task.id,
+      "Keep the useful module and repair its remaining boundary",
+      null,
+      true,
+      revision.id,
+      ["src/module.ts", "src/utils.ts"],
+      [{
+        description: "Repair the remaining module boundary",
+        acceptanceExpectation: "The original acceptance command passes",
+      }],
+    );
+    assert.equal(result.status, "queued");
+    const grants = store.listEvents(task.id).filter((e) => e.type === "attempt.authorization.granted");
+    assert.equal(grants.length, 1);
+    assert.equal((grants[0]?.payload as Record<string, unknown>)?.kind, "correction");
+    assert.equal((grants[0]?.payload as Record<string, unknown>)?.candidateRevisionId, revision.id);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("structured correction rejects succeeded task with stale diff before mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-succ-stale-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = standaloneSucceededTask(store, "succeeded-stale-correct");
+  const attemptId = seedPassingVerification(store, task);
+  store.setTaskStatus(task.id, "succeeded", { error: null });
+  await mkdir(task.paths.root, { recursive: true });
+  await writeFile(task.paths.diff, "original candidate bytes\n");
+  const revision = await captureCandidateRevision(
+    store, store.getTask(task.id), store.getAttempt(attemptId),
+    1, true, ["src/module.ts"], 1, 4,
+  );
+  const verSeq = store.listEvents(task.id)
+    .filter((e) => e.type === "verification.completed" && e.attemptId === attemptId)
+    .reduce((latest, e) => latest === undefined || e.sequence > latest.sequence ? e : latest, undefined as { sequence: number } | undefined);
+  store.addEvent(task.id, attemptId, "main-review.completed",
+    "Main review: revise", {
+      decision: "revise", reason: "Repair the remaining gaps",
+      attemptId, verificationEventSequence: verSeq?.sequence ?? 1,
+    });
+  await writeFile(task.paths.diff, "changed after revision\n");
+  const beforeEvents = store.listEvents(task.id).length;
+  try {
+    assert.throws(
+      () => coordinator.correct(
+        task.id, "Try to repair stale candidate", null, true,
+        revision.id, ["src/module.ts"],
+        [{
+          description: "Repair the remaining stale issue",
+          acceptanceExpectation: "The original acceptance command passes",
+        }],
+      ),
+      /no longer matches the current workspace/,
+    );
+    assert.equal(store.getTask(task.id).status, "succeeded");
+    assert.equal(store.listEvents(task.id).length, beforeEvents);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("structured correction rejects succeeded task with accept review before mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-succ-accept-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const task = standaloneSucceededTask(store, "succeeded-accept-correct");
+  const attemptId = seedPassingVerification(store, task);
+  store.setTaskStatus(task.id, "succeeded", { error: null });
+  await mkdir(task.paths.root, { recursive: true });
+  await writeFile(task.paths.diff, "candidate bytes\n");
+  const revision = await captureCandidateRevision(
+    store, store.getTask(task.id), store.getAttempt(attemptId),
+    1, true, ["src/module.ts"], 1, 4,
+  );
+  const verSeq = store.listEvents(task.id)
+    .filter((e) => e.type === "verification.completed" && e.attemptId === attemptId)
+    .reduce((latest, e) => latest === undefined || e.sequence > latest.sequence ? e : latest, undefined as { sequence: number } | undefined);
+  store.addEvent(task.id, attemptId, "main-review.completed",
+    "Main review: accept", {
+      decision: "accept", reason: "Looks good",
+      attemptId, verificationEventSequence: verSeq?.sequence ?? 1,
+    });
+  const beforeEvents = store.listEvents(task.id).length;
+  try {
+    assert.throws(
+      () => coordinator.correct(
+        task.id, "Try to correct", null, true,
+        revision.id, ["src/module.ts"],
+        [{
+          description: "Repair the remaining issue",
+          acceptanceExpectation: "The original acceptance command passes",
+        }],
+      ),
+      /no-main-revise|has not recorded a valid revise/,
+    );
+    assert.equal(store.getTask(task.id).status, "succeeded");
+    assert.equal(store.listEvents(task.id).length, beforeEvents);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("maxExtraAttempts zero does not block structured correction with maxMainCorrections one", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-relay-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  // Simulate the Relay scenario: base=1, extra=0, corrections=1
+  settings.update({ execution: { maxAttempts: 1, maxExtraAttempts: 0 } });
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  const task = standaloneSucceededTask(store, "relay-correct");
+  const attemptId = seedPassingVerification(store, task);
+  store.setTaskStatus(task.id, "succeeded", { error: null });
+  await mkdir(task.paths.root, { recursive: true });
+  await writeFile(task.paths.diff, "candidate bytes\n");
+  const revision = await captureCandidateRevision(
+    store, store.getTask(task.id), store.getAttempt(attemptId),
+    1, true, ["src/module.ts"], 1, 4,
+  );
+  const verSeq = store.listEvents(task.id)
+    .filter((e) => e.type === "verification.completed" && e.attemptId === attemptId)
+    .reduce((latest, e) => latest === undefined || e.sequence > latest.sequence ? e : latest, undefined as { sequence: number } | undefined);
+  store.addEvent(task.id, attemptId, "main-review.completed",
+    "Main review: revise", {
+      decision: "revise", reason: "Minor gap remaining",
+      attemptId, verificationEventSequence: verSeq?.sequence ?? 1,
+    });
+  try {
+    const result = coordinator.correct(
+      task.id, "Repair the minor gap", null, true,
+      revision.id, ["src/module.ts"],
+      [{
+        description: "Repair the remaining module issue",
+        acceptanceExpectation: "The original acceptance command passes",
+      }],
+    );
+    assert.equal(result.status, "queued");
+    assert.equal(store.listEvents(task.id).filter((e) => e.type === "attempt.authorization.granted").length, 1);
   } finally {
     await coordinator.shutdown();
     store.close();

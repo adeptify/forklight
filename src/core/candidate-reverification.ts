@@ -30,6 +30,7 @@ import type {
   TaskRecord,
   VerificationResult,
 } from "./types.js";
+import { captureCandidateRevision } from "./candidate-revision.js";
 import { executeVerificationPass } from "./verifier.js";
 import { isoTimestamp as timestamp } from "./time.js";
 
@@ -411,6 +412,43 @@ export async function reverifyCandidate(
     );
     const verificationEventSequence = completedEvent.sequence;
 
+    // 7a. Capture exact Candidate Revision bound to this verification event
+    // before the Task can become successful. On capture failure, keep the Task
+    // failed, preserve Attempt/history, record a stable content-free failure
+    // event, return failed zero-Worker facts, and never retry.
+    const attempt = store.getAttempt(attemptId);
+    let revisionCaptureFailed = false;
+    try {
+      const businessPatch = verification.patches?.business;
+      await captureCandidateRevision(
+        store,
+        reloaded,
+        attempt,
+        verificationEventSequence,
+        verification.passed,
+        businessPatch?.affectedPaths ?? [],
+        businessPatch?.filesChanged ?? 0,
+        businessPatch?.changedLines ?? 0,
+      );
+    } catch (_captureError) {
+      revisionCaptureFailed = true;
+      // Record a stable content-free failure event — never expose raw paths or exceptions.
+      store.addEvent(
+        input.taskId,
+        attemptId,
+        "candidate.revision.capture.failed",
+        "Candidate revision capture failed during reverification",
+        {
+          attemptId,
+          verificationEventSequence,
+          verificationPassed: verification.passed,
+          workerInvoked: false,
+          incrementalWorkerTokens: 0,
+          incrementalModelRuntimeCostUsd: 0,
+        },
+      );
+    }
+
     const commandCount = verification.commands.length;
     const passedCommandCount = verification.commands.filter(
       (command) => command.exitCode === 0 && !command.timedOut,
@@ -420,11 +458,12 @@ export async function reverifyCandidate(
       0,
     );
 
-    // 8. On pass: move only the Task status to "succeeded". Preserve the
-    //    retained Attempt (never rewrite it). currentAttemptId already points at
-    //    the retained Attempt, so Main Review accept will bind correctly.
-    //    On failure: leave the Task failed; do not touch the Attempt.
-    if (verification.passed) {
+    // 8. On pass AND successful revision capture: move Task to "succeeded".
+    //    Preserve the retained Attempt (never rewrite it). currentAttemptId
+    //    already points at the retained Attempt, so Main Review accept will
+    //    bind correctly.
+    //    On verification failure or capture failure: leave the Task failed.
+    if (verification.passed && !revisionCaptureFailed) {
       store.setTaskStatus(input.taskId, "succeeded", {
         error: null,
         finishedAt: timestamp(),
@@ -449,8 +488,7 @@ export async function reverifyCandidate(
     };
 
     // 10. Persist completion evidence (privacy-safe: no command output/reason).
-    const status: "passed" | "failed" = verification.passed ? "passed" : "failed";
-    const attempt = store.getAttempt(attemptId);
+    const status: "passed" | "failed" = (verification.passed && !revisionCaptureFailed) ? "passed" : "failed";
     store.addEvent(
       input.taskId,
       attemptId,

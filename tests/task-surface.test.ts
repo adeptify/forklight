@@ -87,6 +87,17 @@ test("failureCategoryFromEvents reads normalizer payload", () => {
   assert.equal(failureCategoryFromEvents([{ type: "worker.completed", sequence: 1 }]), undefined);
 });
 
+test("launch authentication rejection is durable non-model failure evidence", () => {
+  assert.equal(
+    failureCategoryFromEvents([{
+      type: "task.launch-preflight.failed",
+      sequence: 1,
+      payload: { failureCategory: "authentication", workerInvoked: false },
+    }]),
+    "authentication",
+  );
+});
+
 test("failureCategory survives classified then bare dual worker.failed (runner double-write)", () => {
   // Real path: claude normalizer writes classified worker.failed, then runner
   // appends a second bare worker.failed with only a summary string (no payload).

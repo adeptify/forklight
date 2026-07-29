@@ -20,9 +20,27 @@ import path from "node:path";
 import type { SettingsService } from "../core/settings.js";
 import type { SetupService } from "../setup/service.js";
 import type { SetupKeychainStore } from "../setup/types.js";
+import {
+  projectExecutionProviderReadiness,
+  resolveExecutionProviderFacts,
+  type DaemonHealthEvidence,
+} from "../setup/doctor.js";
 import type { DaemonMethod } from "../daemon/protocol.js";
-import { providerDefinition, isProviderName } from "../core/providers.js";
+import {
+  providerDefinition,
+  providerLabel,
+  providerNames,
+  isProviderName,
+  providerReadiness,
+  type ProviderName,
+  type ProviderReadiness,
+} from "../core/providers.js";
 import { listWorkerAdapters } from "../workers/registry.js";
+import {
+  resolveWorkerReadiness,
+  type ProviderVerificationEvidence,
+  type RuntimeReadinessEvidence,
+} from "../core/worker-readiness.js";
 import { MIME, SECURITY_HEADERS, safeJson } from "../server-http.js";
 import {
   buildHubSettingsPatch,
@@ -65,13 +83,28 @@ import {
   previewEffectivePolicy,
   validateAdvancedPolicyPatch,
 } from "../core/advanced-policy.js";
-import type { AdvancedPolicyFields } from "../core/types.js";
+import type {
+  AdvancedPolicyFields,
+  ContractQualityOverrides,
+  EventRecord,
+  TaskRecord,
+} from "../core/types.js";
 import { isRuntimeName } from "../core/runtime-names.js";
+import { validateContractQualityOverride } from "../core/worker-profiles.js";
+import { previewQualityPolicy } from "../core/contract-quality.js";
 import { buildDeliveryPlanView } from "../core/delivery-profiles.js";
+import {
+  candidateRevisionMatchesCurrentDiff,
+  resolveLatestRevision,
+} from "../core/candidate-revision.js";
 import { parseAffectedPathsFromWorkspaceDiff } from "../workspace/patch.js";
 import { normalizeCodexTerminalUsage } from "../core/codex-terminal-usage.js";
 import { grossDirectCodexTokens } from "../core/direct-codex-calibration.js";
 import { isoTimestamp } from "../core/time.js";
+import {
+  OnboardingSampleService,
+  type PreparedOnboardingSample,
+} from "../onboarding/sample-task.js";
 
 const LOOPBACK = "127.0.0.1";
 const MAX_BODY_BYTES = 20_480;
@@ -104,6 +137,8 @@ const DIRECT_CODEX_REJECT_REVIEW_KEYS = new Set([
   "confirm",
 ]);
 const DIRECT_CODEX_PUBLISH_KEYS = new Set(["confirm"]);
+const ONBOARDING_SAMPLE_PREPARE_KEYS = new Set(["workerProfileId", "confirm"]);
+const ONBOARDING_SAMPLE_SUBMIT_KEYS = new Set(["sampleId", "previewRevisionDigest", "confirm"]);
 
 /**
  * Evidence classes the Hub is allowed to memoise briefly. Each class is
@@ -251,7 +286,12 @@ export interface HubServerDeps {
   /** macOS Keychain account (username). Required so keys write to the same account as setup/doctor. */
   account: () => string;
   port?: number;
+  /** Private owner nonce used only by the authenticated Hub liveness probe. */
+  nonce?: string;
   packageRoot?: string;
+  /** Owner-only root for disposable guided samples. Required with packageRoot
+   *  to enable the first-Task experience; never returned to the browser. */
+  sampleRoot?: string;
   ensureDaemon?: () => Promise<Record<string, unknown>>;
   /** Probe without starting (Hub control surface). */
   probeDaemon?: () => Promise<DaemonProbeResult>;
@@ -262,6 +302,12 @@ export interface HubServerDeps {
     method: DaemonMethod,
     params?: Record<string, unknown>,
   ) => Promise<T>;
+  /** Optional deterministic seam for local Provider authentication evidence.
+   *  Production falls back to Keychain + local Grok sign-in inspection. */
+  inspectProviderReadiness?: () => {
+    anyReady: boolean;
+    providers: Record<ProviderName, ProviderReadiness>;
+  };
   /**
    * Optional cache for expensive setup/status and daemon-health evidence.
    * Defaults to a single shared cache with a 1.5 s monotonic TTL. Tests can
@@ -283,6 +329,7 @@ export interface SafeTaskJourney {
   nextAction: NextActionSection;
   candidateReuse?: CandidateReuseSection;
   candidateReverification?: CandidateReverificationSection;
+  retainedCandidate: RetainedCandidateSection;
 }
 
 interface CandidateReverificationSection {
@@ -326,6 +373,19 @@ interface CandidateReuseSection {
   grossTokens?: number;
   runtimeEstimateUsd?: number;
 }
+
+type RetainedCandidateSection =
+  | { status: "evidence-unavailable" }
+  | {
+      status: "available";
+      attemptOrdinal: number;
+      verificationPassed: boolean;
+      filesChanged: number;
+      changedLines: number;
+      affectedPathCount: number;
+      /** Validated relative paths from the canonical revision, capped for UI. */
+      affectedPaths: string[];
+    };
 
 interface AssignmentSection {
   contractVersion: 1 | 2;
@@ -756,6 +816,8 @@ export function buildSafeTaskJourney(
     label: nextLabel,
   };
 
+  const retainedCandidate = buildRetainedCandidateSection(rawTask, inspectEvents);
+
   return {
     assignment,
     workerExecution,
@@ -763,6 +825,7 @@ export function buildSafeTaskJourney(
     finalDelivery,
     cause,
     nextAction,
+    retainedCandidate,
     ...(candidateReuse === undefined ? {} : { candidateReuse }),
     ...(candidateReverification === undefined ? {} : { candidateReverification }),
   };
@@ -924,6 +987,35 @@ function safeRelativePath(value: string): boolean {
   return !normalized.split("/").includes("..");
 }
 
+/**
+ * Project only evidence that the canonical CandidateRevision still matches the
+ * Task's exact retained Diff. Task status, changed-file observations, Main
+ * review, and Worker claims are deliberately not treated as proof.
+ */
+function buildRetainedCandidateSection(
+  rawTask: Record<string, unknown>,
+  inspectEvents: Array<Record<string, unknown>>,
+): RetainedCandidateSection {
+  const revision = resolveLatestRevision(inspectEvents as unknown as EventRecord[]);
+  if (
+    revision === undefined
+    || typeof rawTask.id !== "string"
+    || revision.taskId !== rawTask.id
+    || !candidateRevisionMatchesCurrentDiff(rawTask as unknown as TaskRecord, revision)
+  ) {
+    return { status: "evidence-unavailable" };
+  }
+  return {
+    status: "available",
+    attemptOrdinal: revision.attemptOrdinal,
+    verificationPassed: revision.verificationPassed,
+    filesChanged: revision.filesChanged,
+    changedLines: revision.changedLines,
+    affectedPathCount: revision.affectedPaths.length,
+    affectedPaths: revision.affectedPaths.slice(0, 40),
+  };
+}
+
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {
   return typeof record[key] === "string" ? record[key] as string : undefined;
 }
@@ -1045,12 +1137,77 @@ function resolveNextAction(
 export class HubServer {
   private server: ReturnType<typeof createServer> | undefined;
   private actualPort = 0;
+  private stopPromise: Promise<void> | undefined;
   private readonly token: string;
+  private readonly nonce: string;
   private readonly cache: HubEvidenceCache;
+  private readonly onboardingSamples: OnboardingSampleService | undefined;
 
   constructor(private readonly deps: HubServerDeps) {
     this.token = randomBytes(32).toString("base64url");
+    this.nonce = deps.nonce ?? randomBytes(18).toString("base64url");
     this.cache = deps.cache ?? new HubEvidenceCache();
+    this.onboardingSamples = deps.packageRoot === undefined || deps.sampleRoot === undefined
+      ? undefined
+      : new OnboardingSampleService(deps.packageRoot, deps.sampleRoot);
+  }
+
+  private async resolveCurrentWorkerReadiness(): Promise<ReturnType<typeof resolveWorkerReadiness>> {
+    const settings = this.deps.settings.get();
+    const localProviders = this.deps.inspectProviderReadiness?.()
+      ?? providerReadiness(settings.providerDefaults);
+    const daemon = await this.probeDaemonStatus();
+    const daemonEvidence: DaemonHealthEvidence = {
+      ok: daemon.running === true && daemon.ok !== false,
+      serverIdentity: daemon.buildIdentity,
+      result: daemon,
+    };
+    const executionFacts = resolveExecutionProviderFacts({
+      clientBuildIdentity: currentBuildIdentity(),
+      daemonEvidence,
+      localProviders: providerNames().map((name) => {
+        const provider = localProviders.providers[name];
+        return {
+          name,
+          label: providerLabel(name),
+          configured: provider.ready,
+          ready: provider.ready,
+          authMode: provider.authMode,
+          defaultModel: provider.defaultModel,
+        };
+      }),
+    });
+    const providers = projectExecutionProviderReadiness(
+      executionFacts.providers,
+      localProviders.providers,
+    );
+    const runtimes: Record<string, RuntimeReadinessEvidence> = {};
+    for (const adapter of listWorkerAdapters()) {
+      const doctor = adapter.doctor();
+      if (doctor instanceof Promise) continue;
+      runtimes[adapter.name] = { ok: doctor.ok };
+    }
+    return resolveWorkerReadiness({
+      workerProfiles: settings.workerProfiles,
+      modelCatalog: settings.modelCatalog,
+      providerDefaults: settings.providerDefaults,
+      providers: providers.providers,
+      runtimes,
+    });
+  }
+
+  private safeSampleProjection(
+    sample: PreparedOnboardingSample,
+    preview?: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return {
+      available: true,
+      state: sample.state,
+      sampleId: sample.sampleId,
+      workerProfileId: sample.workerProfileId,
+      ...(sample.taskId === undefined ? {} : { taskId: sample.taskId }),
+      ...(preview === undefined ? {} : { preview }),
+    };
   }
 
   /** Test seam: the Hub's bounded evidence cache. */
@@ -1060,6 +1217,10 @@ export class HubServer {
 
   getToken(): string {
     return this.token;
+  }
+
+  getNonce(): string {
+    return this.nonce;
   }
 
   getPort(): number {
@@ -1086,14 +1247,19 @@ export class HubServer {
   }
 
   async stop(): Promise<void> {
+    if (this.stopPromise !== undefined) return this.stopPromise;
     const server = this.server;
     if (!server) return;
     this.server = undefined;
     this.actualPort = 0;
-    await new Promise<void>((resolve, reject) => {
+    this.stopPromise = new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
+      // Call these after close() begins so no new connection can race the
+      // cleanup. A concurrent stop awaits this same promise.
       server.closeIdleConnections();
-    });
+      server.closeAllConnections();
+    }).finally(() => { this.stopPromise = undefined; });
+    return this.stopPromise;
   }
 
   private authenticate(req: IncomingMessage): boolean {
@@ -1170,6 +1336,17 @@ export class HubServer {
       }
     })();
 
+    // A second local CLI invocation uses this authenticated, bounded response
+    // to prove that the descriptor names the exact active ForkLight Hub.
+    if (route === "/api/liveness" && (req.method === "GET" || req.method === "HEAD")) {
+      if (!this.authenticate(req)) {
+        this.sendJson(req, res, 401, { error: "Unauthorized" });
+        return;
+      }
+      this.sendJson(req, res, 200, { ok: true, nonce: this.nonce });
+      return;
+    }
+
     if (route.startsWith("/api/")) {
       if (!this.authenticate(req)) {
         this.sendJson(req, res, 401, { error: "Unauthorized" });
@@ -1203,8 +1380,9 @@ export class HubServer {
       const entry = await this.cache.getOrCompute("setupStatus", async () => {
         const settings = this.deps.settings.get();
         const prereqs = this.deps.setup.inspectPrerequisites();
-        const providers = this.deps.setup.describeProviders();
-        const runtimes: Record<string, unknown> = {};
+        const localProviderReadiness = this.deps.inspectProviderReadiness?.()
+          ?? providerReadiness(settings.providerDefaults);
+        const runtimes: Record<string, RuntimeReadinessEvidence & Record<string, unknown>> = {};
         for (const adapter of listWorkerAdapters()) {
           const doctor = adapter.doctor();
           if (doctor instanceof Promise) continue;
@@ -1217,6 +1395,46 @@ export class HubServer {
         }
         // Probe only — do not auto-start here so Hub stop control stays sticky.
         const daemon = await this.probeDaemonStatus();
+        const executionFacts = resolveExecutionProviderFacts({
+          clientBuildIdentity: currentBuildIdentity(),
+          daemonEvidence: {
+            ok: daemon.running === true && daemon.ok !== false,
+            serverIdentity: daemon.buildIdentity,
+            result: daemon,
+          },
+          localProviders: providerNames().map((name) => ({
+            name,
+            label: providerLabel(name),
+            configured: localProviderReadiness.providers[name].ready,
+            ready: localProviderReadiness.providers[name].ready,
+            authMode: localProviderReadiness.providers[name].authMode,
+            defaultModel: localProviderReadiness.providers[name].defaultModel,
+          })),
+        });
+        const effectiveProviderReadiness = projectExecutionProviderReadiness(
+          executionFacts.providers,
+          localProviderReadiness.providers,
+        );
+        const providers = this.deps.setup.describeProviders().map((provider) => ({
+          ...provider,
+          configured: effectiveProviderReadiness.providers[provider.name].ready,
+          authMode: effectiveProviderReadiness.providers[provider.name].authMode,
+        }));
+        const verification = (
+          daemon.providerVerification !== null
+          && typeof daemon.providerVerification === "object"
+          && !Array.isArray(daemon.providerVerification)
+        )
+          ? daemon.providerVerification as Partial<Record<ProviderName, ProviderVerificationEvidence>>
+          : undefined;
+        const workerReadiness = resolveWorkerReadiness({
+          workerProfiles: settings.workerProfiles,
+          modelCatalog: settings.modelCatalog,
+          providerDefaults: settings.providerDefaults,
+          providers: effectiveProviderReadiness.providers,
+          runtimes,
+          ...(verification === undefined ? {} : { providerVerification: verification }),
+        });
         const mains = await listMainSurfaceStatus(
           undefined,
           this.deps.packageRoot,
@@ -1226,9 +1444,12 @@ export class HubServer {
           settings: viewHubSettings(settings),
           modelCatalog: settings.modelCatalog,
           workerProfiles: settings.workerProfiles,
+          workerReadiness,
           modelRouting: viewModelRoutingSettings(settings),
           prerequisites: prereqs,
           providers,
+          providerReadinessSource: executionFacts.source,
+          providerReadinessSourceDetail: executionFacts.sourceDetail,
           runtimes,
           mains,
           daemon,
@@ -1634,7 +1855,40 @@ export class HubServer {
           "draft-worker",
           capability,
         );
-        this.sendJson(req, res, 200, { ok: true, preview });
+
+        // --- Contract Quality preview ---
+        let existingQuality: ContractQualityOverrides | undefined;
+        if (body.existingContractQuality !== undefined) {
+          existingQuality = validateContractQualityOverride(
+            body.existingContractQuality,
+            "existingContractQuality",
+          );
+        }
+        let draftQuality: ContractQualityOverrides | undefined;
+        if (body.draftContractQuality !== undefined) {
+          draftQuality = validateContractQualityOverride(
+            body.draftContractQuality,
+            "draftContractQuality",
+          );
+        }
+        // Merge: draft overrides win over existing
+        const mergedQuality: ContractQualityOverrides = {};
+        if (existingQuality !== undefined) {
+          for (const key of Object.keys(existingQuality)) {
+            (mergedQuality as Record<string, unknown>)[key] = (existingQuality as Record<string, unknown>)[key];
+          }
+        }
+        if (draftQuality !== undefined) {
+          for (const key of Object.keys(draftQuality)) {
+            (mergedQuality as Record<string, unknown>)[key] = (draftQuality as Record<string, unknown>)[key];
+          }
+        }
+        const qualityPreview = previewQualityPolicy(
+          Object.keys(mergedQuality).length > 0 ? mergedQuality : undefined,
+          currentSettings.contractQuality,
+          "draft-worker",
+        );
+        this.sendJson(req, res, 200, { ok: true, preview, previewQualityPolicy: qualityPreview });
       } catch (error) {
         this.sendJson(req, res, 422, {
           error: error instanceof Error ? error.message : String(error),
@@ -1931,6 +2185,34 @@ export class HubServer {
         return;
       }
 
+      if (opsRoute === "/sample-task") {
+        if (this.onboardingSamples === undefined) {
+          this.sendJson(req, res, 200, { available: false, state: "unavailable" });
+          return;
+        }
+        const latest = await this.onboardingSamples.latest();
+        if (latest === undefined) {
+          this.sendJson(req, res, 200, { available: true, state: "empty" });
+          return;
+        }
+        if (latest.state !== "prepared") {
+          this.sendJson(req, res, 200, this.safeSampleProjection(latest));
+          return;
+        }
+        try {
+          const preview = await this.daemonCall<Record<string, unknown>>("validate_file", {
+            taskFile: latest.taskFile,
+          });
+          this.sendJson(req, res, 200, this.safeSampleProjection(latest, preview));
+        } catch {
+          this.sendJson(req, res, 200, {
+            ...this.safeSampleProjection(latest),
+            state: "needs-attention",
+          });
+        }
+        return;
+      }
+
       const boardPlan = opsRoute.match(/^\/(?:board|plans)\/(.+)$/);
       if (boardPlan) {
         const planId = decodeURIComponent(boardPlan[1]!);
@@ -2032,6 +2314,8 @@ export class HubServer {
           finishedAt: task.finishedAt,
           error: task.error,
           decision,
+          ...(typeof (decision as Record<string, unknown>).stage === "string"
+            ? { decisionStage: (decision as Record<string, unknown>).stage } : {}),
           progress: (decision as { progress?: unknown }).progress,
           journey,
           timeline,
@@ -2510,7 +2794,140 @@ export class HubServer {
         return;
       }
 
-      // POST /api/ops/tasks/submit  { filePath, confirm: true }
+      // POST /api/ops/sample-task/prepare { workerProfileId, confirm: true }
+      // Creates only a private disposable project + ordinary Task file, then
+      // asks the canonical daemon admission path for a safe preview. No Task,
+      // Attempt, Worker, Provider request, review, or Integration is started.
+      if (opsRoute === "/sample-task/prepare") {
+        if (!exactOwnKeys(body, ONBOARDING_SAMPLE_PREPARE_KEYS) || body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "Preparing the sample requires an explicit confirmation" });
+          return;
+        }
+        if (this.onboardingSamples === undefined) {
+          this.sendJson(req, res, 503, { error: "The packaged sample is unavailable; reinstall or update ForkLight" });
+          return;
+        }
+        const workerProfileId = typeof body.workerProfileId === "string" ? body.workerProfileId : "";
+        let worker;
+        try {
+          worker = getWorkerProfile(this.deps.settings.get().workerProfiles, workerProfileId);
+        } catch {
+          this.sendJson(req, res, 422, { error: "Choose an available saved Worker" });
+          return;
+        }
+        const readiness = (await this.resolveCurrentWorkerReadiness())
+          .find((item) => item.workerId === worker.id);
+        if (readiness?.canLaunch !== true) {
+          this.sendJson(req, res, 422, { error: "This Worker needs attention before it can start a Task" });
+          return;
+        }
+        try {
+          const sample = await this.onboardingSamples.prepare(worker.id);
+          const preview = await this.daemonCall<Record<string, unknown>>("validate_file", {
+            taskFile: sample.taskFile,
+          });
+          if (preview.workerProfileId !== worker.id) {
+            this.sendJson(req, res, 422, { error: "The prepared sample no longer matches the selected Worker" });
+            return;
+          }
+          this.sendJson(req, res, 200, this.safeSampleProjection(sample, preview));
+        } catch {
+          this.sendJson(req, res, 422, {
+            error: "The sample could not be prepared safely; reinstall or update ForkLight, then try again",
+          });
+        }
+        return;
+      }
+
+      // POST /api/ops/sample-task/submit
+      // Browser supplies no path. The service resolves the opaque sample,
+      // freezes it as submitting before the daemon call, and records the one
+      // ordinary Task id. A crash leaves outcome-unknown evidence and never
+      // silently submits a duplicate.
+      if (opsRoute === "/sample-task/submit") {
+        if (!exactOwnKeys(body, ONBOARDING_SAMPLE_SUBMIT_KEYS) || body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "Starting the sample requires an explicit confirmation" });
+          return;
+        }
+        if (this.onboardingSamples === undefined) {
+          this.sendJson(req, res, 503, { error: "The packaged sample is unavailable; reinstall or update ForkLight" });
+          return;
+        }
+        const sampleId = typeof body.sampleId === "string" ? body.sampleId : "";
+        const previewRevisionDigest = typeof body.previewRevisionDigest === "string"
+          && /^[a-f0-9]{64}$/.test(body.previewRevisionDigest)
+          ? body.previewRevisionDigest
+          : "";
+        if (!previewRevisionDigest) {
+          this.sendJson(req, res, 422, { error: "Preview the sample again before starting" });
+          return;
+        }
+        let lease;
+        try {
+          lease = await this.onboardingSamples.acquireSubmission(sampleId);
+        } catch {
+          this.sendJson(req, res, 422, { error: "This sample cannot be started again; inspect the Board for its outcome" });
+          return;
+        }
+        if (lease.alreadySubmitted) {
+          this.sendJson(req, res, 200, {
+            ...this.safeSampleProjection(lease.sample),
+            alreadySubmitted: true,
+          });
+          return;
+        }
+        try {
+          const task = await this.daemonCall<{ id: string; name: string; status: string }>(
+            "submit_file",
+            {
+              taskFile: lease.sample.taskFile,
+              expectedPreviewRevisionDigest: previewRevisionDigest,
+            },
+          );
+          const committed = await lease.commit(task.id);
+          this.sendJson(req, res, 200, {
+            available: true,
+            state: committed.state,
+            sampleId: committed.sampleId,
+            workerProfileId: committed.workerProfileId,
+            taskId: committed.taskId,
+            alreadySubmitted: false,
+            task: { id: task.id, name: task.name, status: task.status },
+          });
+        } catch (error) {
+          await lease.abort();
+          const message = error instanceof Error ? error.message : "";
+          this.sendJson(req, res, 422, {
+            error: message.includes("out of date")
+              ? "The sample preview is out of date; prepare it again before starting"
+              : "The sample Task was not started; prepare it again or inspect Worker readiness",
+          });
+        }
+        return;
+      }
+
+      // POST /api/ops/tasks/preview  { filePath }
+      // Read-only bridge to daemon validate_file. Never calls submit_file and
+      // never asks for confirm. Returns only the safe admission preview plus the
+      // preview revision digest the bound submit route must echo back.
+      if (opsRoute === "/tasks/preview") {
+        const filePath = typeof body.filePath === "string" ? body.filePath.trim() : "";
+        if (!filePath || filePath.length > 8192 || !path.isAbsolute(filePath)) {
+          this.sendJson(req, res, 422, { error: "An absolute task contract file path is required" });
+          return;
+        }
+        try {
+          const preview = await this.daemonCall<Record<string, unknown>>("validate_file", {
+            taskFile: filePath,
+          });
+          this.sendJson(req, res, 200, { ok: true, preview });
+        } catch (_daemonError) {
+          this.sendJson(req, res, 422, { error: "Task contract preview rejected by daemon" });
+        }
+        return;
+      }
+
+      // POST /api/ops/tasks/submit  { filePath, previewRevisionDigest, confirm: true }
       if (opsRoute === "/tasks/submit") {
         if (body.confirm !== true) {
           this.sendJson(req, res, 422, { error: "Task submission requires confirm: true" });
@@ -2521,10 +2938,19 @@ export class HubServer {
           this.sendJson(req, res, 422, { error: "An absolute task contract file path is required" });
           return;
         }
+        const previewRevisionDigest = typeof body.previewRevisionDigest === "string"
+          ? body.previewRevisionDigest
+          : "";
+        if (!previewRevisionDigest) {
+          this.sendJson(req, res, 422, {
+            error: "Task submission requires a fresh preview; preview again before submitting",
+          });
+          return;
+        }
         try {
           const task = await this.daemonCall<{ id: string; name: string; status: string }>(
             "submit_file",
-            { taskFile: filePath },
+            { taskFile: filePath, expectedPreviewRevisionDigest: previewRevisionDigest },
           );
           this.sendJson(req, res, 200, {
             ok: true,
@@ -2533,7 +2959,18 @@ export class HubServer {
             task: { id: task.id, name: task.name, status: task.status },
           });
         } catch (_daemonError) {
-          this.sendJson(req, res, 422, { error: "Task contract submission rejected by daemon" });
+          const msg = _daemonError instanceof Error ? _daemonError.message : String(_daemonError);
+          // The daemon's bounded stale-preview reason becomes a "preview again"
+          // instruction; any other rejection stays behind the fixed bounded
+          // message so raw daemon text, file content, path, or command is never
+          // echoed.
+          if (msg.includes("out of date")) {
+            this.sendJson(req, res, 422, {
+              error: "Task preview is out of date; preview again before submitting",
+            });
+          } else {
+            this.sendJson(req, res, 422, { error: "Task contract submission rejected by daemon" });
+          }
         }
         return;
       }

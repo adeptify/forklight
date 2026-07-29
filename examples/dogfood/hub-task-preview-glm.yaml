@@ -1,0 +1,165 @@
+version: 2
+name: Show and bind the effective Worker before Hub submission
+project: ../..
+taskClass: forklight-hub-task-preview-binding
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: volcengine-glm52-1m
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    On the Hub Board, a user enters an absolute Task Contract path and first
+    receives a plain-language preview of the exact Worker, model, runtime,
+    budget, Attempt policy, quality, and Integration feasibility. Submission is
+    enabled only for that preview revision, requires the existing explicit
+    confirmation, and stops with one instruction to preview again when either
+    the file or effective saved settings changed.
+  presentation:
+    summary: Hub 提交任务前先展示真正会用的 Worker、模型和限制；文件或设置变化后必须重新预览，不能拿旧确认启动新任务。
+    language: zh-CN
+  context:
+    - The canonical buildTaskAdmissionPreview and read-only daemon validate_file operation are shipped. CLI and daemon agree on the exact saved Worker selection and effective advanced policy.
+    - The current Hub Board asks only for a file path, shows a generic browser confirm, and calls submit_file directly. Users cannot see the effective Worker/policy before spending model Tokens.
+    - The current previewRevisionDigest proves only the Task file bytes. A safe submission binding must also change when the saved Worker/model/effective policy or admission facts change.
+    - Existing CLI and MCP submit_file callers must remain compatible. Hub can require stronger preview binding without forcing old non-Hub clients into an interactive UI flow.
+  inScope:
+    - Refactor the canonical admission preparation just enough that preview and submission can share one immutable settings snapshot, one Task file read, one parsed TaskSpec, and one effective-policy resolution. Do not re-read or re-resolve after a preview revision is accepted inside the same submit operation.
+    - Compute previewRevisionDigest from the Task file digest plus a deterministic, explicit allowlist of the effective selection, effective policy/provenance, quality result, and Integration summary. It must change when either relevant Task bytes or relevant current settings change, while containing no recoverable Task text, path, command, endpoint, credential reference, or Provider response.
+    - Extend daemon submit_file with an optional expectedPreviewRevisionDigest. When present, recompute the canonical admission from one current snapshot, compare before Task registration, and fail closed with one bounded stale-preview reason if the value is missing, malformed, or different. Existing callers that omit the value keep their current non-interactive behavior.
+    - Add a read-only Hub API route that validates one absolute Task Contract path through daemon validate_file and returns only the safe preview. It never calls submit_file and never asks for confirm.
+    - Require the Hub submit route to receive the exact previewRevisionDigest returned by its preview route and pass it to daemon submit_file. Reject missing or stale evidence before presenting success; never automatically preview and submit in one request.
+    - >-
+      Replace the Board's direct submit card with a two-step flow: enter path
+      and preview; read the exact Task/Worker/model/runtime/budget/base and extra
+      Attempts/adaptation/quality/Integration result; then explicitly confirm
+      and submit. Editing the path invalidates the preview and disables submit.
+    - Add short bilingual explanations for preview, no-Task-started state, stale evidence, unlimited budget, Attempt policy, quality result, and next action. Keep the raw digest and full policy values behind a technical disclosure or omit them from beginner copy.
+    - Add deterministic core, daemon, Hub server, and executable UI regressions for no mutation, exact binding, settings/file drift, missing/malformed evidence, path edits, confirmation, privacy, and bilingual meaning.
+  outOfScope:
+    - Changing Worker readiness, Provider authentication, model routing, competition, automatic retry/correction/adaptation, Task Detail, Plans, Delivery Profiles, Integration authority, Provider probes, commit, or push.
+    - Making CLI/MCP submit require a Hub preview, automatically submitting after preview, storing a reusable approval, or treating a preview as Provider connectivity proof.
+    - Displaying every advanced field in the beginner summary, exposing raw digest/path/command/error text, broad Board redesign, archive/history, or adding a Task Contract editor.
+  executionSteps:
+    - Trace buildTaskAdmissionPreview, loadTaskSpec single-read digest, coordinator validateFile/submitFile, daemon submit_file dispatch, Hub preview/submit routes, Board submit renderer, and directly relevant tests before editing.
+    - Define one internal admission preparation result and deterministic revision projection. Make preview and bound submit consume it without copying parsing or policy resolution.
+    - Add daemon stale-preview validation and tests before changing Hub; prove no Task/event/workspace/queue mutation for missing, malformed, file-drift, and settings-drift failures.
+    - Add the read-only Hub preview route and bound submit bridge with fixed privacy-safe error categories.
+    - Implement the two-step bilingual Board experience and executable state-transition tests. Run focused and full acceptance once; report unrelated failures without expanding scope or retrying.
+  deliverables:
+    - Canonical preview revision covering Task bytes and effective admission settings.
+    - Backward-compatible optional bound submit_file admission.
+    - Read-only Hub preview API and stale-safe Hub submit bridge.
+    - Two-step beginner-readable Board submit flow in English and Chinese.
+    - Deterministic regressions for truth, privacy, no mutation, and stale evidence.
+  modules:
+    - name: Canonical admission preparation and revision
+      responsibility: Produce one parsed Task, one effective policy, and one safe deterministic preview revision from the same file bytes and settings snapshot.
+      consumes:
+        - Absolute Task Contract file, current ForkLightSettings, runtime capabilities, quality policy, and Integration policy.
+      produces:
+        - Internal prepared admission plus the explicit safe preview and revision digest.
+      boundaries:
+        - One file read and settings snapshot per operation; no Task registration, queue, Worker, Provider request, endpoint, credential, raw text, or command in the safe projection.
+    - name: Bound daemon submission
+      responsibility: Prevent a Hub confirmation from starting a Task whose actual effective admission differs from what the user previewed.
+      consumes:
+        - submit_file path and optional expected preview revision.
+      produces:
+        - Existing Task registration only on exact match, or one bounded stale-preview rejection before mutation.
+      boundaries:
+        - Existing unbound CLI/MCP callers stay compatible; no retry, auto-preview, setting mutation, or partial Task creation on rejection.
+    - name: Hub two-step submission journey
+      responsibility: Explain the exact effective execution choice before asking the user to authorize Task creation.
+      consumes:
+        - Absolute path, safe daemon preview, current input value, and explicit user confirmation.
+      produces:
+        - Readable preview card and one bound submit request, or one instruction to preview again.
+      boundaries:
+        - No automatic submit, no raw internal object, digest in beginner copy, Provider claim, path guessing, or persisted approval.
+  callChain:
+    - User enters an absolute Task Contract path and chooses Preview on the Hub Board.
+    - Hub calls its read-only preview route; daemon validate_file prepares the Task once and returns the safe effective selection plus preview revision.
+    - Hub renders what will run, what limits apply, whether the contract is acceptable, and states that no Task has started.
+    - User confirms Submit; Hub sends the unchanged path and exact preview revision to daemon submit_file.
+    - Daemon prepares admission once from current file/settings, rejects any mismatch before mutation, or registers and queues exactly that effective Task.
+  scenarios:
+    - name: Exact preview submits once
+      given: The absolute file and relevant Worker settings are unchanged after a successful preview.
+      when: The user explicitly confirms Submit.
+      then: Daemon accepts the exact revision, creates one Task with the displayed Worker/model/policy, and Hub clears the preview after success.
+    - name: Task file changed after preview
+      given: The user previewed a valid file and its bytes change before confirmation.
+      when: Bound submit runs with the old revision.
+      then: No Task/event/workspace/queue entry is created; Hub says the preview is out of date and offers one Preview again action.
+    - name: Worker settings changed after preview
+      given: The Task bytes are unchanged but the selected saved Profile model, budget, or effective advanced policy changes.
+      when: Bound submit runs with the old revision.
+      then: The revision mismatch stops before mutation and the new effective selection is never silently substituted.
+    - name: Path edited after preview
+      given: A safe preview is visible on the Board.
+      when: The user edits the path input.
+      then: The old preview is visibly invalidated, Submit is disabled, and no request can reuse the old revision for the new path.
+    - name: Preview rejected safely
+      given: The path is relative, missing, unreadable, names an unknown Profile, or contains an invalid contract.
+      when: Preview is requested.
+      then: Hub shows a short bounded rejection and no raw daemon error, file content, path, command, credential reference, or Task is exposed or created.
+  risks:
+    - A digest over file bytes alone misses settings drift, so the revision must include the deterministic safe effective admission projection.
+    - Preview then submit can be a time-of-check/time-of-use race, so bound submit must parse, resolve, compare, and register from one prepared admission rather than calling preview then reading again.
+    - Requiring revision for all clients would break non-Hub workflows, so only Hub enforces the optional protocol field while daemon keeps omission backward-compatible.
+    - UI state can accidentally reuse a revision after path edits, so path input mutation must clear the stored preview and tests must execute that state change.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1400
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-preview.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/task-preview.test.ts
+    - tests/daemon.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Preview revision changes for relevant Task-file or current effective-settings changes and is computed from the same single-read/snapshot admission that a bound submit registers.
+    - Bound submit rejects missing, malformed, file-drift, settings-drift, or mismatched revision before any Task, event, workspace, queue, Provider, or Worker mutation; existing unbound CLI/MCP submission remains compatible.
+    - Hub preview is read-only; Board shows exact Worker/model/runtime/budget/Attempt/adaptation/quality/Integration facts before confirmation, invalidates on path edit, and never automatically submits.
+    - English and Chinese explain what will happen and the next action without raw digest, endpoint, credential reference, path, command, Task content, Provider response, or internal jargon in beginner copy.
+    - Focused core/daemon/Hub behavior, full tests, strict TypeScript, Hub JavaScript syntax, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-preview.test.ts tests/daemon.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

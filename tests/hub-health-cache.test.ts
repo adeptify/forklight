@@ -835,12 +835,19 @@ test("cache: cached responses do not include credentials, raw commands, or new i
     const checkedAt = (first.body as { checkedAt: string }).checkedAt;
     assert.match(checkedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     // /api/status body keys are bounded: settings, modelCatalog, modelRouting, workerProfiles,
-    // prerequisites, providers, runtimes, mains, daemon, versionJourney, checkedAt.
+    // workerReadiness,
+    // prerequisites, providers, bounded readiness provenance, runtimes, mains,
+    // daemon, versionJourney, checkedAt.
     const keys = Object.keys(first.body as Record<string, unknown>).sort();
     assert.deepEqual(keys, [
       "checkedAt", "daemon", "mains", "modelCatalog", "modelRouting", "prerequisites",
-      "providers", "runtimes", "settings", "versionJourney", "workerProfiles",
+      "providerReadinessSource", "providerReadinessSourceDetail", "providers", "runtimes",
+      "settings", "versionJourney", "workerProfiles",
+      "workerReadiness",
     ]);
+    const body = first.body as Record<string, unknown>;
+    assert.ok(body.providerReadinessSource === "daemon" || body.providerReadinessSource === "local-fallback");
+    assert.equal(typeof body.providerReadinessSourceDetail, "string");
   } finally {
     await ctx.cleanup();
   }

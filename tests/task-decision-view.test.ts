@@ -150,7 +150,7 @@ test("decision authority matrix keeps Worker success text unverified", () => {
       nextAction: "User may authorize Integration",
     },
     {
-      name: "source applied no activation",
+      name: "source delivery complete when activation is not applicable",
       task: task("succeeded"),
       events: [
         claim,
@@ -171,8 +171,8 @@ test("decision authority matrix keeps Worker success text unverified", () => {
         ],
         createdAt: now,
       }],
-      stage: "applied-not-activated",
-      nextAction: "Run or verify activation",
+      stage: "delivered",
+      nextAction: "Delivery is complete; runtime activation was not required",
     },
     {
       name: "activation passed",

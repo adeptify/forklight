@@ -1,0 +1,171 @@
+version: 2
+name: Let real Grok work correct stale Worker readiness
+project: /Users/yijunwang/code/forklight
+taskClass: provider-runtime-evidence-truth
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    After a real Grok Builder Worker successfully reaches the model and returns
+    a terminal response, ForkLight records that stronger connection evidence
+    and Hub/CLI no longer keep showing the Worker as connection-failed because
+    of an older keychain-only xAI probe. Local sign-in readiness, Provider
+    connectivity, and task-quality verification remain separate truths.
+  presentation:
+    summary: Grok 真跑成功后，Hub 不再继续显示旧的“连接失败”。
+    language: zh-CN
+  context:
+    - A real post-restart Grok 4.5 Task, 6e07c4ab-1c57-4973-85fe-ceb70b0d0840, succeeded and passed independent verification.
+    - Daemon health still reports local-grok-builder as needs-attention / connection-failed because an older explicit xAI probe checked only the xAI Keychain entry.
+    - Grok Builder supports a readable operator ~/.grok/auth.json local-sign-in path and successfully seeds it into task-local GROK_HOME; an xAI Keychain entry is not required for that path.
+    - Provider readiness already reports xai ready with authMode local-sign-in, but ProviderProbeService getProviderStatus derives authentication readiness only from Keychain existence.
+    - Successful Worker execution is stronger connection evidence than the old keychain-only probe. Independent acceptance may still fail because of code quality; that must not erase the fact that the model connection worked.
+    - Preserve the dirty worktree and every unrelated change. No commit or push.
+  inScope:
+    - Add a privacy-safe evidence source that distinguishes an explicit Provider probe from a successful real Worker run.
+    - When an Attempt receives a genuine worker.completed terminal event, persist verified connection evidence for the exact Task Provider, model, and endpoint origin.
+    - Let that successful Worker evidence supersede older failed evidence for the same Provider.
+    - For xAI status derivation, recognize the supported readable local-sign-in path instead of requiring a Keychain item.
+    - Prevent an xAI keychain-only probe from overwriting real success with a false authentication failure. If ForkLight cannot perform a real Grok connectivity probe here, return a bounded actionable result without persisting false failed evidence.
+    - Keep failed verification, rejected Candidate, Worker interruption, and pre-model launch failure from fabricating successful connection evidence.
+    - Add focused behavior tests for exact-model/origin matching, evidence precedence, local-sign-in, privacy, and daemon health projection.
+  outOfScope:
+    - General Provider redesign, automatic retries, model scoring, routing, competition, new UI layout, credential storage changes, proxy configuration, or changing task success semantics.
+    - Treating a passing Provider connection as passing code quality, treating local auth presence as a remote connectivity success, or converting every Worker failure into Provider failure.
+    - Exposing auth paths, proxy values, credentials, prompts, raw model output, or failure diagnostics in readiness JSON.
+  executionSteps:
+    - Trace ProviderProbeService, StateStore evidence, DaemonCoordinator execution, CLI health projection, canonical Worker readiness, and Hub consumption.
+    - Define one small evidence-recording boundary with explicit source and exact identity.
+    - Record success only from a genuine worker.completed event produced by the selected Attempt.
+    - Correct xAI local-sign-in handling and make explicit xAI probing non-destructive when no true Grok connectivity probe is performed.
+    - Add focused tests first, run them once, then run full tests, strict TypeScript, build, and diff hygiene once.
+  deliverables:
+    - Real Worker success updates Provider connection truth.
+    - Grok local-sign-in no longer becomes a false missing-keychain failure.
+    - Focused regression evidence and unchanged privacy boundaries.
+  modules:
+    - name: Runtime connection evidence
+      responsibility: Convert only a genuine Worker terminal success into safe, exact Provider connection evidence.
+      consumes:
+        - Task Provider identity, exact model and endpoint, Attempt timing, and canonical worker.completed event.
+      produces:
+        - Persisted verified evidence tagged as coming from a real Worker run.
+      boundaries:
+        - No prompt, output, credential, path, proxy, or code-quality claim.
+    - name: Provider status service
+      responsibility: Reconcile local authentication capability with cached connection evidence without destructive false probes.
+      consumes:
+        - Keychain readability, Grok local-sign-in readiness, exact default identity, and persisted evidence.
+      produces:
+        - Unverified, verified, stale, or failed connection truth.
+      boundaries:
+        - Local sign-in alone is launch readiness, not remote verification; a keychain-only xAI check cannot report remote failure.
+    - name: Daemon execution bridge
+      responsibility: Record real connection success after execution while leaving verifier and Candidate judgment independent.
+      consumes:
+        - Run result and events for the exact Attempt.
+      produces:
+        - At most one idempotent Provider evidence update per genuine completed Worker execution.
+      boundaries:
+        - No new Attempt, retry, adaptation, probe call, or Task-status rewrite.
+    - name: Readiness regressions
+      responsibility: Prove Hub/CLI projection becomes truthful and remains private.
+      consumes:
+        - Fake local-sign-in, old failed evidence, simulated Worker outcomes, and settings identities.
+      produces:
+        - Deterministic tests covering success and non-success boundaries.
+      boundaries:
+        - No live Provider call in tests and no giant source-string assertions.
+  callChain:
+    - Daemon launches the exact saved Grok Worker Profile after local authentication preflight.
+    - Grok reaches the Provider and emits a canonical worker.completed terminal event.
+    - The execution bridge records verified Provider/model/origin evidence from that event.
+    - Daemon health reads the evidence without probing, canonical readiness resolves the Worker, and Hub/CLI show the resulting state.
+    - Independent verification and Main review continue separately and may still reject the implementation.
+  scenarios:
+    - name: Old false failure is corrected by real success
+      given: xAI has old failed keychain-only evidence but Grok local sign-in is readable.
+      when: A Grok Worker genuinely completes against the configured model and endpoint.
+      then: New worker-run evidence supersedes the old failure and the saved Grok Worker becomes ready.
+    - name: Verification fails after model work
+      given: The Worker returned a genuine completed response but an acceptance command failed.
+      when: The Attempt becomes failed for code-quality reasons.
+      then: Provider connection may be verified while Task delivery remains failed; neither truth overwrites the other.
+    - name: Worker never reaches terminal response
+      given: Launch, authentication, connectivity, interruption, or watchdog failure occurs before worker.completed.
+      when: Daemon finalizes the attempt.
+      then: No verified worker-run connection evidence is fabricated.
+    - name: Local sign-in without prior run
+      given: Grok auth is readable but no matching remote evidence exists.
+      when: Health is read.
+      then: The Worker is launchable/unverified, not blocked and not falsely verified.
+    - name: User requests xAI probe
+      given: xAI uses local sign-in and has no Keychain item.
+      when: An explicit probe is requested without a true Grok network probe implementation.
+      then: Existing real-success evidence is preserved and no false authentication-failed record is written.
+  risks:
+    - Recording success after only local launch would create false readiness, so require the exact canonical worker.completed event.
+    - Custom Task model or endpoint must not verify a different saved default; existing exact identity matching must remain authoritative.
+    - A later explicit probe must not downgrade valid evidence merely because the OAuth path is not a Keychain item.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1000
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/provider-probe.ts
+    - src/core/providers.ts
+    - src/core/types.ts
+    - src/core/runner.ts
+    - src/daemon/coordinator.ts
+    - tests/provider-probe.test.ts
+    - tests/worker-readiness.test.ts
+    - tests/daemon.test.ts
+acceptance:
+  criteria:
+    - A genuine worker.completed event records verified evidence for the exact Provider/model/origin and exposes no sensitive content.
+    - Old failed xAI evidence is superseded by a later genuine Grok success, including when authentication is local-sign-in rather than Keychain.
+    - Local sign-in without remote evidence remains launchable/unverified; verification failure after genuine Worker completion does not erase connection truth.
+    - Launch failure, interruption, and absence of worker.completed never create success evidence.
+    - An explicit xAI probe cannot persist a false authentication failure solely because the Keychain entry is absent.
+    - Hub and CLI use the same canonical readiness projection; no new product-facing jargon is introduced.
+  commands:
+    - node --test --import tsx tests/provider-probe.test.ts tests/worker-readiness.test.ts tests/cli-health.test.ts
+    - node --test --import tsx tests/daemon.test.ts
+    - npm test
+    - npx tsc --noEmit
+    - npm run build
+    - git diff --check

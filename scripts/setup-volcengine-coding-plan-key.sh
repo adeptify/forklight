@@ -3,7 +3,22 @@
 set -euo pipefail
 
 KEYCHAIN_SERVICE="forklight.volcengine.api-key"
-KEYCHAIN_ACCOUNT="$(id -un)"
+
+resolve_keychain_account() {
+  local candidate
+  local id_account=""
+  id_account="$(id -un 2>/dev/null || true)"
+  for candidate in "${USER:-}" "${LOGNAME:-}" "${id_account}"; do
+    if [[ "${candidate}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  echo "Unable to resolve a safe local Keychain account." >&2
+  return 1
+}
+
+KEYCHAIN_ACCOUNT="$(resolve_keychain_account)"
 
 if ! command -v security >/dev/null 2>&1; then
   echo "This setup script requires the macOS security command." >&2
@@ -19,11 +34,12 @@ if [[ -z "${VOLCENGINE_API_KEY}" ]]; then
   exit 1
 fi
 
-security add-generic-password \
+printf '%s\n' "${VOLCENGINE_API_KEY}" | security add-generic-password \
   -U \
   -a "${KEYCHAIN_ACCOUNT}" \
   -s "${KEYCHAIN_SERVICE}" \
-  -w "${VOLCENGINE_API_KEY}" >/dev/null
+  -T /usr/bin/security \
+  -w >/dev/null
 
 unset VOLCENGINE_API_KEY
 

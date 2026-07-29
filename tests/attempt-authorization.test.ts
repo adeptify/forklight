@@ -446,6 +446,91 @@ test("correction requires failed or interrupted status", async () => {
     store2.setTaskStatus(task.id, "succeeded", { error: null });
     assert.throws(() => authorizeMainCorrection(store2, task.id, {
       feedback: "Can't correct succeeded", maxBudgetUsd: null, confirm: true,
-    }, 3, 1, 20), /cannot authorize a correction from status succeeded/);
+    }, 3, 1, 20), /has not recorded a valid revise/);
+  } finally { store2.close(); }
+});
+
+test("correction authorized for succeeded task with valid Main revise review", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-corr-succeeded-"));
+  const store2 = new StateStore(home);
+  try {
+    const task = registerTaskFromSpec(store2, {
+      version: 1, name: "succeeded revise task", project: "/tmp/source",
+      goal: "Test", constraints: [],
+      provider: { name: "deepseek", model: "deepseek-v4-pro", keychainService: "forklight.test" },
+      runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: 1.5 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+    }, "forklight://test/correction-succeeded");
+    const now = new Date().toISOString();
+    const attempt = {
+      id: "s-att-1", taskId: task.id, ordinal: 1, status: "succeeded" as const,
+      sessionId: task.sessionId, rawLogPath: "/tmp/s-att-1.jsonl",
+      startedAt: now, finishedAt: now, exitCode: 0,
+    };
+    store2.createAttempt(attempt);
+    store2.updateTask(task.id, { currentAttemptId: attempt.id });
+    store2.setTaskStatus(task.id, "succeeded", { error: null });
+    // Seed verification and Main revise review
+    const verEvent = store2.addEvent(task.id, attempt.id, "verification.completed",
+      "Independent verification passed", {
+        passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
+        commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+        diffPath: "/tmp/diff.patch", sourceUnchanged: true,
+      });
+    store2.addEvent(task.id, attempt.id, "main-review.completed",
+      "Main review: revise", {
+        decision: "revise", reason: "Keep the useful parts and fix remaining issues",
+        attemptId: attempt.id, verificationEventSequence: verEvent.sequence,
+      });
+    const opts = authorizeMainCorrection(store2, task.id, {
+      feedback: "Fix the remaining module boundary", maxBudgetUsd: null, confirm: true,
+    }, 3, 1, 20);
+    assert.equal(opts.maximumOrdinal, 2);
+    const grants = store2.listEvents(task.id).filter((e) => e.type === "attempt.authorization.granted");
+    assert.equal(grants.length, 1);
+    assert.equal((grants[0]?.payload as Record<string, unknown>)?.kind, "correction");
+  } finally { store2.close(); }
+});
+
+test("maxExtraAttempts zero does not block correction when maxMainCorrections is one", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-corr-relay-"));
+  const store2 = new StateStore(home);
+  try {
+    const task = registerTaskFromSpec(store2, {
+      version: 1, name: "relay task", project: "/tmp/source",
+      goal: "Test", constraints: [],
+      provider: { name: "deepseek", model: "deepseek-v4-pro", keychainService: "forklight.test" },
+      runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: 1.5 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+    }, "forklight://test/correction-relay");
+    const now = new Date().toISOString();
+    const attempt = {
+      id: "r-att-1", taskId: task.id, ordinal: 1, status: "succeeded" as const,
+      sessionId: task.sessionId, rawLogPath: "/tmp/r-att-1.jsonl",
+      startedAt: now, finishedAt: now, exitCode: 0,
+    };
+    store2.createAttempt(attempt);
+    store2.updateTask(task.id, { currentAttemptId: attempt.id });
+    store2.setTaskStatus(task.id, "succeeded", { error: null });
+    const verEvent = store2.addEvent(task.id, attempt.id, "verification.completed",
+      "Independent verification passed", {
+        passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
+        commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+        diffPath: "/tmp/diff.patch", sourceUnchanged: true,
+      });
+    store2.addEvent(task.id, attempt.id, "main-review.completed",
+      "Main review: revise", {
+        decision: "revise", reason: "Minor remaining gaps", attemptId: attempt.id,
+        verificationEventSequence: verEvent.sequence,
+      });
+    // maxExtraAttempts=0 is irrelevant — correction uses maxMainCorrections=1
+    const opts = authorizeMainCorrection(store2, task.id, {
+      feedback: "Fix the gaps", maxBudgetUsd: null, confirm: true,
+    }, 1, 1, 20);
+    assert.equal(opts.maximumOrdinal, 2);
   } finally { store2.close(); }
 });

@@ -147,6 +147,62 @@ function hasVerifiedFinalDelivery(task){
     return item && item.status === "verified-repaired-delivered";
   });
 }
+/* Task headline projection: the single most user-relevant outcome for the
+ * prominent Task badge on the board card and the Task Detail hero. Verified
+ * final delivery and the Main/delivery decisionStage take precedence over
+ * the machine status, so a machine-successful Candidate that Main asked to
+ * revise can never be presented as accepted or delivered. Pure presentation
+ * only: it never mutates machine truth, lane, filter, or lifecycle state,
+ * and the full journey keeps the Worker result, independent checks, Main
+ * decision, and delivery as separate evidence. */
+function taskHeadline(task){
+  var stageMap = {
+    "awaiting-main-review": { labelKey: "taskHeadlineAwaitingReview", tone: "badge-warn", delivered: false },
+    "revision-requested": { labelKey: "taskHeadlineRevisionRequested", tone: "badge-warn", delivered: false },
+    "main-rejected": { labelKey: "taskHeadlineRejected", tone: "badge-err", delivered: false },
+    "ready-for-integration": { labelKey: "taskHeadlineReadyIntegration", tone: "badge-info", delivered: false },
+    "integrating": { labelKey: "taskHeadlineIntegrating", tone: "badge-info", delivered: false },
+    "applied-not-activated": { labelKey: "taskHeadlineAppliedNotActivated", tone: "badge-warn", delivered: false },
+    "delivered": { labelKey: "taskHeadlineDeliveredNoActivation", tone: "badge-ok", delivered: true },
+    "activated": { labelKey: "taskHeadlineVerifiedDelivery", tone: "badge-ok", delivered: true },
+    "integration-failed": { labelKey: "taskHeadlineIntegrationFailed", tone: "badge-err", delivered: false }
+  };
+  var machineMap = {
+    "succeeded": { labelKey: "taskHeadlineMachinePassed", tone: "badge-ok", delivered: false },
+    "completed": { labelKey: "taskHeadlineMachinePassed", tone: "badge-ok", delivered: false },
+    "running": { labelKey: "statusRunning", tone: "badge-info", delivered: false },
+    "active": { labelKey: "statusActive", tone: "badge-info", delivered: false },
+    "preparing": { labelKey: "statusPreparing", tone: "badge-warn", delivered: false },
+    "verifying": { labelKey: "statusVerifying", tone: "badge-warn", delivered: false },
+    "queued": { labelKey: "statusQueued", tone: "badge-dim", delivered: false },
+    "waiting": { labelKey: "statusWaiting", tone: "badge-dim", delivered: false },
+    "pending": { labelKey: "statusPending", tone: "badge-dim", delivered: false },
+    "blocked": { labelKey: "statusBlocked", tone: "badge-err", delivered: false },
+    "failed": { labelKey: "statusFailed", tone: "badge-err", delivered: false },
+    "interrupted": { labelKey: "statusInterrupted", tone: "badge-err", delivered: false }
+  };
+  if(hasVerifiedFinalDelivery(task)){
+    return { labelKey: "taskHeadlineVerifiedDelivery", tone: "badge-ok", delivered: true };
+  }
+  var stage = task && task.decisionStage;
+  var stageEntry = stage ? stageMap[stage] : null;
+  if(stageEntry) return stageEntry;
+  var status = task && task.status;
+  var machineEntry = status ? machineMap[status] : null;
+  if(machineEntry) return machineEntry;
+  return { labelKey: "statusUnknown", tone: "badge-dim", delivered: false };
+}
+/* Prominent Task badge built from the headline projection. Used by the
+ * kanban card and the Task Detail hero so the first status a user sees
+ * follows the latest Main/delivery outcome instead of the raw machine
+ * status. The full journey still shows the machine result, independent
+ * checks, Main decision, and delivery as separate evidence. */
+function taskHeadlineBadge(task){
+  var hl = taskHeadline(task);
+  var b = h("span", "badge " + hl.tone + " task-headline", t(hl.labelKey));
+  b.setAttribute("data-fl-role", "task-headline");
+  return b;
+}
 function badgeTd(s){ var b = td(""); b.appendChild(badge(s)); return b; }
 function progBar(p){
   var el = h("progress", "progress-bar");
@@ -202,6 +258,7 @@ var S = {
   settings: null, health: null, boards: null, tasks: null, competitions: null, stats: null,
   economics: null,
   economicsError: null,
+  sample: null,
   hub: null,
   lastOk: 0, connected: false, hadOk: false, tab: "overview",
   detail: null, detailReturnFocus: null, timer: null, token: null,
@@ -656,10 +713,11 @@ function refresh(){
   var econP = pollEconomics();
   var opsP = Promise.all([
     fetchJSON("/api/ops/health"), fetchJSON("/api/ops/board"), fetchJSON("/api/ops/tasks"),
-    fetchJSON("/api/ops/competitions"), fetchJSON("/api/ops/stats"), fetchJSON("/api/ops/settings")
+    fetchJSON("/api/ops/competitions"), fetchJSON("/api/ops/stats"), fetchJSON("/api/ops/settings"),
+    fetchJSON("/api/ops/sample-task")
   ]).then(function(v){
     S.health = v[0]; S.boards = v[1]; S.tasks = v[2];
-    S.competitions = v[3]; S.stats = v[4]; S.settings = v[5];
+    S.competitions = v[3]; S.stats = v[4]; S.settings = v[5]; S.sample = v[6];
     S.lastOk = Date.now(); S.connected = true; S.hadOk = true;
   }).catch(function(e){
     S.connected = false;
@@ -928,6 +986,7 @@ function taskProgressSummary(task){
     "ready-for-integration": "taskProgressReadyIntegration",
     "integrating": "taskProgressIntegrating",
     "applied-not-activated": "taskProgressAppliedNotActivated",
+    "delivered": "taskProgressDeliveredNoActivation",
     "activated": "taskProgressActivated",
     "integration-failed": "taskProgressIntegrationFailed"
   }[stage];
@@ -983,11 +1042,15 @@ function kanbanCard(task){
   cardEl.setAttribute("tabindex", "0");
   cardEl.appendChild(h("div", "kanban-card-title", task.name || t("taskUntitled")));
   var meta = h("div", "kanban-card-meta");
-  meta.appendChild(badge(task.status));
-  // Final-delivery badge is added alongside the machine badge; it never
-  // changes the machine lane (taskLane selects only on status). A failed
-  // Task with verified final delivery still renders in the failed lane.
-  var finalBadge = finalDeliveryBadge(task);
+  // The prominent badge follows the latest Main/delivery outcome, not the
+  // raw machine status, so a machine-successful Candidate Main asked to
+  // revise is never shown as accepted or delivered. The machine lane
+  // (taskLane selects only on status) and the journey evidence are unchanged.
+  meta.appendChild(taskHeadlineBadge(task));
+  // Avoid a duplicate delivery badge when the headline already states the
+  // verified final outcome. A failed Task with verified final delivery still
+  // renders in the failed lane; only the duplicate badge is suppressed.
+  var finalBadge = taskHeadline(task).delivered ? null : finalDeliveryBadge(task);
   if(finalBadge) meta.appendChild(finalBadge);
   // Quiet / stalled activity is a presentation signal on the board only.
   var activityBadge = boardActivityBadge(task);
@@ -1028,6 +1091,133 @@ function kanbanColumn(lane, label, tone, items){
   return col;
 }
 
+/* --- Guided first Task ---
+ * This prepares only a disposable packaged project and an ordinary Task
+ * preview. After explicit Start, the normal Task Detail/Main Review/
+ * Integration path owns the outcome; onboarding adds no second state machine. */
+var guidedWorkerId = "";
+function guidedLaunchableWorkers(){
+  var profiles = (S.hub && S.hub.workerProfiles && S.hub.workerProfiles.profiles) || [];
+  var readiness = (S.hub && S.hub.workerReadiness) || [];
+  return profiles.filter(function(profile){
+    var row = readiness.find(function(item){ return item && item.workerId === profile.id; });
+    return row && row.canLaunch === true;
+  });
+}
+function renderGuidedSampleCard(){
+  var cardEl = h("div", "card form-card guided-sample-card");
+  cardEl.setAttribute("data-fl-role", "guided-first-task");
+  cardEl.appendChild(h("div", "card-title mb-4", t("guidedSampleTitle")));
+  cardEl.appendChild(h("div", "summary-line dim mb-8", t("guidedSampleBody")));
+  var sample = S.sample || { available: false, state: "unavailable" };
+  if(sample.available === false){
+    cardEl.appendChild(stateMsg("empty", t("guidedSampleUnavailable")));
+    return cardEl;
+  }
+
+  if(sample.state === "submitted" && sample.taskId){
+    cardEl.appendChild(stateMsg("success", t("guidedSampleSubmitted")));
+    cardEl.appendChild(h("div", "summary-line", t("guidedSampleSubmittedNext")));
+    var openBtn = h("button", "btn primary sm mt-8", t("guidedSampleOpenTask"));
+    openBtn.type = "button";
+    openBtn.addEventListener("click", function(){ showTask(sample.taskId); });
+    cardEl.appendChild(openBtn);
+    return cardEl;
+  }
+  if(sample.state === "submitting"){
+    cardEl.appendChild(stateMsg("warning", t("guidedSampleUnknown")));
+    var boardBtn = h("button", "btn sm mt-8", t("guidedSampleOpenBoard"));
+    boardBtn.type = "button";
+    boardBtn.addEventListener("click", function(){ switchTab("board"); });
+    cardEl.appendChild(boardBtn);
+    return cardEl;
+  }
+
+  var workers = guidedLaunchableWorkers();
+  if(!workers.length){
+    cardEl.appendChild(stateMsg("empty", t("guidedSampleNoWorker")));
+    var workersBtn = h("button", "btn sm mt-8", t("guidedSampleOpenWorkers"));
+    workersBtn.type = "button";
+    workersBtn.addEventListener("click", function(){ switchTab("worker"); });
+    cardEl.appendChild(workersBtn);
+    return cardEl;
+  }
+  if(!workers.some(function(worker){ return worker.id === guidedWorkerId; })){
+    var defaultId = S.hub && S.hub.workerProfiles && S.hub.workerProfiles.defaultProfileId;
+    guidedWorkerId = workers.some(function(worker){ return worker.id === defaultId; })
+      ? defaultId : workers[0].id;
+  }
+
+  var label = h("label", "", t("guidedSampleWorkerLabel"));
+  var select = h("select", "");
+  workers.forEach(function(worker){
+    var option = document.createElement("option");
+    option.value = worker.id;
+    option.textContent = worker.label;
+    select.appendChild(option);
+  });
+  select.value = guidedWorkerId;
+  select.addEventListener("change", function(){
+    guidedWorkerId = select.value;
+    render();
+  });
+  label.appendChild(select);
+  cardEl.appendChild(label);
+
+  var matchingPrepared = sample.state === "prepared"
+    && sample.workerProfileId === guidedWorkerId
+    && sample.preview;
+  if(matchingPrepared){
+    cardEl.appendChild(h("div", "summary-line mt-8", t("guidedSamplePrepared")));
+    cardEl.appendChild(renderSubmitPreviewFacts(sample.preview));
+    var startBtn = h("button", "btn primary sm mt-8", t("guidedSampleStart"));
+    startBtn.type = "button";
+    startBtn.addEventListener("click", function(){
+      if(!window.confirm(t("guidedSampleStartConfirm"))) return;
+      startBtn.disabled = true;
+      postJSON("/api/ops/sample-task/submit", {
+        sampleId: sample.sampleId,
+        previewRevisionDigest: sample.preview.previewRevisionDigest,
+        confirm: true
+      }).then(function(result){
+        S.sample = result;
+        toast(t("guidedSampleStarted"));
+        return refresh();
+      }).catch(function(error){
+        flashError(t("guidedSampleStartFailed"), error && error.message);
+      }).finally(function(){ startBtn.disabled = false; });
+    });
+    cardEl.appendChild(startBtn);
+    return cardEl;
+  }
+
+  if(sample.state === "needs-attention"){
+    cardEl.appendChild(stateMsg("warning", t("guidedSampleNeedsAttention")));
+  } else if(sample.state === "prepared" && sample.workerProfileId !== guidedWorkerId){
+    cardEl.appendChild(h("div", "summary-line dim mt-8", t("guidedSampleSelectionChanged")));
+  } else {
+    cardEl.appendChild(h("div", "summary-line dim mt-8", t("guidedSampleNotPrepared")));
+  }
+  var prepareBtn = h("button", "btn primary sm mt-8", t("guidedSamplePrepare"));
+  prepareBtn.type = "button";
+  prepareBtn.addEventListener("click", function(){
+    if(!window.confirm(t("guidedSamplePrepareConfirm"))) return;
+    prepareBtn.disabled = true;
+    postJSON("/api/ops/sample-task/prepare", {
+      workerProfileId: guidedWorkerId,
+      confirm: true
+    }).then(function(result){
+      S.sample = result;
+      toast(t("guidedSamplePreparedToast"));
+      render();
+    }).catch(function(error){
+      flashError(t("guidedSamplePrepareFailed"), error && error.message);
+    }).finally(function(){ prepareBtn.disabled = false; });
+  });
+  cardEl.appendChild(prepareBtn);
+  return cardEl;
+}
+
 /* --- Overview (dense: metrics + split columns, less vertical scroll) --- */
 function rOverview(){
   viewEl.textContent = "";
@@ -1045,6 +1235,7 @@ function rOverview(){
   // Three-layer version alignment: source, built product, running service.
   // Prominent, before task metrics, so a non-technical user sees it first.
   viewEl.appendChild(renderVersionJourneyCard());
+  viewEl.appendChild(renderGuidedSampleCard());
 
   var metrics = hd("div", "grid-4", [
     metric(t("ovBoard"), String(tasks.length), lanes.active + " " + t("ovWorking")),
@@ -1419,6 +1610,16 @@ function renderVersionJourneyCard(){
 /* Board filter is presentation-only session state; it never mutates Tasks. */
 var boardFilterQuery = "";
 var boardFilterLane = "all";
+/* Two-step submit state: the path input value and the last safe preview.
+ * Editing the path invalidates the preview so an old revision can never be
+ * reused for a different file. Both survive a poll re-render. */
+var boardSubmitPath = "";
+var boardPreview = null;
+var boardPreviewRequestId = 0;
+function submitPreviewRequestIsCurrent(requestId, requestedPath, currentPath){
+  return requestId === boardPreviewRequestId
+    && requestedPath === String(currentPath || "").trim();
+}
 function taskMatchesBoardFilter(task, query, lane){
   if(lane && lane !== "all" && taskLane(task.status) !== lane) return false;
   var q = String(query || "").trim().toLowerCase();
@@ -1429,40 +1630,204 @@ function taskMatchesBoardFilter(task, query, lane){
   ].map(function(v){ return String(v || "").toLowerCase(); }).join(" ");
   return hay.indexOf(q) >= 0;
 }
+
+/* Render the safe admission preview as beginner-readable facts. Raw digest
+ * and full effective policy values stay behind a closed technical disclosure;
+ * beginner copy shows only Worker/model/runtime/budget/Attempts/adaptation/
+ * quality/Integration facts. No path, command, endpoint, credential, or Task
+ * text is rendered. */
+function submitFactRow(label, value){
+  var r = h("div", "summary-line submit-fact");
+  r.appendChild(h("span", "fact-label", label + ": "));
+  r.appendChild(h("span", "fact-val", value));
+  return r;
+}
+function submitBudgetText(preview){
+  if(preview.budget && preview.budget.unlimited) return t("taskSubmitBudgetUnlimited");
+  var amt = preview.budget && typeof preview.budget.maxBudgetUsd === "number"
+    ? preview.budget.maxBudgetUsd : null;
+  return amt === null ? t("taskSubmitBudgetUnlimited") : ("$" + String(amt));
+}
+function submitAttemptsText(preview){
+  var v = preview.effectivePolicy && preview.effectivePolicy.values;
+  if(!v) return "";
+  var base = typeof v.baseMaxAttempts === "number" ? v.baseMaxAttempts : 0;
+  var extra = typeof v.maxExtraAttempts === "number" ? v.maxExtraAttempts : 0;
+  return extra > 0
+    ? t("taskSubmitAttemptsValue", { base: base, extra: extra })
+    : t("taskSubmitAttemptsNoExtra", { base: base });
+}
+function submitAdaptationText(preview){
+  var v = preview.effectivePolicy && preview.effectivePolicy.values;
+  var count = v && typeof v.maxAdaptationRounds === "number" ? v.maxAdaptationRounds : 0;
+  return count > 0
+    ? t("taskSubmitAdaptationOn", { count: count })
+    : t("taskSubmitAdaptationOff");
+}
+function submitQualityText(preview){
+  var q = preview.quality || {};
+  var score = typeof q.score === "number" ? q.score : 0;
+  return q.passed
+    ? t("taskSubmitQualityPass", { score: score })
+    : t("taskSubmitQualityFail", { score: score });
+}
+function submitIntegrationText(preview){
+  var integ = preview.integration || {};
+  if(!integ.applicable) return t("taskSubmitIntegrationNa");
+  return integ.integratable ? t("taskSubmitIntegrationOk") : t("taskSubmitIntegrationWarn");
+}
+function submitWorkerText(preview){
+  var id = String(preview.workerProfileId || "");
+  var label = preview.workerProfileLabel ? String(preview.workerProfileLabel) : id;
+  return label === id ? id : label + " (" + id + ")";
+}
+function renderSubmitPreviewFacts(preview){
+  var wrap = h("div", "submit-preview-facts");
+  wrap.appendChild(submitFactRow(t("taskSubmitFactTask"), String(preview.taskName || "")));
+  if(preview.workerProfileId){
+    wrap.appendChild(submitFactRow(t("taskSubmitFactWorker"), submitWorkerText(preview)));
+  }
+  wrap.appendChild(submitFactRow(t("taskSubmitFactProvider"), String(preview.provider || "")));
+  wrap.appendChild(submitFactRow(t("taskSubmitFactModel"), String(preview.model || "")));
+  wrap.appendChild(submitFactRow(t("taskSubmitFactRuntime"), String(preview.runtime || "")));
+  wrap.appendChild(submitFactRow(t("taskSubmitFactEffort"), String(preview.effort || "")));
+  wrap.appendChild(submitFactRow(t("taskSubmitFactBudget"), submitBudgetText(preview)));
+  wrap.appendChild(submitFactRow(t("taskSubmitFactAttempts"), submitAttemptsText(preview)));
+  wrap.appendChild(submitFactRow(t("taskSubmitFactAdaptation"), submitAdaptationText(preview)));
+  wrap.appendChild(submitFactRow(t("taskSubmitFactQuality"), submitQualityText(preview)));
+  wrap.appendChild(submitFactRow(t("taskSubmitFactIntegration"), submitIntegrationText(preview)));
+  wrap.appendChild(h("div", "summary-line dim mt-4", t("taskSubmitNoTaskStarted")));
+  // Technical disclosure: raw digest and full effective policy values only.
+  var tech = h("div", "summary-line mono fs11");
+  tech.appendChild(h("span", "", t("taskSubmitDigestLabel") + ": " + String(preview.previewRevisionDigest || "")));
+  wrap.appendChild(collapsedSection(t("taskSubmitTechnical"), tech));
+  return wrap;
+}
 function rTasks(){
   viewEl.textContent = "";
   if(!S.hadOk){ showDisconnected(); return; }
   viewEl.appendChild(renderPageStory("board"));
   var tasks = S.tasks || [];
-  // Submit entry: transports one complete Task Contract through the daemon.
+  // Submit entry: preview exactly what will run, then confirm a bound submit.
   var submitCard = h("div", "card form-card");
   submitCard.appendChild(h("div", "card-title mb-4", t("taskSubmitTitle")));
   submitCard.appendChild(h("div", "summary-line dim mb-8", t("taskSubmitBody")));
   var pathLab = h("label", "", t("taskSubmitPathLabel"));
   var pathIn = h("input", "");
   pathIn.type = "text";
+  pathIn.value = boardSubmitPath;
   pathIn.placeholder = t("taskSubmitPathPlaceholder");
   pathLab.appendChild(pathIn);
   submitCard.appendChild(pathLab);
+
+  var previewArea = h("div", "preview-panel submit-preview-panel");
+  var previewBtn = h("button", "btn sm", t("taskSubmitPreviewBtn"));
+  previewBtn.type = "button";
   var submitBtn = h("button", "btn primary sm", t("taskSubmitBtn"));
   submitBtn.type = "button";
-  submitBtn.addEventListener("click", function(){
+  submitBtn.disabled = true;
+
+  function renderSubmitPreview(){
+    previewArea.textContent = "";
+    if(!boardPreview){
+      previewArea.appendChild(h("div", "summary-line dim", t("taskSubmitPreviewEmpty")));
+      submitBtn.disabled = true;
+      return;
+    }
+    previewArea.appendChild(renderSubmitPreviewFacts(boardPreview.preview));
+    submitBtn.disabled = false;
+  }
+
+  function clearSubmitPreview(){
+    boardPreview = null;
+    renderSubmitPreview();
+  }
+
+  pathIn.addEventListener("input", function(){
+    boardSubmitPath = pathIn.value;
+    // Any path edit invalidates the stored preview so the old revision can
+    // never be reused for a different file.
+    boardPreviewRequestId += 1;
+    clearSubmitPreview();
+  });
+
+  previewBtn.addEventListener("click", function(){
     var fp = pathIn.value.trim();
     if(!fp){ flashError(t("taskSubmitPathRequired")); return; }
+    var requestId = boardPreviewRequestId + 1;
+    boardPreviewRequestId = requestId;
+    clearSubmitPreview();
+    previewBtn.disabled = true;
+    flashError("");
+    postJSON("/api/ops/tasks/preview", { filePath: fp })
+      .then(function(res){
+        if(!submitPreviewRequestIsCurrent(requestId, fp, pathIn.value)) return;
+        var pv = res && res.preview;
+        if(!pv || typeof pv.previewRevisionDigest !== "string" || !pv.previewRevisionDigest){
+          flashError(t("taskSubmitPreviewFailed"));
+          boardPreview = null;
+          renderSubmitPreview();
+          return;
+        }
+        boardSubmitPath = fp;
+        boardPreview = { filePath: fp, digest: pv.previewRevisionDigest, preview: pv };
+        renderSubmitPreview();
+      })
+      .catch(function(e){
+        if(!submitPreviewRequestIsCurrent(requestId, fp, pathIn.value)) return;
+        boardPreview = null;
+        renderSubmitPreview();
+        flashError(t("taskSubmitPreviewFailed"), e && e.message);
+      })
+      .finally(function(){
+        if(requestId === boardPreviewRequestId) previewBtn.disabled = false;
+      });
+  });
+
+  submitBtn.addEventListener("click", function(){
+    if(!boardPreview){ flashError(t("taskSubmitPreviewRequired")); return; }
     if(!window.confirm(t("taskSubmitConfirm"))) return;
     submitBtn.disabled = true;
+    previewBtn.disabled = true;
+    pathIn.disabled = true;
     flashError("");
-    postJSON("/api/ops/tasks/submit", { filePath: fp, confirm: true })
+    postJSON("/api/ops/tasks/submit", {
+      filePath: boardPreview.filePath,
+      previewRevisionDigest: boardPreview.digest,
+      confirm: true
+    })
       .then(function(res){
         toast(t("taskSubmitOk", { taskId: res.taskId }));
+        boardSubmitPath = "";
+        boardPreview = null;
         pathIn.value = "";
+        renderSubmitPreview();
         return refresh();
       })
-      .catch(function(e){ flashError(t("operationFailed"), e && e.message); })
-      .finally(function(){ submitBtn.disabled = false; });
+      .catch(function(e){
+        // Stale or rejected: the preview is no longer authoritative, so clear
+        // it and ask the user to preview again. A stale revision (file or
+        // settings drift) gets the explicit "preview again" instruction; any
+        // other bounded rejection still clears the preview before retry.
+        clearSubmitPreview();
+        var msg = e && e.message ? String(e.message) : "";
+        if(msg.indexOf("out of date") >= 0 || msg.indexOf("fresh preview") >= 0){
+          flashError(t("taskSubmitStale"));
+        } else {
+          flashError(t("operationFailed"), msg);
+        }
+      })
+      .finally(function(){
+        pathIn.disabled = false;
+        previewBtn.disabled = false;
+        submitBtn.disabled = !boardPreview;
+      });
   });
-  submitCard.appendChild(hd("div", "actions mt-8", [submitBtn]));
+
+  submitCard.appendChild(hd("div", "actions mt-8", [previewBtn, submitBtn]));
+  submitCard.appendChild(previewArea);
   viewEl.appendChild(submitCard);
+  renderSubmitPreview();
   if(!tasks.length){
     viewEl.appendChild(stateMsg("empty", t("noTasks")));
     return;
@@ -2409,6 +2774,45 @@ var ADV_GROUP_ORDER = [
   { title: "maxMainCorrections", fields: ["maxMainCorrections"] },
   { title: "maxMainReverifications", fields: ["maxMainReverifications"] }
 ];
+
+/* Contract Quality field labels, bound to the shared 8-field validator. */
+var QUALITY_FIELD_LABELS = {
+  mode: "workersQualityMode",
+  maxFiles: "workersQualityMaxFiles",
+  maxDiffLines: "workersQualityMaxDiffLines",
+  maxFocusPaths: "workersQualityMaxFocusPaths",
+  minScenarios: "workersQualityMinScenarios",
+  minCallChainSteps: "workersQualityMinCallChainSteps",
+  minOutcomeCharacters: "workersQualityMinOutcomeCharacters",
+  minModuleResponsibilityCharacters: "workersQualityMinModuleResponsibilityCharacters"
+};
+var QUALITY_MODE_OPTIONS = [
+  ["", "workersQualityInherit"],
+  ["hard", "workersQualityModeHard"],
+  ["warn", "workersQualityModeWarn"],
+  ["score", "workersQualityModeScore"],
+  ["off", "workersQualityModeOff"]
+];
+var QUALITY_MAX_FIELDS = ["maxFiles", "maxDiffLines", "maxFocusPaths"];
+var QUALITY_MIN_FIELDS = [
+  "minScenarios", "minCallChainSteps", "minOutcomeCharacters", "minModuleResponsibilityCharacters"
+];
+var QUALITY_FIELD_ORDER = [
+  { top: "mode", row: ["mode"] },
+  { top: "maxFiles", row: ["maxFiles", "maxDiffLines"] },
+  { top: "maxFocusPaths", row: ["maxFocusPaths"] },
+  { top: "minScenarios", row: ["minScenarios", "minCallChainSteps"] },
+  { top: "minOutcomeCharacters", row: ["minOutcomeCharacters", "minModuleResponsibilityCharacters"] }
+];
+function qualityModeLabel(value){
+  var key = {
+    hard: "workersQualityModeHard",
+    warn: "workersQualityModeWarn",
+    score: "workersQualityModeScore",
+    off: "workersQualityModeOff"
+  }[value];
+  return key ? t(key) : t("workersQualityInherit");
+}
 /* Pricing route options are the only known safe identifiers the UI exposes.
  * The route selects the official price table and currency for evidence; it is
  * not the Provider endpoint and it is not an invoice. The Hub never infers
@@ -2515,6 +2919,106 @@ function hydrateAdvancedFields(container, advancedPolicy){
   });
 }
 
+function buildQualityFields(){
+  var container = h("div", "advanced-fields quality-fields");
+  QUALITY_FIELD_ORDER.forEach(function(group){
+    var row = h("div", "advanced-row");
+    group.row.forEach(function(field){
+      var lab = h("label", "", t(QUALITY_FIELD_LABELS[field]));
+      if(field === "mode"){
+        var sel = h("select", "");
+        sel.setAttribute("data-quality", field);
+        QUALITY_MODE_OPTIONS.forEach(function(pair){
+          var o = document.createElement("option");
+          o.value = pair[0]; o.textContent = t(pair[1]); sel.appendChild(o);
+        });
+        sel.value = "";
+        lab.appendChild(sel);
+      } else if(QUALITY_MAX_FIELDS.indexOf(field) >= 0){
+        var state = h("select", "");
+        state.setAttribute("data-quality-max-mode", field);
+        [
+          ["inherit", "workersQualityInherit"],
+          ["unlimited", "workersQualityUnlimited"],
+          ["limited", "workersQualityLimited"]
+        ].forEach(function(pair){
+          var option = document.createElement("option");
+          option.value = pair[0]; option.textContent = t(pair[1]); state.appendChild(option);
+        });
+        state.value = "inherit";
+        var inp = h("input", "");
+        inp.type = "number";
+        inp.setAttribute("data-quality-max-value", field);
+        inp.placeholder = t("workersQualityLimitValue");
+        inp.min = "1"; inp.step = "1";
+        inp.disabled = true;
+        lab.appendChild(state);
+        lab.appendChild(inp);
+      } else {
+        var inp2 = h("input", "");
+        inp2.type = "number";
+        inp2.setAttribute("data-quality", field);
+        inp2.placeholder = t("workersBlankInherit");
+        inp2.min = "0"; inp2.step = "1";
+        lab.appendChild(inp2);
+      }
+      row.appendChild(lab);
+    });
+    container.appendChild(row);
+  });
+  return container;
+}
+
+function collectQualityPatch(){
+  var patch = {};
+  $$("[data-quality]").forEach(function(el){
+    var field = el.getAttribute("data-quality");
+    if(!field) return;
+    if(field === "mode" && el.tagName === "SELECT"){
+      if(el.value) patch[field] = el.value;
+    } else {
+      var raw2 = el.value.trim();
+      if(raw2 !== "") patch[field] = Number(raw2);
+    }
+  });
+  $$("[data-quality-max-mode]").forEach(function(state){
+    var field = state.getAttribute("data-quality-max-mode");
+    if(!field || state.value === "inherit") return;
+    if(state.value === "unlimited"){
+      patch[field] = null;
+      return;
+    }
+    var input = document.querySelector('[data-quality-max-value="' + field + '"]');
+    patch[field] = Number(input && input.value !== "" ? input.value : 0);
+  });
+  return patch;
+}
+
+function syncQualityMaximumInput(state){
+  var field = state.getAttribute("data-quality-max-mode");
+  if(!field) return;
+  var input = document.querySelector('[data-quality-max-value="' + field + '"]');
+  if(input) input.disabled = state.value !== "limited";
+}
+
+function hydrateQualityFields(container, contractQuality){
+  var quality = contractQuality || {};
+  container.querySelectorAll("[data-quality]").forEach(function(el){
+    var field = el.getAttribute("data-quality");
+    if(!field) return;
+    var val = quality[field];
+    el.value = val === undefined ? "" : String(val);
+  });
+  container.querySelectorAll("[data-quality-max-mode]").forEach(function(state){
+    var field = state.getAttribute("data-quality-max-mode");
+    var value = quality[field];
+    state.value = value === undefined ? "inherit" : (value === null ? "unlimited" : "limited");
+    var input = container.querySelector('[data-quality-max-value="' + field + '"]');
+    if(input) input.value = typeof value === "number" ? String(value) : "";
+    syncQualityMaximumInput(state);
+  });
+}
+
 function buildPricingRouteField(){
   var lab = h("label", "wp-pricing-route-field");
   lab.setAttribute("for", "fl-wp-pricing-route");
@@ -2576,11 +3080,15 @@ function fetchWorkerPreview(runtime){
     if(prof && prof.advancedPolicy) existingPolicy = prof.advancedPolicy;
   }
   var draft = collectAdvancedPatch();
-  var body = { runtime: runtime, draftAdvancedPolicy: draft };
+  var draftQuality = collectQualityPatch();
+  var body = { runtime: runtime, draftAdvancedPolicy: draft, draftContractQuality: draftQuality };
   if(Object.keys(existingPolicy).length > 0) body.existingAdvancedPolicy = existingPolicy;
   postJSON("/api/worker-advanced-preview", body)
-    .then(function(res){ renderWorkerPreview(res.preview || []); })
-    .catch(function(){ renderWorkerPreview([]); });
+    .then(function(res){
+      renderWorkerPreview(res.preview || []);
+      renderQualityPreview(res.previewQualityPolicy || []);
+    })
+    .catch(function(){ renderWorkerPreview([]); renderQualityPreview([]); });
 }
 
 function renderWorkerPreview(rows){
@@ -2640,6 +3148,60 @@ function renderWorkerPreview(rows){
     var phaseTd = h("td", "preview-phase");
     phaseTd.appendChild(phaseBadge);
     rtr.appendChild(phaseTd);
+    tbody.appendChild(rtr);
+  });
+  tbl.appendChild(tbody);
+  panel.appendChild(tbl);
+}
+
+function renderQualityPreview(rows){
+  var panel = document.getElementById("fl-quality-preview");
+  if(!panel) return;
+  panel.textContent = "";
+  var title = h("div", "card-title mb-4", t("workersQualityPreviewTitle"));
+  panel.appendChild(title);
+  if(!rows.length){
+    panel.appendChild(h("div", "summary-line dim", t("workersPreviewEmpty")));
+    return;
+  }
+  var tbl = h("table", "preview-table");
+  var thd = h("thead", "");
+  var tr = h("tr", "");
+  tr.appendChild(h("th", "", t("workersPreviewSetting")));
+  tr.appendChild(h("th", "", t("workersPreviewValue")));
+  tr.appendChild(h("th", "", t("workersPreviewSource")));
+  thd.appendChild(tr);
+  tbl.appendChild(thd);
+  var tbody = document.createElement("tbody");
+  rows.forEach(function(r){
+    var rtr = h("tr", "");
+    var fieldLabel = t(QUALITY_FIELD_LABELS[r.field]) || r.field;
+    rtr.appendChild(h("td", "preview-field", fieldLabel));
+    var valStr;
+    if(r.field === "mode"){
+      var modeLabels = {
+        "hard": t("workersQualityModeHard"),
+        "warn": t("workersQualityModeWarn"),
+        "score": t("workersQualityModeScore"),
+        "off": t("workersQualityModeOff")
+      };
+      valStr = modeLabels[r.value] || String(r.value);
+    } else if(r.value === null){
+      valStr = t("workersPreviewUnlimited");
+      rtr.classList.add("preview-unlimited");
+    } else {
+      valStr = String(r.value);
+    }
+    rtr.appendChild(h("td", "preview-val", valStr));
+    var srcLabel = {
+      "task": t("workersPreviewSourceTask"),
+      "worker": t("workersPreviewSourceWorker"),
+      "global": t("workersPreviewSourceGlobal")
+    };
+    var srcBadge = h("span", "badge " + (r.source === "task" ? "badge-info" : r.source === "worker" ? "badge-ok" : "badge-dim"), srcLabel[r.source] || r.source);
+    var srcTd = h("td", "preview-src");
+    srcTd.appendChild(srcBadge);
+    rtr.appendChild(srcTd);
     tbody.appendChild(rtr);
   });
   tbl.appendChild(tbody);
@@ -3309,6 +3871,53 @@ function buildMrReasons(cands, policy){
   return reasons;
 }
 
+function workerModelCompatible(runtime, modelConfig){
+  if(!modelConfig || !modelConfig.provider) return false;
+  return runtime === "grok-build"
+    ? modelConfig.provider === "xai"
+    : modelConfig.provider !== "xai";
+}
+
+function workerReadinessFor(workerId){
+  var rows = (S.hub && S.hub.workerReadiness) || [];
+  return rows.find(function(row){ return row && row.workerId === workerId; }) || null;
+}
+
+function workerReadinessPresentation(result){
+  var stateMap = {
+    ready: ["workersReadinessReady", "badge-ok"],
+    launchable: ["workersReadinessLaunchable", "badge-info"],
+    "needs-attention": ["workersReadinessAttention", "badge-warn"],
+    blocked: ["workersReadinessBlocked", "badge-warn"]
+  };
+  var reasonMap = {
+    ready: "workersReadinessReasonReady",
+    "connection-unverified": "workersReadinessReasonConnectionUnverified",
+    "connection-stale": "workersReadinessReasonConnectionStale",
+    "connection-failed": "workersReadinessReasonConnectionFailed",
+    "authentication-missing": "workersReadinessReasonAuthenticationMissing",
+    "runtime-unavailable": "workersReadinessReasonRuntimeUnavailable",
+    "pairing-invalid": "workersReadinessReasonPairingInvalid",
+    "model-invalid": "workersReadinessReasonModelInvalid"
+  };
+  var nextMap = {
+    none: "workersReadinessNextNone",
+    "run-smoke-check": "workersReadinessNextSmoke",
+    "check-provider": "workersReadinessNextProvider",
+    "configure-authentication": "workersReadinessNextAuth",
+    "fix-runtime": "workersReadinessNextRuntime",
+    "change-pairing": "workersReadinessNextPairing",
+    "choose-model": "workersReadinessNextModel"
+  };
+  var state = stateMap[result && result.state] || stateMap.blocked;
+  return {
+    label: t(state[0]),
+    tone: state[1],
+    reason: t(reasonMap[result && result.reason] || "workersReadinessReasonModelInvalid"),
+    next: t(nextMap[result && result.nextAction] || "workersReadinessNextModel")
+  };
+}
+
 function rWorker(){
   viewEl.textContent = "";
   flashError("");
@@ -3353,6 +3962,16 @@ function rWorker(){
     var purpose = isDef ? t("workersCardDefaultPurpose") : t("workersCardReusablePurpose");
     var story = h("div", "profile-story");
     story.appendChild(h("div", "profile-story-purpose", purpose));
+    var readiness = workerReadinessFor(prof.id);
+    if(readiness){
+      var readinessView = workerReadinessPresentation(readiness);
+      story.appendChild(hd("div", "profile-story-line", [
+        h("span", "badge " + readinessView.tone, readinessView.label)
+      ]));
+      story.appendChild(h("div", "profile-story-line", readinessView.reason));
+      story.appendChild(h("div", "profile-story-line dim fs11",
+        t("workersReadinessNextLabel", { action: readinessView.next })));
+    }
     story.appendChild(h("div", "profile-story-line", t("workersCardRunsWith", {
       model: modelLine, runtime: runtimeDisplayName(prof.runtime)
     })));
@@ -3383,12 +4002,39 @@ function rWorker(){
         ? t("workersCardAdaptationOff")
         : t("workersCardAdaptationOn", { count: String(advanced.maxAdaptationRounds) }));
     story.appendChild(h("div", "profile-story-line", attemptText + " " + adaptationText));
+    /* Contract Quality summary: short human-readable label only. */
+    var cq = prof.contractQuality;
+    var qualitySummary = "";
+    if(cq && typeof cq === "object"){
+      var cqKeys = Object.keys(cq);
+      qualitySummary = t("workersQualitySummaryOn", {
+        mode: qualityModeLabel(cq.mode),
+        overrides: String(cqKeys.length)
+      });
+    } else {
+      qualitySummary = t("workersQualitySummaryOff");
+    }
+    story.appendChild(h("div", "profile-story-line dim fs11", qualitySummary));
     cardEl.appendChild(story);
 
     var technical = h("div", "journey-list");
     technical.appendChild(h("div", "journey-list-item mono dim", "Worker ID: " + prof.id));
     technical.appendChild(h("div", "journey-list-item mono dim", "Runtime: " + (prof.runtime || "?")));
     technical.appendChild(h("div", "journey-list-item mono dim", "Model: " + modelTechnical));
+    if(readiness && readiness.checks){
+      var checkLabels = {
+        model: "workersReadinessCheckModel",
+        pairing: "workersReadinessCheckPairing",
+        authentication: "workersReadinessCheckAuth",
+        runtime: "workersReadinessCheckRuntime",
+        connection: "workersReadinessCheckConnection"
+      };
+      technical.appendChild(h("div", "journey-list-item", t("workersReadinessTechnical")));
+      Object.keys(checkLabels).forEach(function(key){
+        technical.appendChild(h("div", "journey-list-item mono dim",
+          t(checkLabels[key]) + ": " + String(readiness.checks[key] || "unknown")));
+      });
+    }
     var routeLine = h("div", "journey-list-item dim");
     routeLine.appendChild(document.createTextNode(t("workersPricingRouteCardLabel") + ": "));
     if(typeof prof.pricingRoute === "string" && prof.pricingRoute){
@@ -3476,19 +4122,33 @@ function rWorker(){
   labR.appendChild(selR); form.appendChild(labR);
   var labM = h("label", "", t("workersModel"));
   var selM = h("select", "");
-  if(!models.length){
-    var o0 = document.createElement("option"); o0.value = ""; o0.textContent = t("workersModelFirst");
-    selM.appendChild(o0);
-  } else {
-    models.forEach(function(mc){
+  function syncCompatibleModels(preferredId){
+    var previous = preferredId || selM.value;
+    var compatible = models.filter(function(mc){
+      return workerModelCompatible(selR.value, mc);
+    });
+    selM.textContent = "";
+    if(!compatible.length){
+      var emptyOption = document.createElement("option");
+      emptyOption.value = "";
+      emptyOption.textContent = models.length
+        ? t("workersModelNoCompatible") : t("workersModelFirst");
+      selM.appendChild(emptyOption);
+      selM.disabled = true;
+      return;
+    }
+    selM.disabled = false;
+    compatible.forEach(function(mc){
       var o = document.createElement("option");
       o.value = mc.id;
       o.textContent = mc.label + " (" + mc.provider + " / " + mc.model + ")";
       selM.appendChild(o);
     });
+    if(compatible.some(function(mc){ return mc.id === previous; })) selM.value = previous;
   }
-  if(isEdit && editingProfile.modelConfigId) selM.value = editingProfile.modelConfigId;
+  syncCompatibleModels(isEdit ? editingProfile.modelConfigId : "");
   labM.appendChild(selM); form.appendChild(labM);
+  form.appendChild(h("div", "hint-inline dim fs11", t("workersModelCompatibilityHint")));
   var budgetModeLab = h("label", "", t("workersBudgetMode"));
   var budgetMode = h("select", "");
   budgetMode.id = "fl-wp-budget-mode";
@@ -3550,6 +4210,24 @@ function rWorker(){
   advDetails.appendChild(advBody);
   form.appendChild(advDetails);
 
+  /* --- Contract Quality disclosure --- */
+  var qualDetails = h("details", "advanced-disclosure quality-disclosure");
+  var qualSummary = h("summary", "", t("workersQualityGroup"));
+  qualDetails.appendChild(qualSummary);
+  var qualBody = h("div", "advanced-body");
+  qualBody.appendChild(h("div", "summary-line dim mb-8", t("workersQualityGroupHint")));
+  var qualFields = buildQualityFields();
+  qualBody.appendChild(qualFields);
+  if(isEdit){
+    hydrateQualityFields(qualBody, editingProfile.contractQuality);
+  }
+  var qualPreviewPanel = h("div", "card preview-panel");
+  qualPreviewPanel.id = "fl-quality-preview";
+  qualPreviewPanel.appendChild(h("div", "summary-line dim", t("workersPreviewEmpty")));
+  qualBody.appendChild(qualPreviewPanel);
+  qualDetails.appendChild(qualBody);
+  form.appendChild(qualDetails);
+
   var saveLabel = isEdit ? t("workersSave") : t("workersSave");
   form.appendChild(formActions(saveLabel, null, {
     label: t("workersNext"),
@@ -3585,6 +4263,8 @@ function rWorker(){
     if(pricingRoute !== undefined){
       profile.pricingRoute = pricingRoute;
     }
+    var qualityPatch = collectQualityPatch();
+    if(Object.keys(qualityPatch).length > 0) profile.contractQuality = qualityPatch;
     postJSON("/api/worker-profiles", { action: "upsert", profile: profile })
       .then(function(){
         toast(t("workersSaved") + profile.id);
@@ -3607,6 +4287,16 @@ function rWorker(){
     }
   });
 
+  qualDetails.addEventListener("toggle", function(){
+    S.workerFormActive = true;
+    if(qualDetails.open){
+      qualSummary.textContent = t("workersQualityGroupOpen");
+      scheduleWorkerPreview(selR.value);
+    } else {
+      qualSummary.textContent = t("workersQualityGroup");
+    }
+  });
+
   var changeHandler = function(){
     if(advDetails.open && selR.value){
       scheduleWorkerPreview(selR.value);
@@ -3614,9 +4304,20 @@ function rWorker(){
   };
   advBody.addEventListener("input", changeHandler);
   advBody.addEventListener("change", changeHandler);
+  var qualChangeHandler = function(e){
+    if(e && e.target && e.target.getAttribute("data-quality-max-mode")){
+      syncQualityMaximumInput(e.target);
+    }
+    if(qualDetails.open && selR.value){
+      scheduleWorkerPreview(selR.value);
+    }
+  };
+  qualBody.addEventListener("input", qualChangeHandler);
+  qualBody.addEventListener("change", qualChangeHandler);
   form.addEventListener("input", function(){ S.workerFormActive = true; });
   form.addEventListener("change", function(){ S.workerFormActive = true; });
   selR.addEventListener("change", function(){
+    syncCompatibleModels("");
     if(advDetails.open && selR.value){
       scheduleWorkerPreview(selR.value);
     }
@@ -5059,8 +5760,9 @@ function taskStoryPresentation(task){
     : verificationState === "failed" ? "failed" : "waiting";
   var review = delivery.mainReview && typeof delivery.mainReview === "object"
     ? delivery.mainReview : null;
+  var mainDecision = review && typeof review.decision === "string" ? review.decision : "";
   var finalState = repaired || integrated ? "complete"
-    : review && review.decision === "accept" ? "ready" : "waiting";
+    : mainDecision === "accept" ? "ready" : "waiting";
   /* Prefer the canonical Main-authored presentation summary when its exact
    * safe shape (an object with a non-empty string summary) is present. The
    * authored text is kept exact and bounded - never translated, rewritten,
@@ -5146,7 +5848,8 @@ function taskStoryPresentation(task){
           : finalState === "ready" ? "storyFinalReady" : "storyFinalWaiting",
         value: reviewReason,
         valueLabelKey: "storyMainDecisionReasonLabel",
-        items: !repaired && verificationState === "complete" ? changedFiles : [],
+        items: !repaired && verificationState === "complete" && mainDecision === "accept"
+          ? changedFiles : [],
         itemsLabelKey: "storyFinalFilesLabel",
         noteKey: repaired ? "storyFinalFilesRepairedMissing" : ""
       },
@@ -5157,7 +5860,8 @@ function taskStoryPresentation(task){
         bodyKey: why ? "storyCauseBody" : "storyCauseMissing",
         value: why,
         causeWhat: cause && cause.what ? String(cause.what) : "failed",
-        failureCategory: cause && cause.failureCategory ? String(cause.failureCategory) : "unknown"
+        failureCategory: cause && cause.failureCategory ? String(cause.failureCategory) : "unknown",
+        mainDecision: repaired ? "" : mainDecision
       },
       {
         id: "next",
@@ -5219,7 +5923,7 @@ function renderTaskStory(task){
         valueBox.appendChild(h("div", "task-story-value-label", t(step.valueLabelKey)));
       }
       var primaryValue = step.id === "cause"
-        ? resolveCauseWhy(step.causeWhat, step.value, step.failureCategory)
+        ? resolveCauseWhy(step.causeWhat, step.value, step.failureCategory, step.mainDecision)
         : step.value;
       valueBox.appendChild(h("div", "task-story-value-text", primaryValue));
       content.appendChild(valueBox);
@@ -5327,7 +6031,8 @@ function correctionRejectionLabel(category){
     "allowance-zero": "taskCorrectRejectAllowanceZero",
     "allowance-exhausted": "taskCorrectRejectAllowanceExhausted",
     "pending-incompatible-grant": "taskCorrectRejectPendingGrant",
-    "stale-revision": "taskCorrectRejectStale"
+    "stale-revision": "taskCorrectRejectStale",
+    "no-main-revise": "taskCorrectRejectNoMainRevise"
   };
   return t(map[category] || "taskCorrectRejectNoRevision");
 }
@@ -5360,6 +6065,53 @@ function renderCandidateReverification(task){
     total: String(rv.allowance.max),
     source: rv.allowance.source
   })));
+  return card;
+}
+
+/* Explain retained Candidate evidence without turning it into a Main decision.
+ * The backend has already proved whether the immutable revision still matches
+ * the Task Diff; this renderer only separates retention, machine checks, Main
+ * handling, and final delivery in plain language. */
+function renderRetainedCandidate(task){
+  var rc = task.journey && task.journey.retainedCandidate;
+  if(!rc) return null;
+  var card = h("div", "card form-card retained-candidate-card");
+  card.setAttribute("data-fl-role", "retained-candidate");
+  card.appendChild(h("div", "card-title mb-4", t("retainedCandidateTitle")));
+  if(rc.status !== "available"){
+    card.appendChild(h("div", "summary-line dim", t("retainedCandidateUnavailableBody")));
+    return card;
+  }
+  card.appendChild(h("div", "summary-line mb-8", t("retainedCandidateAvailableBody", {
+    ordinal: String(rc.attemptOrdinal),
+    files: String(rc.filesChanged),
+    lines: String(rc.changedLines),
+    count: String(rc.affectedPathCount),
+    passed: rc.verificationPassed
+      ? t("retainedCandidateMachinePassed")
+      : t("retainedCandidateMachineFailed")
+  })));
+  var finalDelivery = task.journey && task.journey.finalDelivery || {};
+  var mainDecision = finalDelivery.mainReview && finalDelivery.mainReview.decision;
+  var noteKey = "retainedCandidatePendingNote";
+  if(hasVerifiedFinalDelivery(task)) noteKey = "retainedCandidateRepairedNote";
+  else if(mainDecision === "revise") noteKey = "retainedCandidateReviseNote";
+  else if(mainDecision === "reject") noteKey = "retainedCandidateRejectedNote";
+  else if(mainDecision === "accept") noteKey = "retainedCandidateAcceptedNote";
+  card.appendChild(h("div", "summary-line dim mb-8", t(noteKey)));
+  if(rc.affectedPaths && rc.affectedPaths.length){
+    card.appendChild(h("div", "task-story-value-label", t("retainedCandidatePathsLabel")));
+    var list = h("div", "task-report-process");
+    rc.affectedPaths.forEach(function(candidatePath){
+      list.appendChild(h("div", "mono fs11", String(candidatePath)));
+    });
+    card.appendChild(list);
+    if(rc.affectedPathCount > rc.affectedPaths.length){
+      card.appendChild(h("div", "summary-line dim fs11", t("storyMoreItems", {
+        count: String(rc.affectedPathCount - rc.affectedPaths.length)
+      })));
+    }
+  }
   return card;
 }
 
@@ -5615,7 +6367,12 @@ function renderTaskJourney(task){
     var c = j.cause;
     var repairedDelivery = hasVerifiedFinalDelivery(task);
     var whatText = repairedDelivery ? t("journeyCauseWhatRepaired") : resolveCauseWhat(c.what);
-    var whyText = repairedDelivery ? t("journeyCauseWhyRepaired") : resolveCauseWhy(c.what, c.why, c.failureCategory);
+    var whyText = repairedDelivery ? t("journeyCauseWhyRepaired") : resolveCauseWhy(
+      c.what,
+      c.why,
+      c.failureCategory,
+      j.finalDelivery && j.finalDelivery.mainReview && j.finalDelivery.mainReview.decision
+    );
     var whatRow = h("div", "task-story-row");
     whatRow.setAttribute("data-fl-role", "cause-what");
     whatRow.appendChild(h("div", "task-story-label", t("journeyWhatLabel")));
@@ -5660,7 +6417,9 @@ function resolveCauseWhat(what){
     queued: "journeyCauseWhatQueued", failed: "journeyCauseWhatFailed" };
   return t(map[what] || "journeyCauseWhatFailed");
 }
-function resolveCauseWhy(what, why, category){
+function resolveCauseWhy(what, why, category, mainDecision){
+  if(mainDecision === "revise") return t("journeyCauseWhyMainRevise");
+  if(mainDecision === "reject") return t("journeyCauseWhyMainReject");
   if(what === "succeeded") return t("journeyCauseWhySucceeded");
   if(what === "running") return t("journeyCauseWhyRunning");
   if(what === "queued") return t("journeyCauseWhyQueued");
@@ -6313,6 +7072,7 @@ function renderPreflightResult(result){
 function timelineEventLabel(type){
   var map = {
     "task.created": "tlTaskCreated",
+    "task.launch-preflight.failed": "tlLaunchPreflightFailed",
     "task.queued": "tlTaskQueued",
     "workspace.preparation.stage": "tlPrepStage",
     "workspace.prepared": "tlPrepDone",
@@ -6440,8 +7200,10 @@ function renderTaskWorkbench(task, extraTabs){
   hero.setAttribute("data-fl-role", "task-story-current-result");
   hero.appendChild(h("div", "task-report-hero-title", task.name || t("taskUntitled")));
   var meta = h("div", "task-report-hero-meta");
-  meta.appendChild(badge(task.status));
-  var finalBadge = finalDeliveryBadge(task);
+  meta.appendChild(taskHeadlineBadge(task));
+  // Avoid a duplicate delivery badge when the headline already states the
+  // verified final outcome; the journey below keeps the full delivery evidence.
+  var finalBadge = taskHeadline(task).delivered ? null : finalDeliveryBadge(task);
   if(finalBadge) meta.appendChild(finalBadge);
   if(cause.failureCategory){
     meta.appendChild(h("span", "badge badge-err", failureCategoryLabel(cause.failureCategory)));
@@ -6456,7 +7218,12 @@ function renderTaskWorkbench(task, extraTabs){
   if(cause.why || cause.what){
     var whyText = hasVerifiedFinalDelivery(task)
       ? t("journeyCauseWhyRepaired")
-      : resolveCauseWhy(cause.what, cause.why, cause.failureCategory);
+      : resolveCauseWhy(
+          cause.what,
+          cause.why,
+          cause.failureCategory,
+          fd.mainReview && fd.mainReview.decision
+        );
     if(whyText){
       hero.appendChild(reportBlock(t("taskReportWhyLabel"), whyText, false));
     }
@@ -6468,6 +7235,8 @@ function renderTaskWorkbench(task, extraTabs){
   var overviewBody = h("div", "task-tab-body");
   overviewBody.appendChild(h("div", "task-report-card-hint", t("taskTabOverviewHint")));
   overviewBody.appendChild(renderTaskStory(task));
+  var overviewRetained = renderRetainedCandidate(task);
+  if(overviewRetained) overviewBody.appendChild(overviewRetained);
 
   // 1) Instruction
   var instrNodes = [];
@@ -6591,6 +7360,8 @@ function renderTaskWorkbench(task, extraTabs){
     [reportList(null, files, true)],
     "task-report-artifacts"
   ));
+  var resultRetained = renderRetainedCandidate(task);
+  if(resultRetained) resultBody.appendChild(resultRetained);
 
   // 4) Checks + final handling
   var checkNodes = [];

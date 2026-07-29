@@ -1,0 +1,140 @@
+version: 2
+name: Make doctor report the Provider truth used for execution
+project: ../..
+taskClass: forklight-cli-doctor-provider-truth
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    `forklight doctor` reports Provider authentication readiness from the
+    currently running exact-build Daemon when that trustworthy execution
+    source is available, clearly labels where the answer came from, and falls
+    back to the CLI process's local inspection without starting a Daemon or
+    probing a Provider. Human and JSON output give one truthful next action and
+    never expose credentials or internal diagnostic payloads.
+  presentation:
+    summary: Doctor 应优先回答“当前真正执行任务的 Daemon 看到了哪些可用 Provider”，并说明证据来源；不能在 Worker 已可启动时误报全部未配置。
+    language: zh-CN
+  context:
+    - The current live Daemon reports DeepSeek, MiniMax, Volcengine GLM, and xAI/Grok as ready, while `forklight doctor --json` in this CLI process reports every Provider configured=false and `current=null`.
+    - SetupService intentionally inspects the invoking process's local Keychain context. That remains a useful fallback, but it is not the execution truth when an exact-build Daemon is already running with canonical privacy-safe Provider readiness.
+    - Daemon health is read-only and already returns bounded Provider readiness plus a server build identity. The CLI must compare that identity with its current built identity before trusting the Daemon result.
+    - This Task is a small M1 onboarding truth fix and the remaining real DeepSeek smoke path. It must not redesign setup, Hub, Worker readiness, Provider probing, or daemon lifecycle.
+  inScope:
+    - Add one small pure doctor-result resolver/presenter seam so daemon-backed and local-fallback behavior can be tested without real credentials or a live Provider.
+    - On `forklight doctor`, perform at most one bounded read-only health exchange with an already-running Daemon. Never call ensureDaemon and never start, stop, restart, replace, or signal a process.
+    - Trust Daemon Provider readiness only when the health response succeeds, its server identity is valid, and it exactly matches the invoking CLI build. Otherwise use the existing SetupService local inspection and label the source as local fallback with a bounded reason such as unavailable, build mismatch, protocol mismatch, or malformed evidence.
+    - Preserve the existing prerequisite checks and safe Provider catalog/variant metadata. For daemon-backed output, set configured/readiness/authentication facts only from the canonical safe Daemon Provider projection; do not mix a daemon-ready result with a contradictory local Keychain boolean.
+    - Select the displayed current/default Provider deterministically from the effective configured default when it is ready, otherwise from the first ready Provider. If none are ready, keep current null and give one configure-provider action.
+    - Extend human and JSON output with a stable bounded source/provenance and one next-action code/message. Human output should explain in plain language whether the running executor is ready; JSON should remain useful to automation without raw daemon responses.
+    - Add deterministic tests for exact-build daemon preference, no-daemon fallback, build/protocol mismatch fallback, malformed daemon evidence, default-provider selection, no ready Provider, read-only behavior, and privacy-safe serialization.
+  outOfScope:
+    - Provider network probes, billable requests, credential reads or writes, Keychain migration, API key setup, OAuth file inspection changes, runtime doctor redesign, Worker Profile changes, Hub UI changes, Task submission, competition, retry, correction, adaptation, Integration, commit, or push.
+    - Starting a missing Daemon, trusting a descriptor/PID alone, trusting different-build health, copying endpoint/keychain service/raw error/stack/build id into beginner output, or claiming connectivity verification from local authentication readiness.
+    - Removing SetupService's local behavior or making Doctor depend on a running Daemon.
+  executionSteps:
+    - Trace the current doctor branch, SetupService bootstrap, daemon health envelope, build-identity comparison, and current CLI test conventions before editing.
+    - Define bounded doctor source/result types and a pure resolver that combines safe catalog metadata with either exact-build daemon readiness or local fallback evidence.
+    - Wire one read-only daemon health exchange into the doctor branch without ensureDaemon or any mutation-capable call; keep errors bounded and fall back rather than failing setup diagnosis.
+    - Render JSON and human output from the same safe result, with one source explanation and one next action.
+    - Add focused deterministic tests, then run the complete acceptance once. Report baseline failures rather than widening scope or retrying.
+  deliverables:
+    - Canonical safe Doctor result that names its evidence source and one next action.
+    - Exact-build running-Daemon Provider truth with local fallback.
+    - Human/JSON presentation and deterministic privacy/read-only regressions.
+  modules:
+    - name: Doctor truth resolver
+      responsibility: Choose trustworthy Provider readiness evidence and turn it into one stable beginner-readable diagnosis.
+      consumes:
+        - Existing prerequisite/catalog metadata, effective default Provider, optional safe daemon health facts, invoking build identity, and local fallback inspection.
+      produces:
+        - Bounded source, Provider configured/auth mode facts, deterministic current Provider, and one next-action code/message.
+      boundaries:
+        - Pure decision logic; no credential access, Provider request, process lifecycle, Task, settings mutation, endpoint disclosure, or raw error propagation.
+    - name: Doctor CLI bridge
+      responsibility: Read an already-running exact-build Daemon once when possible and render the canonical safe result.
+      consumes:
+        - "`doctor`, optional `--json`, current build identity, read-only daemon health envelope, and SetupService fallback."
+      produces:
+        - Short human diagnosis or stable safe JSON.
+      boundaries:
+        - No ensureDaemon, start/stop/restart, Provider probe, key write, raw response, secret, private path, or build-id-heavy beginner copy.
+  callChain:
+    - User or Main runs `forklight doctor` with optional JSON output.
+    - CLI gathers unchanged local prerequisites/catalog facts and attempts one bounded read-only health exchange against an already-running Daemon.
+    - The resolver accepts daemon Provider readiness only after exact build and protocol identity proof; otherwise it chooses the labeled local fallback.
+    - The resolver chooses the effective ready Provider and one next action, then the CLI renders human or JSON output from that same safe projection and exits without mutation.
+  scenarios:
+    - name: Exact-build Daemon is execution-ready
+      given: The current Daemon identity exactly matches the CLI and reports MiniMax plus DeepSeek ready while the invoking process's local Keychain inspection reports neither.
+      when: Doctor runs.
+      then: It reports the Daemon-backed readiness, identifies the evidence source, chooses the ready configured default when possible, and does not mix in the contradictory local booleans.
+    - name: Daemon is absent
+      given: No daemon socket is available.
+      when: Doctor runs.
+      then: It does not start a Daemon, returns the existing local diagnosis with source=local and one relevant next action, and preserves all local state.
+    - name: Daemon identity is not trustworthy
+      given: Health is different-build, protocol-incompatible, or missing a valid server identity/provider projection.
+      when: Doctor runs.
+      then: It labels a bounded fallback reason, ignores daemon readiness, uses local evidence, and exposes no raw identity or error.
+    - name: No Provider is ready
+      given: The selected evidence source contains no ready Provider.
+      when: Doctor resolves the result.
+      then: Current remains null and the single next action tells the user to configure a Provider; it does not call a probe or invent a ready connection.
+  risks:
+    - Mixing Daemon and local booleans would preserve the contradiction, so one source must own all readiness fields in a result.
+    - Trusting any responding daemon would let an old build state override current setup truth, so exact build/protocol identity is mandatory.
+    - Reusing ensureDaemon would turn a diagnostic read into a lifecycle mutation, so the doctor path must use only a bounded exchange and fallback on failure.
+    - Copying the full health object would leak endpoints, keychain service identifiers, process/build details, or raw errors, so the result must be an explicit allowlist.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 700
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - src/setup/doctor.ts
+    - src/setup/service.ts
+    - tests/setup-doctor.test.ts
+    - tests/setup-service.test.ts
+acceptance:
+  criteria:
+    - Exact-build and protocol-compatible daemon Provider readiness is the sole readiness source when available; absent, mismatched, malformed, or failed health cleanly uses the labeled local fallback.
+    - Doctor performs no daemon start/stop/restart, Provider probe, credential read/write, setting mutation, Task creation, network Provider request, or retry loop.
+    - Provider selection prefers the effective configured default only when ready, otherwise the first ready Provider; no-ready output is null with one configure action.
+    - Human and JSON output share one safe result and explain source, current readiness, and next action without credentials, keychain service, raw health/error, private path, endpoint, token, nonce, command, stack, or raw build id.
+    - Focused Doctor/setup behavior, full tests, strict TypeScript, CLI syntax/build, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/setup-doctor.test.ts tests/setup-service.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - npm run build
+    - git diff --check

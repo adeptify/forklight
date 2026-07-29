@@ -14,6 +14,7 @@ import { HubServer } from "../src/hub/server.js";
 import { SetupService } from "../src/setup/service.js";
 import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
 import { StateStore } from "../src/state/store.js";
+import { providerNames, type ProviderName, type ProviderReadiness } from "../src/core/providers.js";
 
 class MemoryKeychain implements SetupKeychainStore {
   readonly values = new Map<string, string>();
@@ -67,7 +68,7 @@ function doHttp(
   });
 }
 
-async function makeOpsHub() {
+async function makeOpsHub(options: { guidedSample?: boolean } = {}) {
   const home = await mkdtemp(path.join(tmpdir(), "fl-hub-ops-"));
   const store = new StateStore(home);
   const settings = new SettingsService(store);
@@ -76,6 +77,13 @@ async function makeOpsHub() {
   const staticDir = path.join(home, "static");
   await mkdir(staticDir, { recursive: true });
   await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  if (options.guidedSample) {
+    const fixture = path.join(home, "fixtures", "checkout");
+    await mkdir(path.join(fixture, "tests"), { recursive: true });
+    await writeFile(path.join(fixture, "checkout.py"), "def calculate_total():\n    return 1\n");
+    await writeFile(path.join(fixture, "README.md"), "# guided sample\n");
+    await writeFile(path.join(fixture, "tests", "test_checkout.py"), "import unittest\n");
+  }
 
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const server = new HubServer({
@@ -85,13 +93,82 @@ async function makeOpsHub() {
     staticRoot: staticDir,
     account: () => "hub-ops-user",
     port: 0,
+    ...(options.guidedSample
+      ? {
+          packageRoot: home,
+          sampleRoot: path.join(home, "samples"),
+          inspectProviderReadiness: () => {
+            const defaults = settings.get().providerDefaults;
+            const providers = Object.fromEntries(providerNames().map((name) => [name, {
+              ready: true,
+              authMode: name === "xai" ? "local-sign-in" : "api-key",
+              endpoint: defaults[name].defaultEndpoint,
+              defaultModel: defaults[name].defaultModel,
+              keychainService: defaults[name].defaultKeychainService,
+            }])) as Record<ProviderName, ProviderReadiness>;
+            return { anyReady: true, providers };
+          },
+        }
+      : {}),
     ensureDaemon: async () => ({ ok: true, pid: 99 }),
     probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
     daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
       calls.push({ method, params });
+      if (method === "validate_file") {
+        if (typeof params.taskFile !== "string" || !params.taskFile) {
+          throw new Error("taskFile is required");
+        }
+        let previewWorkerId = "local-grok-builder";
+        let previewWorkerLabel = "Local Grok Builder";
+        if (options.guidedSample) {
+          const generated = (await import("yaml")).default.parse(
+            await readFile(params.taskFile, "utf8"),
+          ) as { workerProfileId?: string };
+          previewWorkerId = generated.workerProfileId ?? "";
+          previewWorkerLabel = settings.get().workerProfiles.profiles
+            .find((profile) => profile.id === previewWorkerId)?.label ?? previewWorkerId;
+        }
+        return {
+          taskName: "Preview Task",
+          workerProfileId: previewWorkerId,
+          workerProfileLabel: previewWorkerLabel,
+          provider: "xai",
+          model: "grok-4.5",
+          runtime: "grok-build",
+          effort: "high",
+          budget: { maxBudgetUsd: 1.25, unlimited: false },
+          effectivePolicy: {
+            profileId: "local-grok-builder",
+            values: { baseMaxAttempts: 6, maxExtraAttempts: 1, maxConcurrency: 1 },
+            provenance: { baseMaxAttempts: "worker" },
+            enforcementCapability: {
+              durationEnforcement: "preemptive",
+              tokenEnforcement: "post-observation",
+              progressWatchdog: "live",
+            },
+          },
+          quality: { passed: true, score: 80, checks: [], issues: [], warnings: [] },
+          integration: {
+            applicable: true,
+            integratable: true,
+            taskMaxFiles: 4,
+            taskMaxLines: 100,
+            integrationMaxFiles: 100,
+            integrationMaxLines: 1000,
+            issues: [],
+          },
+          previewRevisionDigest: "0".repeat(64),
+        } as T;
+      }
       if (method === "submit_file") {
         if (typeof params.taskFile !== "string" || !params.taskFile) {
           throw new Error("taskFile is required");
+        }
+        const digest = typeof params.expectedPreviewRevisionDigest === "string"
+          ? params.expectedPreviewRevisionDigest
+          : "";
+        if (digest !== "0".repeat(64)) {
+          throw new Error("Task preview is out of date; preview again before submitting.");
         }
         return { id: "task-sub-1", name: "Test Task", status: "queued" } as T;
       }
@@ -212,6 +289,8 @@ async function makeOpsHub() {
   });
   const port = await server.start();
   return {
+    home,
+    settings,
     base: `http://127.0.0.1:${port}`,
     token: server.getToken(),
     calls,
@@ -221,6 +300,100 @@ async function makeOpsHub() {
     },
   };
 }
+
+test("guided sample prepare uses a saved launchable Worker and creates no Task", async () => {
+  const ctx = await makeOpsHub({ guidedSample: true });
+  try {
+    const workerProfileId = ctx.settings.get().workerProfiles.defaultProfileId;
+    const missingConfirm = await doHttp(
+      `${ctx.base}/api/ops/sample-task/prepare`,
+      "POST",
+      ctx.token,
+      { workerProfileId, confirm: false },
+    );
+    assert.equal(missingConfirm.status, 422);
+
+    const prepared = await doHttp(
+      `${ctx.base}/api/ops/sample-task/prepare`,
+      "POST",
+      ctx.token,
+      { workerProfileId, confirm: true },
+    );
+    assert.equal(prepared.status, 200);
+    const body = prepared.body as Record<string, unknown>;
+    assert.equal(body.available, true);
+    assert.equal(body.state, "prepared");
+    assert.equal(body.workerProfileId, workerProfileId);
+    assert.match(String(body.sampleId), /^sample_[a-f0-9]{32}$/);
+    const preview = body.preview as Record<string, unknown>;
+    assert.equal(preview.workerProfileId, workerProfileId);
+    assert.equal(ctx.calls.filter((call) => call.method === "validate_file").length, 1);
+    assert.equal(ctx.calls.some((call) => call.method === "submit_file"), false);
+    const serialized = JSON.stringify(body);
+    for (const forbidden of [ctx.home, "taskFile", "keychainService", "endpoint", "acceptance.commands"] ) {
+      assert.equal(serialized.includes(forbidden), false, forbidden);
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("guided sample bound submit creates one ordinary Task and duplicate start returns it", async () => {
+  const ctx = await makeOpsHub({ guidedSample: true });
+  try {
+    const workerProfileId = ctx.settings.get().workerProfiles.defaultProfileId;
+    const prepared = await doHttp(
+      `${ctx.base}/api/ops/sample-task/prepare`, "POST", ctx.token,
+      { workerProfileId, confirm: true },
+    );
+    const prep = prepared.body as Record<string, unknown>;
+    const preview = prep.preview as Record<string, unknown>;
+    const requestBody = {
+      sampleId: prep.sampleId,
+      previewRevisionDigest: preview.previewRevisionDigest,
+      confirm: true,
+    };
+    const first = await doHttp(`${ctx.base}/api/ops/sample-task/submit`, "POST", ctx.token, requestBody);
+    assert.equal(first.status, 200);
+    assert.equal((first.body as Record<string, unknown>).taskId, "task-sub-1");
+    assert.equal(ctx.calls.filter((call) => call.method === "submit_file").length, 1);
+
+    const duplicate = await doHttp(`${ctx.base}/api/ops/sample-task/submit`, "POST", ctx.token, requestBody);
+    assert.equal(duplicate.status, 200);
+    assert.equal((duplicate.body as Record<string, unknown>).alreadySubmitted, true);
+    assert.equal((duplicate.body as Record<string, unknown>).taskId, "task-sub-1");
+    assert.equal(ctx.calls.filter((call) => call.method === "submit_file").length, 1);
+
+    const recovered = await doHttp(`${ctx.base}/api/ops/sample-task`, "GET", ctx.token);
+    assert.equal(recovered.status, 200);
+    assert.equal((recovered.body as Record<string, unknown>).state, "submitted");
+    assert.equal((recovered.body as Record<string, unknown>).taskId, "task-sub-1");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("guided sample stale preview does not submit and returns to a recoverable prepared state", async () => {
+  const ctx = await makeOpsHub({ guidedSample: true });
+  try {
+    const workerProfileId = ctx.settings.get().workerProfiles.defaultProfileId;
+    const prepared = await doHttp(
+      `${ctx.base}/api/ops/sample-task/prepare`, "POST", ctx.token,
+      { workerProfileId, confirm: true },
+    );
+    const sampleId = (prepared.body as Record<string, unknown>).sampleId;
+    const stale = await doHttp(
+      `${ctx.base}/api/ops/sample-task/submit`, "POST", ctx.token,
+      { sampleId, previewRevisionDigest: "1".repeat(64), confirm: true },
+    );
+    assert.equal(stale.status, 422);
+    assert.match(String((stale.body as Record<string, unknown>).error), /out of date/);
+    const recovered = await doHttp(`${ctx.base}/api/ops/sample-task`, "GET", ctx.token);
+    assert.equal((recovered.body as Record<string, unknown>).state, "prepared");
+  } finally {
+    await ctx.cleanup();
+  }
+});
 
 test("Hub Task Detail contains safe deliveryPlan with counts only", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "fl-hub-dp-detail-"));
@@ -848,7 +1021,7 @@ test("task submit calls daemon with submit_file and returns task id", async () =
       `${ctx.base}/api/ops/tasks/submit`,
       "POST",
       ctx.token,
-      { filePath: "/tmp/task.yaml", confirm: true },
+      { filePath: "/tmp/task.yaml", previewRevisionDigest: "0".repeat(64), confirm: true },
     );
     assert.equal(res.status, 200);
     const body = res.body as Record<string, unknown>;
@@ -861,6 +1034,7 @@ test("task submit calls daemon with submit_file and returns task id", async () =
     const call = ctx.calls.find((c) => c.method === "submit_file");
     assert.ok(call);
     assert.equal(call!.params.taskFile, "/tmp/task.yaml");
+    assert.equal(call!.params.expectedPreviewRevisionDigest, "0".repeat(64));
   } finally {
     await ctx.cleanup();
   }
@@ -897,11 +1071,137 @@ test("task submit daemon error returns fixed bounded message, never echoes daemo
       `http://127.0.0.1:${port}/api/ops/tasks/submit`,
       "POST",
       server.getToken(),
-      { filePath: "/tmp/bad.yaml", confirm: true },
+      { filePath: "/tmp/bad.yaml", previewRevisionDigest: "0".repeat(64), confirm: true },
     );
     assert.equal(res.status, 422);
     const body = res.body as Record<string, unknown>;
     assert.equal(body.error, "Task contract submission rejected by daemon");
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("task submit without previewRevisionDigest is rejected before any daemon call", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const before = ctx.calls.length;
+    const res = await doHttp(
+      `${ctx.base}/api/ops/tasks/submit`,
+      "POST",
+      ctx.token,
+      { filePath: "/tmp/task.yaml", confirm: true },
+    );
+    assert.equal(res.status, 422);
+    const body = res.body as Record<string, unknown>;
+    assert.ok(typeof body.error === "string" && /preview/i.test(body.error));
+    assert.equal(ctx.calls.length, before, "no daemon call when the preview digest is missing");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("task submit with a stale digest returns the out-of-date message and never echoes daemon text", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const res = await doHttp(
+      `${ctx.base}/api/ops/tasks/submit`,
+      "POST",
+      ctx.token,
+      { filePath: "/tmp/task.yaml", previewRevisionDigest: "1".repeat(64), confirm: true },
+    );
+    assert.equal(res.status, 422);
+    const body = res.body as Record<string, unknown>;
+    assert.equal(body.error, "Task preview is out of date; preview again before submitting");
+    const call = ctx.calls.find((c) => c.method === "submit_file");
+    assert.ok(call, "submit_file was called with the stale digest");
+    assert.equal(call!.params.expectedPreviewRevisionDigest, "1".repeat(64));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("task preview route is read-only: calls validate_file and never submit_file", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const before = ctx.calls.length;
+    const res = await doHttp(
+      `${ctx.base}/api/ops/tasks/preview`,
+      "POST",
+      ctx.token,
+      { filePath: "/tmp/task.yaml" },
+    );
+    assert.equal(res.status, 200);
+    const body = res.body as { ok: boolean; preview: Record<string, unknown> };
+    assert.equal(body.ok, true);
+    assert.equal(body.preview.provider, "xai");
+    assert.equal(body.preview.model, "grok-4.5");
+    assert.equal(body.preview.previewRevisionDigest, "0".repeat(64));
+    assert.ok(ctx.calls.some((c) => c.method === "validate_file"));
+    // Preview never calls submit_file and never asks for confirm.
+    assert.ok(!ctx.calls.slice(before).some((c) => c.method === "submit_file"));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("task preview route rejects a non-absolute path without a daemon call", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const before = ctx.calls.length;
+    const res = await doHttp(
+      `${ctx.base}/api/ops/tasks/preview`,
+      "POST",
+      ctx.token,
+      { filePath: "relative/task.yaml" },
+    );
+    assert.equal(res.status, 422);
+    assert.equal(ctx.calls.length, before, "no validate_file call on a relative path");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("task preview route returns a bounded rejection on daemon error and never echoes raw text", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-preview-err-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const setup = new SetupService(settings, new MemoryKeychain(), inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain: new MemoryKeychain(),
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, _params: Record<string, unknown> = {}) => {
+      if (method === "validate_file") {
+        throw new Error("Invalid task contract: missing 'name' - /tmp/bad.yaml - https://secret.example.invalid");
+      }
+      return {} as T;
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/preview`,
+      "POST",
+      server.getToken(),
+      { filePath: "/tmp/bad.yaml" },
+    );
+    assert.equal(res.status, 422);
+    const body = res.body as Record<string, unknown>;
+    assert.equal(body.error, "Task contract preview rejected by daemon");
+    const json = JSON.stringify(body);
+    assert.ok(!json.includes("secret.example.invalid"));
+    assert.ok(!json.includes("/tmp/bad.yaml"));
+    assert.ok(!json.includes("Invalid task contract"));
   } finally {
     await server.stop();
     store.close();
@@ -1150,5 +1450,153 @@ test("correct rejects empty feedback", async () => {
     assert.ok(typeof body.error === "string" && body.error.includes("feedback"));
   } finally {
     await ctx.cleanup();
+  }
+});
+
+test("Task Detail projects canonical decisionStage while preserving raw machine status", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-ds-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
+      if (method === "status") {
+        return {
+          id: params.taskId,
+          name: "Revision Task",
+          status: "succeeded",
+          sourcePath: "/home/user/repo",
+          sessionId: "sess-rev-1",
+          createdAt: "2026-07-28T00:00:00.000Z",
+          spec: {
+            version: 2,
+            provider: { name: "deepseek", model: "deepseek-v4-flash" },
+            runtime: { name: "claude-code" },
+            worker: { focusPaths: [] },
+            contract: { outcome: "test", inScope: [], outOfScope: [], executionSteps: [], deliverables: [] },
+            acceptance: { criteria: [], commands: [] },
+          },
+        } as T;
+      }
+      if (method === "task_decision") {
+        return {
+          taskId: params.taskId,
+          stage: "revision-requested",
+          nextAction: "Resume with the Main agent review reason",
+          lineage: { complete: false, missingAttemptIds: [], attemptCount: 1, verifiedAttemptCount: 1,
+            hopChurn: { filesChanged: 0, changedLines: 0 },
+            combinedDeliveryDiff: { filesChanged: 0, changedLines: 0 },
+            correctionAttemptIds: [] },
+          progress: { activity: "terminal", latestEventSequence: 5 },
+        } as T;
+      }
+      if (method === "task_economics") return {} as T;
+      if (method === "candidate_reverify_eligibility") return { eligible: false, category: "stale-revision" } as T;
+      if (method === "correction_eligibility") return { eligible: false, category: "not-failed-or-interrupted" } as T;
+      if (method === "inspect") return { events: [], attempts: [], diff: "" } as T;
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(`http://127.0.0.1:${port}/api/ops/tasks/t-revise`, "GET", server.getToken());
+    assert.equal(res.status, 200);
+    const body = res.body as Record<string, unknown>;
+
+    // Machine status remains the immutable execution truth.
+    assert.equal(body.status, "succeeded");
+
+    // Canonical decision stage is projected as a top-level safe field.
+    assert.equal(body.decisionStage, "revision-requested");
+
+    // Raw decision is still available for sections that read deeper evidence.
+    const decision = body.decision as Record<string, unknown> | undefined;
+    assert.ok(decision !== undefined, "decision object is present");
+    assert.equal(decision!.stage, "revision-requested");
+
+    // The two facts remain distinct: machine status did not become the decision.
+    assert.notEqual(body.status, body.decisionStage);
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("Task Detail without decision stage falls back gracefully", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-ds-leg"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
+      if (method === "status") {
+        return {
+          id: params.taskId,
+          name: "Legacy Task",
+          status: "succeeded",
+          spec: {
+            version: 1,
+            provider: { name: "deepseek", model: "v4" },
+            runtime: { name: "claude-code" },
+            goal: "test",
+            constraints: [],
+            acceptance: { commands: ["true"] },
+          },
+        } as T;
+      }
+      if (method === "task_decision") {
+        // Legacy decision response without a stage field.
+        return { taskId: params.taskId } as T;
+      }
+      if (method === "task_economics") return {} as T;
+      if (method === "candidate_reverify_eligibility") throw new Error("not supported");
+      if (method === "correction_eligibility") throw new Error("not supported");
+      if (method === "inspect") return { events: [], attempts: [] } as T;
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(`http://127.0.0.1:${port}/api/ops/tasks/t-leg`, "GET", server.getToken());
+    assert.equal(res.status, 200);
+    const body = res.body as Record<string, unknown>;
+
+    // Machine status is always present.
+    assert.equal(body.status, "succeeded");
+
+    // decisionStage is absent when the decision response carries no stage.
+    assert.ok(!("decisionStage" in body), "decisionStage must be absent when not supplied");
+
+    // decision object is still present for the journey renderer.
+    assert.ok(body.decision !== undefined, "decision object is present");
+  } finally {
+    await server.stop();
+    store.close();
   }
 });

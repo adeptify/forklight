@@ -4,6 +4,8 @@ import { isTerminalTaskStatus } from "./task-progress.js";
 import {
   buildCandidateGapContract,
   computeGapContractDigest,
+  isLatestMainReviewRevise,
+  latestVerificationSequence,
 } from "./candidate-revision.js";
 import {
   blocksSamePolicyRetry,
@@ -13,6 +15,7 @@ import { failureCategoryForTask } from "./worker-failure.js";
 import type {
   AttemptAuthorization,
   AttemptExecutionOptions,
+  AttemptRecord,
   CandidateGapContract,
   TaskRecord,
 } from "./types.js";
@@ -455,9 +458,28 @@ export function authorizeMainCorrection(
   // Check task eligibility
   const task = store.getTask(taskId);
   if (task.status !== "failed" && task.status !== "interrupted") {
-    throw new Error(
-      `Task ${taskId} cannot authorize a correction from status ${task.status}`,
+    // Succeeded tasks are eligible only when the latest Main Review is a typed
+    // revise bound to the latest attempt and verification. Uses the same
+    // canonical binding helpers as resolveCorrectionEligibility.
+    if (task.status !== "succeeded") {
+      throw new Error(
+        `Task ${taskId} cannot authorize a correction from status ${task.status}`,
+      );
+    }
+    const events = store.listEvents(taskId);
+    const attempts = store.listAttempts(taskId);
+    const latestAttempt = attempts.reduce<AttemptRecord | undefined>(
+      (latest, a) => latest === undefined || a.ordinal > latest.ordinal ? a : latest,
+      undefined,
     );
+    if (
+      latestAttempt === undefined
+      || !isLatestMainReviewRevise(events, latestAttempt.id, latestVerificationSequence(events))
+    ) {
+      throw new Error(
+        "correction rejected: Task succeeded but Main has not recorded a valid revise decision bound to the latest Attempt",
+      );
+    }
   }
 
   // Check competition membership — fail closed

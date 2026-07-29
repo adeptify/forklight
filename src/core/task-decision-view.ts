@@ -237,6 +237,12 @@ function stageAndAction(input: {
     if (runtime?.status === "passed") {
       return { stage: "activated", nextAction: "Delivery is active" };
     }
+    if (runtime?.status === "not-applicable") {
+      return {
+        stage: "delivered",
+        nextAction: "Delivery is complete; runtime activation was not required",
+      };
+    }
     return {
       stage: "applied-not-activated",
       nextAction: "Run or verify activation",

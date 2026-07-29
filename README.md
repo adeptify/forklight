@@ -69,6 +69,32 @@ forklight hub
 One command starts the **backend daemon** and the **Hub UI** on `127.0.0.1`.
 Ctrl+C stops Hub UI only; stop the daemon with `forklight daemon stop`.
 
+Running `forklight hub` again reopens the same active control center for that
+ForkLight home. It does not start another Hub process or choose another random
+port. A different `FORKLIGHT_HOME` remains an intentionally separate instance.
+
+### Hub recovery guide
+
+`forklight hub` handles common situations safely. Rerun the command as the
+default recovery action. Do **not** manually delete files from
+`FORKLIGHT_HOME`, scan or kill processes, reuse a port that another Hub owns,
+or share the full URL printed by the command (it carries a private local access
+token in the fragment — the bare origin `http://127.0.0.1:PORT/` contains no
+token).
+
+| Situation | What happened | What to do |
+| --- | --- | --- |
+| You run `forklight hub` a second time, from any terminal | The first Hub is still the active control center. The second command prints the existing URL, reopens it in the browser, and exits. | Nothing — the original Hub stays active and the daemon remains separate. **Closing this second terminal does not stop the Hub.** |
+| You pressed Ctrl+C in the Hub terminal | Hub UI stopped. The daemon and any running Worker Tasks continue independently. | Run `forklight hub` again to reopen the Hub UI. The daemon and your tasks are still running. |
+| The Hub crashed or the terminal was force-closed | The recorded owner is no longer running. | Run `forklight hub` again. ForkLight clears only its own stale local ownership data and starts one fresh Hub. |
+| `forklight hub` refuses to start while another Hub seems to be running | ForkLight found a live process but could not prove it is your authenticated Hub. This is a safety decision. | Stop the original Hub you know is running (Ctrl+C in its terminal), then run `forklight hub` again. Do **not** guess a process ID or kill a process manually. |
+| You want to restart the Hub on purpose | The current Hub is alive and authenticated. ForkLight will not take it over. | Stop the known Hub (Ctrl+C in its terminal), then run `forklight hub` again. No other cleanup is needed. |
+| You set a different `FORKLIGHT_HOME` | That is a separate local environment with its own daemon, settings, and task history. | Run `forklight hub` with the same `FORKLIGHT_HOME` each time. Each home can have its own active Hub. |
+
+The daemon is a separate long-running process. Stopping the Hub (with Ctrl+C
+or a closed terminal) does **not** stop the daemon or cancel running Worker
+Tasks. To stop the daemon intentionally, run `forklight daemon stop`.
+
 In the browser (no hand-editing of Main configs for the guided path):
 
 1. **Models** - provider, model id, optional endpoint; paste API key (Keychain only)
@@ -120,9 +146,11 @@ summary exactly as Main wrote it; it does not guess, rewrite, or translate it.
 The technical outcome, scope, checks, and evidence remain available underneath
 and continue to control execution and acceptance.
 
-Hub binds only to `127.0.0.1`. The token is carried in the URL fragment and
-removed from the visible URL after the page loads. Provider keys are never written
-into Main client config files — only forklight MCP command paths are.
+Hub binds only to `127.0.0.1`. Its private owner record is stored with owner-only
+permissions so the CLI can safely reopen it after a second invocation. The token
+is carried in the URL fragment and removed from the visible URL after the page
+loads. Provider keys are never written into Main client config files — only
+forklight MCP command paths are.
 
 Standalone `forklight console` and `forklight setup` UIs were removed; use
 `forklight hub` only.

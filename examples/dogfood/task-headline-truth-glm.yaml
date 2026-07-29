@@ -1,0 +1,154 @@
+version: 2
+name: Make Task headline status follow the Main decision
+project: ../..
+taskClass: forklight-hub-task-headline-truth
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    The first status a user sees on a Task card and in Task Detail describes the
+    latest Main/delivery outcome, so a machine-successful Candidate that Main
+    asked to revise can never be presented as accepted or delivered.
+  presentation:
+    summary: 看板和任务详情先告诉用户 Main 最终怎么处理，而不是把“机器检查通过”误写成“已经验收”。
+    language: zh-CN
+  context:
+    - A real Hub browser audit found Task `14ed39d0-2cc0-4644-b199-737532cd29a6` under the accurate `checks passed` lane, but its card and detail hero both displayed `已通过验收` while the adjacent text said Main requested revision.
+    - The board lane may continue to describe the machine pipeline stage. The misleading part is the prominent Task badge, which currently renders only `task.status` and ignores `decisionStage`.
+    - "`taskProgressSummary` already has truthful plain-language explanations for Main review, revision, rejection, integration, activation, and integration failure. Reuse those semantics instead of creating another lifecycle model."
+    - The full journey must keep the machine result visible as evidence. This Task only fixes the headline a beginner reads first.
+  inScope:
+    - Add one pure presentation helper that selects a bounded headline label and tone from verified final delivery, `decisionStage`, then machine `status` as the fallback.
+    - Give explicit bilingual headline labels to awaiting Main review, Main requested revision, Main rejected, ready for integration, integrating, applied but not activated, activated, and integration failed.
+    - Use the headline helper for the prominent badge on every kanban Task card and in the Task Detail hero.
+    - Avoid duplicate final-delivery badges in those two locations when the headline already represents the verified final outcome.
+    - Keep the existing full journey machine-state row and independent-check evidence unchanged so users can still distinguish Worker result, checks, Main decision, and final delivery.
+    - "Add focused executable tests proving at minimum: succeeded + revision-requested is not `accepted`; succeeded + main-rejected is not `accepted`; awaiting review is not delivered; ready-for-integration is not delivered; activated/verified final delivery is delivered; plain succeeded without Main evidence falls back to a machine-check label rather than a final-acceptance claim."
+  outOfScope:
+    - Changing Task schema, persisted status, decision stages, server projection, kanban lane membership/counts, task filters, Main review authority, Integration, daemon, Provider routing, Worker execution, CSS redesign, commit, or push.
+    - Rewriting Task Detail, hiding machine evidence, changing lifecycle APIs, adding retries/corrections/adaptation, or broad copy cleanup.
+  executionSteps:
+    - "Read `statusLabel`, `taskProgressSummary`, `finalDeliveryBadge`, `kanbanCard`, and `renderTaskWorkbench` before editing."
+    - Implement one narrow headline projection with final delivery and decision stage taking precedence over machine status.
+    - Replace only the two prominent badge call sites and keep lower-level journey evidence unchanged.
+    - Add paired English/Chinese labels and focused pure-helper/render-source tests that would fail on the audited contradiction.
+    - Run focused and full acceptance once; report unrelated failures without expanding scope.
+  deliverables:
+    - Truthful Task headline badge on the board and Task Detail.
+    - Bilingual labels for each existing Main/delivery stage.
+    - Regression tests for the audited machine-success/Main-revision contradiction and adjacent stages.
+  modules:
+    - name: Task headline projection
+      responsibility: Select the latest user-relevant Task outcome without mutating machine truth.
+      consumes:
+        - Safe Task status, decisionStage, and compact verified-final-delivery evidence.
+      produces:
+        - One bounded localized label and visual tone for the prominent Task badge.
+      boundaries:
+        - No persisted state, lane, filter, lifecycle, request, or private remediation data.
+    - name: Headline rendering
+      responsibility: Show the same truthful first status on the board card and detail hero.
+      consumes:
+        - Task headline projection and existing narrative progress summary.
+      produces:
+        - A consistent first-glance result with no contradictory acceptance claim or duplicate delivery badge.
+      boundaries:
+        - Machine outcome and full collaboration evidence remain available in the journey.
+    - name: Headline regression coverage
+      responsibility: Prevent machine success from being confused with Main acceptance or verified delivery.
+      consumes:
+        - Representative Task objects for current decision and delivery stages.
+      produces:
+        - Deterministic helper and call-site assertions in both locales.
+      boundaries:
+        - No browser mock, server fixture rewrite, giant snapshot, or source-order-only test.
+  callChain:
+    - Worker and independent verification produce the machine Task status.
+    - "Main review and Integration produce `decisionStage` and compact final-delivery evidence."
+    - The headline projection selects the latest user-relevant outcome.
+    - Board card and Task Detail hero render that projection first; the journey separately explains machine result and evidence.
+  scenarios:
+    - name: Machine passed but Main requested revision
+      given: Task status is succeeded and decisionStage is revision-requested.
+      when: The board card or detail hero renders.
+      then: The first badge says Main requested revision and never says accepted or delivered.
+    - name: Waiting for Main
+      given: Independent checks passed and decisionStage is awaiting-main-review.
+      when: The first badge renders.
+      then: It says the result is waiting for Main review rather than accepted.
+    - name: Accepted but not integrated
+      given: Main accepted the Candidate and decisionStage is ready-for-integration.
+      when: The first badge renders.
+      then: It says waiting for integration rather than delivered.
+    - name: Verified delivery
+      given: The compact journey proves final delivery or decisionStage is activated.
+      when: The first badge renders.
+      then: It says verified delivery once, without a duplicate final badge.
+    - name: Legacy machine-only success
+      given: A legacy Task has succeeded status but no Main or delivery evidence.
+      when: The first badge renders.
+      then: It says machine checks passed, not final acceptance.
+  risks:
+    - Moving Tasks between lanes would mix this UX fix with scheduling semantics, so lane selection and counts must stay unchanged.
+    - Replacing the full journey result would hide useful machine truth, so only the two headline badges may change.
+    - A second lifecycle map could drift, so label precedence must be a small pure presentation projection covered by existing stage values.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 350
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - The prominent Task badge follows verified final delivery and Main/delivery decision stages before machine status, without changing persisted state or board lanes.
+    - Machine-successful Tasks awaiting Main, revision, rejection, or integration never display accepted/delivered wording in the board-card or detail-hero headline.
+    - Verified delivery is shown once; legacy machine-only success uses a machine-check label rather than a final-acceptance claim.
+    - The ordered journey still shows machine outcome, independent checks, Main handling, cause, and next action as separate evidence.
+    - English and Chinese labels are complete, focused UI tests and the full suite pass, strict TypeScript and Hub JavaScript syntax pass, and the diff is clean.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

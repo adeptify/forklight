@@ -1,0 +1,156 @@
+version: 2
+name: Make detached daemon tests prove their own cleanup
+project: ../..
+taskClass: forklight-test-daemon-lifecycle
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    Every test that starts a detached ForkLight daemon must register its exact PID and temporary home immediately, then prove in teardown that the process and endpoint are gone even when the test assertion fails, so test runs cannot pollute later dogfood or imitate a production daemon.
+  presentation:
+    summary: 启动临时 Daemon 的测试无论成功还是中途失败，都会清理自己创建的精确进程和 socket，并在结束前证明没有残留；它不会扫描或结束用户正在运行的 ForkLight。
+    language: zh-CN
+  context:
+    - "Inspect first: startDaemonProcess/ensureDaemon/stopDaemon in src/daemon/client.ts, every detached-daemon call in tests/build-identity.test.ts and tests/daemon.test.ts, and the activation lifecycle fixtures."
+    - A previous full test run left a source-dev daemon under a temporary `forklight-source-daemon-*` home. The test tried shutdown and finally sent SIGTERM, but it did not wait for verified process and socket exit before returning.
+    - Production daemon ownership and handoff behavior already have their own implementation tests. This Task is about test-owned cleanup discipline, not changing production shutdown semantics.
+    - Cleanup authority comes only from a PID returned by the test's own `startDaemonProcess` call and the exact temporary home created by that test. Process-name scanning, global temp-directory scanning, and the user's real FORKLIGHT_HOME are forbidden.
+    - This delivery must use the existing `forklight-self-upgrade` profile so a successful reviewed patch can exercise the real automatic daemon activation path.
+  inScope:
+    - Add one small test-only detached-daemon fixture/helper that registers the exact temporary home and every PID returned by that fixture before awaiting readiness.
+    - Provide bounded teardown that first attempts an ordinary endpoint shutdown only when the endpoint reports a tracked PID, then signals only still-live tracked PIDs, waits for exit, verifies the exact socket is unreachable/gone, and removes only that fixture's temporary home.
+    - Make teardown idempotent and safe when startup failed before readiness, shutdown already completed, the daemon was replaced by another PID started through the same fixture, or a test assertion throws.
+    - Migrate every direct detached start in tests/build-identity.test.ts and the lifecycle-focused direct starts in tests/daemon.test.ts to register teardown immediately through the shared helper.
+    - Add focused behavioral tests for cleanup after a thrown test body, two sequential tracked PIDs, already-stopped process, and refusal to signal an untracked endpoint owner.
+    - Keep normal test output quiet; failures must identify the exact remaining tracked PID or endpoint without dumping logs, settings, tokens, or unrelated process information.
+  outOfScope:
+    - Changing production daemon start, stop, restart, activation handoff, socket ownership, CLI behavior, Hub behavior, Worker execution, retry policy, or Provider calls.
+    - Discovering or killing processes by name, command line, port scan, pgrep, global tmp scan, or any PID not returned by this test fixture.
+    - Cleaning the user's real ForkLight home, production daemon, Hub, credentials, Task data, or other tests' temporary homes.
+    - Refactoring all temporary-directory tests, adding a general process supervisor, adding automatic retries, weakening assertions, commit, or push.
+  executionSteps:
+    - Enumerate the exact direct `startDaemonProcess` call sites and distinguish test-owned detached children from in-process ForkLightDaemon fixtures and intentionally fake socket servers.
+    - Implement a test-only fixture with immediate PID registration, exact-home ownership, bounded graceful stop, exact-PID fallback, exit/socket proof, and idempotent cleanup.
+    - Register teardown before the first asynchronous readiness wait so assertion or bootstrap failure cannot bypass cleanup.
+    - Convert only the detached lifecycle call sites; preserve tests that intentionally exercise replacement, drain, and endpoint-race semantics.
+    - Add deterministic helper tests using isolated temporary homes and no production environment state.
+    - Run focused lifecycle tests, then the complete suite once. Return any unsafe ownership ambiguity to Main instead of adding a broad kill fallback.
+  deliverables:
+    - Shared exact-ownership detached-daemon test fixture.
+    - Migrated source-build and daemon lifecycle tests with failure-safe teardown.
+    - Regression tests proving bounded cleanup and refusal to touch untracked owners.
+  modules:
+    - name: Detached daemon test fixture
+      responsibility: Track only daemons created by one test and fully clean their exact processes, endpoint, and temporary home before the test finishes.
+      consumes:
+        - One mkdtemp-created home, PIDs returned by fixture-owned starts, daemon health for that home, and bounded process/socket liveness checks.
+      produces:
+        - Started daemon identities plus a deterministic cleanup result or a precise test failure naming the remaining owned resource.
+      boundaries:
+        - Test-only module; no global discovery, no untracked PID signalling, no user home, no production setting mutation.
+    - name: Lifecycle test adoption
+      responsibility: Ensure every detached start in the selected source-build and daemon lifecycle tests registers cleanup before it can throw or await readiness.
+      consumes:
+        - Existing test scenarios for start, restart, replacement, ordinary stop, and activation handoff.
+      produces:
+        - Equivalent assertions with explicit fixture ownership and guaranteed teardown.
+      boundaries:
+        - Do not rewrite in-process daemon tests, fake socket race fixtures, or production behavior to make cleanup easier.
+    - name: Cleanup verification
+      responsibility: Prove cleanup handles failure, replacement, and already-stopped paths while refusing an untracked live endpoint.
+      consumes:
+        - Isolated child daemons, exact tracked PID sets, exact socket paths, and controlled thrown assertions.
+      produces:
+        - Focused deterministic regression evidence with no leaked child or socket.
+      boundaries:
+        - No Provider/model call inside tests, no timing-only assertion without a final liveness check, and no broad process cleanup.
+  callChain:
+    - A lifecycle test creates one isolated temporary home and immediately creates its fixture.
+    - The fixture starts a detached daemon, records the returned PID synchronously, and the test then awaits readiness or runs its scenario.
+    - Node test teardown invokes cleanup whether the body passed, failed, or threw during readiness.
+    - Cleanup reads only the exact home endpoint; it requests ordinary shutdown only if health identifies a tracked PID.
+    - Cleanup signals only any still-live tracked PIDs, waits within a fixed deadline, verifies the exact endpoint is unreachable, and removes only the owned home.
+    - If an untracked process owns the endpoint, cleanup refuses to signal it and reports the ownership conflict while still cleaning safe tracked resources.
+  scenarios:
+    - name: Assertion fails after readiness
+      given: The fixture started a daemon and the test body throws after health succeeds.
+      when: Registered teardown runs.
+      then: The exact child exits, its socket is unreachable or gone, and only that temporary home is removed before the test process completes.
+    - name: Restart creates a replacement PID
+      given: One fixture starts a daemon, stops it, and starts a second daemon for the same home.
+      when: Teardown runs after either normal completion or failure.
+      then: Both returned PIDs are tracked, every still-live owned PID exits, and the final endpoint is gone.
+    - name: Daemon already stopped
+      given: The test already completed ordinary shutdown and the socket disappeared.
+      when: Teardown runs again.
+      then: Cleanup is a bounded no-op and succeeds without inventing a leak.
+    - name: Endpoint belongs to an untracked owner
+      given: The exact home socket answers health with a PID not returned by this fixture.
+      when: Cleanup runs.
+      then: It never sends shutdown or a signal to that PID, reports the ownership conflict, and does not use process scanning as a fallback.
+  risks:
+    - PID reuse can make a stale number unsafe, so endpoint shutdown requires a tracked health PID and direct signals are limited to immediately registered children within the fixture lifetime.
+    - Detached children cannot be reaped like ordinary attached children, so teardown must prove both process and socket state instead of assuming SIGTERM succeeded.
+    - Replacement tests intentionally change PID/socket ownership, so the fixture must track a set and preserve the original scenario rather than hiding it behind one current PID.
+    - Overbroad cleanup could harm the user's daemon; the exact temporary home plus returned PID set is the non-negotiable authority boundary.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 900
+provider:
+  name: volcengine
+  model: glm-5.2[1M]
+  endpoint: https://ark.cn-beijing.volces.com/api/coding
+  keychainService: forklight.volcengine.api-key
+  pricingRoute: volcengine-coding-plan-subscription
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - tests/helpers/detached-daemon.ts
+    - tests/detached-daemon-fixture.test.ts
+    - tests/build-identity.test.ts
+    - tests/daemon.test.ts
+acceptance:
+  criteria:
+    - Every selected detached daemon start registers its exact PID and teardown before readiness or assertions can fail.
+    - Teardown is bounded, idempotent, proves exact PID and socket exit, and removes only the fixture-owned temporary home.
+    - Endpoint shutdown and direct signals can target only PIDs returned by this fixture; an untracked owner is never signalled or killed.
+    - Failure, sequential replacement, already-stopped, and untracked-owner scenarios have deterministic tests without real Provider or user-home access.
+    - Existing daemon replacement, handoff, source-build identity, and activation semantics remain unchanged.
+    - The complete existing suite passes and leaves no new `forklight-source-daemon-*` or lifecycle-test daemon process/socket behind.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/detached-daemon-fixture.test.ts tests/build-identity.test.ts tests/daemon.test.ts tests/activation.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

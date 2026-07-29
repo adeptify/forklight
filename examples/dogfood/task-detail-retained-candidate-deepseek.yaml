@@ -1,0 +1,159 @@
+version: 2
+name: Explain exactly what Candidate ForkLight retained
+project: ../..
+taskClass: forklight-hub-task-detail-retained-candidate
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    Task Detail tells a non-technical user whether ForkLight can prove that an
+    immutable Worker Candidate is still retained, what bounded files and size
+    it contains, and how that evidence differs from machine checks, Main
+    acceptance, Main repair, and final delivery.
+  presentation:
+    summary: 在任务详情中明确告诉用户“候选成果是否仍被保留、保留了哪些文件”，同时不把原 Worker 候选冒充成 Main 最终交付的结果。
+    language: zh-CN
+  context:
+    - ForkLight already records immutable `candidate.revision.captured` evidence after verification and keeps a private patch artifact, but the normal Task Detail journey does not consistently explain that a Candidate remains retained.
+    - Existing `candidateReuse` describes a correction that already happened, and `candidateReverification` describes a no-Worker check that already happened. Neither answers whether the current Candidate evidence itself is still valid.
+    - Status, Main revise, changed-file observations, and Worker completion claims are not retained-Candidate proof.
+    - Core `resolveLatestRevision` already fail-closes malformed CandidateRevision events and `candidateRevisionMatchesCurrentDiff` proves that the current retained Diff still matches the immutable digest. Reuse these authorities instead of parsing payloads or hashing in Hub.
+    - For a Main-repaired delivery, the retained Candidate is the original Worker Candidate. Its paths are not a separately recorded list of files changed by Main and must never be presented as final delivered files.
+  inScope:
+    - Add a bounded `journey.retainedCandidate` projection built only from the latest valid CandidateRevision whose Task identity matches and whose digest still matches the current Task Diff.
+    - For proven evidence, expose only Attempt ordinal, machine-verification boolean, files changed, changed lines, total affected-path count, and at most 40 validated relative affected paths.
+    - For missing, malformed, stale, or mismatched evidence, expose an evidence-unavailable state without guessing that no Candidate ever existed.
+    - Show this explanation in the default Overview and Result areas of Task Detail using plain paired English and Chinese copy.
+    - Distinguish machine-success plus Main-revise, original Worker Candidate after verified Main repair, ordinary pending/accepted/integrated outcomes, and legacy evidence-unavailable Tasks.
+    - Add behavior-level backend and UI regressions for valid, mismatched, malformed, capped, legacy, Main-revise, and Main-repaired cases.
+  outOfScope:
+    - Changing CandidateRevision persistence, correction or reverification eligibility, automatically launching a correction, making succeeded-plus-revise correctable, changing Task status or decision stages, Main review, Integration, board lanes, Provider routing, commit, or push.
+    - Claiming that a retained Candidate is accepted, delivered, safe to integrate, or operationally reusable merely because its evidence is present.
+    - Exposing CandidateRevision id, digest prefix or full digest, private artifact path, raw Diff, event payload, prompt, logs, credentials, Task workspace paths, or Main repair file guesses.
+    - Broad Task Detail redesign or another lifecycle map.
+  executionSteps:
+    - Inspect the canonical CandidateRevision parser/freshness helper, `buildSafeTaskJourney`, Task Detail workbench, existing candidate reuse/remediation UI, i18n, and relevant tests.
+    - Add one narrow backend projection that reuses core authority and fails closed to evidence-unavailable.
+    - Add one small reusable Task Detail renderer with evidence-first wording and use it in Overview and Result without changing tabs or lifecycle controls.
+    - Add deterministic tests that exercise data behavior and user-visible semantic separation, including privacy-negative assertions.
+    - Run focused and full acceptance once; report unrelated failures without expanding scope or retrying automatically.
+  deliverables:
+    - Privacy-safe retained-Candidate journey evidence.
+    - Plain-language Overview and Result explanation of what is retained and what it does not prove.
+    - Regression coverage for freshness, legacy fallback, repair separation, path caps, and forbidden fields.
+  modules:
+    - name: Retained Candidate evidence projection
+      responsibility: Prove a Candidate record still matches the exact current Task Diff and return only bounded safe facts.
+      consumes:
+        - Current TaskRecord, full internal inspect events, canonical CandidateRevision parser, and core Diff freshness check.
+      produces:
+        - Available evidence with bounded metrics and safe relative paths, or an explicit evidence-unavailable state.
+      boundaries:
+        - No payload parser duplication, no lifecycle inference, no artifact-path or digest disclosure, and no mutation.
+    - name: Retained Candidate explanation
+      responsibility: Tell the user what Candidate evidence exists and keep it separate from Main acceptance and final delivery.
+      consumes:
+        - Safe journey retainedCandidate, independent verification, Main review, and compact verified-delivery evidence.
+      produces:
+        - Bilingual Overview and Result cards with counts, bounded paths, and the correct caveat for the current outcome.
+      boundaries:
+        - Original Worker paths never become Main repair or final-delivery paths; no action authority is created.
+    - name: Evidence and language regression
+      responsibility: Prevent stale/private Candidate data or acceptance claims from entering Task Detail.
+      consumes:
+        - Valid, malformed, stale, legacy, Main-revise, and Main-repaired fixtures in both locales.
+      produces:
+        - Executable assertions for safe projection, visible meaning, caps, and forbidden content.
+      boundaries:
+        - No live Provider call, real Daemon mutation, giant UI snapshot, commit, or push.
+  callChain:
+    - Worker verification captures an immutable CandidateRevision and the Task keeps its current Diff.
+    - Daemon full inspect gives Hub internal event evidence while the Task record identifies the authoritative current Diff.
+    - Hub reuses core revision validation and freshness checking, then creates a bounded retainedCandidate journey section.
+    - Task Detail Overview and Result render what remains retained; independent checks, Main handling, and final delivery remain separate sections.
+  scenarios:
+    - name: Machine passed but Main requested changes
+      given: The latest valid CandidateRevision matches the current Diff, machine verification passed, and Main decision is revise.
+      when: Task Detail renders.
+      then: It says the Candidate evidence is retained and lists bounded facts, but clearly says Main has not accepted or delivered it.
+    - name: Main repaired and delivered after Worker failure
+      given: The original Worker Candidate is retained and the remediation disposition proves a later Main-repaired delivery.
+      when: Task Detail renders.
+      then: It labels the evidence as the original Worker Candidate and never treats its paths as the final repaired file list.
+    - name: Legacy or stale evidence
+      given: No valid CandidateRevision exists, its payload is malformed, or its digest does not match the current Diff.
+      when: Task Detail renders.
+      then: It says structured proof is unavailable and does not claim that no Candidate ever existed or that one is reusable.
+    - name: Large valid Candidate
+      given: A valid matching revision records more than 40 affected paths.
+      when: The safe journey is returned.
+      then: The true total path count remains visible while the path list is capped at 40 validated relative paths.
+  risks:
+    - Event presence alone can be stale, so the current Diff digest match is required before available evidence is emitted.
+    - A Main-repaired delivery lacks a separate repaired-file list, so original Candidate paths must never be reused as final output.
+    - Absence of modern evidence does not prove absence of work; legacy wording must say evidence unavailable rather than Candidate missing.
+    - Candidate evidence can be large or sensitive, so paths are validated and capped while private identifiers, artifacts, digests, and raw content stay excluded.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 900
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/candidate-revision.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Retained-Candidate available evidence comes only from a latest valid CandidateRevision bound to the same Task and matching the current Task Diff.
+    - Safe evidence exposes only Attempt ordinal, verification boolean, file/line counts, total affected-path count, and at most 40 validated relative paths.
+    - Missing, malformed, stale, or mismatched evidence fails closed to evidence unavailable without claiming the Candidate never existed.
+    - Machine verification, Main acceptance, Main repair, and final delivery remain distinct in both English and Chinese; original Worker paths never become repaired final files.
+    - CandidateRevision id/digest, private artifact path, raw Diff/event payload, prompt/log/credential/workspace paths are absent from the Task Detail safe journey and rendered UI.
+    - Focused Hub and CandidateRevision tests, full tests, strict TypeScript, Hub JavaScript syntax, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/candidate-revision.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

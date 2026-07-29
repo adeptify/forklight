@@ -1,0 +1,152 @@
+version: 2
+name: Close the remaining detached test daemon ownership gaps
+project: ../..
+taskClass: forklight-test-daemon-lifecycle
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    The restart and Hub CLI tests must finish with every detached daemon they caused fully exited: replacement PIDs are adopted into the exact-home test fixture before assertions can lose them, and Hub teardown must prove daemon stop instead of swallowing a cleanup failure.
+  presentation:
+    summary: 修复最后两处测试进程泄漏：测试启动的新 Daemon 必须被当前临时 Home 接管并在结束前证明退出，清理失败必须让测试失败，不能悄悄留下后台进程。
+    language: zh-CN
+  context:
+    - Main found twenty live source-dev daemon processes after successful verification runs. Every process used an isolated temporary `forklight-*` home/socket, never the real ForkLight home.
+    - "One leak per suite used `forklight-restart-running-*`: `tests/daemon-cli.test.ts` calls production `restartDaemon`, whose replacement PID is not currently registered in `DetachedDaemonFixture`."
+    - "One leak per suite used `forklight-hub-instance-*`: the full Hub CLI test invokes daemon stop in finally but swallows every error before deleting the home."
+    - The existing fixture already has exact-home, tracked-PID, bounded-exit, socket-proof, and untracked-owner refusal behavior. Extend/adopt it rather than inventing process-name cleanup.
+    - Main has already terminated the twenty proven isolated test processes by their exact PIDs. Formal Daemon PID 75123 and Hub PID 76185 were not touched.
+  inScope:
+    - Add the smallest fixture API needed to register a replacement PID returned or proven by a test-owned operation on the fixture's exclusive temporary home.
+    - Make the direct production restart test register the replacement before later assertions and guarantee cleanup even when restart or an assertion fails.
+    - Make the Hub CLI test resolve the exact temporary-home daemon PID, stop it through the production graceful path, wait for exact PID/socket exit, and surface cleanup failure instead of swallowing it.
+    - Add focused regressions proving a production restart replacement and a CLI-created daemon do not survive test teardown.
+    - Preserve the existing refusal to signal a genuinely untracked endpoint owner.
+  outOfScope:
+    - Changing production daemon start, stop, restart, signal handling, Hub lifecycle, Integration activation, or source ownership behavior.
+    - Scanning or killing processes by name, command line, global temp directory, port, or repository path.
+    - Signalling the user's formal Daemon, Hub, MCP processes, unrelated Workers, or any PID not attributable to the exact fixture home and test-owned operation.
+    - Weakening assertions, hiding cleanup errors, automatic retry, provider changes, commit, or push.
+  executionSteps:
+    - Trace the exact PID ownership transitions in the direct restart test and the Hub CLI test before editing.
+    - Extend the test-only fixture with a narrow adoption/operation wrapper whose authority is the fixture-owned mkdtemp home and PID returned or health-proven immediately after the test-owned launch/restart.
+    - Update the direct restart test so the replacement is tracked before assertions can throw.
+    - Update the Hub CLI test so daemon teardown is awaited and proven before its home is removed; preserve any earlier Hub shutdown failure while also reporting daemon cleanup failure.
+    - Run focused tests, then the full suite once. Do not add a broad after-suite killer.
+  deliverables:
+    - Exact-home replacement PID adoption in the detached daemon fixture.
+    - Leak-proof direct restart test.
+    - Leak-proof Hub CLI lifecycle test with visible cleanup failures.
+    - Deterministic regression evidence for both gaps.
+  modules:
+    - name: Detached daemon fixture adoption
+      responsibility: Extend exact-home ownership to a replacement created by a test-owned production operation without weakening untracked-owner protection.
+      consumes:
+        - The fixture's private mkdtemp home, its prior tracked PID set, and a PID returned or immediately health-proven by the operation.
+      produces:
+        - An updated tracked set that cleanup can stop and verify, or a precise ownership error.
+      boundaries:
+        - Test-only; no global discovery and no adoption from the user's real home.
+    - name: Restart lifecycle test
+      responsibility: Exercise production restart while retaining teardown authority over both old and replacement PIDs.
+      consumes:
+        - A fixture-owned running daemon and production restart result.
+      produces:
+        - Existing restart/build assertions plus verified exit of every caused process.
+      boundaries:
+        - Do not replace production restart with a different implementation just to simplify the test.
+    - name: Hub CLI lifecycle teardown
+      responsibility: Close the Hub and its exact-home daemon with failure-visible, bounded proof.
+      consumes:
+        - The spawned Hub child, private home, daemon health PID, graceful stop result, and endpoint/process liveness.
+      produces:
+        - One completed test with no surviving child, daemon, claim, descriptor, or socket.
+      boundaries:
+        - Never swallow daemon cleanup failure and never scan outside the private home.
+  callChain:
+    - A test creates an exclusive temporary ForkLight home.
+    - The test starts a daemon or Hub through the production path.
+    - Any returned or exact-home health-proven replacement PID is immediately adopted by the fixture before the test continues.
+    - Finally closes the Hub if present, gracefully stops the exact-home daemon, waits for the exact PID and socket to disappear, then removes only that home.
+    - Any incomplete cleanup fails the test with the exact owned resource; no background cleanup loop or retry is started.
+  scenarios:
+    - name: Production restart replacement
+      given: A fixture owns the original daemon and production restart creates a new PID.
+      when: A later assertion passes or throws and fixture cleanup runs.
+      then: Both original and replacement PIDs are gone and the exact socket is unreachable.
+    - name: Hub starts its own daemon
+      given: The CLI Hub test starts a daemon in its private home.
+      when: The Hub is terminated in finally.
+      then: Teardown identifies and gracefully stops that exact-home daemon, proves exit, and only then removes the home.
+    - name: Cleanup fails
+      given: A caused daemon or endpoint does not exit within the bounded deadline.
+      when: Teardown completes.
+      then: The test fails with the exact PID/home instead of swallowing the error or claiming success.
+    - name: Foreign endpoint owner
+      given: An endpoint owner cannot be attributed to the fixture's test-owned operation.
+      when: Cleanup runs.
+      then: It is not adopted or signalled and the ownership conflict remains visible.
+  risks:
+    - Overbroad PID adoption could weaken safety; adoption must require the fixture's exclusive home and immediate operation evidence.
+    - A finally block can hide the primary assertion failure; preserve the primary error while making cleanup failure visible as additional evidence.
+    - Test subprocess timing can be flaky; use bounded health/process/socket proof rather than arbitrary sleeps.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 500
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-standard-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - tests/helpers/detached-daemon.ts
+    - tests/detached-daemon-fixture.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/hub-instance.test.ts
+acceptance:
+  criteria:
+    - Production restart and Hub CLI tests leave no daemon process or socket owned by their exact temporary homes.
+    - Replacement PID adoption is narrow, attributable, and does not weaken refusal of foreign/untracked owners.
+    - Cleanup failures are surfaced, bounded, and identify the exact PID/home.
+    - Production daemon and Hub behavior are unchanged.
+    - Full tests, strict TypeScript, and diff hygiene pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/detached-daemon-fixture.test.ts tests/daemon-cli.test.ts tests/hub-instance.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

@@ -2097,3 +2097,120 @@ test("Task presentation rejects unsafe shapes at one content-free parser boundar
     );
   }
 });
+
+// --- Worker change-budget wording matches the frozen changeBudgetMode ---
+
+/** Build a version 2 Task spec whose frozen completionPolicy carries the given
+ *  changeBudgetMode. The "legacy" shape omits changeBudgetMode so the presenter
+ *  must fall back to the hard instruction, matching legacy stored Task records. */
+function specWithChangeBudgetMode(
+  mode: "hard" | "warn" | "score" | "off" | "legacy",
+): ContractTaskSpec {
+  const spec = parseTaskSpec(contractSpec(), process.cwd()) as ContractTaskSpec;
+  if (mode === "legacy") {
+    spec.completionPolicy = { noChangeMode: "hard" };
+  } else {
+    spec.completionPolicy = { noChangeMode: "hard", changeBudgetMode: mode };
+  }
+  return spec;
+}
+
+test("Worker change-budget block is truthful per frozen changeBudgetMode", () => {
+  const maxFilesLine = "- At most 4 changed files";
+  const maxDiffLinesLine = "- At most 300 added/deleted lines";
+  const hardHeading = "Hard change budget:";
+  const hardStop = "stop and report the missing decomposition instead of expanding scope";
+  const authoritative = /agreed scope, hard boundaries, and independent acceptance remain authoritative/;
+
+  const cases: Array<{
+    mode: "hard" | "warn" | "score" | "off" | "legacy";
+    heading: string;
+    required: string[];
+  }> = [
+    {
+      mode: "hard",
+      heading: hardHeading,
+      required: [hardStop],
+    },
+    {
+      mode: "legacy",
+      heading: hardHeading,
+      required: [hardStop],
+    },
+    {
+      mode: "warn",
+      heading: "Change budget guidance (warn):",
+      required: [
+        "guidance only; an overrun is a warning, not a Task failure",
+        "Finish the agreed scoped behavior and report the overrun",
+        "do not sacrifice correctness or scope to fit the numbers",
+      ],
+    },
+    {
+      mode: "score",
+      heading: "Change budget evidence (score):",
+      required: [
+        "evaluation evidence, not a pass/fail gate",
+        "overrun does not stop or fail the Task",
+      ],
+    },
+    {
+      mode: "off",
+      heading: "Change budget reference (off):",
+      required: [
+        "enforcement is disabled; these figures are reference only",
+        "do not expand scope beyond the bounded contract",
+      ],
+    },
+  ];
+
+  for (const { mode, heading, required } of cases) {
+    const prompt = buildWorkerPrompt(specWithChangeBudgetMode(mode), false);
+    const isHard = mode === "hard" || mode === "legacy";
+
+    // Every mode keeps the exact configured figures and its mode-accurate heading.
+    assert.ok(prompt.includes(maxFilesLine), `[${mode}] expected configured maxFiles line`);
+    assert.ok(prompt.includes(maxDiffLinesLine), `[${mode}] expected configured maxDiffLines line`);
+    assert.ok(prompt.includes(heading), `[${mode}] expected heading: ${heading}`);
+    for (const phrase of required) {
+      assert.ok(prompt.includes(phrase), `[${mode}] expected phrase: ${phrase}`);
+    }
+
+    if (isHard) {
+      // Hard and legacy-hard keep the stop-and-report instruction.
+      assert.ok(prompt.includes(hardStop), `[${mode}] hard mode must keep the stop-and-report instruction`);
+    } else {
+      // Non-hard modes protect correctness and scope, never present as a hard gate.
+      assert.match(prompt, authoritative, `[${mode}] non-hard mode must keep scope/acceptance authoritative`);
+      assert.ok(!prompt.includes(hardHeading), `[${mode}] must not contain the hard change-budget heading`);
+      assert.ok(!prompt.includes(hardStop), `[${mode}] must not contain the hard stop-and-report instruction`);
+    }
+  }
+});
+
+test("legacy Task without a frozen changeBudgetMode falls back to the hard block", () => {
+  // changeBudgetMode absent while completionPolicy is present.
+  const noMode = parseTaskSpec(contractSpec(), process.cwd()) as ContractTaskSpec;
+  noMode.completionPolicy = { noChangeMode: "hard" };
+  // Legacy stored Task shape: completionPolicy absent entirely.
+  const noCompletion = parseTaskSpec(contractSpec(), process.cwd()) as ContractTaskSpec;
+  delete noCompletion.completionPolicy;
+
+  for (const spec of [noMode, noCompletion]) {
+    const prompt = buildWorkerPrompt(spec, false);
+    assert.match(prompt, /Hard change budget:/);
+    assert.match(prompt, /stop and report the missing decomposition instead of expanding scope/);
+    assert.ok(prompt.includes("- At most 4 changed files"));
+    assert.ok(prompt.includes("- At most 300 added/deleted lines"));
+  }
+});
+
+test("non-hard change-budget modes still keep independent acceptance commands visible", () => {
+  // Soft wording must not strip scope boundaries or acceptance authority.
+  for (const mode of ["warn", "score", "off"] as const) {
+    const prompt = buildWorkerPrompt(specWithChangeBudgetMode(mode), false);
+    assert.match(prompt, /Hard boundaries:/);
+    assert.match(prompt, /Independent acceptance commands:/);
+    assert.match(prompt, /Behavioral acceptance criteria:/);
+  }
+});

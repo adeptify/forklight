@@ -1,0 +1,156 @@
+version: 2
+name: Verify Main repairs after a machine-successful candidate is revised
+project: ../..
+taskClass: forklight-main-adjudication
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    `forklight remediate verify` can truthfully record a no-Worker Main-repaired delivery when independent machine verification passed but the latest Main review rejected the candidate for revision, while preserving the original succeeded Task, Attempt, review, Candidate Revision, and Integration authority.
+  presentation:
+    summary: 机器检查通过但主调度仍发现事实或边界错误时，可以在主调度修正后重新验收并记录交付，不必为了一个审查问题整单重跑 Worker，也不会把修正后的代码冒充原候选。
+    language: zh-CN
+  context:
+    - "`verifyMainRemediation` currently accepts only failed or interrupted Tasks. Task `fbd403bd-fb4d-49b9-9a66-bb968a0be374` passed every machine command, but Main correctly recorded `revise` because the docs called a Hub-lifetime token one-time and blurred the Hub/daemon boundary."
+    - Main fixed the current source without another Worker; all stored acceptance commands passed again, but the remediation command rejected the succeeded Task before running them.
+    - "`latestMainReview` already parses privacy-sensitive review evidence. `recordMainReview` binds a review to one Attempt and verification event; Candidate Revision digests protect a later accept/Integration path."
+    - Existing remediation checks verify the current source in an isolated copy, retain private reason/command output in Store, expose only a compact result, never rewrite machine Task status, and never integrate automatically.
+    - This delivery must use `forklight-self-upgrade`; only a machine-successful, Main-accepted candidate may proceed to normal Integration and automatic daemon activation.
+  inScope:
+    - "Replace the status-only remediation gate with one small explicit eligibility rule: failed/interrupted remain eligible; succeeded is eligible only when its latest valid Main Review is `revise` for the current Attempt and the latest independent verification event."
+    - For succeeded Tasks, fail closed when there is no Main review, the latest decision is accept/reject, the review payload is malformed, the Attempt differs, the verification event is stale, or a newer review/verification supersedes it.
+    - Reuse the existing stored acceptance commands, isolated current-source copy, single-flight guard, private records, compact projection, duplicate-pass rejection, and `verified-repaired-delivered` disposition.
+    - Keep Task/Attempt status and every original Worker, verification, Main Review, Candidate Revision, patch digest, and Integration record immutable.
+    - Add focused tests for eligible succeeded+revise, all succeeded rejection cases, latest-event binding, unchanged failed/interrupted compatibility, status immutability, privacy-safe events/projection, and duplicate passing disposition.
+    - Keep rejection messages fixed and content-free; never echo the Main review reason, task prompt, command output, file path, or patch content.
+  outOfScope:
+    - Automatically accepting a Main-repaired source, changing the Candidate Revision, creating a new patch digest, applying Integration, activating runtime, changing Task status, launching a Worker, retrying, adapting policy, commit, or push.
+    - Allowing succeeded Tasks with Main accept/reject/no review, legacy malformed review evidence, stale review binding, queued/running/preparing/verifying Tasks, or Competition winners without the exact current binding.
+    - Changing CLI/MCP/Hub request shapes, Store schema, disposition status names, statistics formulas, candidate correction/reverify eligibility, or Integration preflight rules.
+  executionSteps:
+    - Trace latest independent verification and latest Main Review selection, including Attempt and verification-sequence binding.
+    - Implement one pure or narrowly scoped eligibility helper consumed by `verifyMainRemediation`; preserve failed/interrupted behavior exactly.
+    - Validate succeeded eligibility before the duplicate/single-flight gates and before any check-started event or command execution.
+    - Run current-source verification through the existing isolated command path and persist the same compact disposition without mutating machine history.
+    - Add table-driven rejection tests plus a real passing succeeded+revise case and confirm no rejected case creates an event/check/disposition.
+    - Run focused remediation/Main Review tests and the complete suite once; return any ambiguity about Integration authority to Main instead of weakening digest binding.
+  deliverables:
+    - Explicit succeeded+latest-Main-revise remediation eligibility.
+    - Regression coverage proving event binding, history immutability, privacy, and no Integration authority expansion.
+  modules:
+    - name: Remediation eligibility
+      responsibility: Decide from stored Task, latest verification, and latest valid Main Review whether current-source Main remediation may be independently verified.
+      consumes:
+        - Task status/currentAttemptId, ordered verification events, and the latest parsed MainReviewDecision.
+      produces:
+        - Eligible failed/interrupted, eligible succeeded+current-revise, or one fixed rejection without private content.
+      boundaries:
+        - No command execution, event mutation, Worker launch, candidate mutation, Integration, or inference from free text.
+    - name: Main remediation verifier
+      responsibility: Reuse the existing isolated acceptance runner and disposition persistence for the newly eligible succeeded+revise case.
+      consumes:
+        - An eligible Task, explicit confirm/reason, stored acceptance commands, and verification timeout.
+      produces:
+        - The existing private check plus compact `verified-repaired-delivered` disposition when all commands pass.
+      boundaries:
+        - Machine Task/Attempt/review/revision status remains unchanged; no automatic accept, apply, or activation.
+    - name: Adjudication regression suite
+      responsibility: Prove the single added path and every fail-closed boundary without leaking review or command content.
+      consumes:
+        - Temporary stores and source trees with ordered verification/Main Review event fixtures.
+      produces:
+        - Deterministic eligibility, persistence, privacy, and immutability evidence.
+      boundaries:
+        - No real Provider call, daemon mutation, user home, production source, or timing-only authorization.
+  callChain:
+    - A Worker candidate passes independent verification and the machine Task becomes succeeded.
+    - Main reviews the same current Attempt/verification, finds a factual or boundary gap, and records `revise` instead of accepting the patch.
+    - Main repairs the current source without launching a Worker and explicitly invokes remediation verification with a bounded reason and confirm.
+    - Eligibility proves the latest review is a valid revise bound to the latest verification/current Attempt.
+    - The existing isolated verifier runs every stored acceptance command and records a private check plus compact repaired-delivery disposition on pass.
+    - The original Task remains succeeded and Main review remains revise; any later Integration still requires its normal independently reviewed patch and authorization.
+  scenarios:
+    - name: Machine success followed by current Main revise
+      given: The current Attempt passed independent verification and the latest valid Main review is revise for that exact verification event.
+      when: Main confirms remediation verification after correcting current source.
+      then: Stored acceptance runs once; on pass the standard repaired-delivery disposition is recorded without changing Task/Attempt/review/revision history.
+    - name: Machine success already accepted
+      given: The latest Main review is accept or reject, or there is no valid Main review.
+      when: Remediation verification is requested.
+      then: It rejects before events, checks, or commands because this path is not an alternate Integration or review mechanism.
+    - name: Review is stale
+      given: A revise review references an older Attempt or verification event and newer machine evidence exists.
+      when: Remediation verification is requested.
+      then: It rejects with a fixed content-free reason and executes nothing.
+    - name: Existing failed-task remediation
+      given: A failed or interrupted Task uses the existing Main repair workflow.
+      when: Remediation verification is requested.
+      then: Its behavior, records, projection, and disposition remain compatible without requiring a Main revise review.
+    - name: Repaired current source fails acceptance
+      given: A succeeded+revise Task is eligible but one stored acceptance command fails.
+      when: Verification finishes.
+      then: The failed check is persisted, no delivery disposition appears, original machine success remains unchanged, and nothing retries automatically.
+  risks:
+    - Accepting any succeeded Task would let remediation bypass Main review, so exact latest `revise` binding is mandatory.
+    - Treating a remediation disposition as a fresh patch acceptance could bypass digest-bound Integration; this task must keep those authorities separate.
+    - Reading free-text review reasons to infer eligibility would be unstable and leak-prone; only typed event fields may authorize the path.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 650
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-remediation.ts
+    - src/core/main-review.ts
+    - tests/main-remediation.test.ts
+acceptance:
+  criteria:
+    - Failed/interrupted remediation remains compatible; succeeded remediation requires the latest valid Main revise bound to the current Attempt and latest verification event.
+    - Every missing, malformed, accept, reject, stale-Attempt, stale-verification, or superseded review case rejects before commands or durable remediation mutation.
+    - Passing succeeded+revise remediation records the existing compact disposition but never changes Task/Attempt/Main Review/Candidate Revision/patch digest or grants Integration authority.
+    - Failed remediation persists a failed check without disposition, retry, Worker, adaptation, accept, Integration, or activation.
+    - Rejection and public event/projection surfaces remain content-free and omit review reason, command output, paths, prompts, and patch content.
+    - The complete existing suite remains green.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-remediation.test.ts tests/main-review.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

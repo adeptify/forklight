@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   providerDefinition,
   providerEnvironment,
+  providerLaunchAuthentication,
   providerNames,
   providerReadiness,
   providerVariants,
@@ -242,6 +243,7 @@ test("providerReadiness with built-in defaults checks keychain presence without 
     const provider = readiness.providers[name];
     assert.ok(provider, `missing readiness entry for ${name}`);
     assert.equal(typeof provider.ready, "boolean");
+    assert.ok(["api-key", "local-sign-in", "none"].includes(provider.authMode));
     assert.equal(typeof provider.defaultModel, "string");
     assert.equal(typeof provider.endpoint, "string");
     assert.equal(typeof provider.keychainService, "string");
@@ -251,8 +253,87 @@ test("providerReadiness with built-in defaults checks keychain presence without 
     assert.equal(serialized.includes("apiKey"), false);
     assert.equal(serialized.includes("secret"), false);
     assert.equal(serialized.includes("token"), false);
-    if (!provider.ready) assert.equal(provider.error, "Keychain entry not found");
+    if (!provider.ready) assert.equal(provider.error, "Local authentication not found");
   }
+});
+
+test("providerReadiness accepts Grok local sign-in without mislabeling other Providers", () => {
+  const readiness = providerReadiness(cloneDefaults().providerDefaults, {
+    hasReadableKeychainValue: () => false,
+    hasLocalGrokSignIn: () => true,
+  });
+  assert.equal(readiness.providers.xai.ready, true);
+  assert.equal(readiness.providers.xai.authMode, "local-sign-in");
+  assert.equal(readiness.providers.xai.error, undefined);
+  assert.equal(readiness.providers.deepseek.ready, false);
+  assert.equal(readiness.providers.deepseek.authMode, "none");
+});
+
+test("providerReadiness prefers a readable Keychain API key and can be tested without exposing it", () => {
+  const seen: string[] = [];
+  const readiness = providerReadiness(cloneDefaults().providerDefaults, {
+    hasReadableKeychainValue(service) {
+      seen.push(service);
+      return service === "forklight.xai.api-key";
+    },
+    hasLocalGrokSignIn: () => true,
+  });
+  assert.equal(readiness.providers.xai.authMode, "api-key");
+  assert.equal(seen.length, providerNames().length);
+  const serialized = JSON.stringify(readiness);
+  assert.equal(serialized.includes("auth.json"), false);
+  assert.equal(serialized.includes("/Users/"), false);
+});
+
+test("provider launch authentication uses the exact Task account and keeps Grok local sign-in fallback", () => {
+  const seen: Array<[string, string | undefined]> = [];
+  const task = parseTaskSpec(
+    {
+      version: 1,
+      name: "exact auth",
+      project: ".",
+      provider: {
+        name: "deepseek",
+        keychainService: "forklight.deepseek.custom-key",
+        keychainAccount: "custom-local-account",
+      },
+      runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: null },
+      goal: "Prove exact launch auth selection",
+      acceptance: { commands: ["true"] },
+    },
+    process.cwd(),
+  );
+  const unreadable = providerLaunchAuthentication(task, {
+    hasReadableKeychainValue(service, account) {
+      seen.push([service, account]);
+      return false;
+    },
+    hasLocalGrokSignIn: () => true,
+  });
+  assert.deepEqual(seen, [["forklight.deepseek.custom-key", "custom-local-account"]]);
+  assert.deepEqual(unreadable, {
+    ready: false,
+    authMode: "none",
+    failureCategory: "authentication",
+    reasonCode: "provider-auth-unreadable",
+  });
+
+  const grokTask = parseTaskSpec(
+    {
+      version: 1,
+      name: "grok local auth",
+      project: ".",
+      provider: { name: "xai" },
+      runtime: { name: "grok-build", executable: "grok", effort: "high", maxBudgetUsd: null },
+      goal: "Keep local sign-in as a launch path",
+      acceptance: { commands: ["true"] },
+    },
+    process.cwd(),
+  );
+  assert.deepEqual(providerLaunchAuthentication(grokTask, {
+    hasReadableKeychainValue: () => false,
+    hasLocalGrokSignIn: () => true,
+  }), { ready: true, authMode: "local-sign-in" });
 });
 
 test("providerReadiness reflects non-built-in Provider defaults", () => {

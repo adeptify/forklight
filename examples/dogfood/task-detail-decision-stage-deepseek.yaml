@@ -1,0 +1,145 @@
+version: 2
+name: Keep Task Detail headline aligned with the Main decision
+project: ../..
+taskClass: forklight-hub-task-detail-decision-truth
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    Task Detail receives the same canonical Main/delivery decision stage as the
+    task board, so its first headline cannot fall back to machine success when
+    Main requested revision, rejected the result, or has not delivered it yet.
+  presentation:
+    summary: 让任务详情和看板使用同一个 Main 决策事实，避免点进详情后把“Main 要求修改”又显示成“检查已通过”。
+    language: zh-CN
+  context:
+    - The list endpoint already projects `decisionStage` from each canonical Task summary, and `taskHeadline` uses that top-level field before machine status.
+    - The Task Detail endpoint fetches the canonical `task_decision`, returns it as `decision`, but does not project `decision.stage` into the top-level `decisionStage` consumed by `renderTaskWorkbench`.
+    - Therefore the board can say Main requested revision while the detail hero for the same machine-successful Task falls back to Checks passed.
+    - The full Task Detail journey already carries Main input, Worker identity and claim, independent verification, final handling, cause, candidate reuse/remediation evidence, and next action. Do not redesign those sections.
+  inScope:
+    - Type the Task Detail `task_decision` response with the canonical `TaskDecisionView` shape.
+    - Return its canonical `stage` as top-level `decisionStage` in `/api/ops/tasks/:id`.
+    - Add a real Hub endpoint regression proving a machine-successful Task with `task_decision.stage=revision-requested` returns `decisionStage=revision-requested` while preserving raw machine status as `succeeded`.
+    - Keep the existing pure UI headline regression proving that this combination renders Main requested revision rather than a machine-success or delivery claim.
+  outOfScope:
+    - New decision mappings, new lifecycle state, persisted Task mutation, board lane/count changes, changes to Main review or Integration, broad Task Detail redesign, Provider routing, Worker policy, retry/correction/adaptation, commit, or push.
+    - Reading `decision.stage` independently in multiple UI components or inventing a second decision authority.
+    - Exposing review prompts, raw diffs, logs, credentials, private remediation reason, command, or output.
+  executionSteps:
+    - Inspect the Task list projection, Task Detail route, canonical `TaskDecisionView`, `taskHeadline`, and relevant Hub endpoint/UI tests.
+    - Thread the already-returned canonical decision stage into the Task Detail safe response with the smallest coherent typed change.
+    - Add one behavior-level HTTP regression for the audited contradiction and retain the existing UI helper/call-site assertions.
+    - Run the focused tests and full acceptance once; report unrelated failures without expanding the task.
+  deliverables:
+    - Task Detail response with canonical top-level `decisionStage`.
+    - Regression evidence that machine status and Main decision remain distinct and the detail headline can consume both.
+  modules:
+    - name: Task Detail response projection
+      responsibility: Present the canonical Main/delivery stage beside immutable machine status.
+      consumes:
+        - Task status returned by `status` and `TaskDecisionView.stage` returned by `task_decision`.
+      produces:
+        - One safe top-level `decisionStage` field in the Task Detail response.
+      boundaries:
+        - No lifecycle recomputation, persistence, mutation, or private evidence exposure.
+    - name: Task Detail headline
+      responsibility: Continue selecting verified delivery or Main decision before machine status.
+      consumes:
+        - Existing `decisionStage`, machine `status`, and compact verified-delivery evidence.
+      produces:
+        - A truthful first badge in the Task Detail hero.
+      boundaries:
+        - Reuse the existing helper; do not create another stage map or change board lanes.
+    - name: Endpoint regression
+      responsibility: Prove the server-to-UI contract at the real HTTP boundary.
+      consumes:
+        - A stubbed canonical Task and `TaskDecisionView` with contradictory machine/Main outcomes.
+      produces:
+        - Deterministic assertions that both facts survive with the correct names.
+      boundaries:
+        - No live Provider call, real Daemon mutation, browser mock, or giant snapshot.
+  callChain:
+    - Daemon `status` returns the machine Task record and `task_decision` returns the canonical Main/delivery view.
+    - Hub Task Detail projects `task_decision.stage` as top-level `decisionStage` without recomputing it.
+    - "`showTask` passes the safe response to `renderTaskWorkbench`."
+    - "`taskHeadline` uses verified delivery, then `decisionStage`, then machine `status`, while the journey shows each evidence layer separately."
+  scenarios:
+    - name: Machine passed but Main requested revision
+      given: Task status is succeeded and canonical decision stage is revision-requested.
+      when: The Task Detail endpoint and hero render.
+      then: The response preserves both facts and the first badge says Main requested revision, never delivered or accepted.
+    - name: Legacy machine-only fallback
+      given: A legacy presentation object lacks decision-stage evidence.
+      when: The headline helper renders succeeded.
+      then: It says Checks passed or 检查已通过 rather than claiming final acceptance.
+    - name: Verified final delivery remains authoritative
+      given: The Task contains verified delivery evidence.
+      when: The detail hero renders.
+      then: It continues to show verified delivery once without changing machine status.
+  risks:
+    - Recomputing stage in Hub could drift from the daemon, so only the canonical decision response may supply it.
+    - Testing only source text could miss the real response gap, so at least one HTTP endpoint regression is required.
+    - Treating the projected stage as machine status would corrupt lanes; the two fields must remain distinct.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 260
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Task Detail projects the canonical `TaskDecisionView.stage` as top-level `decisionStage` without recomputing or mutating it.
+    - A machine-successful, Main-revision Task keeps `status=succeeded` and `decisionStage=revision-requested` as separate response facts.
+    - Existing Task Detail headline precedence uses the projected stage and makes no acceptance or delivery claim for revision, rejection, review, or pre-integration stages.
+    - Legacy fallback and verified-delivery behavior remain truthful; no private remediation or raw execution evidence is newly exposed.
+    - Focused Hub endpoint/UI tests, full tests, strict TypeScript, Hub JavaScript syntax, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

@@ -1,0 +1,149 @@
+version: 2
+name: Finalize exact candidate reverification evidence chain
+project: ../..
+taskClass: forklight-candidate-evidence-handoff
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    Candidate reverification captures the exact current revision before success,
+    Main Review accepts only the revision for the exact latest verification
+    sequence, and the complete handoff passes independent tests and Integration preflight.
+  presentation:
+    summary: 把重新验证、版本封存、主调度验收和安全合入连成一条精确链路，并用真实失败场景证明旧版本不能顶替新版本。
+    language: zh-CN
+  context:
+    - Task ac43b931-840a-49fb-938b-d551935f07b2 proved fresh capture is needed but exposed digest-only stale-revision acceptance.
+    - Task 1bf84201-e657-4c4c-9c80-43dd3c6dba26 implemented the right production direction but failed only two test-fixture errors.
+    - Fixture error one wrote a blocker file at an already-existing revisions directory and failed with EISDIR before testing production behavior; remove the directory after seeding old evidence, then create the blocker file.
+    - Fixture error two invoked the expected-to-throw recordMainReview once outside assert.throws; invoke it only inside the rejection assertion.
+  inScope:
+    - Add captureCandidateRevision after the new verification.completed event and before any passing Task status transition.
+    - On capture failure, keep Task failed, preserve Attempt/history, record only a stable content-free candidate-evidence failure, return failed zero-Worker facts, and never retry.
+    - Change Main Review accept to resolve Candidate Revision by exact Attempt plus exact latest verificationEventSequence, then require current Diff digest match.
+    - Preserve legacy unbound accept only when no candidate.revision.captured event exists anywhere for the Task.
+    - Add deterministic tests for Main-edited Diff, unchanged Diff/new verification, old same-digest revision plus forced new capture failure, exact-sequence rejection, true legacy compatibility, privacy, and Integration preflight.
+    - Correct the two known fixture mistakes explicitly and keep the test setup cross-platform for macOS/Linux Node filesystems.
+  outOfScope:
+    - Worker/provider/UI/settings/Competition changes, schema migration, automatic accept/Integration, retries beyond the one configured Main correction, adaptation, commit, or push.
+    - Raw exception/path exposure, stale revision fallback, digest-check weakening, unrelated test cleanup, or broad refactoring.
+  executionSteps:
+    - Reimplement the small production changes from the two failed Tasks against current source; do not copy their broken tests blindly.
+    - Build the capture-failure fixture by seeding old revision evidence, removing its private revisions directory, and replacing that directory path with a blocker file before reverify.
+    - Place every expected Main Review rejection exclusively inside assert.throws and verify no review event was appended.
+    - Run focused tests and full suite once; if a real failure remains, return the exact assertion for one bounded Main correction rather than broadening scope.
+  deliverables:
+    - Exact fresh-revision capture and exact-sequence Main Review binding.
+    - Passing end-to-end and fail-closed regression coverage.
+  modules:
+    - name: Reverification evidence producer
+      responsibility: Persist exact candidate evidence before a local reverify can become successful.
+      consumes:
+        - Retained Attempt, verification event, current Diff, affected paths and patch metrics.
+      produces:
+        - Exact Candidate Revision or stable failed reverification evidence.
+      boundaries:
+        - No Worker, new Attempt, provider cost, retry, accept, or Integration.
+    - name: Main Review evidence consumer
+      responsibility: Accept only evidence produced for the exact latest verification event and current Diff.
+      consumes:
+        - Latest verification, current Attempt, exact-sequence revision, current Diff digest.
+      produces:
+        - Digest-bound accept or stable rejection.
+      boundaries:
+        - Legacy fallback only for zero revision history; no stale-sequence substitution.
+    - name: Regression fixtures
+      responsibility: Reproduce successful handoff and storage failure without failing before the target code runs.
+      consumes:
+        - Temporary workspaces, ordered events, seeded revisions and controlled blocker paths.
+      produces:
+        - Deterministic assertions for status, binding, privacy, cost facts and preflight.
+      boundaries:
+        - No user home, Provider, source project mutation, Integration apply, activation, commit, or push.
+  callChain:
+    - Main authorizes one no-Worker reverify of a retained failed candidate.
+    - Local acceptance appends a new verification event and exact revision capture runs.
+    - Task succeeds only if capture succeeds.
+    - Main Review resolves only that verification event's revision and checks the current Diff.
+    - Integration preflight accepts the fresh bound evidence or rejects missing/stale evidence.
+  scenarios:
+    - name: Repaired Diff handoff
+      given: Main changed a retained candidate after an older failed revision.
+      when: Reverify passes and Main accepts.
+      then: A new exact revision is bound and Integration preflight passes.
+    - name: Same bytes new evidence
+      given: Diff bytes are unchanged but verification is newer.
+      when: Reverify passes.
+      then: A new sequence-bound revision is required and the old revision cannot substitute.
+    - name: Storage failure with old evidence
+      given: Old same-digest revision evidence exists but the new revision directory path is blocked after seeding.
+      when: Passing reverify attempts capture.
+      then: Task stays failed, event is content-free, Main accept/preflight reject, and nothing retries.
+    - name: Legacy history
+      given: The Task has no Candidate Revision events at all.
+      when: Main accepts a passing verification.
+      then: Existing legacy compatibility remains unchanged.
+  risks:
+    - A test that fails during setup gives false confidence; fixtures must prove the production call was reached.
+    - Equal Diff digests do not prove equal verification lineage; sequence binding is mandatory.
+    - This is the final Worker convergence task; one explicit correction is the hard stop for further model loops.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 800
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/candidate-reverification.ts
+    - src/core/main-review.ts
+    - tests/candidate-reverification.test.ts
+    - tests/main-review.test.ts
+    - tests/candidate-revision.test.ts
+acceptance:
+  criteria:
+    - Reverify success requires exact fresh revision capture; capture failure remains failed and private with zero Worker/new Attempt/model cost and no retry.
+    - Main accept requires exact Attempt, exact latest verification sequence, and current Diff digest; stale same-digest evidence rejects.
+    - Corrected fixtures reach production behavior, assert rejection exactly once, and preserve true legacy compatibility.
+    - Fresh accept enables normal Integration preflight; focused/full tests, strict TypeScript and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/candidate-reverification.test.ts tests/candidate-revision.test.ts tests/main-review.test.ts tests/integration.test.ts tests/main-remediation.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

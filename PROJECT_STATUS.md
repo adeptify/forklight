@@ -1,6 +1,6 @@
 # ForkLight Project Status
 
-Last updated: 2026-07-28
+Last updated: 2026-07-29
 
 ## Product boundary
 
@@ -15,22 +15,356 @@ commit, or push authority.
 **Control UI:** `forklight hub` is the only browser control center (configure +
 operate). Standalone Console and Setup UIs were removed.
 
-## Current milestone: M0 — trustworthy self-upgrade
+**Reading rule:** the current milestone, roadmap, and `Next engineering`
+sections are the authoritative present-tense plan. Later chronological dogfood
+sections preserve what was true at that point in time; an older entry saying a
+gate was still open is historical evidence, not the current milestone state.
+
+## Current milestone: M1 — daily personal execution assistant
 
 ForkLight is now an **engineering Alpha** rather than a concept prototype. The
 core `one Main → bounded Workers → independent verification → Main review →
-safe Integration` loop is real and has been dogfooded with DeepSeek Pro and
-MiniMax-M3. The immediate priority is to make that loop reliably upgrade
-ForkLight itself before widening the feature surface.
+safe Integration` loop is real and has been dogfooded with DeepSeek Pro,
+MiniMax-M3 and Volcengine GLM. M0 is complete again after closing the reload
+lifecycle gap; M1 resumes with the clean-user journey and representative M1.4
+Tasks.
 
-**M0 residual (honest, 2026-07-27):** activation handoff, PID/endpoint
-ownership, one-use authorization, and Unix-socket drain/replacement are covered
-by shipped unit and daemon fixtures (`tests/activation.test.ts`,
-`tests/daemon.test.ts`, `tests/build-identity.test.ts`). The product exit gate
-of **three consecutive live self-activation upgrades** remains **0/3** until
-three accepted deliveries exercise the full detached activation path on the
-real `forklight-self-upgrade` Delivery Profile. Manual rebuild/restart is useful
-runtime evidence and is **not** counted toward that gate.
+**M0 reload closure (2026-07-29):** restarting the Codex App created fresh MCP
+connections. A read-only MCP health call, the built CLI, and the formal Daemon
+now all report build
+`da669a7baf2f02d8ec8de392b0b747247f96a762805d1ecb157bf159aa13c143`
+and source digest
+`4020d27f518e64de75e7c0f202d65be6baca97bcceb969c1746ad83138d1503a`;
+identity is `matched`, Daemon PID `4851` is the only formal Daemon, and it has
+no active or queued Task. The App restart removed the old Hub owner. Main then
+started one current Hub, PID `56042`, on the sole listener
+`127.0.0.1:51543`; the old `56069` listener is gone.
+
+The final ownership audit also found three Grok-owned MCP children that
+predated the current build. Main terminated only exact PIDs `5795`, `6562`, and
+`25826`, preserving Grok Main PID `23702`; Grok immediately recreated fresh MCP
+children `56325`, `56326`, and `56331`. Codex's MCP children were all created
+after the App restart. Multiple MCP processes are valid when multiple Main
+tasks are loaded, including two loaded tasks with the same filesystem cwd. The
+single-instance rule is therefore **one MCP connection per loaded Main task**,
+not one MCP per workspace directory; the global singleton rules remain one
+formal Daemon and one Hub owner/listener. The earlier failed in-turn SIGTERM
+experiment remains useful evidence that an App/config reload is required, but
+the operational gate is now closed. No commit or push has been performed.
+
+**M0 residual (honest, 2026-07-28):** activation handoff, PID/endpoint
+ownership, one-use authorization, Unix-socket drain/replacement, and one-Hub-
+per-home ownership/reuse are covered by shipped unit, daemon, and real CLI
+fixtures (`tests/activation.test.ts`, `tests/daemon.test.ts`,
+`tests/build-identity.test.ts`, `tests/hub-instance.test.ts`). The product gate
+of **three consecutive live self-activation upgrades is complete (3/3)**:
+Tasks `8b3528b5-f9f1-495d-abb5-687f43be66d5`,
+`6ff650f4-6123-4643-aa4a-82f15e63389c`, and
+`da3747c8-ee83-430e-882d-d9509fa9b9eb` each passed source apply, independent
+verification, artifact build, detached daemon activation, exact old-PID exit,
+and new-build identity checks through the real `forklight-self-upgrade`
+Delivery Profile. After the first M1.1 delivery, the current CLI and formal
+Daemon match build
+`8a148033c9f45b35c40d86ae5ec7f4864b5d972359df089a14586c461209c895`
+and source digest
+`108f44c65fe574aff1582803166dfd2a93056d9da64ea114a2e6a548f1faee05`;
+Hub PID `24314` is `current` on the single `127.0.0.1:56962` listener, and no
+Task is active or queued.
+
+The last live audit also found 20 source-dev test Daemons left by replacement
+and Hub CLI fixtures. Main proved every one used an isolated temporary
+home/socket, terminated only those exact PIDs, then used ForkLight Task
+`c9bb5cc9-c4ac-41ec-b0b9-0077e78e5505` to close both ownership gaps. Main
+rejected the first machine-green placement, retained the candidate, made two
+bounded repairs, and recorded remediation check
+`9e3b07c3-99fc-4cf8-84c7-69e5aab11061` with 4/4 commands passed. Focused
+52/52, full 1,443/1,443, strict TypeScript, diff hygiene, and repeated external
+process audits now leave zero source-dev test Daemons.
+
+**Historical M0 exit proof:** a fresh collaboration Agent loaded MCP build
+`f8155ae0ecd58ecae014da7f61c5509caf7387c94ac22f2528366937b670821a`
+instead of inheriting this long-running task's old `2bcd...` MCP. Its MCP,
+CLI, and Daemon build identities and source digests matched exactly; Hub
+remained `current` at PID `76185` on port `56962`, with no active or queued
+Task. This proved that specific fresh Main session bound to the then-current MCP
+without another rebuild or retry. The 2026-07-29 long-session mismatch above
+shows that fresh-start binding and post-upgrade reload are separate requirements;
+the App-restart proof above now closes the latter. No commit or push has been
+performed.
+
+**M1.1 complete (2026-07-28):** Task
+`692d386d-064d-4870-b242-a5783697256e` closed the list/detail truth gap so the
+prominent Task headline follows the Main/delivery decision instead of falling
+back to machine success. Task `5b139291-7e80-49e2-9312-d76e4c4f4b74` then
+attempted the retained-Candidate explanation. Main recorded `revise`, launched
+no second Worker, retained the useful presentation structure, replaced its
+duplicated digest implementation with the canonical CandidateRevision
+authority, made the copy conditional on Main handling, and replaced a false
+generic source assertion with semantic privacy tests. Focused verification is
+**126/126**, full verification is **1,451/1,451**, strict TypeScript, Hub
+JavaScript syntax, build, and diff hygiene pass. Remediation check
+`8e7a7303-a8ae-4223-9919-1f78c23a3aa1` passed the original **5/5** commands and
+records `verified-repaired-delivered` while preserving the original failed
+Worker Attempt. The final comprehension audit used real Hub Tasks for accepted,
+Main-revise, and Main-repaired delivery states, plus deterministic journey
+fixtures for verification failure, Provider/authentication failure, active
+execution, and legacy evidence. It found one remaining contradiction: a machine-
+green Task with a Main `revise` decision still showed the Worker's files as
+"accepted as the final result" and used generic success copy. The UI now makes
+Main revise/reject override machine success, never labels those files as finally
+accepted, and gives one concrete next action in both languages. Focused Hub tests
+pass **99/99**, the full repository passes **1,452/1,452**, strict TypeScript,
+Hub JavaScript syntax, production build, and diff hygiene pass. CLI and Daemon
+match build `df297e93bb337febf5a59953e41185f46ccbb0c7bfe884185713a84616c5dd67`;
+Daemon PID `63458` has no active or queued Task, and Hub PID `63820` is `current`
+on the single `127.0.0.1:56962` listener. **M1.1 is complete; M1.2 is active.**
+
+**M1.2 readiness slice delivered (2026-07-28):** DeepSeek Task
+`2d0222c8-5d13-4b2c-a8a8-d750b736ac19` stalled after a partial Provider stream
+and was stopped by the configured 30-minute no-progress watchdog. Main did not
+retry it or start a second Worker. The useful authentication/readiness design
+was retained, then Main completed one canonical resolver covering API key or
+local Grok sign-in, saved model, runtime doctor, Provider/runtime pairing, and
+optional connection evidence. Hub now explains each saved Worker in plain
+language and filters impossible model/runtime combinations before save.
+
+Focused readiness/Hub verification passes **148/148**, the full repository
+passes **1,462/1,462**, and strict TypeScript, Hub JavaScript syntax, production
+build, and diff hygiene pass. Remediation check
+`69ff5b2b-b560-4a9e-9118-698805d40e40` reran the original contract **5/5** and
+records `verified-repaired-delivered` while preserving the failed Worker Task.
+Real English and Chinese Hub checks show DeepSeek, Volcengine GLM, MiniMax, and
+Grok as locally launchable; Grok uses its existing local sign-in and is no
+longer mislabeled as missing an API key. Selecting Grok Build limits the model
+picker to the xAI model. CLI and Daemon now match build
+`37253b46188f76d4096d12d3e7cb7b804edaa0e3c3117be16008b94496e15f2f`;
+Daemon PID `84788` has no active or queued Task, and Hub PID `88178` is
+`current` on the single `127.0.0.1:58786` listener. M1.2 remains active until
+the remaining smaller DeepSeek smoke proof passes.
+
+**M1.2 Grok path delivered with bounded Main repair (2026-07-28):** Task
+`45fa7412-c099-4b14-87cc-4f97b8f30f04` used the saved
+`local-grok-builder` Profile and one xAI `grok-4.5` Attempt through Grok Build.
+It produced a complete read-only `validate_file` daemon path plus shared CLI
+preview. Focused **137/137** and full **1,475/1,475** passed, but the machine
+Task failed strict TypeScript on one test helper and `git diff --check` on one
+trailing blank line. Main did not rerun Grok: it retained the candidate, fixed
+those two mechanical issues, required absolute paths at the daemon boundary,
+and made the parsed Task plus preview digest come from the same single file
+read. Remediation check `8747b759-fcd6-4a68-958f-423a4fd55be7` passed the
+original **5/5** commands.
+
+Real CLI and daemon calls now agree on the saved Worker Profile, label,
+Provider, model, runtime, effort, unlimited budget, one base Attempt, zero
+extra Attempts, zero adaptation rounds, and the same content-free preview
+revision. Preview creates no Task and returns no endpoint, credential reference,
+absolute path, prompt, acceptance command, or Provider response. This counts as
+one real Grok path delivered with Main repair, not as machine-success. Grok
+terminal usage is unavailable and is not displayed as zero.
+
+**M1.2 GLM Hub binding delivered with retained Candidate and bounded Main repair
+(2026-07-28):** Task `f42c5b2e-4458-4d89-b4ca-5a66b6669dea` used the saved
+`volcengine-glm52-1m` Profile and one `glm-5.2[1M]` Attempt through Claude
+Code. It added a canonical admission preparation shared by preview and bound
+submission, a Hub read-only preview route, and a two-step Board flow. Focused
+tests and full **1,491/1,491** passed in the Worker workspace; strict TypeScript
+failed only because one test helper kept an unused parameter. The original
+Task and Attempt remain failed.
+
+Main did not rerun GLM or start another Worker. It retained the candidate and
+fixed four bounded gaps: malformed non-string preview evidence can no longer
+fall back to unbound submission at the daemon transport; an old preview response
+cannot reappear after the user edits the path or starts a newer preview; the
+Submit button remains disabled after success/rejection clears the preview; and
+the beginner copy now says “Task brief check / 任务说明检查” and explains whether
+Main can safely apply the result. Focused **228/228**, full **1,491/1,491**,
+strict TypeScript, Hub JavaScript syntax, production build, and diff hygiene
+pass. Remediation check for the original contract passed **5/5**.
+
+The real current Hub preview resolves the exact GLM Profile, model, runtime,
+unlimited budget, one base Attempt, zero extra Attempts, zero adaptation,
+quality pass, and Integration feasibility without creating a Task (Task count
+remained 20 before/after). Real English and Chinese browser interaction now
+confirms the same facts: Submit starts disabled, preview makes it available,
+editing the path immediately clears the bound preview and disables Submit
+again, and neither language starts a Task or spends model Tokens during
+preview.
+
+That browser pass exposed a separate live-process problem rather than hiding it:
+one detached Hub process received `uv_os_get_passwd ENOENT` from
+`os.userInfo()`, so Overview falsely described the Task service and saved API
+keys as unavailable. Main added one bounded local-account resolver shared by
+setup, Provider readiness, Provider probing, and Task Keychain reads. It accepts
+only a safe local account name and falls back through `USER`, `LOGNAME`, and
+`id -un`; no credential or private path enters the UI. The post-fix repository
+passes **1,492/1,492**, strict TypeScript, Hub JavaScript syntax, production
+build, and diff hygiene. A real restart reports DeepSeek, MiniMax, Volcengine,
+and local Grok authentication ready.
+
+The Attempt used **26,404,895 gross Worker Tokens** (25,944,128 cache-read),
+runtime estimate **USD 17.878539**, and 54 receipts give a low-confidence Main
+exchange envelope of **191,039–1,187,491 Tokens**. Official per-request price
+is unavailable for the subscription plan, and no exact-pair direct-Main
+baseline exists, so no Main Token saving is claimed. CLI and Daemon now match
+build `55006043d66b7dfb4b3cf62de32841629c4b054e7df6e8c0ca70c3bd33516cb3`
+and source digest
+`4732062afdf3ac9c06b7dfea48713a9d49b4aa21d46b91013683b253c57b50d0`;
+Daemon PID `63567` has no active or queued Task, and Hub PID `64421` is
+`current` on the single `127.0.0.1:51475` listener.
+
+**M1.2 launch-auth contradiction discovered (2026-07-28):** the first new
+MiniMax smoke Task `7b8c6d1b-d396-4ec5-b62d-fefc05c954c0` passed the saved
+Worker/readiness preview and completed workspace preparation, but failed before
+turn 1 because the Daemon could locate yet could not read
+`forklight.minimax.api-key`. It has no Worker usage or Candidate. Main did not
+retry it. A bounded root-fix contract then used local Grok Task
+`811863fb-7633-4516-a3c4-f283af67e24f`; that Task also produced no Candidate or
+usage because the previously working Grok local sign-in had expired before its
+first model response. Main stopped there instead of rotating through GLM and
+DeepSeek with the same unproven authentication state.
+
+A non-secret local check confirms DeepSeek, MiniMax, and Volcengine Keychain
+items are currently unreadable even though daemon health still calls them
+ready. This disproves the current `ready = Keychain item exists` assumption and
+reopens the M1.2 readiness claim: launch readiness must prove the exact local
+auth path is readable, without materializing the secret, and Task execution
+must stop before workspace/Attempt creation when it is not. The frozen repair
+contract is `examples/dogfood/provider-credential-preflight-grok.yaml`; no
+external Worker is currently authenticated to implement it. A small local
+recovery helper, `scripts/setup-provider-key.sh`, writes only macOS Keychain and
+immediately verifies discarded-output readability. After local re-authorization,
+the same bounded contract should run once through MiniMax, followed by the
+Doctor truth task through DeepSeek. M1.2 remains active; no authentication
+failure is treated as model-quality evidence.
+
+**M1.2 launch-auth root fix delivered by Main (2026-07-28):** because every
+external Worker path was blocked before its first model response, Main did not
+repeat the same failing launch. Provider readiness now executes the exact
+Keychain `-w` read used at Worker launch while discarding stdout/stderr, and an
+exact Task preflight uses the Task's frozen service/account plus the supported
+Grok local-sign-in fallback. A rejection becomes a durable authentication
+failure before workspace preparation, Attempt creation, Worker launch,
+Provider request, or Worker Token usage. Its safe event explicitly records
+`workerInvoked=false`, `workspacePrepared=false`, and `attemptCreated=false`;
+statistics treat it as non-model evidence and Task Detail labels it “Worker
+could not start / Worker 未能启动” rather than blaming the model.
+
+Focused Provider/Daemon/Task-surface tests pass **148/148** and the complete
+repository passes **1,495/1,495**; strict TypeScript, production build, Hub
+JavaScript syntax, and diff hygiene pass. The live CLI and Daemon now match
+build `b8e563db9c6f26ea4a853bbd11077734767afa0d4a867b74ece3094e92cb4e12`
+and source digest
+`e8992122781b41de3412f2561e5281c8b5b35866c8e733260f97831ffee24e45`.
+Daemon PID `55645` has no active or queued Task; Hub PID `57028` is `current`
+on the single `127.0.0.1:62816` listener. Runtime health at that point truthfully
+marked DeepSeek, MiniMax, and Volcengine local authentication unavailable
+instead of ready. Grok still had a readable local-sign-in file, which is a
+supported launch path but not proof that the remote session is still accepted.
+
+**M1.2 MiniMax path delivered after credential recovery (2026-07-28):** the
+newer Task `1c710ce9-04f5-4d7a-aadb-f8f82e229fff` proves the launch-auth repair
+and local credential path now work end to end. It used the saved
+`minimax-m3-cn` Profile, MiniMax-M3, Claude Code high, unlimited budget, one
+base Attempt, zero extra Attempts, and zero adaptation. The Worker ran 177
+turns and produced a three-file / 623-line Candidate. Focused **21/21** and full
+**1,508/1,508** passed in its workspace; strict TypeScript failed only because
+one test imported `WorkerProfilesSettings` from the module that consumes rather
+than exports it.
+
+Main did not retry MiniMax. It retained the Candidate, corrected that type-only
+import, and replaced the Candidate's copied Provider-evidence expiry logic with
+one pure classifier shared by ProviderProbeService and CLI health. Main focused
+Provider/readiness verification passes **37/37**, the current full repository
+passes **1,511/1,511**, strict TypeScript and diff hygiene pass, and remediation
+check `2bcf5b28-ffb4-44ae-a3be-33fae2053726` passed the original **4/4**
+commands while preserving the original failed Task.
+
+The real built `forklight health` now lists every saved Worker in saved order
+and states whether it can launch, why, and the next action. Current evidence
+shows DeepSeek, Volcengine GLM, MiniMax, and Grok locally launchable; stale or
+missing connection evidence remains explicit and is not promoted to verified.
+The MiniMax Attempt used **19,140,708 gross Worker Tokens** (18,931,200
+cache-read), with matched top-level and per-model counts. Runtime estimate is
+**USD 11.63624**; the official MiniMax evidence is only a bounded
+**CNY 8.7448473–17.4896946** estimate, not a bill. The receipt-aware Main
+exchange envelope is **281,191–1,698,782 Tokens**. No exact-pair direct-Main
+baseline exists, so no Main Token saving is claimed.
+
+CLI and Daemon now match build
+`7efb333bb9b5b54663df6034b77c4fcfc63358b1fad82d9cf7e4372b4ee09ae1`
+and source digest
+`233c8921912ab8cbdeb4ba06e9526be4a7b265865f86a7ea1ac4fabcd334aff1`;
+Daemon PID `60112` has no active or queued Task, and Hub PID `61108` is
+`current` on the single `127.0.0.1:61538` listener. M1.2 now remains open only
+for the smaller DeepSeek proof.
+
+**M1.2 DeepSeek path and guided first Task delivered (2026-07-28):** the Hub
+guided sample implementation passed focused **113/113**, full **1,520/1,520**,
+strict TypeScript, Hub JavaScript syntax, production build, and diff hygiene.
+The built Hub prepared a private packaged checkout sample with opaque browser
+identity, selected saved Worker `default`, and canonical bound admission
+preview. The preview resolved exactly to DeepSeek `deepseek-v4-pro[1M]`, Claude
+Code high, unlimited budget, one base Attempt, zero extra Attempts, zero
+adaptation, Quality 100/100, and an integratable ordinary Task. Preparing the
+sample created no Task or model usage.
+
+After explicit submit, Task `bfe223ac-feb2-422e-8f5b-418eef919308` used one
+DeepSeek Attempt and no competition, retry, correction, or adaptation. It ran
+6 turns in about 31 seconds, changed only `checkout.py` (1 file / 5 changed
+lines), and independently passed all four packaged Python tests. Main reviewed
+the exact Candidate, independently reran the tests, recorded `accept`, and used
+the ordinary Integration path. Source apply and source verification passed;
+the accepted patch now exists only in the disposable sample project, while
+artifact build and runtime activation were correctly not applicable.
+
+The Attempt used **26,292 gross Worker Tokens** (7,119 input, 2,533 output,
+16,640 cache-read); top-level and per-model totals match. DeepSeek official
+PAYG evidence estimates **USD 0.005360795** and runtime telemetry estimates
+**USD 0.10724**; neither is presented as a bill. Three receipts give a
+low-confidence Main exchange envelope of **6,631–39,922 Tokens**. No exact-pair
+direct-Main baseline exists, so no Main Token saving is claimed.
+
+The real bilingual Task Detail audit then found one presentation contradiction:
+source-only delivery had passed source apply and source verification while
+runtime activation was correctly `not-applicable`, but the prominent result
+still implied the change was active. Decision View now has a distinct
+`delivered` stage. Chinese shows “已交付；这个任务不需要运行时生效步骤,”
+while English shows “Delivered; this task did not require runtime activation.”
+The runtime-activated path remains a separate stronger fact.
+
+Focused delivery/Hub verification passes **126/126**. Real Chinese and English
+DOM checks confirm the headline, explanation, and no-action next step.
+
+The subsequent release-package smoke found a clean-user blocker that repository
+tests had not exercised: `dist/build-identity.json` was generated and required
+by both installed entrypoints, but the npm package allowlist shipped only
+`dist/src/`. A real tarball install reproduced CLI startup failure before any
+configuration. The package now includes the exact generated identity, and the
+manifest test freezes that requirement. A second real tarball install proves
+the identity file is present, the installed identity matches the source package
+byte-for-byte, both CLI/MCP entrypoints are executable, and the installed CLI
+loads successfully.
+
+Full verification now passes **1,542/1,542**, and strict TypeScript, Hub
+JavaScript syntax, production build, package smoke, and diff hygiene pass.
+
+The final package build and runtime switch now match build
+`3aa4ab800f5dabbd28ec2b7a08a77b0679a99f3ee628b67285420c401608d483`
+and source digest
+`5d8fcaf120116c145cfe77f578bd2372a57d1dc247eb1eb0b75e5321bebe67de`;
+Daemon PID `9154` has no active or queued Task, and Hub PID `9341` is
+`current` on the single `127.0.0.1:58037` listener. Same-day fresh Daemon
+launches produced different readability for the same historical DeepSeek,
+MiniMax, and Volcengine Keychain items: one launch restored all three, while
+the final explicit restart truthfully reports all three unavailable. This does
+not support a permanent model or Provider conclusion; it proves historical-key
+readability is launch-context dependent and therefore not restart-stable.
+Future writes use credential-free argv, an explicit `/usr/bin/security` ACL,
+and the same safe `USER`/`LOGNAME`/`id -un` account priority as the runtime.
+The existing three keys need one explicit re-entry followed by another restart
+to prove persistence. No paid probe, Worker Attempt, or model-quality judgment
+was created from this result. **M1.2 model-path evidence remains complete; M1.3
+is active.**
 
 ### Quality-first policy (2026-07-26)
 
@@ -99,6 +433,17 @@ never counted as progress or success by itself.
 
 ### Shipped
 
+- **Succeeded + Main-revise no-Worker remediation (2026-07-28):** a machine-
+  successful Task may now verify a Main repair without rerunning a Worker, but
+  only when the latest typed Main review is `revise` and is bound to both the
+  current Attempt and the latest independent verification event. Missing,
+  malformed, accept/reject, superseded, stale-verification, stale-Attempt, or
+  mismatched event-envelope evidence rejects before commands or durable
+  remediation mutation. The original Task, Attempt, review, Candidate Revision,
+  patch digest, and Integration authority remain unchanged; a passing check only
+  records the existing `verified-repaired-delivered` disposition. Historical
+  Task `fbd403bd-fb4d-49b9-9a66-bb968a0be374` exercised this path with 4/4
+  acceptance commands and no second Worker.
 - **Contract-infeasible terminal stop (2026-07-27):** when independent acceptance
   (or Main-declared privacy-safe reason codes) proves the Task Contract cannot
   be satisfied under the current boundary, verification stamps
@@ -218,6 +563,20 @@ never counted as progress or success by itself.
   `score`, and `off` change admission effect without falsifying check results.
   Schema, credentials, source isolation, command authority, acceptance,
   Main Review, Integration, commit, and push remain hard outside Quality.
+- **Worker Quality Hub editor (2026-07-28):** each Worker can now override the
+  quality mode and individual outcome/context/module/scenario/risk/acceptance,
+  focus-path, file-scope, and line-scope expectations from the same shared
+  resolver used at Task creation. Maximums have explicit inherit, unlimited,
+  and limited states; minimums preserve explicit zero; every field can return
+  to global inheritance. The preview explains effective values and provenance
+  before save, while Safety, execution ceilings, and Integration stay separate.
+- **Version-aware Hub ownership (2026-07-28):** a Hub descriptor now freezes the
+  running build identity. A matching owner is reused; a legacy or different
+  build requires an explicit confirmed replacement. Replacement rechecks the
+  exact claim, descriptor, PID, authenticated owner, listener, and lifecycle
+  records immediately before signaling and while waiting. Ownership changes
+  fail closed, automatic SIGKILL is forbidden, and concurrent graceful-stop
+  callers share the same completion promise.
 - **Volcengine Coding Plan Worker (2026-07-27):** `volcengine` is distinct from
   Alibaba `glm`. The built-in non-default `volcengine-glm52-1m` Claude Code
   Worker preserves exact model `glm-5.2[1M]`, the ARK Coding endpoint, and the
@@ -661,24 +1020,114 @@ See **README.md → Quick start**. Summary:
 3. New Main session (Grok/Codex/Claude) with forklight MCP
 4. `forklight_validate` / `forklight_submit` / `forklight_wait` (or CLI equivalents)
 
+The requirement-level gate is now recorded in
+`docs/m1-daily-assistant-acceptance.md`. The current Hub can complete the
+configuration steps and now exposes a guided **Run your first real Task** card.
+It copies only the packaged checkout fixture, consumes the selected saved
+Worker and effective policy, performs canonical preview plus one-time bound
+submit, and then hands off to ordinary Task Detail, Main Review, and explicit
+Integration. The current-machine DeepSeek journey completed successfully, but
+the clean-user outcome remains open. A valid exit run must use a new macOS
+account, VM, or Mac; changing only `FORKLIGHT_HOME` would inherit Keychain and
+Main-client state and is not clean evidence.
+
+The implemented product path is specified by
+`examples/dogfood/hub-guided-first-task-deepseek.yaml`. It defines an opaque,
+owner-only packaged sample; a generated ordinary Task bound only to the user's
+saved Worker Profile; canonical preview and one-time bound submit; then normal
+Task Detail, Main Review, and explicit Integration. It forbids hard-coded
+Provider/model/runtime/execution policy, automatic retry/review/integration,
+raw local paths, and sample-only execution truth. The current-machine journey
+has now proved that implementation with one real DeepSeek Task. The remaining
+gate is clean-environment timing, configuration, Main reconnection, and recovery
+evidence rather than another implementation retry.
+
 ## Next engineering
 
-1. **M0 live exit evidence:** the handoff implementation and deterministic
-   tests are complete. Use the next three accepted ForkLight deliveries with a
-   real build → handoff stop → replacement start → identity check profile;
-   require three consecutive passes and zero new test-owned daemon/socket leaks.
-2. **Main runtime profile preflight:** calibration identity is explicit and
-   immutable, but there is no preflight that proves the declared profile matches
-   the runtime actually launched. The first live attempt rejected the stale
-   `gpt-5.6` label; the local supported model was `gpt-5.6-sol`. Add a safe
-   detect/declare/confirm flow without assuming every Main is Codex.
-3. **M1 guided configuration:** Worker Advanced settings and truthful effective
-   preview, the per-Worker Quality resolver/snapshot, and the Delivery Profile
-   Hub editor are shipped. Next expose Quality fields and provenance in the
-   Worker Hub editor, then competition weights and remaining project/global
-   presets as explicit Safety / Quality / Preference layers. UI controls must
-   consume the shared resolver instead of duplicating policy semantics.
-4. **Contract feasibility:** shipped as a durable failure category
+1. **M1.2 real Worker readiness and selection — complete:** the canonical per-Worker
+   readiness result and pre-save Provider/runtime filtering are now delivered.
+   CLI validation and Hub submission now use the actual saved Worker Profiles;
+   Hub shows the final effective Worker/policy before submit and binds the
+   confirmation to that exact file/settings revision. Grok and GLM paths,
+   including the real English/Chinese preview interaction, are delivered with
+   bounded Main repair. The saved MiniMax path is also delivered with one
+   retained Candidate and bounded Main repair. The final smaller DeepSeek proof
+   completed through the guided checkout journey with one machine-successful
+   Attempt, Main accept, and safe Integration.
+   The failed DeepSeek readiness Task is retained as a runtime-stall sample, not
+   retried. Each proof gets one Attempt and no competition or automatic retry;
+   fix configuration failures before spending model Tokens.
+2. **M1.3 guided daily use — active:** Worker Advanced settings, per-Worker Quality
+   editing/provenance, immutable Task snapshots, and the Delivery Profile Hub
+   editor and guided first Task are shipped. A controlled Daemon restart now
+   proves that the existing DeepSeek, MiniMax, and Volcengine Keychain items
+   remain launchable without re-entry or a Provider request. The read-only
+   ten-Task candidate inventory is recorded in
+   `docs/m1-real-task-portfolio.md`, including current source-overlap risk,
+   user-facing outcomes, module boundaries, acceptance commands, and bounded
+   execution policy. The operator procedure and evidence worksheet are recorded
+   in `docs/m1-clean-user-runbook.md`; the current Mac has only the existing
+   development user. A world-readable clean-run bundle is frozen under
+   `/Users/Shared/ForkLight-Clean-Run.cDgmCh`: tarball SHA-256
+   `5c0609a14b9df7e19c4949907954bf58fd87eb00fac686df370538fbca86e9d5`,
+   package build `e0072e64953a6994f503b4f7e72b7f755ef72e0b3d4f1728ec07f516273279ad`,
+   full prepack check, isolated install, CLI load, exact installed identity
+   comparison, and sensitive-filename scan all pass. It was not activated in
+   the existing development user. An independent macOS user, VM, or Mac still
+   needs to be authorized and used. Finish that approximately 15-minute clean-machine
+   journey, including a fresh Main connection and restart/recovery checkpoint,
+   then align and execute the representative Tasks without manual database or
+   internal configuration edits. Relay has now supplied an additional M1.4
+   pilot Task for execution-detail readability. It proved real Worker
+   delegation, retained-Candidate correction, Main review, and browser
+   comprehension, but it does **not** yet count as a clean ForkLight
+   Integration: the Task remained machine-failed because repository-wide
+   acceptance was blocked by unrelated concurrent work, so Main applied only
+   the reviewed three-file source patch. The pilot is evidence for improving
+   partial reuse and baseline-aware acceptance, not a manufactured success.
+   Relay 的第二条实践已经把默认 Worker Profile 继承和真实验收门接通：DeepSeek Task
+   `84c2474c-5b46-4bf7-9f00-55964e4052ec` 机器验收通过，Integration 完成，Main 的两处
+   定点合同修正后目标测试 64/64、lint、diff hygiene 和真实 UI dry-run 通过。它暴露的
+   “成功 Candidate 无法承接 Main revise”已经由 ForkLight Task
+   `908c5cd9-dfbd-42b0-8849-035addbcdb8b` 关闭：成功任务现在只有在最新 Main revise 精确绑定
+   当前 Attempt/机器验收、Candidate 仍匹配、没有竞争或 Integration 历史且
+   `maxMainCorrections` 仍有额度时，才能复用同一 Task/workspace/session 做一次结构化纠正。
+   `maxExtraAttempts=0` 不再阻断这条路径；纠正后仍需新的机器验收、Main 接受和独立 Integration，
+   不会自动循环。最终 1,561/1,561 全量测试、构建、四阶段 Integration/activation 和
+   CLI/Daemon identity 均通过。下一步按 Relay 后续业务样本验证这条能力，不继续为同一状态机
+   制造参数重试。
+   Relay R5 已用 Volcengine `glm-5.2[1M]` 验证另一条真实 UI 链路：保持 Doctor API 不变，
+   通过纯 presentation mapper 让设置页先回答“Relay 核心、ForkLight 执行、工作区安全能否使用”，
+   再给一个恢复动作，机器原始数据默认折叠。两次同 Candidate Attempt 均通过原 4 条机器验收；
+   Main 因候选仍有两个空 `memory` 文件和一处初学者原始错误文案保持 `revise`，没有自动
+   Integration，只写回四个产品文件并记录 4/4 remediation verification。最终 8/8 行为测试、
+   目标 lint、diff hygiene 和桌面/390px 浏览器验收通过；全局 TypeScript 只剩既有可选 `pg`
+   基线问题。该样本证明“Worker 产出 → 一次受限纠正 → Main 定点交付 → 用户理解验收”的链路，
+   但不替代 Adeptify、Dia、NovelRPGPlay 十任务和 clean-user journey 的 M1.4 退出条件。
+   Relay R6 又补充了一个安全/可靠性样本：不存在、非目录、真实路径越过 allowlist 的 workspace
+   现在会在 Assignment/Worker 启动前拒绝；有效的 symlink allowlist root 则按两侧真实路径正确
+   授权。Routing 因精确任务类零样本机械建议竞争，Main 基于两文件和确定性验收覆盖为 DeepSeek
+   单 Worker。一次基础 Attempt 和一次同 Candidate correction 后，24/24 新行为、17/17 既有 Alpha
+   主链、目标 lint、导入和 diff hygiene 通过，ForkLight Integration
+   `658a6e77-3dc5-45f3-be3b-bbafb2cd934e` 完成。两轮只有 645,799 gross Worker Tokens，说明缩小
+   入口、固定验收并保留 Candidate 比增加 Token 上限或默认竞争更有效。当时源码 CLI 与 Daemon
+   identity matched，但长 Codex 会话内的 MCP 仍是旧 build；该轮所有 mutation 均走匹配 CLI。
+   本文件顶部记录的 App 重启证明现已恢复 matched MCP 并关闭 M0 reload gate，Relay M1.4 可以继续。
+   Relay R7 已完成 Activity 可读性实践：MiniMax-M3 Task
+   `a274b50c-cf0b-4838-bd0d-c98369c04008` 把原始 `event.kind` / `job.status` 改为白话分类、
+   五种真实执行状态、空状态和可点击的事项入口。第一次 Attempt 机器验收通过，Main 因
+   `未知 Runtime`、内部术语、重复上下文和失败提示没有入口而要求一次同 Candidate correction；
+   第二次 Attempt 的产品改动可保留，但新增页面合同测试把普通路径误当 URL，机器验收保持 failed。
+   Main 只修一行测试，随后无 Worker reverify 3/3 通过，新增 Worker Tokens / 模型费用均为 0；Relay
+   原工作树再次通过聚焦 25/25、全量 176/176 和 diff hygiene。remediation check
+   `653da815-03b0-4a2c-89fd-cf05e3179ebf` 记录为 `verified-repaired-delivered`，两个原 Attempt
+   事实均保留。该样本同时暴露一个 ForkLight 缺口：reverify 能证明 Main 修复后的 Candidate，
+   但不会捕获新的 CandidateRevision，导致 fresh Main accept 与 automatic Integration 因 revision
+   mismatch 安全拒绝。下一条 ForkLight 自身任务应关闭这条 revision handoff，而不是让 Main 长期
+   手工复制已验证补丁。
+   Keep using shared resolvers so the form,
+   preview, saved policy, and Task admission cannot drift into separate meanings.
+3. **Contract feasibility:** shipped as a durable failure category
    `contract-infeasible` with a pure classifier (`assessContractInfeasibility`),
    verification.completed payload stamping, same-policy extra-attempt rejection,
    adaptation gate stop reason, and Hub next-action `revise-contract`. Reason
@@ -686,14 +1135,14 @@ See **README.md → Quick start**. Summary:
    `scope-boundary-conflict`) and are not inferred from free-text command output.
    Next: collect production examples where Main declares codes during review,
    and optionally help Task authors preview contradictory acceptance before submit.
-5. **Hub Board density and long-run progress:** Board cards now surface
+4. **Hub Board density and long-run progress:** Board cards now surface
    backend `progress.activity` as plain-language badges: updating, quiet, and
    (presentation-only) stalled after five minutes of silence, without inventing
    a new machine status or changing kanban lanes. A presentation-only name/
    stage filter is shipped so dense boards can be narrowed without mutating
    Tasks. Still open: archive/history and lineage grouping; distinguish
    Provider request in-flight from process-alive stream activity.
-6. **Selective model routing:** the privacy-safe advisory core, settings,
+5. **Selective model routing:** the privacy-safe advisory core, settings,
    CLI/MCP path, Hub policy/evidence view, failure classification, correction
    churn, official-cost comparability, uncertainty gate, and configurable
    strict/flexible missing-evidence policy are shipped. The optional
@@ -702,23 +1151,34 @@ See **README.md → Quick start**. Summary:
    budget overrides, and never treats uncapped success as proof. Next use competition
    only for uncertainty, critical work, new task classes, or explicit requests.
    Do not make routing mutating until Main can inspect and override every
-   recommendation.
-7. Collect more accepted exact-pair samples across task classes and Main
+   recommendation. Relay dogfood then exposed a prompt-policy mismatch: every
+   Worker saw “Hard change budget” even when its frozen policy was warn. GLM
+   Task `c989e9a7-4a52-48e1-bf4e-9d186b37dac5` delivered a two-file fix in one
+   Attempt; focused 86/86, full 1,542/1,542, strict TypeScript, Integration
+   source apply/verification, and the final CLI/Daemon identity all pass. Hard
+   and legacy-hard retain the stop rule; warn, score, and off now state their
+   real non-blocking meaning without inviting scope expansion. Main explicitly
+   overrode a no-evidence competition suggestion because this was a small,
+   deterministic Task. That saved three unnecessary candidates, but the chosen
+   GLM Attempt still used 27 turns and 1,010,445 gross Worker Tokens. Treat this
+   as accepted quality evidence and negative efficiency evidence: before the
+   next small Task, tighten context/read guidance or choose Main-direct work
+   rather than using success alone to justify delegation.
+6. Collect more accepted exact-pair samples across task classes and Main
    profiles before raising calibration confidence; keep timing separate from
    quality unless the user enables a time preference.
-8. **Provider-native exact cost coverage:** Worker `pricingRoute` and a truthful
+7. **Provider-native exact cost coverage:** Worker `pricingRoute` and a truthful
    aggregate-tier range are shipped. Next capture Provider/runtime-supported
    per-request usage rows so multi-tier Attempts can become exact; until then
    Insights must keep the range supplementary and retain
    `per-request-usage-required` in the exact-unavailable count.
-9. **Build identity and runtime activation truth:** soften stale MCP reconnect
-   after a rebuild and decide license/public package policy. Delivery settings,
-   Task snapshots, Preflight, and Task Detail now distinguish source update,
-   source verification, artifact build, and runtime activation. Overview now
-   diagnoses which of current source, built assets, or the running daemon is
-   stale and gives the exact safe next action. Next configure ForkLight's own
-   real build/activation/check profile and prove three consecutive detached
-   live handoffs; explanation is shipped, automatic activation evidence is not.
+9. **Build identity and runtime activation truth — M0 complete:** Delivery
+   settings, Task snapshots, Preflight, Task Detail, and Overview distinguish
+   source update, source verification, artifact build, and runtime activation.
+   Three consecutive detached live handoffs and a fresh-Main identity check are
+   proved. Keep these invariants in every release candidate; next decide the
+   license/public-package policy and make stale Main reconnection easier without
+   weakening the exact build check.
 10. **Execution-truth cleanup:** generated-output classification before
     Patch/Integration size gates is shipped for declared workspace exclusions;
     raw and generated audit evidence is retained while the Integration payload
@@ -743,10 +1203,16 @@ See **README.md → Quick start**. Summary:
 13. **Single active Hub + recovery correctness:** same-tab authentication across
     a normal page refresh and crash-safe `preparing` workspace recovery are
     shipped. A partial or malformed snapshot is now cleared and rebuilt before
-    Attempt 1; cleanup errors fail closed without false Worker attribution.
-    Next discover or reuse an existing local Hub instead of accumulating ports,
-    explain server/token restart recovery, and make every daemon lifecycle test
-    prove its temporary process/socket cleanup so old test daemons cannot leak.
+    Attempt 1; cleanup errors fail closed without false Worker attribution. Hub
+    startup now keeps one private lifetime owner claim per `FORKLIGHT_HOME`,
+    authenticates the stored loopback instance before reuse, never steals a live
+    owner after a timeout, and removes ownership only when the exact owner exits.
+    A second CLI invocation reuses the existing URL even when another `--port`
+    is requested; different homes remain isolated. Detached-daemon lifecycle
+    tests now register exact test-owned PIDs before readiness and use bounded,
+    idempotent teardown that proves process/socket exit and refuses untracked
+    owners. Next explain descriptor/token recovery in Hub copy and extend the
+    fixture to any future test that starts a detached service.
 14. **Narrative contract and full copy audit:** the optional bounded Main-authored
     summary and source language are shipped end to end across YAML/MCP parsing,
     immutable Task storage, Worker context, safe Hub projection, and Task
@@ -793,6 +1259,118 @@ See **README.md → Quick start**. Summary:
     real mismatch categories over time. Never repair a disagreement by inventing
     component rows, summing unavailable Tasks as zero, or treating a telemetry
     mismatch as execution failure, extra spend, savings, or a Provider bill.
+
+## Latest dogfood — 2026-07-28 single active Hub and authenticated reuse
+
+ForkLight Task `e00b738c-c949-45ef-8702-36fb28ec42da` used one DeepSeek
+`deepseek-v4-pro[1M]` Attempt with Claude Code high, no per-Task Token cap, and
+all retry/adaptation paths frozen to zero. Model competition was deliberately
+skipped: historical evidence favored DeepSeek for this bounded Hub-lifecycle
+task, while competition would have paid several Workers to answer the same
+question. The Attempt used **3,268,717 gross Worker Tokens** (125,492 input,
+30,777 output, 3,112,448 cache read) and reported a **USD 2.953109 runtime
+estimate**. It produced 6 files / 975 changed lines.
+
+Independent verification passed 1,387/1,389 tests plus strict TypeScript, Hub
+JavaScript syntax, source compatibility, and `git diff --check`. The two failures
+were useful: one test waited on a loser before the winner had published, exposing
+that the proposed five-second startup lock could be stolen; another assumed a
+fixed PID was dead. Main recorded `revise`, kept the reusable architecture, and
+did not launch another Worker. The final implementation holds a private,
+identity-checked ownership claim for the Hub lifetime, performs authenticated
+loopback reuse, fails closed for a live incompatible owner, publishes descriptors
+atomically, bounds validation/probe input, and prevents an old owner from deleting
+a replacement owner's files. Deterministic concurrency tests and a real
+child-process CLI reuse test replace the incorrect premises.
+
+The complete current-source verification, production build, strict TypeScript,
+Hub JavaScript syntax, and `git diff --check` pass. ForkLight remediation check
+`5cf9ac36-06e1-492f-8415-d324d5399665` ran all **5/5** original acceptance
+commands and recorded `verified-repaired-delivered`; the machine Task remains
+`failed`, preserving the Worker result instead of rewriting history.
+
+Live activation was then checked manually. Daemon/client build identity is
+matched at
+`d0b5f4edac90fe0e00fc56a199b4c6e4536795a5f84a816877dbf765105cde43`.
+The Hub owns `127.0.0.1:56962`; a second invocation requesting port `53542`
+authenticated and reused 56962, created no 53542 listener, and left one Hub
+owner. The ForkLight home is mode 700 and both private ownership files are mode
+600. Authenticated liveness returned 200 with the exact owner nonce. This was a
+Main-remediated delivery followed by a manual runtime restart, not automatic
+Integration activation, so the M0 live-exit count honestly remains **0/3**. No
+commit or push has been performed.
+
+## Latest dogfood — 2026-07-28 detached test-daemon cleanup
+
+ForkLight Task `54e54c6e-a3a9-4718-9e26-36e0fa6b534a` used one Volcengine
+`glm-5.2[1M]` Attempt with Claude Code high, no per-Task Token cap, and every
+retry/correction/reverification/adaptation allowance frozen to zero. The new
+task class had no comparable routing samples; Main deliberately chose one GLM
+run instead of paying for a three-model competition.
+
+The Attempt ran 46 turns and used **3,749,928 gross Worker Tokens** (165,200
+input, 100,760 output, 3,483,968 cache read). Top-level and per-model counters
+matched exactly. The runtime estimate was **USD 5.086984**; the configured
+Volcengine route is a subscription plan with no per-request price, so ForkLight
+does not present that estimate as an official bill. There is no exact paired
+direct-Main baseline, therefore direct Main Token savings remains unavailable;
+the low-confidence arithmetic boundary range is not called savings.
+
+GLM delivered a useful 4-file / 486-line test fixture and migrated all selected
+detached starts. Independent verification passed 1,380/1,383 tests, but three
+call sites passed a scalar PID to an iterable-only helper; strict TypeScript
+reported the same three errors. Main recorded `revise`, did not invoke another
+Worker, retained the exact-home/exact-PID ownership design, changed the helper
+to accept one or many PIDs, and fixed another review-only gap: cleanup is now
+marked complete only after every owned check succeeds, so a thrown leak check
+cannot make a later `finally` skip cleanup.
+
+Focused lifecycle verification passes **122/122**. The full suite passes
+**1,383/1,383**, together with strict TypeScript, production build, Hub
+JavaScript syntax, and `git diff --check`. Remediation check
+`7e1a8bd5-1e0e-4fe9-aca1-5e164e2c5fae` passed the original **4/4** commands and
+recorded `verified-repaired-delivered`; the Worker Task remains `failed`. Test
+completion left no temporary detached daemon; only the production daemon
+remained. The current daemon is PID `21176`, with matched client/daemon build id
+`e138a43deae2a9fd689c480cdb8e555b49add6f8c5cea18f428a654efff73dcf`.
+Because Main repaired the candidate and switched the runtime manually, this is
+not automatic Integration activation and M0 remains **0/3**. No commit or push
+has been performed.
+
+## Latest dogfood — 2026-07-28 Hub recovery explanation and adjudication gap
+
+ForkLight Task `fbd403bd-fb4d-49b9-9a66-bb968a0be374` deliberately reduced the
+scope to README and operations copy so the next real delivery could exercise
+the automatic Integration/activation path. One DeepSeek
+`deepseek-v4-pro[1M]` Attempt ran 21 turns, changed 2 files / 87 lines, and
+passed all four machine commands, including 11/11 focused Hub lifecycle tests,
+the full **1,383/1,383** suite, strict TypeScript, and `git diff --check`.
+
+The Attempt used **446,023 gross Worker Tokens** (31,608 input, 13,647 output,
+400,768 cache read); top-level and per-model counters matched. The runtime
+estimate was **USD 0.699599** and the DeepSeek PAYG estimate was
+**USD 0.027075154**, not a Provider bill. No exact paired direct-Main baseline
+exists, so direct savings remains unavailable.
+
+Main did not accept the candidate despite machine success. It called the Hub
+access token “one-time”, although the token remains valid for the Hub owner's
+lifetime, and one sentence implied the Hub manages the daemon instead of being
+an independent control surface. Main recorded `revise`, started no second
+Worker, retained the recovery journey, and corrected only those factual/boundary
+gaps. The current source again passes the focused 11/11 lifecycle tests, the
+full 1,383/1,383 suite, strict TypeScript, and `git diff --check`.
+
+This exposed a result-adjudication gap: `remediate verify` accepts only a machine
+`failed` or `interrupted` Task. A machine-succeeded candidate that Main correctly
+marks `revise` cannot receive a no-Worker `verified-repaired-delivered`
+disposition, even when Main fixes and independently verifies the source. The
+original candidate also cannot be safely accepted because Main acceptance binds
+its reviewed patch digest. Therefore this delivery was not sent through automatic
+Integration/activation and M0 remains **0/3**. The daemon stays on PID `21176`
+with matched build id
+`e138a43deae2a9fd689c480cdb8e555b49add6f8c5cea18f428a654efff73dcf`.
+Next close this specific adjudication path without weakening patch-digest binding
+or letting a successful Task silently mutate after review.
 
 ## Latest dogfood — 2026-07-27 budget reliability and partial-candidate reuse
 
@@ -877,3 +1455,280 @@ Hub remains on `127.0.0.1:53542`. Real-browser QA confirmed the revised Overview
 and historical Task explanation, disabled unsafe correction, exact next action,
 and zero browser console warnings/errors. This manual restart is not an automatic
 Integration handoff and does not advance M0's 0/3 live-exit count.
+
+## Latest dogfood — 2026-07-28 Worker Quality Hub configuration
+
+ForkLight Task `fc507e1a-4332-456c-82d6-d91a708b94df` used one DeepSeek
+`deepseek-v4-pro[1M]` Attempt with no competition, correction, retry, adaptation,
+or per-Task cap. Main intentionally avoided a three-model competition because
+this new task class had no comparable evidence and multiplying the run would not
+improve the product boundary enough to justify the Token cost.
+
+The Worker produced the shared-resolver bridge, editor, effective preview,
+localization, and focused tests in 90 turns. Its candidate was largely reusable,
+but Main recorded `revise`: blank maximum fields merged back to the old Worker
+override instead of representing either global inheritance or explicit unlimited,
+the mode could not return to global inheritance, and one static test searched for
+an HTML id attribute even though the application sets the DOM id in JavaScript.
+Main started no second Worker. It retained the implementation, added explicit
+inherit/unlimited/limited maximum states, made blank minimums mean inherit while
+preserving explicit zero, changed edit/save to submit the full visible draft so
+old overrides can be removed, and rewrote the copy around user outcomes rather
+than raw policy terms.
+
+Focused Quality/Hub verification passes **127/127** and the full suite passes
+**1,402/1,402**, together with strict TypeScript, production build, Hub JavaScript
+syntax, and `git diff --check`. Remediation check
+`f54b5b11-f14c-44c1-a12a-8d3e1296b99f` passed the original **5/5** commands and
+recorded `verified-repaired-delivered`; the machine Task remains `failed`.
+
+The Attempt used **10,697,062 gross Worker Tokens** (147,256 input, 34,222
+output, 10,515,584 cache read), with matching top-level and per-model counters.
+The runtime estimate was **USD 6.849622** and the DeepSeek PAYG estimate was
+**USD 0.131948492**, neither of which is a Provider bill. There is no exact-pair
+direct-Main baseline, so direct Token savings remains unavailable; the displayed
+boundary range is only an isolation estimate, not a claim that Main would have
+spent the same Tokens.
+
+The production daemon is PID `52511`; client and daemon match build id
+`930e60f612cf818d4d41968c9b4a49916dd6631ff679fb879f6836a8ba0d83db` and source
+digest `573c6484b0ffbf325d96ff653810d03feec549301ed9f201cd952a3b9c55f5ba`.
+This was a Main repair plus manual runtime handoff, not automatic Integration
+activation, so the M0 live-exit count remains **0/3**. No commit or push has been
+performed.
+
+Real-browser QA first exposed that the long-lived Hub owner was still serving an
+older API process while static assets already reflected the rebuilt UI. The new
+form therefore rendered correctly, but its Quality preview response omitted the
+new rows and silently showed the empty state. Main stopped only the descriptor-
+owned PID and restarted one Hub owner on `127.0.0.1:56962`. After that handoff,
+Chinese and English both explain that these are Task-authoring expectations, not
+Worker output limits; unlimited resolves from Worker, explicit zero remains a
+Worker override, clearing it restores the global value, and the browser reports
+no warnings or errors. No Worker setting was saved during QA.
+
+The same handoff exposed a separate lifecycle gap: SIGTERM released the exact
+listener and owner files, but the old Hub process did not exit within seven
+seconds and required an exact-PID SIGKILL after ownership had already been
+released. This is now the next bounded M0 candidate, not an expansion of the
+completed Quality delivery: Hub replacement needs build identity, a bounded
+graceful stop, and proof that the old PID is gone before a new owner is called
+active.
+
+## Latest dogfood — 2026-07-28 version-aware Hub owner handoff
+
+ForkLight Task `b14dca06-a543-4329-b6df-8dca459bc57c` used one DeepSeek
+`deepseek-v4-pro[1M]` Attempt with no competition, retry, correction,
+adaptation, or per-Task cap. The Worker candidate was reusable, but its focused
+suite passed **57/58**, the full suite passed **1,411/1,412**, and strict
+TypeScript found three errors. Main recorded `revise` instead of starting
+another Worker.
+
+Main kept the candidate and repaired both the false test setup and the safety
+boundary. The final flow freezes the exact claim and descriptor bytes, proves
+the authenticated owner again immediately before SIGTERM, fails closed if a
+replacement appears while waiting, and calls the handoff complete only when the
+old PID, listener, claim, and descriptor are all gone. It never escalates to an
+automatic SIGKILL. Concurrent Hub shutdown paths now await one shared stop
+promise, so a signal handler cannot return before the server has actually
+closed.
+
+Focused Hub ownership verification passes **59/59**, the full suite passes
+**1,413/1,413**, strict TypeScript and Hub JavaScript checks pass, and
+`git diff --check` is clean. Remediation check
+`5198196f-e602-4ac4-9114-5fd25da2b13c` passed the original **5/5** commands and
+recorded `verified-repaired-delivered`; the machine Task remains `failed`.
+
+The Attempt used **4,099,628 gross Worker Tokens** (117,497 input, 41,651
+output, 3,940,480 cache read). The runtime estimate was **USD 3.599000** and the
+DeepSeek PAYG estimate was **USD 0.101631805**, neither of which is a Provider
+bill. The receipt-derived Main exchange envelope is **144,284–879,326 Tokens**;
+without an exact-pair direct-Main baseline, the arithmetic boundary range is not
+reported as saved Main Tokens.
+
+Main then performed a real version A→B handoff on `127.0.0.1:56962`. The normal
+start recognized the live A owner as a different build and did not signal it.
+The explicit confirmed restart proved the exact A owner, waited for PID `16845`
+to exit, and started B as PID `17258` on the same port with exactly one listener
+and the B descriptor. The daemon was manually refreshed to PID `17712` and the
+client, daemon, and Hub artifacts matched build B at verification time. This
+was a Main remediation plus manual Hub/daemon handoff, not an accepted Worker
+patch applied through automatic Integration activation, so M0 truthfully
+remains **0/3**. No commit or push has been performed.
+
+## Latest dogfood — 2026-07-28 first successful automatic self-upgrade
+
+ForkLight Task `8b3528b5-f9f1-495d-abb5-687f43be66d5` added the public
+`forklight daemon restart` command by routing it to the existing shared,
+fully-awaited restart helper. One DeepSeek `deepseek-v4-pro[1M]` Attempt ran for
+27 turns with no competition, retry, correction, adaptation, time cap, Token
+cap, or monetary cap. The Candidate changed two files / 197 lines: five product
+lines in `src/cli.ts` and isolated real-process lifecycle tests.
+
+Independent verification passed focused **118/118**, full **1,418/1,418**,
+strict TypeScript, and `git diff --check`. Main reviewed the exact Candidate
+Revision and accepted it without repair. Integration operation
+`df91aaeb-d138-460c-9d7c-32af3d621b79` then passed all four required stages:
+source apply, source verification, artifact build, and runtime activation.
+The old daemon PID `17712` exited; the automatically activated daemon is PID
+`39407`, has no active or queued Task, and reports build id
+`eb249f02f7018440b38094caecb54b83c72360e40da10885811175273db4b9fe` with
+source digest `0b4d3011172a79fbd6f4d7a9f520682576c792e55bdc9afed7c05c770ef18166`.
+
+The stale Hub owner was then diagnosed without being signalled and explicitly
+replaced through the shipped version-aware Hub handoff. Old Hub PID `17258`
+exited naturally; PID `40369` now owns the same `127.0.0.1:56962` listener and
+its private descriptor reports the same new build as the daemon. This manual Hub
+refresh is ancillary evidence; the M0 count comes only from the successful
+automatic Integration daemon activation.
+
+The Attempt used **1,367,541 gross Worker Tokens** (86,146 input, 11,251
+output, 1,270,144 cache read). Runtime estimate was **USD 1.347077** and the
+DeepSeek PAYG estimate was **USD 0.051866152**, neither of which is a Provider
+bill. The measured Main exchange envelope was **157,974–971,114 Tokens**. There
+is no exact-pair direct-Main baseline, so the arithmetic boundary range is not
+presented as saved Main Tokens. This is the first consecutive automatic M0
+self-upgrade, so the gate advances from **0/3 to 1/3**. No commit or push has
+been performed.
+
+## Latest dogfood — 2026-07-28 MiniMax read-only Hub status review
+
+ForkLight Task `14ed39d0-2cc0-4644-b199-737532cd29a6` used one MiniMax
+`MiniMax-M3` Attempt with no competition, retry, correction, or adaptation. The
+Worker produced a substantial, mostly reusable read-only Hub status Candidate:
+four files / 765 lines, focused **45/45**, full **1,435/1,435**, strict
+TypeScript, Hub JavaScript syntax, and `git diff --check` all passed.
+
+Main nevertheless recorded `revise`. The public CLI always supplied the current
+build identity, but the exported inspection function made that identity optional
+and classified any proven versioned owner as `current` when the comparator was
+omitted. That type boundary permits a future internal caller to state a false
+version result even though today's CLI path is correct. Main did not start a
+second Worker and did not accept or integrate the Candidate; M0 therefore stays
+**1/3**.
+
+The Attempt took 75 turns and used **6,770,903 gross Worker Tokens** (144,833
+input, 47,908 output, 6,578,162 cache read). Runtime estimate was **USD
+5.210946**. A MiniMax official per-request cost was unavailable because the
+required billing rows were not present; no zero cost was invented. The Main
+exchange envelope was **26,261–160,651 Tokens**. There is no exact-pair
+direct-Main baseline, so the boundary arithmetic is not called saved Main
+Tokens. The long read/thinking path and Main semantic miss remain model-routing
+evidence. No commit or push has been performed.
+
+## Latest dogfood — 2026-07-28 retained Candidate to automatic M0 2/3
+
+Main retained the complete machine-verified Candidate from MiniMax Task
+`14ed39d0-2cc0-4644-b199-737532cd29a6` rather than rerunning its 6.77M-Token
+implementation. The only rejected fact boundary was extracted into DeepSeek
+Task `6ff650f4-6123-4643-aa4a-82f15e63389c`: require a valid invoking build
+identity before read-only Hub status can say `current`, make every next action
+total, and fail closed for unsafe runtime callers.
+
+The DeepSeek Attempt ran 21 turns and changed three files / 99 lines. Focused
+status verification passed **46/46**, full verification passed **1,436/1,436**,
+strict TypeScript, Hub JavaScript syntax, and `git diff --check` all passed.
+Main accepted the exact Candidate Revision without repair. Integration operation
+`55ccac9a-ab49-4308-bdf8-df575dfe60bc` passed source apply, all five source
+verification commands, artifact build, and runtime activation.
+
+The old daemon PID `39407` exited and the automatically activated daemon is PID
+`52232`, running build id
+`a655daf034eccd7ec5659f8d4b5f30af59672b5fc68e830462c0dd5279b8fee5` with
+source digest `756df610253e814e936ce50e07d5b229f8349d0c6049eefb729134d8905febcf`.
+Real CLI QA used the newly built `hub status` against the still-old Hub and got
+only `different-build`, proven PID/port, and `restart-with-confirm`; it exposed
+no token, nonce, URL, path, or raw build id. The explicit Hub handoff then let
+old PID `40369` exit naturally and started PID `53147` on the same port. The
+final read-only status is `current`, and daemon/Hub descriptors match the new
+build with one listener and no active or queued Task.
+
+The gap Attempt used **1,038,932 gross Worker Tokens** (69,138 input, 16,706
+output, 953,088 cache read). Runtime estimate was **USD 1.239884** and the
+DeepSeek PAYG estimate was **USD 0.048064194**, neither a Provider bill. The
+Main exchange envelope was **152,555–937,782 Tokens**; no exact-pair direct-Main
+baseline exists, so the arithmetic boundary is not called saved Main Tokens.
+Because this was the second consecutive accepted automatic activation, M0
+advances from **1/3 to 2/3**. No commit or push has been performed.
+
+## Latest dogfood — 2026-07-29 Relay Daily Brief product slice
+
+Main deliberately moved beyond another ForkLight-internal repair and used the
+orchestrator on Relay's first read-only Daily Brief slice. MiniMax `MiniMax-M3`
+implemented a deterministic Item / Assignment / Job mapper and Today-page
+presentation. Main used exactly one retained-Candidate correction to close
+three fact-boundary gaps, then stopped; no third Worker, retry loop,
+adaptation, competition, or automatic Integration was authorized.
+
+The Task remains machine-failed because Main froze an acceptance command that
+hits Relay's pre-existing ESLint 10.8 / Next React plugin incompatibility even
+on untouched source. Main did not relabel that as success. The reviewed target
+files were applied manually, followed by bounded copy and responsive fixes.
+Final evidence is focused **12/12**, ESLint 9 compatibility lint, diff hygiene,
+and real desktop plus 390px browser QA. Global TypeScript remains blocked only
+by the concurrent Team/Postgres optional `pg` dependency baseline.
+
+The two Attempts used **8,014,119 gross Worker Tokens** (149,732 input, 63,313
+output, 7,801,074 cache read) across 103 turns. The Main exchange envelope is
+**144,638–875,918 Tokens**. No exact-pair direct-Main baseline exists, so this
+is not presented as saved Main Tokens. This sample adds evidence that MiniMax
+can converge on a bounded product slice, but its repeated-read path is too
+expensive for a four-file deterministic UI task unless the task contract gives
+more precise symbol and test entry points. No commit or push has been performed.
+
+## Latest dogfood — 2026-07-29 R8 closes the reverify-to-Integration evidence chain
+
+Relay R7 exposed a ForkLight correctness gap rather than a Relay product bug:
+after Main repaired a retained Candidate, the zero-Worker `reverify` path could
+append a passing verification but did not capture a new immutable
+CandidateRevision for the repaired Diff. Fresh Main accept therefore rejected
+safely and automatic Integration could not proceed.
+
+Main used ForkLight itself to close the loop. Two exploratory DeepSeek Tasks
+(`ac43b931-840a-49fb-938b-d551935f07b2` and
+`1bf84201-e657-4c4c-9c80-43dd3c6dba26`) remained failed and were not integrated:
+their independent tests first revealed that digest-only Main Review could reuse
+an older same-byte revision, then exposed two test-fixture errors. Main kept
+those failures truthful instead of relabeling Worker completion as success.
+
+Final Task `2820723c-dbf6-4382-8459-511d0339dd62` froze
+`baseMaxAttempts=1`, `maxExtraAttempts=0`, `maxMainCorrections=1`, and
+`maxAdaptationRounds=0`. Attempt 1 failed with one real fixture error and one
+invalid event spelling. Main recorded `revise`, authorized the single structured
+Candidate correction with two explicit remaining gaps, and did not open another
+Task or automatic retry. Attempt 2 then passed focused **135/135**, full
+**1,565/1,565**, strict TypeScript, and `git diff --check`.
+
+The accepted five-file Candidate now guarantees:
+
+- candidate reverify appends canonical verification evidence, captures the
+  exact current Diff for that verification sequence, and only then reports Task
+  success;
+- capture failure leaves the Task failed, preserves the retained Attempt,
+  records content-free evidence, and performs no Worker/model retry;
+- Main Review accept resolves CandidateRevision by exact current Attempt plus
+  exact latest verification sequence before checking the current Diff digest;
+- an older same-digest revision cannot substitute for missing new evidence;
+  true legacy Tasks with no revision history retain the previous compatibility
+  path.
+
+Main accepted CandidateRevision
+`99a8f260-4e77-465d-a3f5-b84c82ca2cf4`. Integration operation
+`fa79ade9-50c8-40c3-8f5c-c05d7e0d5661` passed source apply, all four source
+verification commands, artifact build, and runtime activation. Built CLI and
+Daemon now match build
+`5ed667126017b9e124fa2d42d2b6e7c209657dac4f8ceb14934e23e341cdce4d`
+with source digest
+`d7951afadd450270bf1d78243a03d8498a028738dfb3f13249d91af852d6b3ff`.
+The old Hub exited cleanly; current Hub PID is `81114` on port `53005` with one
+listener and status `current`.
+
+Across the three bounded Tasks and the final correction, observed usage was
+**10,661,297 gross Worker Tokens** (275,477 input, 116,380 output, 10,269,440
+cache read). Claude Code runtime estimates total approximately **USD 9.421605**;
+DeepSeek PAYG estimates total approximately **USD 0.258309815** and are not
+Provider bills. No exact-pair direct-Codex baseline exists, so this is measured
+Worker volume, not a saved-Main-Token claim. The current loaded Codex MCP remains
+the pre-upgrade process and needs a real Codex App/plugin reload before its
+identity can match the new build; matched CLI remains the safe control surface
+until then. No commit or push has been performed.

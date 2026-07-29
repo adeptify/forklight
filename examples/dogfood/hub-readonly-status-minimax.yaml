@@ -1,0 +1,146 @@
+version: 2
+name: Add a read-only token-free Hub status command
+project: ../..
+taskClass: forklight-cli-hub-readonly-status
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    Main or a local user can run `forklight hub status` without starting,
+    claiming, replacing, opening, or mutating the Hub, and receive a small
+    token-free answer that says whether no Hub is active, the active Hub is the
+    current build, it is a different or legacy build, or its ownership cannot
+    be safely verified.
+  presentation:
+    summary: 用一条只读命令判断 Hub 是否运行、是不是当前版本；查询不会启动或接管服务，也不会泄露访问令牌。
+    language: zh-CN
+  context:
+    - "`discoverOrClaimHub()` intentionally mutates a clean home by acquiring a lifetime claim, so it cannot be reused as a status query."
+    - The Hub ownership module already has strict claim/descriptor parsing, exact claim matching, PID liveness, authenticated loopback proof, and build-identity comparison. The read path should reuse these internal facts without copying a weaker proof into CLI code.
+    - Real M0 supervision currently needs manual descriptor reads and `lsof`. A bounded read-only status makes the same decision available to Main and future Hub diagnostics without exposing the URL fragment token.
+    - This is the second small automatic self-upgrade candidate. It must not redesign ownership or add recovery behavior.
+  inScope:
+    - Add one exported read-only Hub inspection function in the ownership module. It may read private lifecycle records, check PID liveness, perform the existing bounded authenticated loopback probe, and compare the descriptor build with a supplied current build identity.
+    - Return a typed, token-free status covering at least stopped/no records, current build, different build, legacy build, and unverified/inconsistent ownership. Include only safe state, PID and port when they are actually proven, plus one bounded reason/action code if useful.
+    - The inspection must never create the home, acquire a claim, publish/remove/rename/rewrite a lifecycle file, signal a PID, start/stop/restart a process, open a browser, rotate a token, or call the daemon.
+    - Add `forklight hub status [--json]`. Human output should be short plain language with one relevant next action and no raw build id. JSON should use the same safe projection and never contain token, nonce, URL fragment, private path, raw record, or authentication header.
+    - Keep normal `forklight hub`, explicit stale-owner restart, port handling, and daemon behavior unchanged.
+    - Add deterministic isolated tests for every state, authenticated proof, no side effects, safe output, invalid operation behavior, and no token/nonce leakage.
+  outOfScope:
+    - Hub startup, owner acquisition, stale cleanup, replacement, force kill, daemon status/restart, UI changes, network exposure beyond loopback, Provider calls, Task scheduling, Integration changes, commit, or push.
+    - Treating a descriptor, PID, port, process existence, or build id alone as proof of a running Hub.
+    - Auto-recovery, deleting malformed/stale records, adding a watcher, polling continuously, or changing status based on dirty source rather than built artifact identity.
+  executionSteps:
+    - Trace the exact discovery proof and extract or reuse the smallest internal read-only decision seam; do not route status through claim acquisition.
+    - Define one strict safe status type and implement inspection with bounded probe time and no write-capable calls.
+    - Add the CLI status branch before any discovery/claim call, with human and JSON rendering derived from the safe status only.
+    - Add isolated module and CLI regressions that snapshot lifecycle bytes before/after and search serialized output for token, nonce, URL fragment, home, and raw record content.
+    - Run focused and full acceptance once. Report any unrelated baseline problem to Main instead of widening scope or retrying.
+  deliverables:
+    - Read-only authenticated Hub status service with a small safe projection.
+    - Public human/JSON CLI command and deterministic no-side-effect/privacy tests.
+  modules:
+    - name: Hub status inspection
+      responsibility: Determine whether a Hub is absent, current, different-build, legacy, or unverified using the existing strict owner evidence without acquiring authority.
+      consumes:
+        - Existing private claim/descriptor bytes, PID liveness, authenticated loopback response, bounded timeout, and current built identity.
+      produces:
+        - One token-free typed status with only proven PID/port and a bounded state/reason.
+      boundaries:
+        - No filesystem mutation, claim acquisition, signal, browser, process lifecycle action, daemon call, raw secret, URL, or private path.
+    - name: Status CLI presentation
+      responsibility: Render the safe status for a human or JSON consumer before any normal Hub startup branch executes.
+      consumes:
+        - "`hub status`, optional `--json`, and the safe inspection result."
+      produces:
+        - Short outcome-oriented text or a safe JSON object with one relevant next action.
+      boundaries:
+        - No owner mutation, raw build id in human copy, token/nonce/URL fragment, or duplicated ownership proof.
+  callChain:
+    - User or Main runs `forklight hub status` with optional JSON output.
+    - CLI invokes the read-only ownership inspection before `discoverOrClaimHub` can run.
+    - Inspection strictly reads and cross-checks existing claim/descriptor evidence, proves PID and authenticated loopback liveness when possible, and compares the proven owner build with the current artifact.
+    - Inspection returns only the safe status; CLI renders it and exits without starting or mutating any service.
+  scenarios:
+    - name: No Hub is active
+      given: The isolated home does not exist or contains no lifecycle records.
+      when: Status runs.
+      then: It reports stopped and does not create the home or any file.
+    - name: Current Hub is proven
+      given: Exact claim and descriptor records point to a live authenticated loopback Hub with the current built identity.
+      when: Status runs.
+      then: It reports current with proven PID/port, emits no URL or credential, and preserves every lifecycle byte.
+    - name: Different or legacy build is proven
+      given: The exact live authenticated owner carries a different build or no build identity.
+      when: Status runs.
+      then: It reports different-build or legacy with a plain confirmed-restart next action but does not signal or replace the owner.
+    - name: Ownership cannot be proven
+      given: Records are malformed, partial, inconsistent, dead, changed during proof, or fail authenticated liveness.
+      when: Status runs.
+      then: It reports unverified with no guessed PID/port authority, makes no repair, and leaves all evidence unchanged.
+  risks:
+    - Reusing the mutating discovery entry would create an owner during a read, so status must return before and remain structurally separate from claim acquisition.
+    - Exposing the convenient existing Hub URL would reveal the fragment token, so the safe type must be incapable of carrying URL, token, nonce, or raw records.
+    - A status based on files alone could call a stale process current, so current/different/legacy states require the same PID plus authenticated loopback proof as reuse.
+    - Reading then mutating for cleanup would turn diagnostics into authority, so inconsistent evidence remains visible and untouched for explicit recovery.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 800
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: xhigh
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/instance.ts
+    - src/cli.ts
+    - tests/hub-instance.test.ts
+    - docs/operations.md
+acceptance:
+  criteria:
+    - Status never creates a home or lifecycle record and never changes existing lifecycle bytes, PIDs, listeners, processes, tokens, browser state, or daemon state.
+    - Only exact claim/descriptor agreement plus live PID and authenticated loopback proof can produce current, different-build, or legacy; uncertain evidence is explicit and not repaired.
+    - Human and JSON outputs contain no token, nonce, URL fragment, private path, raw record, authentication material, or unproven fact.
+    - Existing normal Hub reuse, confirmed replacement, concurrency, cleanup, permissions, and daemon independence remain unchanged.
+    - Focused behavior, the complete existing suite, strict TypeScript, Hub JavaScript syntax, and diff validation all pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-instance.test.ts tests/build-identity.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

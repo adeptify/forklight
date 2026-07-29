@@ -1,0 +1,155 @@
+version: 2
+name: Explain whether each configured Worker can really start
+project: ../..
+taskClass: forklight-worker-readiness
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+workerProfileId: default
+contract:
+  outcome: >-
+    ForkLight produces one truthful, privacy-safe readiness result for every
+    configured Worker by combining its selected model, Provider authentication,
+    runtime doctor, and allowed Provider/runtime pairing; Hub shows the result
+    in plain language and prevents impossible model/runtime choices before save.
+  presentation:
+    summary: 每个 Worker 直接告诉用户“现在能不能开始、依据是什么、下一步做什么”，并在保存前排除不可能运行的组合。
+    language: zh-CN
+  context:
+    - The current Provider readiness path checks only macOS Keychain entries. The Grok adapter also supports a signed-in operator `~/.grok/auth.json`, and that OAuth path exists on this machine, so Hub currently reports a false xAI credential blocker.
+    - Worker Profile validation already rejects invalid Provider/runtime pairs at the backend boundary, but the Hub form still offers every model for every runtime and lets the user discover the mismatch only after save.
+    - Runtime doctor evidence, model catalog, Worker profiles, Provider configuration, and cached Provider verification already exist. The missing product surface is one canonical per-Worker synthesis rather than making the user combine those pages mentally.
+    - A local configuration check proves only that the Worker can be launched. It must not claim that the Provider request succeeded unless there is corresponding verification evidence; the later smoke Task is the connectivity proof.
+  inScope:
+    - Extend Provider authentication readiness so xAI is ready when either its Keychain entry exists or a readable, non-empty local Grok OAuth auth file exists. Expose only a bounded authentication mode such as api-key, local-sign-in, or none; never expose a credential, path, file content, size, account, or token.
+    - Add one canonical pure Worker-readiness resolver. It consumes Worker Profiles, model catalog, effective Provider defaults/auth evidence, runtime doctor evidence, and optional Provider verification freshness. It produces one bounded result per profile with final state, component checks, effective runtime/Provider/model, a short reason code, and one next-action code.
+    - A Worker must be blocked when its model is missing, materialization fails, Provider/runtime pairing is invalid, runtime doctor is not ready, or authentication is absent. Locally valid but unverified/stale connectivity must be distinguished from a proven blocker and must not be called Provider-verified.
+    - Add the safe readiness array to the existing Hub status response without credentials, OAuth paths, raw doctor output, commands, Tasks, or model responses.
+    - Show a plain-language readiness badge, short explanation, and one next action on every Worker card in English and Chinese. Keep technical component evidence behind the existing disclosure.
+    - >-
+      In the Worker editor, filter the model select by the selected runtime:
+      `grok-build` can select only xAI models; `claude-code` can select only
+      non-xAI models. Preserve a valid existing selection, choose the first
+      valid option only when needed, and disable save with a clear explanation
+      when no compatible model exists.
+    - Keep the backend pairing validation as the security/authority boundary; the UI filter is guidance, not a replacement for validation.
+  outOfScope:
+    - Live Provider probes, starting a Worker merely to test readiness, changing API keys or OAuth files, reading credential contents, model routing scores, competition, retries, correction, adaptation, task submission redesign, Integration policy, commit, or push.
+    - Calling a stale/unverified connection verified, treating one failed Provider request as model-quality evidence, or permanently disabling a model.
+    - Broad Models/Workers page redesign or exposing raw internal errors to beginners.
+  executionSteps:
+    - Read Provider readiness, Grok OAuth seeding, Worker Profile materialization/pairing, Hub status projection, Worker form/card rendering, and directly relevant tests before editing.
+    - Implement the bounded authentication and pure per-Worker synthesis first, with deterministic injected evidence in tests.
+    - Thread only the safe projection into `/api/status`, then make Worker cards and the editor consume it.
+    - Add behavior tests for Keychain, OAuth fallback, no-auth, invalid/missing model, wrong pairing, runtime failure, stale/unverified connection, compatible-option filtering, and bilingual copy.
+    - Run focused and full acceptance once. Report unrelated failures without expanding the Task.
+  deliverables:
+    - Canonical per-Worker readiness resolver and safe Hub status projection.
+    - OAuth-aware xAI authentication readiness without private data exposure.
+    - Worker cards that explain readiness and a Worker form that excludes impossible pairings before save.
+    - Deterministic regressions for backend truth and UI behavior.
+  modules:
+    - name: Provider authentication evidence
+      responsibility: Decide whether the selected Provider has a locally usable authentication path without reading or returning credential content.
+      consumes:
+        - Keychain presence and, for xAI only, local Grok OAuth file availability.
+      produces:
+        - Bounded ready flag and authentication mode.
+      boundaries:
+        - No secret values, paths, file metadata, account names, network request, or persisted auth copy.
+    - name: Worker readiness resolver
+      responsibility: Combine the exact saved Worker selection with local prerequisites into one user-facing conclusion.
+      consumes:
+        - Worker Profile, model catalog/defaults, Provider authentication, runtime doctor, and optional connection-verification state.
+      produces:
+        - Deterministic safe state, component facts, reason code, and next-action code per Worker ID.
+      boundaries:
+        - Read-only, no Task creation, no probe, no setting mutation, no scoring, and no free-form diagnostic exposure.
+    - name: Hub Worker readiness experience
+      responsibility: Let a user understand and correct a Worker before spending model Tokens.
+      consumes:
+        - Safe readiness results, model catalog, selected runtime, and existing effective-policy preview.
+      produces:
+        - Plain-language badges/explanations/actions and only compatible model choices.
+      boundaries:
+        - Backend validation remains authoritative; no broad navigation or visual redesign.
+  callChain:
+    - Local authentication/runtime inspectors produce bounded evidence without a network request.
+    - The canonical resolver materializes each saved Worker and validates model and Provider/runtime compatibility.
+    - Hub `/api/status` returns the safe per-Worker readiness array beside existing Worker Profiles.
+    - Worker cards explain the final conclusion; the editor filters choices using the same Provider/runtime compatibility rule before save.
+    - A later explicitly selected smoke Task proves real Provider execution and remains separate from this local readiness claim.
+  scenarios:
+    - name: Grok OAuth without xAI Keychain key
+      given: Grok runtime is healthy, the xAI model/profile pairing is valid, the Keychain entry is absent, and a readable non-empty local Grok OAuth file exists.
+      when: Worker readiness is resolved.
+      then: Authentication is shown as local sign-in and the Worker is not blocked for a missing API key; no file path or content is exposed.
+    - name: Missing authentication
+      given: A valid Claude Code Worker has neither its Provider Keychain entry nor another supported authentication mode.
+      when: Readiness is resolved.
+      then: The Worker is blocked with one action to configure authentication and no model-quality penalty.
+    - name: Runtime mismatch selected in the form
+      given: The user selects grok-build while a DeepSeek model is selected.
+      when: The runtime choice changes.
+      then: The incompatible model disappears, a valid xAI model is selected when available, and the backend would still reject a forged invalid save.
+    - name: Locally ready but connection not recently verified
+      given: Authentication, model, pairing, and runtime are valid but Provider verification is unverified or stale.
+      when: The card renders.
+      then: It says the Worker can be tried but the connection still needs a real check; it does not claim Provider verification.
+  risks:
+    - Treating OAuth presence as a successful Provider request would overclaim, so local launch readiness and connection verification must remain separate facts.
+    - Duplicating Provider/runtime rules in UI can drift, so use a small explicit compatibility helper covered against the backend rule's current matrix.
+    - Raw filesystem or doctor diagnostics can reveal private context, so the resolver accepts and emits bounded enums only.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1200
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/providers.ts
+    - src/core/worker-readiness.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/providers.test.ts
+    - tests/worker-readiness.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Each saved Worker has exactly one bounded readiness result derived from its effective model, authentication path, runtime doctor, and allowed pairing.
+    - xAI Keychain and local Grok OAuth are distinct supported auth modes; no credential, OAuth content/path/metadata, raw diagnostic, command, or task data is returned.
+    - Local launch readiness and Provider connection verification are separate; unverified/stale evidence never becomes a verified claim.
+    - Worker cards explain state, reason, and next action in both languages; the editor prevents impossible model/runtime choices before save while backend validation stays fail-closed.
+    - Focused readiness/Hub tests, full tests, strict TypeScript, Hub JavaScript syntax, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/providers.test.ts tests/worker-readiness.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

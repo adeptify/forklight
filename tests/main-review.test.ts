@@ -142,3 +142,88 @@ test("main review persists bounded structured evidence for the current Attempt",
     fixture.store.close();
   }
 });
+
+test("main review accept rejects when no CandidateRevision matches the exact latest verification sequence", async () => {
+  const fixture = await reviewFixture(true);
+  try {
+    // Seed a candidate.revision.captured event bound to the first verification.
+    fixture.store.addEvent(
+      fixture.task.id,
+      "attempt-1",
+      "candidate.revision.captured",
+      "Revision for first verification",
+      {
+        id: "rev-old",
+        taskId: fixture.task.id,
+        attemptId: "attempt-1",
+        attemptOrdinal: 1,
+        verificationEventSequence: fixture.verificationSequence,
+        patchDigest: "a".repeat(64),
+        affectedPaths: ["src/index.ts"],
+        filesChanged: 1,
+        changedLines: 5,
+        verificationPassed: true,
+        createdAt: new Date().toISOString(),
+      },
+    );
+    // Add a NEWER verification event at a higher sequence — simulating a
+    // reverification that passed verification but failed to capture a new
+    // revision. The old revision is still bound to the first sequence.
+    fixture.store.addEvent(
+      fixture.task.id,
+      "attempt-1",
+      "verification.completed",
+      "Newer verification passed",
+      {
+        passed: true,
+        behaviorPassed: true,
+        policyPassed: true,
+        sourceCompatible: true,
+        commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+        diffPath: fixture.task.paths.diff,
+        sourceUnchanged: true,
+      },
+    );
+
+    // recordMainReview must reject: the latest verification has no matching
+    // CandidateRevision and a prior revision event exists (rejecting stale
+    // same-digest substitution).
+    assert.throws(
+      () => recordMainReview(fixture.store, fixture.task.id, {
+        decision: "accept",
+        reason: "Should reject without exact-sequence revision",
+        confirm: true,
+      }),
+      /current Diff to match/,
+    );
+
+    // Verify no main-review event was appended (the store is not mutated).
+    assert.equal(
+      fixture.store.listEvents(fixture.task.id).filter((event) => event.type === "main-review.completed").length,
+      0,
+      "no review event was appended on rejection",
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("main review accept works with legacy tasks that have no CandidateRevision events", async () => {
+  // A task with a passing verification but zero candidate.revision.captured
+  // events must fall through the legacy path and accept without digest binding.
+  const fixture = await reviewFixture(true);
+  try {
+    const review = recordMainReview(fixture.store, fixture.task.id, {
+      decision: "accept",
+      reason: "Legacy task without revision evidence",
+      confirm: true,
+    });
+    assert.equal(review.decision, "accept");
+    assert.equal(review.attemptId, "attempt-1");
+    assert.equal(review.verificationEventSequence, fixture.verificationSequence);
+    assert.equal(review.candidateRevisionId, undefined, "no revision binding for legacy");
+    assert.equal(review.acceptedPatchDigest, undefined, "no digest binding for legacy");
+  } finally {
+    fixture.store.close();
+  }
+});

@@ -12,11 +12,8 @@ import {
 } from "../src/core/build-identity.js";
 import type { BuildIdentity } from "../src/core/build-identity.js";
 import { inspectSourceTree, sourceInputFiles } from "../src/core/source-digest.js";
-import {
-  daemonRequest,
-  ensureDaemon,
-  startDaemonProcess,
-} from "../src/daemon/client.js";
+import { daemonRequest } from "../src/daemon/client.js";
+import { DetachedDaemonFixture, waitForPidExit } from "./helpers/detached-daemon.js";
 
 const identity: BuildIdentity = {
   protocolVersion: PROTOCOL_VERSION,
@@ -137,41 +134,23 @@ test("version journey reports the first stale layer and one next action", () => 
 });
 
 test("source-dev daemon can stop and restart with the same build identity", async () => {
-  const home = await mkdtemp(path.join(tmpdir(), "forklight-source-daemon-"));
-  let firstPid: number | undefined;
-  let secondPid: number | undefined;
+  const fixture = await DetachedDaemonFixture.create("forklight-source-daemon-");
   try {
-    startDaemonProcess(home);
-    const first = await ensureDaemon(home);
-    firstPid = first.pid as number;
+    const first = await fixture.ensureReady();
+    const firstPid = first.pid as number;
     assert.ok(Number.isSafeInteger(firstPid));
     assert.deepEqual(first.buildIdentity, currentBuildIdentity());
 
-    await daemonRequest("shutdown", {}, home);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      try {
-        process.kill(firstPid, 0);
-      } catch {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await daemonRequest("shutdown", {}, fixture.home);
+    await waitForPidExit(firstPid);
 
-    startDaemonProcess(home);
-    const second = await ensureDaemon(home);
-    secondPid = second.pid as number;
+    const second = await fixture.ensureReady();
+    const secondPid = second.pid as number;
     assert.ok(Number.isSafeInteger(secondPid));
     assert.notEqual(secondPid, firstPid);
     assert.deepEqual(second.buildIdentity, currentBuildIdentity());
-    await daemonRequest("shutdown", {}, home);
+    await daemonRequest("shutdown", {}, fixture.home);
   } finally {
-    for (const pid of [firstPid, secondPid]) {
-      if (pid === undefined) continue;
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {
-        // Already stopped.
-      }
-    }
+    await fixture.cleanup();
   }
 });

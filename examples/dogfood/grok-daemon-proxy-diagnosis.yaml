@@ -1,0 +1,103 @@
+version: 2
+name: Record why Grok TUI worked while ForkLight timed out
+project: /Users/yijunwang/code/forklight
+taskClass: grok-daemon-proxy-diagnosis
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    Add one concise Chinese dogfood-log entry that explains the measured cause
+    of the Grok timeout, the safe daemon restart, and the result of this real
+    Grok 4.5 smoke run without exposing proxy values or credentials.
+  presentation:
+    summary: 记录 Grok TUI 正常但 ForkLight 超时的真实原因与验证结果。
+    language: zh-CN
+  context:
+    - The manual Grok TUI process inherited HTTP_PROXY, HTTPS_PROXY, and NO_PROXY.
+    - The failed ForkLight daemon PID 79537 inherited none of those variables, so its Grok child could not connect to https://cli-chat-proxy.grok.com and produced no model response.
+    - The operator auth file and task-local copied auth file had the same size and SHA-256 digest, so authentication-copy mismatch was ruled out.
+    - Main stopped only the exact stalled Worker process and later restarted the idle daemon from a shell containing the proxy variables.
+    - The replacement daemon PID 50571 now contains the three proxy variable names. Never record their values.
+    - The earlier failed Task was d576b0dd-4ada-4ae0-ac0e-153692f79b46. This Task itself is the bounded live smoke check after the restart.
+  inScope:
+    - Append one dated section to forklight-dogfood-log.md.
+    - Explain cause, evidence, restart boundary, and that this Task is the real post-restart Grok verification.
+    - Use plain Chinese understandable to a non-technical operator.
+  outOfScope:
+    - Source code, tests, config, credentials, proxy values, Provider redesign, retries, or edits to existing historical entries.
+  executionSteps:
+    - Read the recent dogfood-log style.
+    - Append one compact section with the supplied facts.
+    - Run no commands and make no other edits.
+  deliverables:
+    - One new auditable dogfood-log section.
+  modules:
+    - name: Operational dogfood record
+      responsibility: Preserve the measured cause and recovery evidence for later Main and operators.
+      consumes:
+        - Process-environment comparison, auth digest comparison, failed Task id, and replacement daemon evidence.
+      produces:
+        - One plain-language Markdown section.
+      boundaries:
+        - No secrets, no proxy values, no source change, and no claim beyond measured evidence.
+  callChain:
+    - Grok TUI inherited proxy variables and worked.
+    - ForkLight daemon lacked them; its Grok Worker could not reach the chat proxy and timed out.
+    - Main waited for active work to finish, restarted the daemon from the configured shell, and verified only the variable names on the new process.
+    - This Grok Worker edits the log; ForkLight independently checks the resulting file.
+  scenarios:
+    - name: Reader understands the timeout
+      given: The TUI works but the daemon Worker times out.
+      when: The reader opens the new entry.
+      then: They can see that process environment inheritance, not model quality or copied auth, was the measured difference.
+  risks:
+    - Proxy values and credentials are sensitive, so only variable names and non-secret process/task ids may appear.
+    - A successful edit proves the restarted Grok path can execute this bounded task; it does not prove every future network condition.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 45
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - forklight-dogfood-log.md
+acceptance:
+  criteria:
+    - Exactly one Markdown file changes and the new section is plain Chinese.
+    - The entry identifies missing daemon proxy-variable inheritance as the measured cause and rules out copied-auth mismatch.
+    - The entry names the old failed Task and the replacement daemon PID without exposing proxy values or credentials.
+  commands:
+    - rg -n "d576b0dd-4ada-4ae0-ac0e-153692f79b46|PID 50571|代理环境" forklight-dogfood-log.md
+    - git diff --check

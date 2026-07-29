@@ -3,6 +3,24 @@ import type { TaskSpec } from "./types.js";
 import { keychainAccount } from "./config.js";
 import type { SetupKeychainStore } from "../setup/types.js";
 
+const MACOS_SECURITY_PATH = "/usr/bin/security";
+
+/** Build the content-free argv used to store a Provider key. The credential is
+ * intentionally absent and is supplied through stdin by createKeychainStore. */
+export function keychainWriteArguments(service: string, account: string): string[] {
+  return [
+    "add-generic-password",
+    "-U",
+    "-a",
+    account,
+    "-s",
+    service,
+    "-T",
+    MACOS_SECURITY_PATH,
+    "-w",
+  ];
+}
+
 export function readProviderKey(spec: TaskSpec): string {
   try {
     const value = execFileSync(
@@ -55,8 +73,12 @@ export function createKeychainStore(): SetupKeychainStore {
     write(service, account, value) {
       execFileSync(
         "security",
-        ["add-generic-password", "-U", "-a", account, "-s", service, "-w", value],
-        { stdio: "ignore" },
+        keychainWriteArguments(service, account),
+        {
+          input: `${value}\n`,
+          encoding: "utf8",
+          stdio: ["pipe", "ignore", "ignore"],
+        },
       );
     },
     delete(service, account) {

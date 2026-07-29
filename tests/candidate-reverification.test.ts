@@ -7,7 +7,8 @@
  * CLI/MCP receipt operation names, and bilingual Hub assets.
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -895,4 +896,118 @@ test("maxMainReverificationsFromSnapshot reads the frozen allowance with global 
   assert.equal(maxMainReverificationsFromSnapshot(undefined), 1);
   assert.equal(maxMainReverificationsFromSnapshot(snapshot(0)), 0);
   assert.equal(maxMainReverificationsFromSnapshot(snapshot(3)), 3);
+});
+
+// --- Capture failure (storage blocking) ---
+
+test("capture failure: blocked revisions directory keeps task failed with content-free evidence", async () => {
+  const built = await buildFailedCandidateTask("capturefail", 1);
+  try {
+    // Seed old revision evidence directly from the original behavior-only
+    // failed verification sequence — no prior passing reverification.
+    const diffContent = await readFile(built.task.paths.diff, "utf8");
+    const digest = createHash("sha256").update(diffContent).digest("hex");
+    const revisionId = randomUUID();
+    const revisionsDir = path.join(built.task.paths.root, "revisions");
+    await mkdir(revisionsDir, { recursive: true, mode: 0o700 });
+    await copyFile(built.task.paths.diff, path.join(revisionsDir, `${revisionId}.patch`));
+
+    // Get the original verification event sequence from the failed-candidate fixture.
+    const events = built.store.listEvents(built.task.id);
+    const origVerification = events.find((event) => event.type === "verification.completed");
+    assert.ok(origVerification !== undefined, "original verification must exist");
+    const origVerSeq = origVerification!.sequence;
+
+    built.store.addEvent(
+      built.task.id,
+      built.attemptId,
+      "candidate.revision.captured",
+      "Old revision evidence from prior reverification",
+      {
+        id: revisionId,
+        taskId: built.task.id,
+        attemptId: built.attemptId,
+        attemptOrdinal: 1,
+        verificationEventSequence: origVerSeq,
+        patchDigest: digest,
+        affectedPaths: ["readme.md"],
+        filesChanged: 1,
+        changedLines: 2,
+        verificationPassed: false,
+        createdAt: new Date().toISOString(),
+        privateArtifactPath: path.join(revisionsDir, `${revisionId}.patch`),
+      },
+    );
+
+    // Now remove the revisions directory, then create a blocker file at its path
+    // so that the next capture's mkdir will fail. This is the canonical fixture
+    // pattern: seed old evidence, then block the path before reverify.
+    await rm(revisionsDir, { recursive: true, force: true });
+    await writeFile(revisionsDir, "blocked");
+
+    // Create the marker file so the acceptance command passes.
+    await writeFile(built.markerPath, "pass\n");
+
+    // Run exactly one reverification: verification passes, capture fails.
+    const result = await reverifyCandidate(
+      built.store,
+      { taskId: built.task.id, reason: "storage failure on capture", confirm: true },
+      1,
+      30_000,
+    );
+    assert.equal(result.status, "failed", "reverify result is failed despite passing verification");
+    assert.equal(built.store.getTask(built.task.id).status, "failed", "Task stays failed");
+    assert.equal(result.costFacts.workerInvoked, false);
+    assert.equal(result.costFacts.incrementalWorkerTokens, 0);
+    assert.equal(result.costFacts.incrementalModelRuntimeCostUsd, 0);
+
+    // Capture-failed event exists and is content-free — never exposes raw paths, errors, or private content.
+    const afterEvents = built.store.listEvents(built.task.id);
+    const captureFailedEvents = afterEvents.filter((event) => event.type === "candidate.revision.capture.failed");
+    assert.equal(captureFailedEvents.length, 1, "exactly one capture-failed event");
+    const cfPayload = captureFailedEvents[0]!.payload as Record<string, unknown>;
+    assert.equal(cfPayload.attemptId, built.attemptId);
+    assert.equal(cfPayload.workerInvoked, false);
+    const cfJson = JSON.stringify(cfPayload);
+    assert.ok(!cfJson.includes("ENOTDIR"), "no raw errno exposed");
+    assert.ok(!cfJson.includes("EEXIST"), "no raw errno exposed");
+    assert.ok(!cfJson.includes(built.task.paths.root), "no raw path exposed");
+
+    // The old candidate.revision.captured event still exists. The exact-sequence
+    // check in recordMainReview will reject because the latest verification has
+    // no matching revision and revision events exist for this Task.
+    const captureEvents = afterEvents.filter((event) => event.type === "candidate.revision.captured");
+    assert.equal(captureEvents.length, 1, "old revision still on record");
+
+    // Main accept must reject: no revision for the exact latest verification sequence,
+    // but candidate.revision.captured events exist for this Task.
+    assert.throws(
+      () => recordMainReview(built.store, built.task.id, {
+        decision: "accept", reason: "Should reject without exact-sequence revision", confirm: true,
+      }),
+      /current Diff to match/,
+    );
+    // No main-review event was appended.
+    assert.equal(
+      built.store.listEvents(built.task.id).filter((event) => event.type === "main-review.completed").length,
+      0,
+    );
+
+    // Integration preflight rejects because the Task is not "succeeded".
+    const preflight = await preflightIntegration(built.store, built.task.id, {
+      reviewedPatchMaxFiles: 5,
+      reviewedPatchMaxLines: 400,
+      reviewReceiptTtlMs: 900_000,
+      verificationTimeoutMs: 30_000,
+      backupRetentionCount: 3,
+      autoRollback: true,
+    });
+    assert.ok(preflight.rejectionReasons.length > 0, "preflight must reject a failed task");
+
+    // No new Attempt was created (zero-Worker, no model cost).
+    assert.equal(built.store.listAttempts(built.task.id).length, 1, "no new Attempt created");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
 });

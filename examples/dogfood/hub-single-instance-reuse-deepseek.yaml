@@ -1,0 +1,173 @@
+version: 2
+name: Reuse the active Hub instead of opening duplicate local servers
+project: ../..
+taskClass: forklight-hub-lifecycle
+directCodexProfileId: codex-main-gpt-5.6
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    Make `forklight hub` behave as one local control center per FORKLIGHT_HOME: a second invocation must safely discover, authenticate, and reopen the live Hub instead of creating another process and random port.
+  presentation:
+    summary: 再次运行 ForkLight Hub 时，系统会打开已经在工作的控制台，不再悄悄启动多个端口和重复进程；失效记录会被安全清理。
+    language: zh-CN
+  context:
+    - "Inspect first: src/cli.ts Hub command flow, src/hub/server.ts lifecycle and authentication, src/daemon/client.ts local-home conventions, tests/hub-settings.test.ts, tests/hub-health-cache.test.ts, README.md and docs/operations.md."
+    - Current `forklight hub` always constructs a new HubServer with a random token and usually port 0. Repeated invocations therefore accumulate independent Hub processes and ports for the same FORKLIGHT_HOME.
+    - The Hub is loopback-only and its URL-fragment token is the authentication authority. Reuse must not weaken that boundary or expose the token through an HTTP response, process listing, daemon state, logs, or a world-readable file.
+    - The daemon already has an independent single local endpoint. This task is only about the Hub process and must not combine Hub ownership with daemon ownership.
+    - A reused invocation should print or open the existing authenticated URL and then exit. The original Hub process remains the owner and continues serving.
+    - This is the first M0 self-upgrade delivery candidate. Delivery must use the existing `forklight-self-upgrade` profile; deterministic tests alone do not count as live exit evidence.
+  inScope:
+    - "Add a small Hub-instance lifecycle module that stores one bounded private descriptor per FORKLIGHT_HOME containing only the fields needed to authenticate and reopen the owner: schema version, PID, loopback port, token, and an ownership nonce or equivalent safe identity."
+    - Create descriptor and coordination files with owner-only permissions under FORKLIGHT_HOME, using atomic or exclusive filesystem operations so two simultaneous `forklight hub` invocations cannot both become owners.
+    - Before constructing SetupService, StateStore, or HubServer, make the CLI discover an existing descriptor and prove it is the live ForkLight Hub by checking PID liveness plus an authenticated loopback request. A PID or open port alone is not sufficient.
+    - If the existing Hub proves live, reuse its actual port and token, print/open its URL, clearly state that the active Hub was reused, and exit without starting a second Hub or claiming ownership.
+    - If the descriptor is malformed or its owner is gone/unreachable, remove only the exact stale lifecycle artifacts after bounded validation, then allow one new owner to start. Never signal or kill the recorded PID during discovery.
+    - Publish the descriptor only after HubServer is listening. On graceful SIGINT/SIGTERM or startup failure, remove it only when the current process still owns the exact nonce/token identity; an older process must never erase a replacement owner's record.
+    - "Define deterministic behavior for an explicit `--port`: an already-live Hub for the same home is reused even if it uses another port, while a different FORKLIGHT_HOME remains an intentionally separate instance."
+    - Add focused tests for live reuse, authentication failure, malformed/stale records, concurrent startup, ownership-safe cleanup, permissions, explicit port behavior, and no duplicate listener.
+    - Update README and operations documentation in plain language. Do not require users to understand descriptor files, locks, nonces, or ports in the normal path.
+  outOfScope:
+    - Changing daemon single-instance behavior, daemon socket paths, Worker scheduling, Task state, Provider configuration, or Main MCP installation.
+    - A cloud/shared Hub, LAN binding, remote authentication, multi-user access, or exposing the Hub beyond 127.0.0.1.
+    - Killing an existing Hub, silently replacing a healthy owner, rotating its token, or adding a force/restart command.
+    - Storing the Hub token in settings, SQLite, task events, browser query parameters, daemon health, or any API response.
+    - Starting a Competition, retrying the Task, adapting policy, committing, pushing, or weakening Integration confirmation.
+  executionSteps:
+    - Trace the current CLI Hub path from argument parsing through server start, URL creation, signal handling, and cleanup; identify the earliest point where live reuse can return without allocating other Hub resources.
+    - Implement one narrow lifecycle module with strict descriptor validation, owner-only persistence, authenticated liveness probe, exclusive startup coordination, bounded stale recovery, and ownership-checked release.
+    - Route the CLI through discover-or-claim before constructing the server, publish only after listen succeeds, and release in every owner-only terminal path.
+    - Keep HubServer's loopback/token authentication unchanged except for the smallest read-only liveness seam needed to prove instance identity.
+    - Add deterministic module and CLI-level tests using isolated temporary FORKLIGHT_HOME directories and real loopback servers; tests must clean up every process, listener, and file they create.
+    - Update user documentation, run the stored acceptance commands once, and return any unresolved concurrency or security ambiguity to Main rather than weakening the contract.
+  deliverables:
+    - Single-owner Hub lifecycle and private discovery record per FORKLIGHT_HOME.
+    - Authenticated reuse path that reopens the existing Hub and exits without duplicate processes.
+    - Bounded stale/concurrent-start recovery with ownership-safe cleanup.
+    - Focused regression tests and plain-language operating documentation.
+  modules:
+    - name: Hub instance lifecycle
+      responsibility: Decide whether this invocation should reuse a proven live Hub or become the only new owner for one local ForkLight home.
+      consumes:
+        - FORKLIGHT_HOME, exact descriptor bytes, process liveness, loopback response, requested port, and current process identity.
+      produces:
+        - A validated reusable Hub URL, an exclusive startup claim, or one bounded stale-record decision.
+      boundaries:
+        - No daemon lifecycle mutation, no PID signalling, no network binding beyond loopback, no unbounded wait, and no token exposure outside the private descriptor and existing URL fragment.
+    - name: CLI Hub orchestration
+      responsibility: Reuse before allocating Hub resources, or start/publish/serve/clean up exactly one owner.
+      consumes:
+        - Hub lifecycle decision, CLI open/port flags, HubServer listen result, token, and shutdown signals.
+      produces:
+        - One user-facing existing or newly started Hub URL and truthful ownership message.
+      boundaries:
+        - A reuse invocation exits; it does not start another Hub, daemon, Store, setup service, or long-lived wait loop.
+    - name: Lifecycle verification
+      responsibility: Prove concurrency, stale recovery, permissions, authentication, and cleanup without leaking resources between tests.
+      consumes:
+        - Isolated homes, temporary loopback servers, child processes or injectable process/filesystem seams.
+      produces:
+        - Deterministic behavioral tests and readable operations documentation.
+      boundaries:
+        - Tests never use the user's real ForkLight home, credentials, running Hub, daemon, or source project.
+  callChain:
+    - User runs `forklight hub`; CLI parses home, `--port`, and `--no-open` without constructing the Hub stack.
+    - Lifecycle discovery reads and strictly validates the private descriptor, confirms the recorded process, and authenticates a loopback liveness request with the stored token.
+    - A live result returns the existing authenticated URL to the CLI; the CLI opens or prints it and exits without starting another service.
+    - A stale or missing result enters exclusive startup coordination; exactly one invocation constructs services and starts HubServer while contenders wait only for a bounded result and then reuse or fail clearly.
+    - After the server listens, the owner atomically publishes its descriptor and continues serving.
+    - Graceful shutdown closes the server and removes lifecycle artifacts only if their stored owner identity still matches this process.
+  scenarios:
+    - name: Repeated Hub command
+      given: A healthy authenticated Hub already serves the same FORKLIGHT_HOME on a random loopback port.
+      when: The user runs `forklight hub` again, with or without a different explicit port.
+      then: The command proves the existing owner, prints or opens that same authenticated URL, exits, and creates no second listener or Hub process.
+    - name: Stale descriptor after a crash
+      given: A private descriptor exists but its owner process is gone or the authenticated liveness request cannot prove a ForkLight Hub.
+      when: The next Hub invocation starts.
+      then: It removes only the validated stale artifacts, claims ownership, starts one replacement Hub, and publishes a fresh descriptor.
+    - name: Concurrent first start
+      given: No Hub exists and two invocations begin against the same home at nearly the same time.
+      when: Both attempt startup coordination.
+      then: Exactly one becomes owner; the other reuses the published live instance or exits with a bounded actionable message, with no duplicate listener.
+    - name: Unrelated process reuses PID or port
+      given: The descriptor names a PID or port now owned by a process that is not the recorded authenticated ForkLight Hub.
+      when: Discovery probes it.
+      then: It is never treated as reusable and ForkLight never signals or terminates that process.
+    - name: Old owner exits after replacement
+      given: A replacement has published a new ownership identity after the earlier record became stale.
+      when: Cleanup from the older process runs late.
+      then: Ownership comparison prevents the older process from deleting the replacement descriptor or claim.
+  risks:
+    - A check-then-listen race could still create duplicate owners, so startup requires exclusive coordination rather than only a preflight read.
+    - PID reuse or an unrelated loopback service could create a false match, so authenticated response evidence is required in addition to PID and port.
+    - Persisting the token with permissive mode would weaken local authentication, so file and parent-directory permissions are part of acceptance.
+    - A crash can leave lifecycle files behind, so stale recovery must be bounded, ownership-aware, and must never kill the recorded process.
+    - Cleanup from an old owner could delete a newer record, so every release compares the exact stored identity before removal.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1500
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/instance.ts
+    - src/cli.ts
+    - src/hub/server.ts
+    - tests/hub-instance.test.ts
+    - tests/hub-settings.test.ts
+    - README.md
+    - docs/operations.md
+acceptance:
+  criteria:
+    - One authenticated Hub owner exists per FORKLIGHT_HOME and a repeated command reuses it without constructing a second Hub stack.
+    - Discovery requires strict private descriptor validation, PID liveness, and authenticated loopback proof; PID or port alone never authorizes reuse.
+    - Simultaneous first starts cannot create two owners, and every wait or stale-recovery path is bounded.
+    - Malformed, stale, PID-reused, or authentication-failed records are handled without signalling unrelated processes or deleting a newer owner's state.
+    - Descriptor and coordination artifacts are owner-only; the token never enters settings, SQLite, task evidence, query parameters, API responses, or ordinary logs.
+    - Owner cleanup is identity-checked, idempotent, and removes only its own lifecycle artifacts after graceful shutdown or startup failure.
+    - Explicit port behavior and different FORKLIGHT_HOME behavior are deterministic and documented in plain language.
+    - The complete existing suite remains green and tests leave no Hub process, listener, or temporary lifecycle artifact behind.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-instance.test.ts tests/hub-settings.test.ts tests/hub-health-cache.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

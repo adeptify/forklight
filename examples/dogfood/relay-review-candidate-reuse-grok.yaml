@@ -1,0 +1,195 @@
+version: 2
+name: Relay review keeps useful Worker output and explains every decision
+project: /Users/yijunwang/code/relay
+taskClass: relay-review-candidate-reuse
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    Relay's pending-review experience lets a non-technical user give real
+    feedback and understand the consequence of Accept, Revise, and Reject;
+    when the active runtime is ForkLight, Revise continues the existing
+    ForkLight Task, session, workspace, and files instead of submitting a new
+    Task from scratch.
+  presentation:
+    summary: 验收不再是三个看不懂的英文按钮；用户能写清修改意见，并让 ForkLight 保留已完成成果继续修。
+    language: zh-CN
+  context:
+    - Relay already moves a successful execute_code Assignment to pending_review and keeps Job history.
+    - ItemDetail currently submits hard-coded English reasons for Revise and Reject, so the user's actual judgment never reaches the Worker or audit trail.
+    - Relay currently implements every Revise through retryAssignment, which calls dispatch again and creates a new ForkLight Task even when the previous Job has a ForkLight externalId.
+    - ForkLight 0.2 exposes `forklight revise <task-id> --feedback <text>` for a standalone succeeded Task. That command records the Main revise decision, reuses the existing Task/session/workspace/files, creates another Attempt, and reruns the original independent checks.
+    - A new Relay Job should still be created for the revision so the earlier successful Job remains visible history, but its externalId must remain the same ForkLight Task id.
+    - Accept marks the Relay Item done only. It never means source integration, merge, deployment, or publication.
+    - Reject records the reason, returns the Item to inbox, preserves history, and starts no Worker execution.
+    - The Relay worktree is heavily modified. Preserve every unrelated change and edit only the declared focus paths.
+    - Follow AGENTS.md, docs/DEVELOPMENT.md, docs/ARCHITECTURE.md, and the local Next.js 16 Client Component guidance before changing UI code.
+  inScope:
+    - Add a small optional revision capability to the JobDispatcher boundary so Application code can request reuse without depending on the ForkLight CLI.
+    - Implement ForkLight revision through the existing safe CLI runner. Check live-submit readiness, do not expose feedback in logs, classify clear failure versus uncertain output honestly, and return the same external Task id on accepted revision.
+    - Require non-blank user feedback for Revise and Reject before any Domain state mutation. Trim it once and persist the exact canonical feedback in Assignment reviewReason and Activity text.
+    - For ForkLight Jobs with a usable externalId, create a new Relay revision Job, preserve prior Jobs, call the optional revision capability, and keep the same externalId. Do not call normal submit for that path.
+    - Preserve the existing new-Job retry fallback for runtimes that do not support retained-task revision.
+    - Replace ItemDetail's hard-coded review buttons with a Chinese-first decision panel that explains each outcome, collects feedback for Revise/Reject, prevents duplicate submission while busy, and shows actionable errors without hiding the current result.
+    - Make the UI explicitly say that accepting finishes the Relay Item but does not merge or deploy code, revision preserves the current result when ForkLight supports it, and rejection launches no Worker.
+    - Replace pending-review Accept/Revise/Reject prose in the existing execution presentation with plain Chinese product language.
+    - Add focused behavior tests for decision copy/validation, Service routing and history, and the ForkLight retained Task id behavior.
+  outOfScope:
+    - Automatic source integration, patch apply, merge, commit, push, deployment, publication, Provider configuration, Worker routing, competition, connector work, Team/Postgres work, Schema migration, or broad Item Detail redesign.
+    - Adding a second review authority, changing ForkLight lifecycle rules, using `forklight correct` for a succeeded Task, or claiming an unmeasured Token saving.
+    - Deleting prior Jobs, silently falling back to a new ForkLight Task after an accepted retained-task revision fails, or automatically retrying uncertain CLI output.
+    - Adding dependencies, a localization framework, modal dialogs, giant snapshots, or edits outside the focus paths.
+  executionSteps:
+    - Trace ItemDetail to store/client/API, RelayServices.reviewAssignment and retryAssignment, JobDispatcher, and the ForkLight CLI adapter before editing.
+    - Define one narrow optional dispatcher revision input/output and implement it in the ForkLight adapter using the existing CLI runner.
+    - Refactor the Application review path so required feedback is validated before mutation and ForkLight reuse is selected only from an exact prior Job externalId.
+    - Build the review decision panel inside the incumbent visual system with persistent labels, clear consequences, keyboard focus, busy state, and recoverable error copy.
+    - Add behavior tests that execute the decision rules and Service routing; do not rely only on source-string assertions.
+    - Run the focused checks and full Relay tests once, then report residual baseline failures without expanding scope or looping.
+  deliverables:
+    - Understandable pending-review decision UI with real feedback.
+    - ForkLight-specific retained Task revision path with the same externalId and preserved Relay Job history.
+    - Honest accept/reject boundaries and focused regression evidence.
+  modules:
+    - name: Review decision presentation
+      responsibility: Explain the three user decisions, collect required feedback, and submit one explicit choice with honest loading and failure states.
+      consumes:
+        - Pending Assignment, Runtime type, current Worker result, and the user's decision and feedback.
+      produces:
+        - One accept, revise, or reject request whose visible consequence matches the actual Application behavior.
+      boundaries:
+        - No lifecycle mutation in React, no hard-coded feedback, no merge or deployment claim, and no automatic submit on option selection.
+    - name: Application review workflow
+      responsibility: Validate review input, persist the Main decision, preserve history, and select retained-task revision or ordinary retry by explicit runtime capability.
+      consumes:
+        - Assignment id, canonical decision, canonical feedback, Runtime, and exact prior Job externalId.
+      produces:
+        - Updated Assignment and Item plus, for Revise, a new Relay Job representing the next execution attempt.
+      boundaries:
+        - Feedback validation happens before mutation; Reject starts no Worker; Accept does not integrate source; no silent full resubmit after a ForkLight reuse failure.
+    - name: Runtime revision port
+      responsibility: Give Application code one optional runtime-neutral operation for continuing retained work.
+      consumes:
+        - Existing external task id and bounded user feedback.
+      produces:
+        - The same honest DispatchResult shape used by normal dispatch.
+      boundaries:
+        - Application imports no CLI code and runtimes without this capability keep their existing retry behavior.
+    - name: ForkLight revision adapter
+      responsibility: Invoke ForkLight revise safely and translate its output into Relay execution truth.
+      consumes:
+        - ForkLight Task id, feedback, live-submit setting, CLI availability, and Daemon health.
+      produces:
+        - Accepted, dry-run, failed, or uncertain result with the same Task id and redacted operational logs.
+      boundaries:
+        - Never logs feedback, never calls submit for retained revision, never auto-retries uncertain output, and never fabricates success.
+    - name: Review regressions
+      responsibility: Prove user meaning, validation order, history preservation, exact Task reuse, and fallback behavior.
+      consumes:
+        - Pure decision inputs, fake dispatchers, and representative pending-review records.
+      produces:
+        - Deterministic evidence for every review decision and failure boundary.
+      boundaries:
+        - No live Provider request, real Daemon mutation, browser mock, giant snapshot, or unrelated baseline repair.
+  callChain:
+    - A Worker Job succeeds; Relay observes it and moves the execute_code Assignment to pending_review.
+    - ItemDetail shows the Worker input/output and an explicit review decision panel.
+    - The user accepts, requests changes with feedback, or rejects with a reason.
+    - Store and API pass the exact decision and canonical feedback to RelayServices.
+    - RelayServices validates before mutation and records the Main decision.
+    - For ForkLight revision, a new Relay Job calls JobDispatcher.revise with the prior externalId; the adapter invokes `forklight revise`, which reuses the Task/session/workspace/files and reruns original checks.
+    - For another runtime without revision capability, Relay keeps its existing new-Job retry behavior.
+    - Later observation updates only the new Relay Job while the earlier successful Job remains historical evidence.
+  scenarios:
+    - name: Accept result without implying delivery
+      given: A Worker Job succeeded and the Assignment awaits review.
+      when: The user chooses 接受结果.
+      then: Relay marks the Assignment succeeded and Item done, starts no Worker, and states that source was not merged or deployed.
+    - name: Revise a ForkLight result in place
+      given: The latest successful Job has a ForkLight externalId and the runtime supports retained revision.
+      when: The user enters non-blank feedback and chooses 保留成果继续修改.
+      then: Relay preserves the old Job, creates one revision Job, calls ForkLight revise exactly once with the old Task id, and the new Job keeps that same externalId without calling submit.
+    - name: Revision feedback is missing
+      given: The Assignment awaits review.
+      when: Revise is requested with blank or whitespace-only feedback.
+      then: Relay returns an actionable validation error before changing Assignment, Item, Job, or Activity state.
+    - name: Reject with a reason
+      given: The Assignment awaits review.
+      when: The user provides a reason and rejects the result.
+      then: Relay records the canonical reason, returns the Item to inbox, keeps the completed Job, and starts no Worker.
+    - name: Runtime cannot reuse retained work
+      given: A non-ForkLight runtime does not implement the optional revision capability.
+      when: The user requests changes with feedback.
+      then: Relay preserves prior Jobs and uses the existing new-Job retry path while the UI avoids promising same-Task reuse for that runtime.
+    - name: ForkLight revision response is uncertain
+      given: The revise command returns output that does not prove acceptance or a clear failure.
+      when: The adapter translates the result.
+      then: The new Job records uncertain dispatch, tells the user to inspect ForkLight, and does not automatically submit or retry again.
+  risks:
+    - A review state could mutate before feedback validation, so validation must precede the transaction and have a regression proving no writes.
+    - Reusing the wrong historical Task would attach feedback to unrelated work, so the Application must use the latest exact Job for the same Assignment and require its externalId.
+    - ForkLight revision can be rejected by its own attempt policy; surface that failure honestly and keep prior evidence rather than silently starting over.
+    - The worktree contains unrelated changes, so focus-path enforcement and Main diff review are required before Integration.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 1400
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 2
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - .next
+    - dist
+  generatedPaths:
+    - .next/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/application/ports.ts
+    - src/adapters/runtimes/forklight/job-dispatcher.ts
+    - src/application/services.ts
+    - src/components/ItemDetail.tsx
+    - src/components/job-presentation.ts
+    - src/components/review-presentation.tsx
+    - tests/persistence-and-services.test.ts
+    - tests/review-presentation.test.ts
+acceptance:
+  criteria:
+    - Revise and Reject require canonical non-blank feedback before any state mutation, and the UI collects that feedback instead of sending fixed strings.
+    - ForkLight Revise reuses the exact existing external Task id through an optional dispatcher capability, preserves prior Relay Jobs, creates one new revision Job, and never calls normal submit on that path.
+    - Other runtimes retain the existing new-Job retry fallback without a false reuse promise.
+    - Accept, Revise, and Reject copy states the actual Relay consequence and never claims source merge, deployment, publication, or measured Token savings.
+    - Busy, disabled, validation, and actionable failure states remain understandable and the current Worker result stays visible.
+    - Focused behavior tests and the existing complete 176-test baseline pass; unrelated optional Postgres TypeScript or ESLint 10 compatibility failures are not expanded into this Task.
+  commands:
+    - node --test --import tsx tests/review-presentation.test.ts tests/persistence-and-services.test.ts tests/job-presentation.test.ts
+    - node --test --import tsx tests/alpha-gates.test.ts
+    - npm test
+    - git diff --check

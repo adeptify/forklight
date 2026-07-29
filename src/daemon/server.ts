@@ -9,6 +9,7 @@ import type { StatisticsFilter } from "../core/statistics.js";
 import type { AttemptAuthorization, TaskStatus } from "../core/types.js";
 import { StateStore } from "../state/store.js";
 import { DaemonCoordinator } from "./coordinator.js";
+import type { ProviderAuthInspector } from "../core/providers.js";
 import type { DaemonRequest, DaemonResponse } from "./protocol.js";
 import { requiresMatchingBuildIdentity } from "./protocol.js";
 import {
@@ -133,10 +134,16 @@ export class ForkLightDaemon {
   constructor(
     home: string,
     maxConcurrency?: number,
+    providerAuthInspector?: ProviderAuthInspector,
   ) {
     this.store = new StateStore(home);
     this.settingsService = new SettingsService(this.store);
-    this.coordinator = new DaemonCoordinator(this.store, this.settingsService, maxConcurrency);
+    this.coordinator = new DaemonCoordinator(
+      this.store,
+      this.settingsService,
+      maxConcurrency,
+      providerAuthInspector,
+    );
     this.socketPath = daemonSocketPath(home);
   }
 
@@ -296,8 +303,13 @@ export class ForkLightDaemon {
     switch (request.method) {
       case "health":
         return this.coordinator.health();
+      case "validate_file":
+        return this.coordinator.validateFile(requiredString(params.taskFile, "taskFile"));
       case "submit_file":
-        return this.coordinator.submitFile(requiredString(params.taskFile, "taskFile"));
+        return this.coordinator.submitFile(
+          requiredString(params.taskFile, "taskFile"),
+          params.expectedPreviewRevisionDigest,
+        );
       case "submit":
         return this.coordinator.submit(
           params.task,

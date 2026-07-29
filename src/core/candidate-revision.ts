@@ -24,6 +24,8 @@ import type {
   CorrectionEligibilityCategory,
   EventRecord,
   GapEntry,
+  MainReviewDecision,
+  MainReviewDecisionKind,
   TaskRecord,
 } from "./types.js";
 
@@ -448,6 +450,82 @@ export function buildCandidateGapContract(
   };
 }
 
+// --- Main Review evidence parsing (dependency-neutral, canonical) ---
+
+export function isDecision(value: unknown): value is MainReviewDecisionKind {
+  return value === "accept" || value === "revise" || value === "reject";
+}
+
+/** Return the latest verification event, or undefined if none exists.
+ *  Canonical parser shared by main-review.ts and correction eligibility. */
+export function latestVerificationEvent(events: readonly EventRecord[]): EventRecord | undefined {
+  return events
+    .filter((event) => event.type === "verification.completed")
+    .reduce<EventRecord | undefined>(
+      (latest, event) => latest === undefined || event.sequence > latest.sequence ? event : latest,
+      undefined,
+    );
+}
+
+/** Return the latest verification event's sequence, or 0 if none exists.
+ *  Convenience wrapper used by correction eligibility and authorization. */
+export function latestVerificationSequence(events: readonly EventRecord[]): number {
+  return latestVerificationEvent(events)?.sequence ?? 0;
+}
+
+/** Canonical typed Main Review evidence parser — shared by main-review.ts,
+ *  correction eligibility, authorization, integration, and Task Detail.
+ *  Pure event filter; never mutates, runs commands, or exposes private content. */
+export function latestMainReview(
+  events: readonly EventRecord[],
+): MainReviewDecision | undefined {
+  const event = events
+    .filter((candidate) => candidate.type === "main-review.completed")
+    .reduce<EventRecord | undefined>(
+      (latest, candidate) => latest === undefined || candidate.sequence > latest.sequence
+        ? candidate
+        : latest,
+      undefined,
+    );
+  if (event?.payload === null || typeof event?.payload !== "object") return undefined;
+  const payload = event.payload as Partial<MainReviewDecision>;
+  if (
+    !isDecision(payload.decision)
+    || typeof payload.reason !== "string"
+    || typeof payload.attemptId !== "string"
+    || typeof payload.verificationEventSequence !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    decision: payload.decision,
+    reason: payload.reason,
+    attemptId: payload.attemptId,
+    verificationEventSequence: payload.verificationEventSequence,
+    ...(typeof payload.candidateRevisionId === "string"
+      ? { candidateRevisionId: payload.candidateRevisionId }
+      : {}),
+    ...(typeof payload.acceptedPatchDigest === "string"
+      ? { acceptedPatchDigest: payload.acceptedPatchDigest }
+      : {}),
+  };
+}
+
+/** Validate that the latest Main Review is a typed revise decision bound
+ *  to the exact latest attempt and latest verification event.
+ *  Uses the canonical `latestMainReview` parser — no duplicated event filtering. */
+export function isLatestMainReviewRevise(
+  events: readonly EventRecord[],
+  latestAttemptId: string,
+  latestVerificationSeq: number,
+): boolean {
+  const review = latestMainReview(events);
+  return review !== undefined
+    && review.decision === "revise"
+    && review.attemptId === latestAttemptId
+    && review.verificationEventSequence === latestVerificationSeq;
+}
+
 // --- Correction eligibility ---
 
 /** Canonical read-only correction eligibility shared by daemon, MCP, and Hub.
@@ -470,10 +548,25 @@ export function resolveCorrectionEligibility(
     source: task.effectivePolicy?.provenance.maxMainCorrections ?? "global" as const,
   };
 
-  // Category checks in priority order
+  // Category checks in priority order.
+  // Status gate: only failed, interrupted, or (with Main revise) succeeded.
   if (task.status !== "failed" && task.status !== "interrupted") {
-    return { eligible: false, category: "not-failed-or-interrupted", allowance };
+    if (task.status !== "succeeded") {
+      return { eligible: false, category: "not-failed-or-interrupted", allowance };
+    }
+    // Succeeded hard stops: integration history and competition are
+    // rejection reasons that must fire before shared checks.
+    if (store.listIntegrationResults(taskId).length > 0) {
+      return { eligible: false, category: "not-failed-or-interrupted", allowance };
+    }
+    if (store.getCompetitionByCandidateTaskId(taskId) !== undefined) {
+      return { eligible: false, category: "competition-candidate", allowance };
+    }
+    // All remaining checks (revision, allowance, diff, and Main Review binding)
+    // live in the shared path below so allowance fires before review proof.
   }
+
+  // --- Shared checks for all correction-eligible statuses ---
   if (store.getCompetitionByCandidateTaskId(taskId) !== undefined) {
     return { eligible: false, category: "competition-candidate", allowance };
   }
@@ -542,6 +635,20 @@ export function resolveCorrectionEligibility(
       latestRevision: summarizeRevision(latestRevision),
     };
   }
+  // For succeeded tasks: all revision/diff/allowance checks passed above;
+  // now prove the Main Review is a typed revise bound to the latest attempt.
+  // When the review proof fails, never leak the CandidateRevision summary —
+  // the task is not correctable and front-ends must not expose revision details.
+  if (task.status === "succeeded") {
+    const verSeq = latestVerificationSequence(events);
+    if (!isLatestMainReviewRevise(events, latestAttempt.id, verSeq)) {
+      return {
+        eligible: false,
+        category: "no-main-revise",
+        allowance,
+      };
+    }
+  }
 
   return {
     eligible: true,
@@ -578,6 +685,8 @@ export function describeCorrectionRejection(
       return "correction rejected: a pending correction grant is already present";
     case "stale-revision":
       return "correction rejected: the referenced revision no longer matches the current workspace";
+    case "no-main-revise":
+      return "correction rejected: Task succeeded but Main has not recorded a valid revise decision bound to the latest Attempt";
   }
 }
 

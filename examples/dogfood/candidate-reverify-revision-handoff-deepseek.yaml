@@ -1,0 +1,155 @@
+version: 2
+name: Bind Main-repaired candidate reverification to a fresh Candidate Revision
+project: ../..
+taskClass: forklight-candidate-evidence-handoff
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    After Main repairs a retained candidate and runs the bounded no-Worker
+    reverification path, ForkLight captures an immutable Candidate Revision for
+    the exact current Diff and new verification event before reporting success,
+    so a fresh Main accept and normal Integration preflight can proceed without
+    restarting the Worker.
+  presentation:
+    summary: 主调度修好候选代码并重新验证通过后，系统先封存这份当前版本，再允许验收和合入；封存失败就保持失败，不会拿旧版本冒充成功。
+    language: zh-CN
+  context:
+    - Candidate reverification reruns the original acceptance commands against the retained workspace without a Worker, a new Attempt, or model cost.
+    - The operation currently appends a new verification.completed event and marks the Task succeeded, but does not call captureCandidateRevision.
+    - If Main changed the retained candidate Diff, recordMainReview accept correctly rejects because the latest stored Candidate Revision no longer matches the current Diff.
+    - The normal Worker runner already captures a Candidate Revision after verification and treats capture failure as a terminal failure; reuse this evidence model rather than inventing a parallel receipt.
+  inScope:
+    - After candidate reverification records the canonical verification.completed event, capture an immutable Candidate Revision for the retained Attempt, the new verification sequence, the exact current integration Diff, current affected paths, files changed, changed lines, and verification result.
+    - Require successful revision capture before a passing reverification may move the Task to succeeded or report passed.
+    - If revision capture fails, record the existing privacy-safe candidate.revision.capture.failed event, keep the Task failed, preserve the retained Attempt, and return or throw a bounded actionable failure without private paths, patch contents, prompts, or command output.
+    - Preserve zero Worker invocation, zero incremental Worker Tokens, zero provider runtime cost, one consumed reverification allowance, no new Attempt, and no automatic retry/adaptation.
+    - Add regression coverage where Main changes the retained candidate after the original failed verification, reverification passes, a new revision has the new verification sequence and current digest, fresh Main accept binds it, and Integration preflight becomes eligible.
+    - Add failure coverage proving revision-capture failure cannot create Task success, Main accept authority, or Integration eligibility.
+    - Keep unchanged-diff and failing-reverification behavior compatible, including immutable Attempt history and privacy-safe public projection.
+  outOfScope:
+    - Worker retry, correction Attempt, automatic Main accept, automatic Integration, runtime activation outside the existing delivery profile, competition changes, Store schema migration, token formulas, commit, or push.
+    - Weakening digest matching, accepting a stale revision, exposing revision artifact paths, echoing command output, or adding an unbounded retry loop.
+    - Refactoring unrelated runner, remediation, Hub, provider, daemon, or settings behavior.
+  executionSteps:
+    - Trace the existing runner capture ordering, captureCandidateRevision idempotency, Main Review binding, and Integration preflight requirements.
+    - Add the smallest shared or direct capture step to candidate reverification after verification.completed and before Task success.
+    - Make capture failure fail closed with the same stable event category used by the normal runner and no stale-revision fallback.
+    - Extend focused tests to reproduce the Main-edited Diff case and prove the complete verification to revision to accept to preflight chain.
+    - Run focused Candidate Revision, Main Review, remediation, and reverification tests, then the complete suite once; do not broaden scope for unrelated baseline failures.
+  deliverables:
+    - Fresh Candidate Revision capture in the no-Worker candidate reverification path.
+    - Regression evidence for Main-edited candidate handoff and fail-closed capture errors.
+  modules:
+    - name: Candidate reverification coordinator
+      responsibility: Run one authorized local verification and only report success after exact candidate evidence is durably captured.
+      consumes:
+        - Failed Task, retained Attempt, current workspace Diff, acceptance commands, allowance, explicit Main confirmation and reason.
+      produces:
+        - New verification evidence, new Candidate Revision, and a passed result; or a failed result with safe capture-failure evidence.
+      boundaries:
+        - No Worker, new Attempt, model call, automatic retry, automatic Main accept, or automatic Integration.
+    - name: Candidate Revision evidence
+      responsibility: Bind the current integration Diff bytes to the retained Attempt and new verification sequence.
+      consumes:
+        - Current Diff, verification event sequence/result, affected paths, files changed, and changed lines.
+      produces:
+        - Immutable revision event/artifact whose digest must match the current Diff.
+      boundaries:
+        - Existing private artifact rules and exact digest matching remain authoritative.
+    - name: Handoff regression suite
+      responsibility: Prove the repaired candidate can be accepted and preflighted only through the newly captured exact revision.
+      consumes:
+        - Temporary Task/workspace fixtures with an original failed revision, a Main edit, a passing reverify, and forced capture failure.
+      produces:
+        - Deterministic pass/fail evidence for binding, immutability, privacy, and zero-Worker facts.
+      boundaries:
+        - No real Provider, user ForkLight home, source project mutation, Integration apply, daemon restart, commit, or push.
+  callChain:
+    - A Worker leaves a useful candidate whose behavior verification fails and whose original Candidate Revision is retained.
+    - Main repairs the retained workspace/Diff and explicitly authorizes one candidate reverification.
+    - ForkLight reruns stored acceptance commands locally and appends the new verification.completed event.
+    - ForkLight captures a new Candidate Revision for that exact verification event and current Diff.
+    - Only after capture succeeds does the Task become succeeded; Main records a fresh accept bound to the new revision.
+    - Existing Integration preflight validates the fresh review, revision digest, verification, and source compatibility normally.
+  scenarios:
+    - name: Main-edited candidate becomes deliverable
+      given: The prior failed verification has a Candidate Revision and Main changes the retained candidate Diff.
+      when: One authorized no-Worker reverification passes.
+      then: A distinct current Candidate Revision is captured for the new verification sequence, fresh Main accept succeeds, and Integration preflight has no stale-revision rejection.
+    - name: Candidate evidence cannot be captured
+      given: Verification commands pass but immutable revision capture fails.
+      when: Reverification reaches the evidence step.
+      then: The Task remains failed, the Attempt remains unchanged, a safe capture-failure event exists, no passed result or Integration authority is created, and nothing retries.
+    - name: Verification still fails
+      given: The retained candidate still fails one acceptance command.
+      when: Reverification completes.
+      then: The Task remains failed and all zero-Worker and no-auto-retry guarantees remain true.
+    - name: Candidate Diff is unchanged
+      given: The retained candidate Diff did not change after the original failure.
+      when: Reverification passes.
+      then: The new verification event is still bound to a revision through the existing idempotent evidence rules and a fresh Main accept remains mandatory.
+  risks:
+    - Marking success before evidence capture recreates the observed handoff gap, so ordering is a correctness boundary.
+    - Falling back to the prior revision would let Main accept different bytes, so exact current digest matching must remain fail closed.
+    - Testing failure by exposing a production bypass hook could weaken evidence capture; prefer a narrow internal dependency seam or deterministic filesystem fixture.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 700
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/candidate-reverification.ts
+    - src/core/candidate-revision.ts
+    - tests/candidate-reverification.test.ts
+    - tests/candidate-revision.test.ts
+acceptance:
+  criteria:
+    - A passing Main-edited candidate reverify captures a fresh exact Candidate Revision before Task success and enables a fresh digest-bound Main accept plus normal Integration preflight.
+    - Candidate Revision capture failure keeps Task failed, preserves Attempt history, records safe evidence, grants no Main accept or Integration authority, and performs no retry.
+    - Failing and unchanged-diff reverification remain compatible; every path still invokes no Worker, creates no Attempt, and reports zero incremental Worker Tokens/provider runtime cost.
+    - No private candidate path, patch content, prompt, reason, or command output is exposed through public result/event projections.
+    - Focused and complete existing suites remain green.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/candidate-reverification.test.ts tests/candidate-revision.test.ts tests/main-review.test.ts tests/main-remediation.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

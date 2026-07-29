@@ -1,0 +1,175 @@
+version: 2
+name: Let a new user run the first Task from Hub
+project: ../..
+taskClass: forklight-hub-guided-first-task
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    After configuring a real Worker, a first-time user can prepare, preview,
+    explicitly start, watch, review, and safely integrate one packaged checkout
+    sample from Hub without authoring YAML, entering an absolute path, choosing
+    a hidden Provider setting, or understanding Daemon/MCP/Candidate terminology.
+    The sample uses the selected saved Worker and ordinary Task pipeline.
+  presentation:
+    summary: 配好 Worker 后，用户可以直接在 Hub 运行一个安全的内置示例，完整体验“开始任务、看懂过程、审查结果、安全合入”，不需要先学 YAML。
+    language: zh-CN
+  context:
+    - "`docs/m1-daily-assistant-acceptance.md` is the M1.3 product gate. The current Hub completes Model, Worker, Main, and task-service setup but has no guided first Task."
+    - "`fixtures/checkout` is a deterministic broken project with one behavior fix and independent Python tests. The package manifest now ships both the fixture and `examples/deepseek-checkout.yaml`."
+    - The existing example hard-codes DeepSeek Flash and USD 0.25, so it cannot represent the saved Worker/effective-policy path required by onboarding.
+    - Hub already has canonical Task admission preview, preview-revision binding, explicit submit confirmation, Task Detail, Main Review, and Integration. The sample must compose those authorities rather than invent a parallel execution system.
+    - HubServer already receives an optional packageRoot. Production can additionally inject one exact sampleRoot under the active ForkLight home; tests must use an isolated root.
+  inScope:
+    - Add one small sample-preparation service that copies only an explicit allowlist of checkout fixture files from the proven package root into a new owner-only sample directory under an injected sample root. Reject missing, symlinked, non-file, oversized, changed-during-copy, or out-of-root source evidence without partial success.
+    - Generate a complete ordinary Task Contract inside that sample directory. It must reference the copied project and the user's exact selected saved workerProfileId, but omit inline Provider, model, runtime, budget, duration, Attempt, adaptation, concurrency, file/line policy, endpoint, keychain service, and Delivery Profile overrides.
+    - >-
+      Keep the sample's semantic scope fixed: repair loyalty credit so it
+      reduces taxable subtotal before tax, preserve validation/signature, and
+      run the packaged Python unittest command. Its small contract changeBudget
+      describes sample scope only; enforcement and all advanced execution values
+      still come from the selected Worker/global resolution.
+    - Add an authenticated Hub prepare route that requires explicit confirmation, validates the selected saved Worker, creates one new sample, calls daemon validate_file, and returns only an opaque sample id plus the canonical safe admission preview. It never starts a Task or Provider request.
+    - Add an authenticated Hub submit route that accepts only the opaque sample id, exact previewRevisionDigest, and explicit confirmation; derives the task path under the injected sample root and calls daemon submit_file with the revision binding. Missing, malformed, unrecognized, escaped, stale, or already-submitted evidence fails before a second Task.
+    - Add one beginner-readable final Configure/Overview card in English and Chinese. It explains what the sample changes, asks the user to choose one saved locally launchable Worker, prepares and displays the ordinary effective Worker/policy preview, invalidates that preview when selection changes, then explicitly starts once and links to ordinary Task Detail.
+    - Reuse ordinary Board/Task Detail/Main Review/Integration UI after submission. Do not auto-accept, auto-integrate, auto-retry, auto-adapt, auto-probe, or invent a second sample-only status model.
+    - Persist enough bounded sample metadata to make duplicate-submit protection and Hub restart recovery truthful, without storing Provider data, task text copies, private source paths in API output, credentials, prompts, model responses, or review authority.
+    - Leave the disposable sample project and audit evidence in place after completion. Cleanup is a future separate explicit action; never delete it automatically on success, failure, Hub close, or restart.
+    - Add deterministic service, Hub route, executable UI-state, packaging, privacy, restart, duplicate-submit, preview-drift, and bilingual regressions.
+  outOfScope:
+    - Replacing Main-authored contracts for real projects, adding a general YAML editor, arbitrary project templates, marketplace examples, tutorial tours, desktop packaging, Keychain repair, Provider probes, Worker readiness semantics, model routing, competition, retries, correction/adaptation policy, automatic Main review, automatic Integration, sample cleanup, commit, or push.
+    - Hard-coding a Provider/model/runtime/effort/monetary budget/duration/Token cap/Attempt count/adaptation count/concurrency/official pricing route into the generated sample Task.
+    - Returning or rendering the absolute package path, sample root, generated Task path, endpoint, keychain service, raw contract, acceptance command, preview digest in beginner copy, daemon error, or internal object.
+    - Treating local Worker readiness as Provider connectivity proof or calling the sample successful before independent verification and Main review.
+  executionSteps:
+    - Read the M1 acceptance gate, package manifest, checkout fixture, Worker Profile materialization, admission preview/bound submit, Hub setup/readiness UI, Task journey, and directly relevant tests before editing.
+    - Implement the isolated sample-preparation service with injected roots, exact file allowlist, owner-only permissions, atomic completion marker, opaque id, and deterministic generated Task Contract.
+    - Add prepare/submit routes that reuse validate_file and submit_file, bind one preview revision, reject duplicate/stale/escaped evidence, and expose only a bounded safe projection.
+    - >-
+      Add the final guided Hub card and executable state tests: Worker choice,
+      prepare, preview, selection invalidation, explicit one-time submit, Task
+      link, failure explanation, and restart recovery.
+    - Prove the packed artifact contains every required source fixture and that installed-package root resolution works without the repository's tests or node_modules layout.
+    - Run focused and full acceptance once. Report baseline problems to Main instead of widening scope or retrying.
+  deliverables:
+    - Safe packaged checkout-sample preparation and generated ordinary Task Contract.
+    - Authenticated prepare/submit Hub APIs with opaque identity and canonical preview binding.
+    - Bilingual guided first-Task card that hands off to ordinary Task Detail, review, and Integration.
+    - Deterministic lifecycle, privacy, packaging, and executable UI regressions.
+  modules:
+    - name: Packaged sample preparation
+      responsibility: Create one isolated disposable checkout project and ordinary Task Contract from the proven installed package without inheriting user project data.
+      consumes:
+        - Injected package root, injected ForkLight sample root, exact saved Worker Profile id, allowlisted fixture names, and secure randomness.
+      produces:
+        - Owner-only sample directory, copied project, generated Task file, atomic completion evidence, and opaque sample id.
+      boundaries:
+        - No arbitrary source path, symlink traversal, Provider setting, credential, user project write, automatic cleanup, Task creation, or network request.
+    - name: Canonical Hub sample admission
+      responsibility: Preview and start the generated Task once through existing daemon admission authorities.
+      consumes:
+        - Opaque sample id, exact preview revision, explicit confirmations, saved Worker validation, and daemon validate_file/submit_file.
+      produces:
+        - Safe ordinary admission preview, then at most one ordinary Task id.
+      boundaries:
+        - No raw path/contract/command/error in API output, automatic submit, stale revision, duplicate Task, Provider probe, retry, review, or Integration.
+    - name: Guided first-Task experience
+      responsibility: Let a beginner understand and authorize the complete first Task while reusing normal operating screens after launch.
+      consumes:
+        - Setup readiness, saved Worker/readiness list, safe admission preview, sample state, and returned Task id.
+      produces:
+        - Plain-language prepare/preview/start flow and link to normal Task Detail.
+      boundaries:
+        - No YAML/path input, internal jargon, advanced-policy duplication, false success, auto-review, auto-integration, or hidden retry loop.
+  callChain:
+    - User completes Model/Worker/Main/task-service setup and opens the Run a sample Task card.
+    - User chooses a saved locally launchable Worker and explicitly prepares the sample.
+    - Hub backend copies the allowlisted packaged checkout fixture, writes a Worker-Profile-based ordinary Task Contract, and asks daemon validate_file for the canonical safe preview.
+    - Hub displays what will run and what effective policy applies; changing Worker invalidates the prepared preview and cannot reuse its authorization.
+    - User explicitly starts; Hub derives the private task path from the opaque sample id and passes the exact preview revision to daemon submit_file.
+    - ForkLight creates one ordinary Task and the UI links to normal Task Detail, where the user watches execution, sees verification, records Main review, and may explicitly use ordinary Integration on the disposable project.
+    - Hub restart rehydrates the bounded sample state from owner-only completion/submission evidence; it never starts another Task automatically.
+  scenarios:
+    - name: First-time happy path
+      given: Hub has one locally launchable saved Worker, current task service, and packaged checkout fixture.
+      when: The user prepares, reads the preview, explicitly starts, and follows the Task link.
+      then: Exactly one ordinary Task uses that Worker Profile and its effective policy, independent tests judge the fix, and no YAML/path/internal concept is required.
+    - name: Worker or settings changed after preview
+      given: A sample preview exists and the selected Worker or relevant saved settings change before submit.
+      when: The user tries to start with old evidence.
+      then: UI invalidates on selection change and daemon revision binding rejects other drift before Task creation; the user is told to prepare/preview again.
+    - name: Fixture or package evidence is unsafe
+      given: The package root is missing, outside the expected root, contains a symlink/non-file/oversized allowlisted entry, or changes during copy.
+      when: Sample preparation runs.
+      then: No Task starts, no partial sample is reported ready, no raw path leaks, and one bounded reinstall/update action is shown.
+    - name: Duplicate start or Hub restart
+      given: The sample was already submitted once or Hub restarts after preparation/submission.
+      when: The user revisits or presses Start again.
+      then: ForkLight restores the truthful state, links the existing Task when known, and never creates a duplicate or consumes another Worker Attempt.
+    - name: Worker fails
+      given: The selected Worker cannot authenticate, stalls, or fails independent acceptance.
+      when: The ordinary Task reaches a terminal state.
+      then: Task Detail explains the real failure and next action; onboarding does not retry, hide the Task, claim completion, or discard a retained Candidate.
+  risks:
+    - A second sample-only execution path would drift from real project behavior, so preparation stops at generating a normal Task and all execution/review/Integration uses existing authorities.
+    - Shipping `examples/` without its fixture previously made the sample non-portable, so package contents and installed-root behavior require explicit tests.
+    - Returning an absolute generated path would reintroduce the beginner/path burden and expose local structure, so the browser receives only an opaque id and safe preview.
+    - Preparing again after settings drift can create unused sample directories; that is acceptable recoverable evidence, but it must not create duplicate Tasks or trigger automatic cleanup loops.
+    - Hard-coded Provider/runtime policy would make the sample prove only one model, so generated Tasks bind only to the selected saved Worker Profile and let canonical resolution snapshot all effective settings.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1600
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - docs/m1-daily-assistant-acceptance.md
+    - package.json
+    - fixtures/checkout
+    - src/onboarding/sample-task.ts
+    - src/hub/server.ts
+    - src/hub/public
+    - tests/onboarding-sample-task.test.ts
+    - tests/hub-ops-mutations.test.ts
+acceptance:
+  criteria:
+    - A new user can prepare, preview, and explicitly start one packaged checkout Task from Hub without YAML, an absolute path, internal terminology, or a hard-coded execution Provider/policy.
+    - Sample preparation copies only proven packaged files into an owner-only injected root, writes one ordinary Worker-Profile-based Task, survives Hub restart truthfully, and never mutates a real user project or auto-cleans evidence.
+    - Prepare creates no Task/Worker/Provider activity; submit accepts only the exact opaque sample and bound preview revision, creates at most one ordinary Task, and rejects drift, traversal, malformed, missing, or duplicate evidence before mutation.
+    - After launch, ordinary Task Detail, independent verification, Main Review, retained-Candidate handling, and explicit Integration remain the only authorities; onboarding adds no automatic success, retry, correction, adaptation, probe, review, or Integration.
+    - English and Chinese explain input, process, output, failure, and next action without raw path, contract, command, digest, endpoint, keychain service, credential, Provider response, or internal object in beginner copy.
+    - Focused sample/Hub/package behavior, full tests, strict TypeScript, Hub JavaScript syntax, production build, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/onboarding-sample-task.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts tests/package.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - npm run build
+    - git diff --check

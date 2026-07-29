@@ -1,0 +1,177 @@
+version: 2
+name: Make Hub owner reuse version-aware and graceful shutdown complete
+project: ../..
+taskClass: forklight-hub-owner-upgrade-handoff
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    A second `forklight hub` invocation reuses the active Hub only when that owner runs the same built product; otherwise it explains the stale Hub and offers one explicitly confirmed, authenticated, bounded restart path whose old process really exits before a replacement becomes active.
+  presentation:
+    summary: 再次打开 Hub 时，ForkLight 会确认页面服务是不是当前版本；旧版本不会被悄悄复用，明确确认重启后也必须等旧进程真正退出，才启动新的页面服务。
+    language: zh-CN
+  context:
+    - "`src/hub/instance.ts` already provides one private descriptor and lifetime claim per FORKLIGHT_HOME, strict parsing, PID plus authenticated loopback proof, bounded startup contention, and ownership-safe cleanup."
+    - The descriptor currently has no build identity. A rebuilt static UI can therefore be served by a long-lived old Hub server whose API shape is stale; real browser QA observed the new Worker Quality form while `/api/worker-advanced-preview` still omitted `previewQualityPolicy`.
+    - Real shutdown evidence also showed SIGTERM releasing port 56962 and both lifecycle files while the exact old Hub PID remained alive after seven seconds. Main had to verify ownership was released and kill only that PID manually.
+    - Daemon build identity and activation are separate and already implemented. This task must not merge Hub ownership with daemon ownership or turn Hub restart into daemon restart.
+    - The current CLI grammar is `forklight hub [--no-open] [--port]`. A normal invocation may diagnose a stale Hub, but replacing a live authenticated owner requires an explicit `restart --confirm` style action or an equivalently clear confirmed form.
+    - "M0 acceptance remains quality-first: change-budget excess is warning evidence, while identity, authentication, old-PID exit, ownership, full verification, and no leaks are hard requirements."
+  inScope:
+    - Add the current built product identity to newly published Hub descriptors and strict parsing without exposing it through an unauthenticated HTTP endpoint. Treat legacy descriptors that lack identity as live-but-version-unknown rather than guessing they match.
+    - Compare the invoking CLI's built identity with a proven live Hub descriptor before reuse. Matching owners keep the existing fast reuse path; mismatch or unknown identity prints a plain explanation and exact confirmed restart action instead of opening the stale page as current.
+    - Add one explicit confirmed Hub restart path. Before signalling, it must re-read the exact private descriptor/claim, prove the same PID/port/nonce through the authenticated loopback liveness response, and fail closed if any identity changed.
+    - Send graceful termination only to that proven Hub owner, wait a bounded interval for the exact old PID, listener, descriptor, and claim to disappear, and start/publish a replacement only after all four conditions hold. Do not automatically SIGKILL a timed-out or no-longer-provable PID.
+    - Repair HubServer/CLI shutdown ownership so a current-version Hub with active or recently active local connections exits normally within the bounded grace period, instead of merely releasing its listener and lifecycle files while the Node process remains alive.
+    - Preserve explicit port behavior, one-owner concurrency, private permissions, token secrecy, different-home isolation, and ownership-safe late cleanup.
+    - Add deterministic tests using isolated homes and child processes for matching reuse, legacy/mismatched diagnosis, confirmed replacement, refusal without confirmation, changed ownership, graceful exact-PID exit, timeout without replacement, and zero leftover process/listener/lifecycle files.
+    - Add a short plain-language operations note for normal reuse, stale-version diagnosis, confirmed restart, and timeout recovery. Keep descriptor, nonce, and raw build ids in technical detail only.
+  outOfScope:
+    - Daemon restart/activation changes, Worker scheduling, Tasks, Providers, model routing, Quality policy, Integration authority, MCP installation, browser token lifecycle, or cloud/shared Hub behavior.
+    - Automatic background upgrades, watching source files, hot reload, restarting Hub merely because source is dirty, or claiming source edits are active before a production build exists.
+    - Signalling a PID based only on process liveness, port ownership, a descriptor, or a build id. Authenticated liveness plus exact descriptor/claim identity is mandatory.
+    - Automatic SIGKILL, killing an unrelated or unproven process, deleting another owner's records, rotating credentials outside a successful replacement, commit, push, retry, Competition, correction, or adaptation.
+    - Redesigning the Overview UI or adding broad service-management settings. This slice may expose compact authenticated Hub identity evidence only if required by the existing state response, but no new dashboard is required.
+  executionSteps:
+    - Trace descriptor parsing/publication, authenticated liveness, CLI Hub reuse/start, HubServer stop, signal handlers, and existing real-child lifecycle tests before editing.
+    - Define one typed version-aware discovery result and exact equality rule using the shared build-identity type/helper; keep legacy parsing explicit and fail closed on malformed identity.
+    - Route normal Hub startup through matching reuse versus actionable stale-version diagnosis, then add the explicit confirmed restart branch without duplicating Hub construction logic.
+    - Implement bounded proven-owner termination and make HubServer close all owned HTTP connections/handles needed for the process to exit; preserve idempotent stop and exact-owner release.
+    - Add deterministic module and spawned-CLI tests that never touch the user's real home, daemon, Hub, Keychain, or port, and that fail rather than silently SIGKILL when graceful exit is the behavior under test.
+    - Run focused tests and the full stored acceptance once. Return any cross-platform process-identity ambiguity to Main rather than weakening authenticated ownership proof.
+  deliverables:
+    - Version-aware private Hub descriptor and truthful matching/unknown/mismatch discovery result.
+    - Explicitly confirmed, authenticated, bounded Hub replacement handoff with no overlapping owners.
+    - Graceful shutdown that proves the old Hub PID and owned resources are gone.
+    - Deterministic lifecycle regressions and concise operating guidance.
+  modules:
+    - name: Hub owner identity
+      responsibility: Decide whether a proven live Hub runs the same built product and whether it may be reused, diagnosed as stale, or considered legacy-unknown.
+      consumes:
+        - Private descriptor and claim bytes, authenticated nonce response, PID liveness, and current artifact build identity.
+      produces:
+        - A typed matching reuse decision, bounded upgrade-required evidence, or one exclusive start claim.
+      boundaries:
+        - No source-dirty inference, daemon identity mutation, PID signalling, token logging, or unbounded wait.
+    - name: Confirmed Hub handoff
+      responsibility: Replace only the exact authenticated stale Hub owner after explicit confirmation and prove the old owner is fully gone before starting a successor.
+      consumes:
+        - Frozen descriptor/claim identity, authenticated liveness proof, confirm flag, requested port, and bounded grace interval.
+      produces:
+        - One stopped-old-owner receipt followed by a single replacement owner, or a safe actionable failure with no replacement.
+      boundaries:
+        - Never SIGKILL automatically, never signal unknown/changing ownership, never overlap owners, and never control the daemon.
+    - name: Hub shutdown lifecycle
+      responsibility: Close the listener and all Hub-owned connections/handles so the CLI process actually exits and releases only its exact records.
+      consumes:
+        - SIGINT/SIGTERM or confirmed handoff request, HubServer state, active connections, and exact owner claim.
+      produces:
+        - Idempotent server stop, process exit, released listener, and exact-owner lifecycle cleanup.
+      boundaries:
+        - No broad process scan, unrelated PID cleanup, test-only production behavior, or hidden infinite wait.
+    - name: Lifecycle verification
+      responsibility: Prove version comparison, confirmation, authentication, shutdown, replacement ordering, and cleanup using isolated real child processes.
+      consumes:
+        - Temporary homes, bounded loopback ports, generated build identities, and spawned Hub CLI fixtures.
+      produces:
+        - Focused deterministic evidence and plain-language operations documentation.
+      boundaries:
+        - No user's real home, running Hub/daemon, Provider call, credential, commit, or push.
+  callChain:
+    - User runs `forklight hub`; CLI loads its built identity before allocating Hub services and asks the lifecycle module to discover or claim the home.
+    - Discovery strictly validates descriptor and claim, verifies PID liveness, authenticates the loopback nonce, and compares the descriptor's built identity with the invoking artifact.
+    - A matching owner returns its authenticated URL and the CLI reuses it. A legacy or mismatched owner returns an upgrade-required result and the CLI explains the exact confirmed restart action without opening it as current.
+    - User explicitly confirms restart; CLI repeats the complete proof against unchanged descriptor/claim bytes, signals only that PID, and waits within a fixed deadline for PID, listener, descriptor, and claim to be gone.
+    - Only after all old-owner evidence is gone does CLI acquire one new claim, construct services, start HubServer, publish the new descriptor with build identity, and print/open the new authenticated URL.
+    - Normal signals and restart share the same idempotent HubServer stop path; tests assert the owner process exits and late cleanup cannot remove a replacement's records.
+  scenarios:
+    - name: Current Hub is reused
+      given: A live authenticated Hub descriptor carries the same valid built identity as the invoking CLI.
+      when: User runs `forklight hub` again with any requested port.
+      then: ForkLight reuses that owner and creates no process, listener, token, Store, or daemon side effect.
+    - name: Old or legacy Hub is diagnosed
+      given: The live authenticated owner has a different build identity or a legacy descriptor with no identity.
+      when: User runs normal `forklight hub` without restart confirmation.
+      then: ForkLight does not present the page as current, does not signal it, and gives one plain confirmed restart command.
+    - name: Confirmed stale-owner replacement
+      given: The descriptor, claim, PID, port, nonce, authenticated response, and stale build evidence still match exactly.
+      when: User runs the confirmed restart action.
+      then: The old owner exits within the deadline; only then one replacement starts and publishes the current identity, with no overlapping listener or owner record.
+    - name: Ownership changes during restart
+      given: Any descriptor, claim, PID, nonce, authenticated response, or ownership file changes after diagnosis.
+      when: Confirmed restart revalidates authority.
+      then: It fails closed without signalling or deleting either process and explains that ownership changed.
+    - name: Old owner does not exit
+      given: A proven owner receives graceful termination but its PID or owned resources remain at the deadline.
+      when: The restart wait expires.
+      then: ForkLight does not SIGKILL automatically, does not publish a replacement, and reports which old-owner evidence remains.
+  risks:
+    - Treating source changes as a new build would create restart loops, so comparison uses only built artifact identity frozen into the running descriptor.
+    - A descriptor build id alone cannot authorize termination, so restart repeats authenticated nonce and exact ownership proof immediately before signalling.
+    - A PID may be reused after release, so the bounded path never escalates to automatic SIGKILL when the exact authenticated owner can no longer be proven.
+    - Closing only the listener can leave keep-alive sockets or timers alive, so real child-process exit is acceptance evidence rather than file deletion alone.
+    - Two restart callers could race, so old-owner termination and successor claim must preserve the existing exclusive, bounded ownership protocol.
+  changeBudget:
+    maxFiles: 7
+    maxDiffLines: 1400
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/instance.ts
+    - src/hub/server.ts
+    - src/cli.ts
+    - tests/hub-instance.test.ts
+    - tests/hub-settings.test.ts
+    - docs/operations.md
+acceptance:
+  criteria:
+    - A normal Hub invocation reuses only a proven live owner with the same valid built identity; mismatch and legacy-unknown owners receive a truthful actionable diagnosis without being signalled.
+    - Confirmed restart revalidates exact private ownership and authenticated liveness immediately before SIGTERM, waits a bounded time, and never starts a replacement until the old PID, listener, descriptor, and claim are all gone.
+    - Normal Hub shutdown exits its real child process within the grace period even with authenticated liveness traffic; tests do not hide failure behind cleanup SIGKILL.
+    - A timeout or any changed ownership fails closed without automatic SIGKILL, unrelated-process signalling, overlapping owners, token exposure, or replacement publication.
+    - Matching reuse, explicit-port behavior, different homes, permissions, stale recovery, concurrent starts, late cleanup, and daemon independence remain intact.
+    - The full existing suite passes and test teardown leaves no Hub child process, listener, descriptor, claim, or temporary home behind.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-instance.test.ts tests/hub-settings.test.ts tests/build-identity.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

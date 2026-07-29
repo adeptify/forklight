@@ -1,0 +1,136 @@
+version: 2
+name: Close the remaining Hub status truth gap
+project: ../..
+taskClass: forklight-hub-status-truth-gap
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    The retained read-only Hub status implementation can never report `current`
+    unless a valid invoking build identity was supplied and compared with the
+    proven Hub owner, while every status always carries one explicit next action.
+  presentation:
+    summary: 保留已经验证过的只读 Hub 状态成果，只补上一个事实边界：没有当前构建身份时绝不能说“版本一致”。
+    language: zh-CN
+  context:
+    - Main retained the machine-verified Candidate from Task `14ed39d0-2cc0-4644-b199-737532cd29a6` instead of rerunning its 6.77M-Token implementation.
+    - That Candidate passed focused 45/45, full 1435/1435, strict TypeScript, Hub JavaScript syntax, and diff validation. Main found one semantic gap after verification.
+    - The CLI always passes `currentBuildIdentity()`, but exported `HubInspectionOptions.runIdentity` is optional and the implementation returns `current` for any proven versioned owner when it is absent.
+    - This is a remaining-gap Task, not a redesign. Preserve the retained status implementation and tests; change only the truth boundary and directly affected copy/tests.
+  inScope:
+    - Make a valid `runIdentity` mandatory for `inspectHubStatus` at the TypeScript API boundary while leaving the separate backward-compatible `HubDiscoveryOptions.runIdentity` behavior unchanged.
+    - Fail closed at runtime if JavaScript or an unsafe cast supplies a missing or malformed comparator; return `unverified` with a fixed safe reason and `investigate`, never `current`.
+    - Make `HubInspectionStatus.nextAction` required so every state has exactly one explicit action.
+    - Remove the branch that calls a versioned owner current without comparison; compare every proven non-legacy owner against the valid supplied identity.
+    - Update the shared test options helper so normal tests supply `TEST_BUILD`, and add one explicit missing/malformed comparator regression that proves no `current`, no token/nonce/path output, and no lifecycle mutation.
+    - Tighten the unverified human next action if needed so it requests diagnosis/investigation rather than promising a fresh start that may be unsafe.
+  outOfScope:
+    - Reimplementing read-only status, changing discovery/reuse compatibility, Hub startup/restart, ownership files, authenticated probe mechanics, daemon behavior, UI, Provider routing, Integration authority, commit, or push.
+    - Adding a second Worker, retry, correction, adaptation, new status states, broad documentation, or another lifecycle abstraction.
+  executionSteps:
+    - Inspect only the retained status type/function, CLI rendering/call site, and directly adjacent status tests.
+    - Enforce the comparator and total next action at the narrowest typed boundary, plus one runtime fail-closed guard.
+    - Add the missing-comparator regression and adjust existing helper/callers without duplicating tests.
+    - Run the focused and full acceptance once; report any unrelated failure instead of widening the Task.
+  deliverables:
+    - Mandatory validated build comparator for read-only status.
+    - Total next-action projection and one fail-closed regression for missing/malformed comparator evidence.
+  modules:
+    - name: Status truth boundary
+      responsibility: Prevent a proven Hub owner from being called current until its build is compared with the invoking artifact.
+      consumes:
+        - Proven owner evidence and a mandatory valid `BuildIdentity` comparator.
+      produces:
+        - Current, different-build, legacy, stopped, or unverified status with one required next action.
+      boundaries:
+        - No ownership mutation, discovery compatibility change, secret output, lifecycle action, or guessed current state.
+    - name: Boundary regression
+      responsibility: Prove missing/malformed comparator input fails closed without changing lifecycle evidence.
+      consumes:
+        - An authenticated isolated Hub, unsafe runtime input, and before/after lifecycle bytes.
+      produces:
+        - Deterministic evidence that the result is unverified, token-free, and read-only.
+      boundaries:
+        - No user home, Provider, daemon, UI, process signal, retry, commit, or push.
+  callChain:
+    - CLI obtains `currentBuildIdentity()` and passes it to `inspectHubStatus`.
+    - The status boundary validates the comparator before reading a result as current.
+    - Proven legacy owners remain legacy; proven versioned owners are always compared; unsafe missing/malformed runtime input returns unverified.
+    - CLI renders the required next action from the token-free safe status.
+  scenarios:
+    - name: Matching comparator
+      given: A valid current build identity and an authenticated owner with the same build.
+      when: Status inspects the owner.
+      then: It reports current and nextAction none.
+    - name: Different comparator
+      given: A valid current build identity and an authenticated owner with a different build.
+      when: Status inspects the owner.
+      then: It reports different-build and restart-with-confirm.
+    - name: Missing or malformed comparator
+      given: JavaScript or an unsafe cast bypasses the TypeScript requirement.
+      when: Status is invoked.
+      then: It reports unverified with investigate, emits no private material, and changes no lifecycle evidence.
+  risks:
+    - Changing `HubDiscoveryOptions` would break intentional legacy reuse compatibility, so only `HubInspectionOptions` may become strict.
+    - A compile-time-only fix would still let JavaScript callers lie, so runtime validation is required.
+    - Rewriting the retained implementation would waste verified work and create new defects, so the Diff must remain a narrow truth-gap patch.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 300
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/instance.ts
+    - src/cli.ts
+    - tests/hub-instance.test.ts
+acceptance:
+  criteria:
+    - "`HubInspectionOptions.runIdentity` is mandatory and runtime validation prevents missing or malformed values from producing current."
+    - Every `HubInspectionStatus` has one required nextAction, and all existing states retain their truthful action.
+    - Missing/malformed comparator evidence returns unverified/investigate without token, nonce, URL, private path, PID signalling, lifecycle mutation, Hub startup, or daemon call.
+    - The separate discovery/reuse path retains its existing optional comparator and backward-compatible tests.
+    - The retained read-only status behavior, full suite, strict TypeScript, Hub JavaScript syntax, and diff validation all pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-instance.test.ts tests/build-identity.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

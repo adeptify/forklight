@@ -1,0 +1,123 @@
+version: 2
+name: Stop calling machine success final acceptance
+project: ../..
+taskClass: forklight-hub-machine-success-copy
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    Every generic Hub rendering of the machine `succeeded` state says that
+    checks passed, never that Main accepted or finally delivered the result.
+  presentation:
+    summary: 把机器状态统一说成“检查已通过”，不再让任何通用状态文案暗示 Main 已经验收。
+    language: zh-CN
+  context:
+    - A real Hub audit found a machine-successful Candidate with `decisionStage=revision-requested` prominently labelled `已通过验收` even though Main requested changes.
+    - The retained GLM Candidate now gives Task cards and Task Detail a decision-aware headline, but the shared `statusSucceeded` fallback still says `Succeeded` in English and `已通过验收` in Chinese.
+    - Machine verification, Main acceptance, and verified final delivery are different facts. The generic machine status must name only the first fact.
+  inScope:
+    - Change the shared English `statusSucceeded` label to `Checks passed`.
+    - Change the shared Chinese `statusSucceeded` label to `检查已通过`.
+    - Add one focused bilingual regression proving the generic succeeded label contains no acceptance or delivery claim and remains distinct from verified-delivery copy.
+    - Reuse the current decision-aware Task headline and journey semantics without altering them.
+  outOfScope:
+    - Task status values, decision stages, server data, board lanes/counts, Task headline precedence, delivery badges, Integration, daemon logic, Provider routing, CSS, broad copy cleanup, commit, or push.
+    - New retries, corrections, adaptations, state mappings, or another presentation abstraction.
+  executionSteps:
+    - Inspect both `statusSucceeded` locale entries and the existing Task headline regression tests.
+    - Replace only the two shared locale values and add the narrow executable assertion.
+    - Run the focused and full acceptance once; report unrelated failures without expanding scope.
+  deliverables:
+    - Generic succeeded state that truthfully says only that checks passed in both locales.
+    - Regression coverage preventing future acceptance/delivery wording drift.
+  modules:
+    - name: Shared machine-state copy
+      responsibility: Name the succeeded machine state without claiming a Main decision or final delivery.
+      consumes:
+        - Canonical succeeded status and the active Hub locale.
+      produces:
+        - Checks-passed wording in English and Chinese.
+      boundaries:
+        - No lifecycle, stage, lane, filter, request, or persistence change.
+    - name: Copy truth regression
+      responsibility: Keep machine success distinct from acceptance and verified delivery.
+      consumes:
+        - English and Chinese i18n sections.
+      produces:
+        - Deterministic assertions for exact checks-passed copy and forbidden acceptance/delivery wording.
+      boundaries:
+        - No browser mock, source-order snapshot, or unrelated key assertions.
+  callChain:
+    - ForkLight projects a machine Task status such as succeeded.
+    - Generic Hub surfaces resolve the status through `statusLabel` and `statusSucceeded`.
+    - The localized label says checks passed; decision-aware surfaces separately explain Main review and final delivery.
+  scenarios:
+    - name: Generic machine success
+      given: A Hub surface receives succeeded without a Main or delivery projection.
+      when: It resolves the shared status label.
+      then: It shows Checks passed or 检查已通过 and makes no final-acceptance claim.
+    - name: Final delivery remains distinct
+      given: A Task has verified final delivery evidence.
+      when: Its decision-aware headline renders.
+      then: It still uses the separate verified-delivery label rather than the generic machine-success label.
+  risks:
+    - Broad wording replacement could alter Main decision copy, so only the two `statusSucceeded` values may change.
+    - A presence-only test would allow misleading text to return, so the regression must assert exact locale values and separation from delivery wording.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 120
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - English and Chinese generic succeeded labels are exactly Checks passed and 检查已通过.
+    - Generic succeeded copy contains no accepted, acceptance, delivered, verified, 验收, 接受, or 交付 claim.
+    - Decision-aware Task headline and verified-delivery labels remain unchanged and distinct.
+    - Focused UI tests, the full suite, strict TypeScript, Hub JavaScript syntax, and diff validation all pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check

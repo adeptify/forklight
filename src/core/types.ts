@@ -18,6 +18,7 @@ export type RuntimeBudgetEnforcement = "supported" | "partial" | "unsupported";
 
 export type EventType =
   | "task.created"
+  | "task.launch-preflight.failed"
   | "task.waiting"
   | "task.blocked"
   | "task.ready"
@@ -922,6 +923,7 @@ export type DecisionStage =
   | "ready-for-integration"
   | "integrating"
   | "applied-not-activated"
+  | "delivered"
   | "activated"
   | "integration-failed"
   | "unknown";
@@ -1171,7 +1173,8 @@ export type CorrectionEligibilityCategory =
   | "allowance-zero"
   | "allowance-exhausted"
   | "pending-incompatible-grant"
-  | "stale-revision";
+  | "stale-revision"
+  | "no-main-revise";
 
 /** Canonical read-only correction eligibility projection.
  *  Never exposes private artifact paths, Diff content, or gap text. */

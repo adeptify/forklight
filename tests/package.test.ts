@@ -21,9 +21,15 @@ test("package declares portable CLI and MCP entrypoints", async () => {
     "forklight-mcp": "dist/src/mcp/main.js",
   });
   const files = pkg.files as string[];
+  assert.ok(
+    files.includes("dist/build-identity.json"),
+    "installed CLI and MCP entrypoints require the generated build identity",
+  );
   assert.ok(files.includes("dist/src/"));
   assert.ok(files.includes("plugins/forklight/"));
   assert.ok(files.includes(".agents/plugins/"));
+  assert.ok(files.includes("examples/"));
+  assert.ok(files.includes("fixtures/"), "the packaged first-Task example must include its project fixture");
   assert.ok(!files.some((value) => /tests|plans|Library|\.forklight/i.test(value)));
 });
 

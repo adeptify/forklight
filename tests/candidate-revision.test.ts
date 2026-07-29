@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import {
   captureCandidateRevision,
   resolveLatestRevision,
+  resolveRevisionForAttempt,
   summarizeRevision,
   buildCandidateGapContract,
   computeGapContractDigest,
@@ -420,12 +421,14 @@ test("correction eligibility: eligible failed task with revision", async () => {
   }
 });
 
-test("correction eligibility: not-failed-or-interrupted rejected", async () => {
+test("correction eligibility: succeeded task without revision is rejected", async () => {
   const built = await buildTaskWithWorkspace("elig-2");
   try {
     built.store.setTaskStatus(built.task.id, "succeeded", { error: null });
     const elig = resolveCorrectionEligibility(built.store, built.task.id);
-    assert.equal(elig.category, "not-failed-or-interrupted");
+    // With no candidate.revision.captured event, the shared no-revision check
+    // fires before any Main Review proof for succeeded tasks.
+    assert.equal(elig.category, "no-revision");
   } finally {
     built.store.close();
     await rm(built.home, { recursive: true, force: true });
@@ -660,18 +663,19 @@ test("validateStructuredCorrectionInput rejects stale revision", async () => {
 test("Main Review accept binds to CandidateRevision digest", async () => {
   const built = await buildTaskWithWorkspace("review-1");
   try {
-    const revision = await captureCandidateRevision(
-      built.store, built.task, built.store.getAttempt(built.attemptId),
-      1, false, ["readme.md", "utils.ts"], 2, 4,
-    );
-    // Record a passing verification
+    // Record a passing verification first so we can bind the revision to its exact sequence.
     const verif: VerificationResult = {
       passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
       commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
       diffPath: built.diffPath, sourceUnchanged: true,
     };
-    built.store.addEvent(built.task.id, built.attemptId, "verification.completed",
+    const verEvent = built.store.addEvent(built.task.id, built.attemptId, "verification.completed",
       "Independent verification passed", verif);
+    // Capture revision bound to the exact verification sequence.
+    const revision = await captureCandidateRevision(
+      built.store, built.task, built.store.getAttempt(built.attemptId),
+      verEvent.sequence, false, ["readme.md", "utils.ts"], 2, 4,
+    );
     built.store.setTaskStatus(built.task.id, "succeeded", { error: null });
 
     const review = recordMainReview(built.store, built.task.id, {
@@ -691,20 +695,87 @@ test("Main Review accept binds to CandidateRevision digest", async () => {
   }
 });
 
-test("Main Review cannot accept after the captured Diff changes", async () => {
-  const built = await buildTaskWithWorkspace("review-stale-1");
+test("Main Review accept binds to CandidateRevision for the exact latest verification sequence", async () => {
+  // Repaired Diff handoff: when a reverification creates a new verification
+  // event and captures a new revision, the old revision cannot substitute
+  // even when the Diff digest is identical.
+  const built = await buildTaskWithWorkspace("exactseq-1");
   try {
-    await captureCandidateRevision(
-      built.store, built.task, built.store.getAttempt(built.attemptId),
-      1, true, ["readme.md", "utils.ts"], 2, 4,
-    );
     const verif: VerificationResult = {
       passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
       commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
       diffPath: built.diffPath, sourceUnchanged: true,
     };
-    built.store.addEvent(built.task.id, built.attemptId, "verification.completed",
+    // First verification and exact-sequence revision
+    const ver1 = built.store.addEvent(built.task.id, built.attemptId, "verification.completed",
       "Independent verification passed", verif);
+    const r1 = await captureCandidateRevision(
+      built.store, built.task, built.store.getAttempt(built.attemptId),
+      ver1.sequence, true, ["readme.md", "utils.ts"], 2, 4,
+    );
+    built.store.setTaskStatus(built.task.id, "succeeded", { error: null });
+
+    // Accept at first verification sequence: binds to r1.
+    const review1 = recordMainReview(built.store, built.task.id, {
+      decision: "accept", reason: "First accept at first verification", confirm: true,
+    });
+    assert.equal(review1.candidateRevisionId, r1.id, "first accept binds the first revision");
+
+    // Simulate a reverification: add a NEWER verification and capture a NEW
+    // revision for it. The Diff bytes are unchanged, so the old and new
+    // revisions share the same patchDigest but differ in id and sequence.
+    const ver2 = built.store.addEvent(built.task.id, built.attemptId, "verification.completed",
+      "Newer independent verification passed", verif);
+    const r2 = await captureCandidateRevision(
+      built.store, built.task, built.store.getAttempt(built.attemptId),
+      ver2.sequence, true, ["readme.md", "utils.ts"], 2, 4,
+    );
+
+    // The latest revision for the attempt is now r2 (higher store sequence).
+    const events = built.store.listEvents(built.task.id);
+    const latest = resolveLatestRevision(events);
+    assert.ok(latest !== undefined);
+    assert.equal(latest!.id, r2.id, "latest revision is the new one");
+
+    // The first revision still exists bound to its own sequence.
+    const firstRev = resolveRevisionForAttempt(events, built.attemptId, ver1.sequence);
+    assert.ok(firstRev !== undefined);
+    assert.equal(firstRev!.id, r1.id, "first revision still intact at its original sequence");
+
+    // Now add a THIRD verification WITHOUT capturing a revision — this is the
+    // exact-sequence rejection case. Simulate a reverification that passed
+    // verification but whose capture step failed.
+    built.store.addEvent(built.task.id, built.attemptId, "verification.completed",
+      "Third verification passed but no revision captured", verif);
+
+    // Accept must reject: the latest verification has no matching revision,
+    // and revision events exist for this Task (r1 and r2).
+    assert.throws(
+      () => recordMainReview(built.store, built.task.id, {
+        decision: "accept", reason: "Should reject — no revision for latest seq", confirm: true,
+      }),
+      /current Diff to match/,
+    );
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("Main Review cannot accept after the captured Diff changes", async () => {
+  const built = await buildTaskWithWorkspace("review-stale-1");
+  try {
+    const verif: VerificationResult = {
+      passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
+      commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+      diffPath: built.diffPath, sourceUnchanged: true,
+    };
+    const verEvent = built.store.addEvent(built.task.id, built.attemptId, "verification.completed",
+      "Independent verification passed", verif);
+    await captureCandidateRevision(
+      built.store, built.task, built.store.getAttempt(built.attemptId),
+      verEvent.sequence, true, ["readme.md", "utils.ts"], 2, 4,
+    );
     built.store.setTaskStatus(built.task.id, "succeeded", { error: null });
     await writeFile(built.diffPath, "changed after verification\n");
     assert.throws(
@@ -725,17 +796,17 @@ test("Main Review cannot accept after the captured Diff changes", async () => {
 test("Integration preflight rejects when accepted revision digest does not match current diff", async () => {
   const built = await buildTaskWithWorkspace("int-mismatch-1");
   try {
-    await captureCandidateRevision(
-      built.store, built.task, built.store.getAttempt(built.attemptId),
-      1, false, ["readme.md", "utils.ts"], 2, 4,
-    );
     const verif: VerificationResult = {
       passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
       commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
       diffPath: built.diffPath, sourceUnchanged: true,
     };
-    built.store.addEvent(built.task.id, built.attemptId, "verification.completed",
+    const verEvent = built.store.addEvent(built.task.id, built.attemptId, "verification.completed",
       "Independent verification passed", verif);
+    await captureCandidateRevision(
+      built.store, built.task, built.store.getAttempt(built.attemptId),
+      verEvent.sequence, false, ["readme.md", "utils.ts"], 2, 4,
+    );
     built.store.setTaskStatus(built.task.id, "succeeded", { error: null });
     recordMainReview(built.store, built.task.id, {
       decision: "accept", reason: "Good patch", confirm: true,
@@ -867,6 +938,218 @@ test("structured correction grant survives recovery and only replays the exact G
   }
 });
 
+// --- Succeeded + Main revise correction eligibility ---
+
+async function buildSucceededTaskWithRevision(
+  id: string,
+  effectivePolicy?: EffectivePolicySnapshot,
+): Promise<BuiltTask> {
+  const built = await buildTaskWithWorkspace(id, effectivePolicy);
+  await captureCandidateRevision(
+    built.store, built.task, built.store.getAttempt(built.attemptId),
+    1, false, ["readme.md", "utils.ts"], 2, 4,
+  );
+  built.store.setTaskStatus(built.task.id, "succeeded", { error: null });
+  return built;
+}
+
+function seedMainReview(
+  store: StateStore,
+  taskId: string,
+  attemptId: string,
+  verificationSequence: number,
+  decision: "accept" | "revise" | "reject",
+): void {
+  store.addEvent(taskId, attemptId, "main-review.completed",
+    `Main review: ${decision}`,
+    { decision, reason: "Bounded review reason text", attemptId, verificationEventSequence: verificationSequence },
+  );
+}
+
+function seedVerificationEvent(
+  store: StateStore,
+  taskId: string,
+  attemptId: string,
+  passed: boolean,
+): number {
+  const verif: VerificationResult = {
+    passed, behaviorPassed: passed, policyPassed: true, sourceCompatible: true,
+    commands: [{ command: "true", exitCode: passed ? 0 : 1, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+    diffPath: store.getTask(taskId).paths.diff, sourceUnchanged: true,
+  };
+  const event = store.addEvent(taskId, attemptId, "verification.completed",
+    passed ? "Independent verification passed" : "Independent verification failed", verif);
+  return event.sequence;
+}
+
+test("succeeded task with valid Main revise bound to latest attempt is correction-eligible", async () => {
+  const built = await buildSucceededTaskWithRevision("elig-succ-revise-1", snapshot({ maxMainCorrections: 1 }));
+  try {
+    const verSeq = seedVerificationEvent(built.store, built.task.id, built.attemptId, true);
+    seedMainReview(built.store, built.task.id, built.attemptId, verSeq, "revise");
+    const elig = resolveCorrectionEligibility(built.store, built.task.id);
+    assert.equal(elig.eligible, true);
+    assert.equal(elig.category, "eligible");
+    assert.equal(elig.allowance.max, 1);
+    assert.equal(elig.allowance.remaining, 1);
+    assert.ok(elig.latestRevision !== undefined);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded task without Main Review is not correction-eligible (no-main-revise)", async () => {
+  const built = await buildSucceededTaskWithRevision("elig-succ-noreview-1");
+  try {
+    seedVerificationEvent(built.store, built.task.id, built.attemptId, true);
+    // No main-review.completed event
+    const elig = resolveCorrectionEligibility(built.store, built.task.id);
+    assert.equal(elig.category, "no-main-revise");
+    assert.equal(elig.latestRevision, undefined);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded task with accept Main Review is not correction-eligible (no-main-revise)", async () => {
+  const built = await buildSucceededTaskWithRevision("elig-succ-accept-1");
+  try {
+    const verSeq = seedVerificationEvent(built.store, built.task.id, built.attemptId, true);
+    seedMainReview(built.store, built.task.id, built.attemptId, verSeq, "accept");
+    const elig = resolveCorrectionEligibility(built.store, built.task.id);
+    assert.equal(elig.category, "no-main-revise");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded task with reject Main Review is not correction-eligible (no-main-revise)", async () => {
+  const built = await buildSucceededTaskWithRevision("elig-succ-reject-1");
+  try {
+    const verSeq = seedVerificationEvent(built.store, built.task.id, built.attemptId, true);
+    seedMainReview(built.store, built.task.id, built.attemptId, verSeq, "reject");
+    const elig = resolveCorrectionEligibility(built.store, built.task.id);
+    assert.equal(elig.category, "no-main-revise");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded task with revise review pointing to wrong verification sequence rejects", async () => {
+  const built = await buildSucceededTaskWithRevision("elig-succ-wrongver-1");
+  try {
+    const verSeq = seedVerificationEvent(built.store, built.task.id, built.attemptId, true);
+    seedMainReview(built.store, built.task.id, built.attemptId, verSeq + 999, "revise");
+    const elig = resolveCorrectionEligibility(built.store, built.task.id);
+    assert.equal(elig.category, "no-main-revise");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded task with integration history is not correction-eligible", async () => {
+  const built = await buildSucceededTaskWithRevision("elig-succ-int-1");
+  try {
+    const verSeq = seedVerificationEvent(built.store, built.task.id, built.attemptId, true);
+    seedMainReview(built.store, built.task.id, built.attemptId, verSeq, "revise");
+    const ts = new Date().toISOString();
+    built.store.saveIntegrationReceipt({
+      id: "ir-succ", taskId: built.task.id, patchDigest: "abc",
+      affectedFiles: [], rejectionReasons: [], sourceEvidence: {},
+      createdAt: ts, expiresAt: ts, consumed: false,
+    });
+    built.store.saveIntegrationResult({
+      id: "ir-succ-1", receiptId: "ir-succ", taskId: built.task.id,
+      status: "applied", createdAt: ts,
+    });
+    const elig = resolveCorrectionEligibility(built.store, built.task.id);
+    assert.equal(elig.category, "not-failed-or-interrupted");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded task with revise but stale diff is not correction-eligible", async () => {
+  const built = await buildSucceededTaskWithRevision("elig-succ-stale-1", snapshot({ maxMainCorrections: 1 }));
+  try {
+    const verSeq = seedVerificationEvent(built.store, built.task.id, built.attemptId, true);
+    seedMainReview(built.store, built.task.id, built.attemptId, verSeq, "revise");
+    await writeFile(built.diffPath, "changed after revision and review\n");
+    const elig = resolveCorrectionEligibility(built.store, built.task.id);
+    assert.equal(elig.category, "stale-revision");
+    assert.ok(elig.latestRevision !== undefined);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded task with revise but exhausted maxMainCorrections rejects", async () => {
+  const built = await buildSucceededTaskWithRevision("elig-succ-exhausted-1", snapshot({ maxMainCorrections: 1 }));
+  try {
+    const verSeq = seedVerificationEvent(built.store, built.task.id, built.attemptId, true);
+    seedMainReview(built.store, built.task.id, built.attemptId, verSeq, "revise");
+    // Simulate a consumed correction grant
+    built.store.addEvent(built.task.id, built.attemptId, "attempt.authorization.granted",
+      "correction consumed", {
+        kind: "correction", additionalAttempts: 1, targetOrdinal: 2,
+        maxBudgetUsd: null, budgetMode: "uncapped-for-authorized-attempt",
+        reason: "main-correction", feedback: "test", priorAttemptId: built.attemptId,
+      });
+    // Also add the attempt that consumed the grant
+    built.store.createAttempt({
+      id: `${built.task.id}-att-2`, taskId: built.task.id, ordinal: 2, status: "failed",
+      sessionId: built.task.sessionId, rawLogPath: "/tmp/att-2.jsonl",
+      startedAt: "2026-07-27T01:00:00Z", finishedAt: "2026-07-27T01:30:00Z", exitCode: 1,
+    });
+    const elig = resolveCorrectionEligibility(built.store, built.task.id);
+    assert.equal(elig.category, "allowance-exhausted");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("describeCorrectionRejection includes no-main-revise message", () => {
+  const msg = describeCorrectionRejection("no-main-revise");
+  assert.ok(msg.length > 10);
+  assert.ok(msg.includes("revise"));
+  assert.ok(!msg.includes("null"));
+  assert.ok(!msg.includes("undefined"));
+});
+
+test("maxExtraAttempts zero does not block correction when maxMainCorrections is one", async () => {
+  // This test proves the Relay recovery scenario: a succeeded Task with
+  // baseMaxAttempts=1, maxExtraAttempts=0, maxMainCorrections=1 must be
+  // eligible for a single Main correction.
+  const built = await buildSucceededTaskWithRevision("elig-relay-1", snapshot({
+    baseMaxAttempts: 1,
+    maxExtraAttempts: 0,
+    maxMainCorrections: 1,
+  }));
+  try {
+    const verSeq = seedVerificationEvent(built.store, built.task.id, built.attemptId, true);
+    seedMainReview(built.store, built.task.id, built.attemptId, verSeq, "revise");
+    const elig = resolveCorrectionEligibility(built.store, built.task.id);
+    assert.equal(elig.eligible, true);
+    assert.equal(elig.category, "eligible");
+    assert.equal(elig.allowance.max, 1);
+    assert.equal(elig.allowance.remaining, 1);
+    // maxExtraAttempts=0 never appears in the eligibility or allowance
+    const json = JSON.stringify(elig);
+    assert.ok(!json.includes("maxExtraAttempts"));
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
 // --- Bilingual UI assets ---
 
 test("Hub i18n carries correction eligibility keys in both languages", async () => {
@@ -882,6 +1165,7 @@ test("Hub i18n carries correction eligibility keys in both languages", async () 
     "taskCorrectRejectAllowanceExhausted",
     "taskCorrectRejectPendingGrant",
     "taskCorrectRejectStale",
+    "taskCorrectRejectNoMainRevise",
     "taskCorrectUnavailable",
     "taskCorrectGapTitle",
     "taskCorrectGapHint",

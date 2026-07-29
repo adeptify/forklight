@@ -1,5 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { userInfo } from "node:os";
+import { accessSync, constants, statSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import { localAccountName } from "./config.js";
+import type { TaskSpec } from "./types.js";
 import {
   cloneDefaults,
   type ProviderDefaultSettings,
@@ -228,14 +232,96 @@ export function providerVariants(
 
 export interface ProviderReadiness {
   ready: boolean;
+  /** Bounded local authentication path; never contains credential material. */
+  authMode: "api-key" | "local-sign-in" | "none";
   endpoint: string;
   defaultModel: string;
   keychainService: string;
   error?: string;
 }
 
+export interface ProviderAuthInspector {
+  /** Prove the exact Keychain read used at Worker launch without retaining the value. */
+  hasReadableKeychainValue(keychainService: string, keychainAccount?: string): boolean;
+  hasLocalGrokSignIn(): boolean;
+}
+
+export interface ProviderLaunchAuthentication {
+  ready: boolean;
+  authMode: "api-key" | "local-sign-in" | "none";
+  failureCategory?: "authentication";
+  reasonCode?: "provider-auth-unreadable";
+}
+
+/** Check only that Grok has a readable, non-empty local sign-in file.
+ *  The file path, metadata, and contents never leave this boundary. */
+export function hasLocalGrokSignIn(): boolean {
+  try {
+    const authFile = path.join(homedir(), ".grok", "auth.json");
+    accessSync(authFile, constants.R_OK);
+    const metadata = statSync(authFile);
+    return metadata.isFile() && metadata.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function realProviderAuthInspector(): ProviderAuthInspector {
+  return {
+    hasReadableKeychainValue(keychainService, keychainAccount) {
+      try {
+        execFileSync(
+          "security",
+          [
+            "find-generic-password",
+            "-a",
+            keychainAccount ?? localAccountName(),
+            "-s",
+            keychainService,
+            "-w",
+          ],
+          // `-w` exercises the launch-time read path. Discarding stdout means
+          // readiness never materializes credential bytes in application code.
+          { stdio: "ignore" },
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    hasLocalGrokSignIn,
+  };
+}
+
+/**
+ * Resolve the local authentication path for one exact Task. This is not a
+ * Provider connectivity probe: it only proves that Worker launch can reach a
+ * readable credential (or Grok's supported local sign-in fallback).
+ */
+export function providerLaunchAuthentication(
+  spec: Pick<TaskSpec, "provider" | "runtime">,
+  inspector: ProviderAuthInspector = realProviderAuthInspector(),
+): ProviderLaunchAuthentication {
+  const keychainReady = inspector.hasReadableKeychainValue(
+    spec.provider.keychainService,
+    spec.provider.keychainAccount,
+  );
+  const localSignInReady = spec.provider.name === "xai"
+    && spec.runtime.name === "grok-build"
+    && inspector.hasLocalGrokSignIn();
+  if (keychainReady) return { ready: true, authMode: "api-key" };
+  if (localSignInReady) return { ready: true, authMode: "local-sign-in" };
+  return {
+    ready: false,
+    authMode: "none",
+    failureCategory: "authentication",
+    reasonCode: "provider-auth-unreadable",
+  };
+}
+
 export function providerReadiness(
   defaults: ProviderDefaultsSettings = cloneDefaults().providerDefaults,
+  inspector: ProviderAuthInspector = realProviderAuthInspector(),
 ): {
   anyReady: boolean;
   providers: Record<ProviderName, ProviderReadiness>;
@@ -244,30 +330,20 @@ export function providerReadiness(
   const providers = {} as Record<ProviderName, ProviderReadiness>;
   for (const name of providerNames()) {
     const definition = providerDefinition(name, defaults);
-    let ready = false;
-    try {
-      execFileSync(
-        "security",
-        [
-          "find-generic-password",
-          "-a",
-          userInfo().username,
-          "-s",
-          definition.defaultKeychainService,
-        ],
-        { stdio: "ignore" },
-      );
-      ready = true;
-      anyReady = true;
-    } catch {
-      // Report readiness without reading or returning the credential value.
-    }
+    const keychainReady = inspector.hasReadableKeychainValue(definition.defaultKeychainService);
+    const localSignInReady = name === "xai" && inspector.hasLocalGrokSignIn();
+    const authMode: ProviderReadiness["authMode"] = keychainReady
+      ? "api-key"
+      : localSignInReady ? "local-sign-in" : "none";
+    const ready = authMode !== "none";
+    if (ready) anyReady = true;
     providers[name] = {
       ready,
+      authMode,
       endpoint: definition.defaultEndpoint,
       defaultModel: definition.defaultModel,
       keychainService: definition.defaultKeychainService,
-      ...(ready ? {} : { error: "Keychain entry not found" }),
+      ...(ready ? {} : { error: "Local authentication not found" }),
     };
   }
   return { anyReady, providers };

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -579,13 +580,14 @@ export function parseTaskSpec(
 export async function loadTaskSpec(
   taskFileInput: string,
   policy?: TaskPolicy,
-): Promise<{ taskFile: string; spec: TaskSpec }> {
+): Promise<{ taskFile: string; taskFileDigest: string; spec: TaskSpec }> {
   const taskFile = path.resolve(expandHome(taskFileInput));
   const rawText = await readFile(taskFile, "utf8");
+  const taskFileDigest = createHash("sha256").update(rawText).digest("hex");
   const parsed = taskFile.endsWith(".json") ? JSON.parse(rawText) : YAML.parse(rawText);
   const spec = parseTaskSpec(parsed, path.dirname(taskFile), policy);
   await access(spec.project, constants.R_OK);
-  return { taskFile, spec };
+  return { taskFile, taskFileDigest, spec };
 }
 
 function hardBoundaries(): string[] {
@@ -654,6 +656,58 @@ export function claudeCheckpointProtocolLines(acceptanceCommands: string[]): str
     "- ForkLight independently reruns every acceptance command; that result is authoritative for success.",
     "- If the checkpoint tool is unavailable or fails, still report completion after fixing issues you can see; do not invent a fake pass.",
   ];
+}
+
+/** Render the change-budget instruction block truthfully for the frozen
+ *  changeBudgetMode. Only hard (and the legacy hard fallback when the field is
+ *  absent) describes the budget as a hard gate with a stop-and-report
+ *  instruction; warn, score, and off keep the configured file/line values
+ *  visible but describe their real non-blocking enforcement, so the Worker
+ *  never trims correctness or scope merely to fit the numbers. The agreed
+ *  scope, hard boundaries, and independent acceptance stay authoritative in
+ *  every mode. Mirrors the verifier's per-mode effect (hard-fail / warning /
+ *  score-evidence / ignored) without touching verifier authority. */
+function changeBudgetBlock(spec: ContractTaskSpec): string[] {
+  const { maxFiles, maxDiffLines } = spec.contract.changeBudget;
+  const mode: PolicyMode = spec.completionPolicy?.changeBudgetMode ?? "hard";
+  const limits = [
+    `- At most ${maxFiles} changed files`,
+    `- At most ${maxDiffLines} added/deleted lines`,
+  ];
+  const authoritative =
+    "- The agreed scope, hard boundaries, and independent acceptance remain authoritative.";
+  switch (mode) {
+    case "hard":
+      return [
+        "Hard change budget:",
+        ...limits,
+        "- If the implementation cannot fit, stop and report the missing decomposition instead of expanding scope.",
+      ];
+    case "warn":
+      return [
+        "Change budget guidance (warn):",
+        ...limits,
+        "- These figures are guidance only; an overrun is a warning, not a Task failure.",
+        "- Finish the agreed scoped behavior and report the overrun; do not sacrifice correctness or scope to fit the numbers.",
+        authoritative,
+      ];
+    case "score":
+      return [
+        "Change budget evidence (score):",
+        ...limits,
+        "- Size is evaluation evidence, not a pass/fail gate; an overrun does not stop or fail the Task.",
+        "- Keep the agreed scope and acceptance authoritative; do not trim behavior to fit the numbers.",
+        authoritative,
+      ];
+    case "off":
+      return [
+        "Change budget reference (off):",
+        ...limits,
+        "- Change-budget enforcement is disabled; these figures are reference only.",
+        "- Keep the agreed scope and acceptance authoritative; do not expand scope beyond the bounded contract.",
+        authoritative,
+      ];
+  }
 }
 
 function buildLegacyPrompt(
@@ -771,10 +825,7 @@ export function buildWorkerPrompt(
     "Known risks:",
     ...spec.contract.risks.map((item) => `- ${item}`),
     "",
-    "Hard change budget:",
-    `- At most ${spec.contract.changeBudget.maxFiles} changed files`,
-    `- At most ${spec.contract.changeBudget.maxDiffLines} added/deleted lines`,
-    "- If the implementation cannot fit, stop and report the missing decomposition instead of expanding scope.",
+    ...changeBudgetBlock(spec),
     "",
     "Hard boundaries:",
     ...hardBoundaries().map((boundary) => `- ${boundary}`),

@@ -1,7 +1,8 @@
 import { execFile, execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir, userInfo } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { localAccountName } from "./config.js";
 import type { ProbeEvidence, ProbeFailureCategory } from "./types.js";
 import type { ProviderHealthStatus, ProviderStatus } from "./types.js";
 import type { StateStore } from "../state/store.js";
@@ -213,7 +214,7 @@ export function realKeychainChecker(): KeychainChecker {
     try {
       execFileSync(
         "security",
-        ["find-generic-password", "-a", userInfo().username, "-s", keychainService],
+        ["find-generic-password", "-a", localAccountName(), "-s", keychainService],
         { stdio: "ignore" },
       );
       return true;
@@ -226,7 +227,7 @@ export function realKeychainChecker(): KeychainChecker {
 export function realKeychainReader(keychainService: string): string {
   const value = execFileSync(
     "security",
-    ["find-generic-password", "-a", userInfo().username, "-s", keychainService, "-w"],
+    ["find-generic-password", "-a", localAccountName(), "-s", keychainService, "-w"],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   ).trim();
   if (!value) throw new Error("Keychain returned an empty value");
@@ -239,6 +240,26 @@ export function realClock(): number {
 
 function endpointOrigin(endpoint: string): string {
   return new URL(endpoint).origin;
+}
+
+/** Classify persisted connection evidence without probing a Provider.
+ * ProviderProbeService and read-only CLI/Hub projections must share this
+ * decision so cache expiry and identity drift cannot acquire two meanings. */
+export function deriveProviderHealthStatus(
+  authenticationReady: boolean,
+  evidence: ProbeEvidence | null,
+  currentModel: string,
+  currentEndpointOrigin: string,
+  cacheLifetimeMs: number,
+  now: number,
+): ProviderHealthStatus {
+  if (!authenticationReady || evidence === null) return "unverified";
+  if (evidence.model !== currentModel || evidence.endpointOrigin !== currentEndpointOrigin) {
+    return "unverified";
+  }
+  if (evidence.status === "failed") return "failed";
+  const ageMs = now - new Date(evidence.timestamp).getTime();
+  return ageMs > cacheLifetimeMs ? "stale" : "verified";
 }
 
 // --- Core service ---
@@ -311,11 +332,14 @@ export class ProviderProbeService {
     const keychainOk = this.keychainExists(config.keychainService);
     const evidence = this.store.getProbeEvidence(name);
 
-    const status = this.deriveHealth(
+    const policy = this.probePolicy();
+    const status = deriveProviderHealthStatus(
       keychainOk,
       evidence ?? null,
       config.model,
       endpointOrigin(config.endpoint),
+      policy.cacheLifetimeMs,
+      this.now(),
     );
 
     return {
@@ -336,24 +360,4 @@ export class ProviderProbeService {
     return result;
   }
 
-  private deriveHealth(
-    keychainOk: boolean,
-    evidence: ProbeEvidence | null,
-    currentModel: string,
-    currentEndpointOrigin: string,
-  ): ProviderHealthStatus {
-    if (!keychainOk) return "unverified";
-    if (!evidence) return "unverified";
-
-    if (evidence.model !== currentModel || evidence.endpointOrigin !== currentEndpointOrigin) {
-      return "unverified";
-    }
-    if (evidence.status === "failed") return "failed";
-
-    const policy = this.probePolicy();
-    const ageMs = this.now() - new Date(evidence.timestamp).getTime();
-    if (ageMs > policy.cacheLifetimeMs) return "stale";
-
-    return "verified";
-  }
 }

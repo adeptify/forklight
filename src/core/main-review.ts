@@ -1,69 +1,25 @@
 import type { StateStore } from "../state/store.js";
 import type {
-  EventRecord,
   MainReviewDecision,
   MainReviewDecisionKind,
   VerificationResult,
 } from "./types.js";
 import {
   candidateRevisionMatchesCurrentDiff,
-  resolveLatestRevisionForAttempt,
+  resolveRevisionForAttempt,
+  isDecision,
+  latestVerificationEvent,
+  latestMainReview,
 } from "./candidate-revision.js";
 
-export const MAIN_REVIEW_REASON_MAX_LENGTH = 1000;
+export { latestMainReview };
 
-function latestVerification(events: readonly EventRecord[]): EventRecord | undefined {
-  return events
-    .filter((event) => event.type === "verification.completed")
-    .reduce<EventRecord | undefined>(
-      (latest, event) => latest === undefined || event.sequence > latest.sequence ? event : latest,
-      undefined,
-    );
-}
+export const MAIN_REVIEW_REASON_MAX_LENGTH = 1000;
 
 function verificationPassed(payload: unknown): payload is VerificationResult {
   return payload !== null
     && typeof payload === "object"
     && (payload as { passed?: unknown }).passed === true;
-}
-
-function isDecision(value: unknown): value is MainReviewDecisionKind {
-  return value === "accept" || value === "revise" || value === "reject";
-}
-
-export function latestMainReview(
-  events: readonly EventRecord[],
-): MainReviewDecision | undefined {
-  const event = events
-    .filter((candidate) => candidate.type === "main-review.completed")
-    .reduce<EventRecord | undefined>(
-      (latest, candidate) => latest === undefined || candidate.sequence > latest.sequence
-        ? candidate
-        : latest,
-      undefined,
-    );
-  if (event?.payload === null || typeof event?.payload !== "object") return undefined;
-  const payload = event.payload as Partial<MainReviewDecision>;
-  if (
-    !isDecision(payload.decision)
-    || typeof payload.reason !== "string"
-    || typeof payload.attemptId !== "string"
-    || typeof payload.verificationEventSequence !== "number"
-  ) {
-    return undefined;
-  }
-  return {
-    decision: payload.decision,
-    reason: payload.reason,
-    attemptId: payload.attemptId,
-    verificationEventSequence: payload.verificationEventSequence,
-    ...(typeof payload.candidateRevisionId === "string"
-      ? { candidateRevisionId: payload.candidateRevisionId }
-      : {}),
-    ...(typeof payload.acceptedPatchDigest === "string"
-      ? { acceptedPatchDigest: payload.acceptedPatchDigest }
-      : {}),
-  };
 }
 
 export function recordMainReview(
@@ -81,7 +37,7 @@ export function recordMainReview(
   }
   const task = store.getTask(taskId);
   const events = store.listEvents(taskId);
-  const verification = latestVerification(events);
+  const verification = latestVerificationEvent(events);
   if (verification === undefined || verification.attemptId === undefined) {
     throw new Error("main review requires independent verification evidence");
   }
@@ -104,7 +60,7 @@ export function recordMainReview(
   let candidateRevisionId: string | undefined;
   let acceptedPatchDigest: string | undefined;
   if (input.decision === "accept") {
-    const revision = resolveLatestRevisionForAttempt(events, attempt.id);
+    const revision = resolveRevisionForAttempt(events, attempt.id, verification.sequence);
     if (
       revision !== undefined
       && revision.taskId === taskId

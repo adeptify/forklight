@@ -1,0 +1,119 @@
+version: 2
+name: Explain saved Worker readiness in CLI health
+project: ../..
+taskClass: forklight-cli-worker-readiness
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: minimax-m3-cn
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    A Main or local user can run `forklight health` and immediately see whether
+    every saved Worker Profile can launch, why it is ready or blocked, and the
+    one next action to take. The result must reuse ForkLight's canonical Worker
+    readiness resolver instead of presenting Provider and runtime facts that
+    the user must combine by hand.
+  presentation:
+    summary: "`forklight health` 直接说明每个已保存 Worker 能不能启动、卡在哪里、下一步做什么，不再让用户自己拼接模型、认证和运行环境信息。"
+    language: zh-CN
+  context:
+    - The Hub already uses `resolveWorkerReadiness()` to combine the saved Worker, materialized model, Provider/runtime pairing, local authentication, runtime doctor, and optional connection evidence.
+    - CLI `forklight health` currently reports runtimes and Providers separately. A user can see both lists but still cannot tell whether a particular saved Worker is launchable.
+    - This is a small M1.2 MiniMax proof. It must consume the existing resolver and current settings; it must not create another readiness policy or redesign health.
+    - Health remains useful when the daemon is unavailable. Reading readiness must not start a daemon, probe a Provider, run a Worker, mutate settings, or create a Task.
+  inScope:
+    - Add the canonical safe Worker readiness array to JSON `forklight health`, in saved Worker Profile order.
+    - Feed the resolver from the same settings snapshot, local Provider authentication readiness, local runtime doctor results, and already persisted Provider verification status when safely available.
+    - Add a short human `workers:` section. For each Worker show its label/id, launchable or blocked state, effective Provider/model/runtime when available, plain reason, and one next action.
+    - Preserve every existing health field and the current daemon-optional behavior. A missing daemon or missing verification evidence must remain explicit and must not turn a locally launchable Worker into a false hard failure.
+    - Add deterministic tests for ready, launchable/stale, failed-connection, missing-authentication, unavailable-runtime, malformed saved model, saved order, daemon-unavailable behavior, and safe human/JSON output.
+  outOfScope:
+    - Hub UI, Task Detail, Task admission preview, Daemon protocol changes, Provider probes, API requests, model routing, competition, automatic retry/correction/adaptation, Integration behavior, settings mutation, commit, or push.
+    - A second Worker readiness resolver, inferred credentials, invented connection success, automatic fixes, starting the daemon, or exposing endpoints, Keychain service names, private paths, raw diagnostics, commands, tokens, or API keys in the new Worker section.
+    - Removing or renaming existing health fields, changing the overall health `ok` rule, changing saved Worker order, or widening the CLI into a new interactive setup wizard.
+  executionSteps:
+    - Trace `health()`, `resolveWorkerReadiness()`, Provider status persistence, runtime doctor output, and current health tests before editing.
+    - Define the smallest safe adapter from the existing health inputs to `WorkerReadinessInput`; keep the readiness decision inside the canonical resolver.
+    - Add the JSON field first and prove saved order, daemon-optional behavior, and privacy with deterministic fixtures.
+    - Add concise human rendering from the same readiness results; do not create separate human-only decisions.
+    - Run focused and full acceptance once. If an unrelated baseline problem appears, report it to Main instead of widening the task or retrying.
+  deliverables:
+    - Canonical saved-Worker readiness included in JSON health output.
+    - Plain-language human Worker readiness with one next action per Worker.
+    - Deterministic CLI regressions proving readiness truth, daemon independence, stable order, and privacy.
+  modules:
+    - name: Health readiness composition
+      responsibility: Assemble existing settings, local authentication, runtime doctor, and stored connection evidence into the canonical Worker readiness resolver.
+      consumes:
+        - One ForkLight settings snapshot, saved Worker Profiles, model catalog, Provider defaults, local Provider readiness, runtime doctor results, and optional persisted Provider status.
+      produces:
+        - The existing bounded `WorkerReadinessResult[]` in saved Profile order.
+      boundaries:
+        - No second policy, Provider request, daemon start, Worker launch, Task creation, settings mutation, credential readout, endpoint, private path, raw diagnostic, or command in the new projection.
+    - name: CLI health presentation
+      responsibility: Expose the same readiness results in stable JSON and short human language.
+      consumes:
+        - Canonical Worker readiness results and the existing health output mode.
+      produces:
+        - A `workers` JSON field and one readable human section with identity, state, reason, and next action.
+      boundaries:
+        - Existing health fields and `ok` semantics stay compatible; presentation cannot reinterpret or strengthen the canonical readiness decision.
+  callChain:
+    - User or Main runs `forklight health` with optional `--json`.
+    - CLI reads one settings snapshot, local authentication readiness, runtime doctors, and available stored Provider verification evidence without launching or probing anything.
+    - CLI passes those facts into `resolveWorkerReadiness()`.
+    - The canonical resolver returns one safe result per saved Worker in saved order.
+    - JSON or human presentation renders the same results and exits without mutating ForkLight state.
+  scenarios:
+    - name: Saved MiniMax Worker is locally launchable
+      given: Its saved model and Provider/runtime pairing are valid, authentication exists, Claude Code is available, and connection evidence is stale or absent.
+      when: Health runs.
+      then: The Worker is shown as launchable with a smoke-check next action, not falsely blocked or falsely connection-verified.
+    - name: One prerequisite is missing
+      given: A saved Worker lacks authentication, has an unavailable runtime, or references an invalid model/pairing.
+      when: Health runs.
+      then: Only the applicable bounded reason and next action are shown; no credential, endpoint, path, raw error, or guessed identity is exposed.
+    - name: Daemon is unavailable
+      given: No ForkLight daemon responds but local settings, authentication, and runtime facts are readable.
+      when: Health runs.
+      then: Existing identity status remains daemon-unavailable and Worker launchability is still reported from local facts without starting the daemon.
+    - name: Human and JSON agree
+      given: Multiple saved Workers have different readiness states.
+      when: Health is run once in human mode and once in JSON mode against the same fixtures.
+      then: Both modes preserve saved order and express the same canonical state, reason, launchability, and next action.
+  risks:
+    - Rebuilding readiness inside CLI could drift from Hub, so all decisions must come from `resolveWorkerReadiness()`.
+    - Treating absent or stale Provider evidence as a hard block would contradict local launchability, so connection evidence must retain its existing canonical meaning.
+    - Calling a live Provider or starting the daemon from health would turn diagnostics into mutation or spend, so composition uses only local and persisted evidence.
+    - Human copy can accidentally leak convenient endpoint or Keychain fields already present elsewhere in health, so the new Worker section must render only the readiness allowlist.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 650
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - src/core/worker-readiness.ts
+    - tests/worker-readiness.test.ts
+    - tests/cli-health.test.ts
+acceptance:
+  criteria:
+    - JSON and human health use the canonical readiness resolver, preserve saved Worker order, and agree on state, launchability, reason, and next action.
+    - Missing daemon or connection evidence never starts a service or probe, never blocks otherwise launchable local Workers, and remains explicit rather than guessed.
+    - The new Worker section exposes no endpoint, Keychain service, credential, token, private path, raw diagnostic, command, Task content, or Provider response.
+    - Existing health fields, overall `ok` semantics, Hub behavior, settings, scheduling, and Provider probing remain unchanged.
+    - Focused behavior, the complete existing suite, strict TypeScript, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-readiness.test.ts tests/cli-health.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

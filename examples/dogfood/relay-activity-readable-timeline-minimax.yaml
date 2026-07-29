@@ -1,0 +1,153 @@
+version: 2
+name: Make Relay Activity explain what happened in plain language
+project: /Users/yijunwang/code/relay
+taskClass: relay-activity-readable-timeline
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: minimax-m3-cn
+contract:
+  outcome: >-
+    Relay's Activity page tells a non-technical user who acted, what happened,
+    and where each recent Job currently stands without exposing raw event kinds
+    or Job status codes as the primary explanation.
+  presentation:
+    summary: 把活动页从机器字段列表改成用户能直接看懂的过程时间线，同时保留真实状态，不编造完成或失败原因。
+    language: zh-CN
+  context:
+    - The current Activity page renders raw dotted event kinds such as `assignment.created` and raw Job states such as `succeeded` directly in the UI.
+    - Event text remains the authoritative description of what happened; the presentation layer may label the category but must not rewrite or infer a cause from hidden payload data.
+    - Recent Jobs expose Job, Item, and Runtime records in the existing store. Job success means the Worker run completed; it does not prove review, integration, delivery, or deployment.
+    - The Relay worktree contains unrelated user and Agent changes. Preserve them and edit only the three declared focus paths.
+    - Follow `AGENTS.md`, read `docs/DEVELOPMENT.md` and `docs/ARCHITECTURE.md`, and consult the local Next.js 16 guide relevant to Client Components before editing the page.
+  inScope:
+    - Add one pure Activity presentation module that maps every currently emitted Relay event kind to a short Chinese category label and gives unrecognized kinds a safe generic label instead of exposing the raw machine string.
+    - "Add a truthful pure presentation for all five Job statuses: queued, running, succeeded, failed, and cancelled. It may use Item title and Runtime name already available to the page, but cannot claim review, integration, delivery, deployment, or an unrecorded failure cause."
+    - Use the presentation module in `src/app/activity/page.tsx` for the timeline category and Recent Jobs status, replacing the current raw machine strings.
+    - Replace the technical page description with one plain sentence that explains the page's purpose.
+    - Add clear empty states when there are no Activity events or no recent Jobs.
+    - Add focused behavior tests for recognized and unrecognized event kinds, every Job status, missing Item/Runtime data, and forbidden overclaim wording.
+  outOfScope:
+    - Changing event production, Domain types, store state, APIs, persistence, Job or Assignment lifecycle, navigation structure, filters, pagination, connectors, ForkLight execution, retry/review/integration behavior, or any file outside the three focus paths.
+    - Rewriting existing event text, reading private payload fields, introducing a localization framework, adding dependencies, broad visual redesign, commit, or push.
+    - Fixing the repository's existing ESLint 10 / eslint-plugin-react compatibility failure or optional Postgres TypeScript baseline.
+  executionSteps:
+    - Read the binding project instructions, current Activity page, Domain ActivityEvent/Job types, current emitted event kinds, and relevant local Next.js Client Component guide.
+    - Design one small pure presentation boundary with exhaustive Job status handling and a bounded map for the event kinds currently emitted by Relay.
+    - Wire the page to the presentation output without moving business truth into React or altering store/API behavior.
+    - Add behavior tests that check exact truthful meanings and unrecognized/missing-data fallbacks rather than giant snapshots or source-text-only assertions.
+    - Run the focused test, complete test suite, and diff hygiene once. Report any unrelated baseline issue without widening scope or retrying.
+  deliverables:
+    - Plain-language Activity category and Recent Job presentation in the real Activity page.
+    - Honest empty states and focused regressions for readable fallback behavior.
+  modules:
+    - name: Activity presentation
+      responsibility: Turn existing safe Activity and Job facts into short user-facing Chinese labels without changing lifecycle truth.
+      consumes:
+        - Activity event kind plus Job status and optional existing Item/Runtime display data.
+      produces:
+        - Bounded category, stage, tone, and short explanation values for the Activity page.
+      boundaries:
+        - Pure function only; no store, API, filesystem, payload inference, persistence, or external calls.
+    - name: Activity page
+      responsibility: Render the ordered event text and recent Job facts so the user understands what happened and what is still pending.
+      consumes:
+        - Existing Relay store records and the pure Activity presentation output.
+      produces:
+        - Readable timeline rows, Job rows, and honest empty states.
+      boundaries:
+        - No business-state mutation, duplicated lifecycle logic, raw machine code as primary copy, filter system, or new navigation path.
+    - name: Presentation regression tests
+      responsibility: Prove recognized, unrecognized, missing-data, and non-overclaim behavior independently of React rendering.
+      consumes:
+        - Representative event kinds and all current Job statuses.
+      produces:
+        - Deterministic assertions that guard user meaning and exhaustive status coverage.
+      boundaries:
+        - No live server, Provider call, browser automation, giant snapshot, or dependency addition.
+  callChain:
+    - Relay Application and Adapters append Activity events and persist Jobs using the existing paths.
+    - The client store supplies Activity events, Jobs, Items, and Runtimes to the existing Activity Client Component.
+    - The new pure presentation module maps only those safe facts into display values.
+    - The Activity page renders the original event text plus readable categories and truthful recent-Job stages.
+  scenarios:
+    - name: Assignment event is readable
+      given: An Activity event has kind `assignment.created` and authoritative text describing the assignment.
+      when: The Activity page renders it.
+      then: The user sees a short Chinese category plus the original event text, never the raw dotted kind.
+    - name: Worker completed without delivery evidence
+      given: A recent Job has status `succeeded` with an Item and Runtime.
+      when: Its row renders.
+      then: It says the Worker execution completed and does not say reviewed, integrated, delivered, deployed, or that the Item is complete.
+    - name: Failure cause is absent
+      given: A recent Job has status `failed` and no safe failure summary is presented on this page.
+      when: Its row renders.
+      then: It says execution did not complete and directs the user to inspect the Item, without inventing why.
+    - name: Unrecognized or partial historical data
+      given: An event kind is unrecognized or a Job lacks matching Item/Runtime records.
+      when: The page renders existing history.
+      then: It uses neutral fallback copy, keeps the row visible, and does not leak the raw kind or render undefined text.
+    - name: Empty local history
+      given: There are no Activity events or recent Jobs.
+      when: The page renders.
+      then: Each section explains that no corresponding history exists yet instead of leaving blank space.
+  risks:
+    - Duplicating lifecycle authority in UI could drift, so the mapper only describes current immutable Job status and never derives Assignment or delivery state.
+    - A friendly success label could overclaim final delivery, so success wording must stay explicitly at Worker execution level.
+    - Unrecognized event kinds will appear as Relay grows, so fallback copy must remain useful without exposing internal identifiers.
+    - The worktree is heavily modified, so focus-path enforcement and independent diff review are required before Integration.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 500
+provider:
+  name: minimax
+  model: MiniMax-M3
+  endpoint: https://api.minimaxi.com/anthropic
+  keychainService: forklight.minimax.api-key
+  pricingRoute: minimax-china-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - .next
+    - dist
+  generatedPaths:
+    - .next/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/app/activity/page.tsx
+    - src/components/activity-presentation.ts
+    - tests/activity-presentation.test.ts
+acceptance:
+  criteria:
+    - Every Activity event kind currently emitted by Relay receives a bounded Chinese category label; unrecognized kinds use a neutral fallback and raw dotted identifiers are not primary UI copy.
+    - All five Job statuses receive truthful user-facing stages and explanations, with success limited to Worker execution and failure never inventing a cause.
+    - The page uses the pure presentation output, retains authoritative event text, and shows clear empty states without changing store/API/domain behavior.
+    - Focused behavior tests cover all current Job statuses, representative recognized event kinds, unrecognized kinds, missing Item/Runtime records, and forbidden final-delivery wording.
+    - The focused test, the existing complete 151-test baseline, and diff hygiene pass; existing ESLint compatibility and optional Postgres TypeScript baselines are not expanded into this Task.
+  commands:
+    - node --test --import tsx tests/activity-presentation.test.ts
+    - npm test
+    - git diff --check

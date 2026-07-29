@@ -141,6 +141,65 @@ test("Hub token survives one-tab refresh and is cleared after rejection", async 
   assert.ok(!/JSON\.stringify\([^)]*S\.token/.test(src), "token is not sent in a body");
 });
 
+test("Hub Worker editor filters impossible Provider/runtime pairings before save", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const compatible = new Function(`
+    ${extractFunctionSource(src, "workerModelCompatible")}
+    return workerModelCompatible;
+  `)() as (runtime: string, model: { provider?: string }) => boolean;
+  assert.equal(compatible("grok-build", { provider: "xai" }), true);
+  assert.equal(compatible("grok-build", { provider: "deepseek" }), false);
+  assert.equal(compatible("claude-code", { provider: "xai" }), false);
+  assert.equal(compatible("claude-code", { provider: "minimax" }), true);
+  assert.equal(compatible("claude-code", {}), false);
+
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+  assert.ok(block.includes("syncCompatibleModels"));
+  assert.ok(block.includes("workerModelCompatible(selR.value, mc)"));
+  assert.ok(block.includes('selR.addEventListener("change"'));
+  assert.ok(block.includes("syncCompatibleModels(\"\")"));
+  assert.ok(block.includes("workersModelNoCompatible"));
+  assert.ok(block.includes("if(!selM.value)"), "save remains blocked with no compatible model");
+});
+
+test("Hub Worker cards explain canonical readiness in both languages", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const presentation = new Function("t", `
+    ${extractFunctionSource(src, "workerReadinessPresentation")}
+    return workerReadinessPresentation;
+  `)((key: string) => key) as (value: { state: string; reason: string; nextAction: string }) => {
+    label: string; tone: string; reason: string; next: string;
+  };
+  assert.deepEqual(presentation({
+    state: "launchable",
+    reason: "connection-unverified",
+    nextAction: "run-smoke-check",
+  }), {
+    label: "workersReadinessLaunchable",
+    tone: "badge-info",
+    reason: "workersReadinessReasonConnectionUnverified",
+    next: "workersReadinessNextSmoke",
+  });
+  assert.equal(presentation({
+    state: "blocked",
+    reason: "authentication-missing",
+    nextAction: "configure-authentication",
+  }).reason, "workersReadinessReasonAuthenticationMissing");
+  assert.ok(src.includes("workerReadinessFor(prof.id)"));
+  assert.ok(src.includes("readiness.checks"));
+  for (const phrase of [
+    "Can start; connection check recommended",
+    "Local setup is ready, but this Provider connection has not been checked yet.",
+    "可以开始，建议先检查连接",
+    "本地配置已经齐全，但还没有检查这个 Provider 的真实连接。",
+  ]) {
+    assert.ok(i18n.includes(phrase), phrase);
+  }
+});
+
 test("Hub model-routing unsaved state compares semantic values", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const keysStart = src.indexOf("var MR_WEIGHT_KEYS = ");
@@ -297,6 +356,104 @@ test("Hub i18n carries submit strings in both languages", async () => {
   }
   assert.ok(i18n.includes("提交任务说明"), "zh submit title");
   assert.ok(i18n.includes("确认提交这份任务说明"), "zh submit confirm");
+});
+
+test("Hub board wires a two-step preview-then-submit flow with revision binding", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // Read-only preview route is wired; submit carries the bound digest.
+  assert.ok(src.includes("/api/ops/tasks/preview"), "preview API route");
+  assert.ok(src.includes("previewRevisionDigest"), "submit payload carries the preview revision digest");
+  assert.ok(!src.includes("expectedPreviewRevisionDigest"),
+    "client sends the safe previewRevisionDigest field, not the daemon-internal name");
+  // Two-step state: path input value and stored preview survive a re-render.
+  assert.ok(src.includes("boardSubmitPath"), "path input state is session-local");
+  assert.ok(src.includes("boardPreview"), "preview state is session-local");
+  assert.ok(src.includes("taskSubmitPreviewBtn"), "preview button i18n key");
+  assert.ok(src.includes("renderSubmitPreviewFacts"), "preview facts renderer");
+  assert.ok(src.includes("clearSubmitPreview"), "preview invalidation helper");
+  // Editing the path clears the stored preview so the old revision cannot be
+  // reused for a new path.
+  const inputIdx = src.indexOf('pathIn.addEventListener("input"');
+  assert.ok(inputIdx > 0, "path input has an input listener");
+  const inputEnd = src.indexOf("});", inputIdx);
+  const inputBlock = src.slice(inputIdx, inputEnd > 0 ? inputEnd : src.length);
+  assert.ok(inputBlock.includes("clearSubmitPreview"),
+    "path edit invalidates the stored preview");
+  // Submit is disabled until a fresh preview exists.
+  assert.ok(src.includes("submitBtn.disabled = true"));
+  assert.ok(src.includes("submitBtn.disabled = false"));
+  // Beginner copy states no Task has started; raw digest is behind a disclosure.
+  assert.ok(src.includes("taskSubmitNoTaskStarted"), "no-Task-started note");
+  assert.ok(src.includes("taskSubmitTechnical"), "technical disclosure for digest");
+  assert.ok(src.includes("taskSubmitDigestLabel"), "digest label in technical disclosure");
+  assert.ok(src.includes("taskSubmitStale"), "stale-preview instruction");
+  assert.ok(src.includes("submitBtn.disabled = !boardPreview"),
+    "submit stays disabled after success or rejection clears the preview");
+  // No raw path/command/endpoint is rendered inside the preview facts renderer.
+  const factsIdx = src.indexOf("function renderSubmitPreviewFacts");
+  assert.ok(factsIdx > 0);
+  const factsEnd = src.indexOf("function rTasks()", factsIdx);
+  const factsBlock = src.slice(factsIdx, factsEnd > 0 ? factsEnd : src.length);
+  assert.ok(!factsBlock.includes("spec.project"), "preview facts never read the project path");
+  assert.ok(!factsBlock.includes("keychainService"), "preview facts never read keychain");
+  assert.ok(!factsBlock.includes("endpoint"), "preview facts never read endpoint");
+  assert.ok(!factsBlock.includes("acceptance.commands"), "preview facts never read commands");
+
+  const guardStart = src.indexOf("function submitPreviewRequestIsCurrent");
+  const guardEnd = src.indexOf("function taskMatchesBoardFilter", guardStart);
+  assert.ok(guardStart > 0 && guardEnd > guardStart, "preview response guard is defined");
+  const guardSource = src.slice(guardStart, guardEnd);
+  const guard = new Function(
+    "requestCounter",
+    `${guardSource}\nboardPreviewRequestId = requestCounter; return submitPreviewRequestIsCurrent;`,
+  )(4) as (requestId: number, requestedPath: string, currentPath: string) => boolean;
+  assert.equal(guard(4, "/tmp/a.yaml", "/tmp/a.yaml"), true,
+    "the current response can populate the preview");
+  assert.equal(guard(3, "/tmp/a.yaml", "/tmp/a.yaml"), false,
+    "an older response cannot overwrite a newer request");
+  assert.equal(guard(4, "/tmp/a.yaml", "/tmp/b.yaml"), false,
+    "editing the path while preview is in flight invalidates its response");
+});
+
+test("Hub i18n carries two-step preview strings in both languages", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const zhSection = i18n.slice(i18n.indexOf("zh: {"));
+  const enSection = i18n.slice(0, i18n.indexOf("zh: {"));
+  for (const key of [
+    "taskSubmitPreviewBtn",
+    "taskSubmitPreviewEmpty",
+    "taskSubmitPreviewFailed",
+    "taskSubmitPreviewRequired",
+    "taskSubmitStale",
+    "taskSubmitNoTaskStarted",
+    "taskSubmitFactWorker",
+    "taskSubmitFactModel",
+    "taskSubmitFactRuntime",
+    "taskSubmitFactBudget",
+    "taskSubmitFactAttempts",
+    "taskSubmitFactAdaptation",
+    "taskSubmitFactQuality",
+    "taskSubmitFactIntegration",
+    "taskSubmitBudgetUnlimited",
+    "taskSubmitAttemptsValue",
+    "taskSubmitAdaptationOff",
+    "taskSubmitAdaptationOn",
+    "taskSubmitQualityPass",
+    "taskSubmitQualityFail",
+    "taskSubmitIntegrationOk",
+    "taskSubmitIntegrationWarn",
+    "taskSubmitTechnical",
+    "taskSubmitDigestLabel",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key} present`);
+    assert.ok(zhSection.includes(key), `zh ${key} present`);
+  }
+  assert.ok(zhSection.includes("预览"), "zh preview button");
+  assert.ok(zhSection.includes("尚未启动任何任务"), "zh no-Task-started note");
+  assert.ok(zhSection.includes("预览已过期"), "zh stale instruction");
+  assert.ok(zhSection.includes("无限制"), "zh unlimited budget");
+  assert.ok(enSection.includes("No task has started"), "en no-Task-started note");
+  assert.ok(enSection.includes("out of date"), "en stale instruction");
 });
 
 test("Hub app.js carries worker-edit and advanced-policy helpers", async () => {
@@ -957,6 +1114,10 @@ test("Hub task summary follows the end-to-end stage after machine verification",
     "taskProgressReadyIntegration",
   );
   assert.equal(
+    summarize({ status: "succeeded", decisionStage: "delivered" }),
+    "taskProgressDeliveredNoActivation",
+  );
+  assert.equal(
     summarize({ status: "succeeded", decisionStage: "activated" }),
     "taskProgressActivated",
   );
@@ -977,6 +1138,7 @@ test("Hub task summary follows the end-to-end stage after machine verification",
     "taskProgressFailedMainRejected",
     "taskProgressIntegrating",
     "taskProgressAppliedNotActivated",
+    "taskProgressDeliveredNoActivation",
     "taskProgressActivated",
     "taskProgressIntegrationFailed",
   ]) {
@@ -1223,6 +1385,7 @@ type StoryStep = {
   noteKey?: string;
   causeWhat?: string;
   failureCategory?: string;
+  mainDecision?: string;
   nextLabel?: string;
 };
 type StoryView = {
@@ -1380,9 +1543,58 @@ test("Hub Task story success journey keeps Worker output and checks complete", a
   assert.equal(storyStep(view, "main-check").state, "complete", "all independent checks passed");
   assert.deepEqual(storyStep(view, "main-check").items, [], "no failed checks remain");
   assert.equal(storyStep(view, "final-result").state, "complete", "accepted and integrated final result");
+  assert.deepEqual(
+    storyStep(view, "final-result").items,
+    task.journey.workerExecution.changedFilePaths,
+    "only Main-accepted files appear as accepted final-result files",
+  );
   assert.equal(storyStep(view, "cause").causeWhat, "succeeded", "evidence-backed cause");
   assert.equal(storyStep(view, "next").nextLabel, "done", "next action is done");
   assert.equal(view.repairedDelivery, false, "success is not a Main-repaired delivery");
+});
+
+test("Hub Task story never labels Main-revise or Main-reject files as accepted", async () => {
+  const adapter = await storyAdapter();
+  const base = await storyFixture();
+  const task: StoryFixture = JSON.parse(JSON.stringify(base));
+  task.status = "succeeded";
+  const attempt = task.journey.workerExecution.attempts[0];
+  assert.ok(attempt, "fixture has an attempt");
+  attempt.status = "succeeded";
+  attempt.exitCode = 0;
+  task.journey.independentVerification = {
+    available: true,
+    checks: [{ label: "Project compilation", passed: true, exitCode: 0 }],
+    conclusion: "passed",
+    failedCount: 0,
+    totalCount: 1,
+  };
+  task.journey.finalDelivery = {
+    mainReview: { decision: "revise", reason: "Main found a semantic gap." },
+  };
+  task.journey.cause = {
+    what: "succeeded",
+    why: "Machine checks passed.",
+    failureCategory: "",
+  };
+  task.journey.nextAction = { label: "revise" };
+
+  const reviseView = adapter(task);
+  assert.deepEqual(storyStep(reviseView, "final-result").items, [],
+    "Main-revise files are not accepted final-result files");
+  assert.equal(storyStep(reviseView, "cause").mainDecision, "revise",
+    "cause keeps the Main-revise fact for plain-language explanation");
+
+  task.journey.finalDelivery.mainReview = {
+    decision: "reject",
+    reason: "Main rejected the result.",
+  };
+  task.journey.nextAction = { label: "stopped" };
+  const rejectView = adapter(task);
+  assert.deepEqual(storyStep(rejectView, "final-result").items, [],
+    "Main-reject files are not accepted final-result files");
+  assert.equal(storyStep(rejectView, "cause").mainDecision, "reject",
+    "cause keeps the Main-reject fact for plain-language explanation");
 });
 
 test("Hub Task story failed verification keeps rejected output and the failed check visible", async () => {
@@ -1603,6 +1815,28 @@ test("Hub app.js renders what and why as distinct sentences in every cause path"
   assert.ok(src.includes("journeyCauseWhyRuntime"), "runtime why");
   assert.ok(src.includes("journeyCauseWhyVerification"), "verification why");
   assert.ok(src.includes("journeyCauseWhyUnknown"), "unknown why");
+  assert.ok(src.includes("journeyCauseWhyMainRevise"), "Main-revise why");
+  assert.ok(src.includes("journeyCauseWhyMainReject"), "Main-reject why");
+  const causeResolverSource = extractFunctionSource(src, "resolveCauseWhy");
+  const causeResolver = new Function(
+    "t",
+    `${causeResolverSource}\nreturn resolveCauseWhy;`,
+  )((key: string) => key) as (
+    what: string,
+    why: string,
+    category: string,
+    mainDecision?: string,
+  ) => string;
+  assert.equal(
+    causeResolver("succeeded", "machine passed", "", "revise"),
+    "journeyCauseWhyMainRevise",
+    "Main revise overrides generic machine-success explanation",
+  );
+  assert.equal(
+    causeResolver("succeeded", "machine passed", "", "reject"),
+    "journeyCauseWhyMainReject",
+    "Main reject overrides generic machine-success explanation",
+  );
   // failureCategoryLabel maps raw categories to readable i18n keys
   assert.ok(src.includes("function failureCategoryLabel"), "category label function");
   assert.ok(src.includes("journeyFailureAuth"), "auth label i18n key");
@@ -1637,12 +1871,15 @@ test("Hub i18n carries journey keys in both languages and what/why never duplica
     "journeyCauseWhatFailed",
     "journeyCauseWhyAuth", "journeyCauseWhyBudget", "journeyCauseWhyRuntime",
     "journeyCauseWhyVerification", "journeyCauseWhyUnknown",
+    "journeyCauseWhyMainRevise", "journeyCauseWhyMainReject",
   ]) {
     assert.ok(i18n.includes(key), `separate what/why key ${key} present`);
   }
   // Chinese what/why translations present
   assert.ok(i18n.includes("任务已完成工作"), "zh succeeded what");
   assert.ok(i18n.includes("Worker 完成，独立检查通过，结果已就绪"), "zh succeeded why");
+  assert.ok(i18n.includes("机器检查通过，但 Main 发现了具体问题并要求修改"), "zh Main-revise why");
+  assert.ok(i18n.includes("机器检查可能已经通过，但 Main 已拒绝这份结果"), "zh Main-reject why");
   assert.ok(i18n.includes("任务未能成功完成"), "zh failed what");
   assert.ok(i18n.includes("Provider 拒绝了 API 凭证"), "zh auth why");
   assert.ok(i18n.includes("Token 或预算达到上限"), "zh budget why");
@@ -2875,4 +3112,347 @@ test("Hub Overview version journey card renders three ordered layers, outcome, a
   assert.match(css,
     /@media\s*\(\s*max-width\s*:\s*768px\s*\)\s*\{[^}]*\.vj-layer\s*\{\s*grid-template-columns\s*:\s*22px/i,
     "vj-layer collapses on narrow viewports");
+});
+
+/* --- Task headline projection: the prominent badge follows the latest
+ * Main/delivery outcome instead of the raw machine status, so a
+ * machine-successful Candidate that Main asked to revise can never be
+ * presented as accepted or delivered. The pure helper is extracted and
+ * exercised against representative decision/delivery stages. */
+type TaskHeadline = {
+  labelKey: string;
+  tone: string;
+  delivered: boolean;
+};
+
+test("Hub Task headline projection follows Main/delivery outcome before machine status", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const finalDeliverySource = extractFunctionSource(src, "hasVerifiedFinalDelivery");
+  const headlineSource = extractFunctionSource(src, "taskHeadline");
+  const headline = new Function(
+    `${finalDeliverySource}\n${headlineSource}\nreturn taskHeadline;`,
+  )() as (task: Record<string, unknown>) => TaskHeadline;
+
+  // Machine passed but Main requested revision: never accepted or delivered.
+  const revision = headline({ status: "succeeded", decisionStage: "revision-requested" });
+  assert.equal(revision.labelKey, "taskHeadlineRevisionRequested");
+  assert.equal(revision.delivered, false);
+  assert.notEqual(revision.labelKey, "taskHeadlineVerifiedDelivery");
+
+  // Machine passed but Main rejected: never accepted.
+  const rejected = headline({ status: "succeeded", decisionStage: "main-rejected" });
+  assert.equal(rejected.labelKey, "taskHeadlineRejected");
+  assert.equal(rejected.delivered, false);
+  assert.notEqual(rejected.labelKey, "taskHeadlineVerifiedDelivery");
+
+  // Awaiting Main review: not delivered.
+  const awaiting = headline({ status: "succeeded", decisionStage: "awaiting-main-review" });
+  assert.equal(awaiting.labelKey, "taskHeadlineAwaitingReview");
+  assert.equal(awaiting.delivered, false);
+
+  // Accepted but not integrated: not delivered.
+  const ready = headline({ status: "succeeded", decisionStage: "ready-for-integration" });
+  assert.equal(ready.labelKey, "taskHeadlineReadyIntegration");
+  assert.equal(ready.delivered, false);
+
+  // Activated decision stage: verified final delivery.
+  const activated = headline({ status: "succeeded", decisionStage: "activated" });
+  assert.equal(activated.labelKey, "taskHeadlineVerifiedDelivery");
+  assert.equal(activated.delivered, true);
+  assert.equal(activated.tone, "badge-ok");
+
+  // Source-only delivery is complete, but must not claim runtime activation.
+  const delivered = headline({ status: "succeeded", decisionStage: "delivered" });
+  assert.equal(delivered.labelKey, "taskHeadlineDeliveredNoActivation");
+  assert.equal(delivered.delivered, true);
+  assert.equal(delivered.tone, "badge-ok");
+  assert.notEqual(delivered.labelKey, "taskHeadlineVerifiedDelivery");
+
+  // Compact verified-repaired-delivery evidence: verified final delivery.
+  const repaired = headline({
+    status: "failed",
+    remediationDisposition: { status: "verified-repaired-delivered" },
+  });
+  assert.equal(repaired.labelKey, "taskHeadlineVerifiedDelivery");
+  assert.equal(repaired.delivered, true);
+
+  // Remaining Main/delivery stages get their bounded headline label.
+  assert.equal(
+    headline({ status: "succeeded", decisionStage: "integrating" }).labelKey,
+    "taskHeadlineIntegrating",
+  );
+  assert.equal(
+    headline({ status: "succeeded", decisionStage: "applied-not-activated" }).labelKey,
+    "taskHeadlineAppliedNotActivated",
+  );
+  assert.equal(
+    headline({ status: "succeeded", decisionStage: "integration-failed" }).labelKey,
+    "taskHeadlineIntegrationFailed",
+  );
+
+  // Legacy machine-only success: a machine-check label, never final acceptance.
+  const legacy = headline({ status: "succeeded" });
+  assert.equal(legacy.labelKey, "taskHeadlineMachinePassed");
+  assert.equal(legacy.delivered, false);
+  assert.notEqual(legacy.labelKey, "taskHeadlineVerifiedDelivery");
+  assert.notEqual(legacy.labelKey, "statusSucceeded");
+
+  // Machine failure without delivery evidence falls back to machine status.
+  assert.equal(headline({ status: "failed" }).labelKey, "statusFailed");
+});
+
+test("Hub Task headline labels are bilingual and never confuse machine success with acceptance", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  const headlineKeys = [
+    "taskHeadlineAwaitingReview",
+    "taskHeadlineRevisionRequested",
+    "taskHeadlineRejected",
+    "taskHeadlineReadyIntegration",
+    "taskHeadlineIntegrating",
+    "taskHeadlineAppliedNotActivated",
+    "taskHeadlineDeliveredNoActivation",
+    "taskHeadlineVerifiedDelivery",
+    "taskHeadlineIntegrationFailed",
+    "taskHeadlineMachinePassed",
+  ];
+  for (const key of headlineKeys) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  function labelOf(section: string, key: string): string {
+    const m = new RegExp(`${key}['"]?\\s*:\\s*"([^"]+)"`).exec(section);
+    return m?.[1] ?? "";
+  }
+  // Runtime-activated delivery and source-only delivery use distinct claims.
+  assert.match(labelOf(enSection, "taskHeadlineVerifiedDelivery"), /deliver/i);
+  assert.ok(labelOf(zhSection, "taskHeadlineVerifiedDelivery").includes("交付"));
+  assert.equal(labelOf(enSection, "taskHeadlineDeliveredNoActivation"), "Delivered");
+  assert.equal(labelOf(zhSection, "taskHeadlineDeliveredNoActivation"), "已交付");
+  assert.match(labelOf(enSection, "taskProgressDeliveredNoActivation"), /did not require runtime activation/i);
+  assert.ok(labelOf(zhSection, "taskProgressDeliveredNoActivation").includes("不需要运行时生效步骤"));
+  // Legacy machine-only success is a machine-check label, never final acceptance.
+  assert.equal(labelOf(enSection, "taskHeadlineMachinePassed"), "Checks passed");
+  assert.equal(labelOf(zhSection, "taskHeadlineMachinePassed"), "检查已通过");
+  // Machine success awaiting Main, revision, rejection, or integration never
+  // claims delivery or acceptance in either locale.
+  const nonAcceptanceKeys = [
+    "taskHeadlineAwaitingReview",
+    "taskHeadlineRevisionRequested",
+    "taskHeadlineRejected",
+    "taskHeadlineReadyIntegration",
+    "taskHeadlineIntegrating",
+    "taskHeadlineAppliedNotActivated",
+    "taskHeadlineIntegrationFailed",
+    "taskHeadlineMachinePassed",
+  ];
+  for (const key of nonAcceptanceKeys) {
+    assert.ok(
+      !/deliver|accept|verified/i.test(labelOf(enSection, key)),
+      `en ${key} is not an acceptance or delivery claim`,
+    );
+    const zh = labelOf(zhSection, key);
+    assert.ok(
+      !zh.includes("交付") && !zh.includes("验收"),
+      `zh ${key} is not an acceptance or delivery claim`,
+    );
+  }
+});
+
+test("Hub generic machine-success label is checks passed, never acceptance or delivery", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  function labelOf(section: string, key: string): string {
+    const m = new RegExp(`${key}['"]?\\s*:\\s*"([^"]+)"`).exec(section);
+    return m?.[1] ?? "";
+  }
+  // Exact checks-passed copy in both locales.
+  assert.equal(labelOf(enSection, "statusSucceeded"), "Checks passed");
+  assert.equal(labelOf(zhSection, "statusSucceeded"), "检查已通过");
+  // Forbidden acceptance/delivery wording in the generic machine-success label.
+  const enSucceeded = labelOf(enSection, "statusSucceeded");
+  assert.ok(!/accept(?:ed|ance)?|deliver(?:ed|y)?|verif(?:ied|y)/i.test(enSucceeded),
+    "en statusSucceeded contains no acceptance or delivery claim");
+  const zhSucceeded = labelOf(zhSection, "statusSucceeded");
+  assert.ok(!zhSucceeded.includes("验收"), "zh statusSucceeded contains no 验收");
+  assert.ok(!zhSucceeded.includes("接受"), "zh statusSucceeded contains no 接受");
+  assert.ok(!zhSucceeded.includes("交付"), "zh statusSucceeded contains no 交付");
+  // The generic machine-success label is distinct from verified-final-delivery copy.
+  const enDelivery = labelOf(enSection, "taskHeadlineVerifiedDelivery");
+  assert.notEqual(labelOf(enSection, "statusSucceeded"), enDelivery,
+    "generic machine success must remain distinct from verified delivery in en");
+  const zhDelivery = labelOf(zhSection, "taskHeadlineVerifiedDelivery");
+  assert.notEqual(labelOf(zhSection, "statusSucceeded"), zhDelivery,
+    "generic machine success must remain distinct from verified delivery in zh");
+});
+
+test("Hub Task card and detail hero lead with the headline badge and avoid duplicate delivery", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("function taskHeadline("), "headline projection helper present");
+  assert.ok(src.includes("function taskHeadlineBadge("), "headline badge renderer present");
+  assert.ok(
+    src.includes('setAttribute("data-fl-role", "task-headline")'),
+    "headline badge has a stable marker",
+  );
+
+  // kanbanCard prominent badge uses the headline projection, not raw status.
+  const cardIdx = src.indexOf("function kanbanCard(");
+  assert.ok(cardIdx > 0);
+  const cardEnd = src.indexOf("function ", cardIdx + 1);
+  const cardBlock = src.slice(cardIdx, cardEnd > 0 ? cardEnd : src.length);
+  assert.ok(cardBlock.includes("taskHeadlineBadge(task)"),
+    "kanban card prominent badge uses the headline projection");
+  assert.ok(!cardBlock.includes("badge(task.status)"),
+    "kanban card no longer leads with raw machine status");
+  assert.ok(cardBlock.includes(".delivered"),
+    "kanban card suppresses the duplicate delivery badge when the headline is delivered");
+  assert.ok(cardBlock.includes("finalDeliveryBadge"),
+    "kanban card still appends the compact delivery badge when the headline is not delivered");
+
+  // Task Detail hero prominent badge uses the headline projection, not raw status.
+  const wbIdx = src.indexOf("function renderTaskWorkbench(");
+  assert.ok(wbIdx > 0);
+  const wbEnd = src.indexOf("function ", wbIdx + 1);
+  const wbBlock = src.slice(wbIdx, wbEnd > 0 ? wbEnd : src.length);
+  assert.ok(wbBlock.includes("taskHeadlineBadge(task)"),
+    "detail hero prominent badge uses the headline projection");
+  assert.ok(!wbBlock.includes("badge(task.status)"),
+    "detail hero no longer leads with raw machine status");
+  assert.ok(wbBlock.includes(".delivered"),
+    "detail hero suppresses the duplicate delivery badge when the headline is delivered");
+});
+
+test("Hub retained Candidate card consumes only the safe journey projection", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const renderer = extractFunctionSource(src, "renderRetainedCandidate");
+
+  assert.ok(
+    renderer.includes('setAttribute("data-fl-role", "retained-candidate")'),
+    "retained Candidate card has a stable semantic marker",
+  );
+  for (const field of [
+    "attemptOrdinal",
+    "verificationPassed",
+    "filesChanged",
+    "changedLines",
+    "affectedPathCount",
+    "affectedPaths",
+  ]) {
+    assert.ok(renderer.includes(`rc.${field}`), `renderer consumes safe field ${field}`);
+  }
+  for (const noteKey of [
+    "retainedCandidatePendingNote",
+    "retainedCandidateReviseNote",
+    "retainedCandidateRejectedNote",
+    "retainedCandidateAcceptedNote",
+    "retainedCandidateRepairedNote",
+  ]) {
+    assert.ok(renderer.includes(noteKey), `renderer separates ${noteKey}`);
+  }
+  for (const forbidden of [
+    "patchDigest",
+    "privateArtifactPath",
+    "candidateRevisionId",
+    "rawLogPath",
+    ".payload",
+  ]) {
+    assert.ok(!renderer.includes(forbidden), `renderer does not consume private ${forbidden}`);
+  }
+
+  const workbench = extractFunctionSource(src, "renderTaskWorkbench");
+  assert.ok(
+    workbench.includes("var overviewRetained = renderRetainedCandidate(task)"),
+    "Overview explains the retained Candidate",
+  );
+  assert.ok(
+    workbench.includes("var resultRetained = renderRetainedCandidate(task)"),
+    "Result explains the retained Candidate",
+  );
+});
+
+test("Hub retained Candidate explanation is bilingual and separates evidence from delivery", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  const keys = [
+    "retainedCandidateTitle",
+    "retainedCandidateAvailableBody",
+    "retainedCandidateMachinePassed",
+    "retainedCandidateMachineFailed",
+    "retainedCandidatePathsLabel",
+    "retainedCandidateUnavailableBody",
+    "retainedCandidatePendingNote",
+    "retainedCandidateReviseNote",
+    "retainedCandidateRejectedNote",
+    "retainedCandidateAcceptedNote",
+    "retainedCandidateRepairedNote",
+  ];
+  for (const key of keys) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+
+  function labelOf(section: string, key: string): string {
+    const match = new RegExp(`${key}['"]?\\s*:\\s*"([^"]+)"`).exec(section);
+    return match?.[1] ?? "";
+  }
+
+  const enAvailable = labelOf(enSection, "retainedCandidateAvailableBody");
+  assert.match(enAvailable, /still matches the current retained change/i);
+  assert.match(enAvailable, /does not prove Main acceptance or final delivery/i);
+  const zhAvailable = labelOf(zhSection, "retainedCandidateAvailableBody");
+  assert.ok(zhAvailable.includes("仍与当前保留的改动一致"));
+  assert.ok(zhAvailable.includes("不能单独证明 Main 已接受或已经交付"));
+
+  const enRevise = labelOf(enSection, "retainedCandidateReviseNote");
+  assert.match(enRevise, /not an accepted or delivered result/i);
+  const zhRevise = labelOf(zhSection, "retainedCandidateReviseNote");
+  assert.ok(zhRevise.includes("不是已接受或已交付的结果"));
+
+  const enAccepted = labelOf(enSection, "retainedCandidateAcceptedNote");
+  assert.match(enAccepted, /Delivery and activation are separate facts/i);
+  const zhAccepted = labelOf(zhSection, "retainedCandidateAcceptedNote");
+  assert.ok(zhAccepted.includes("是否已经交付和生效是下方单独展示的事实"));
+
+  const enRepaired = labelOf(enSection, "retainedCandidateRepairedNote");
+  assert.match(enRepaired, /original Worker Candidate/i);
+  assert.match(enRepaired, /not the final repaired file list/i);
+  const zhRepaired = labelOf(zhSection, "retainedCandidateRepairedNote");
+  assert.ok(zhRepaired.includes("原 Worker 候选"));
+  assert.ok(zhRepaired.includes("不是 Main 修复后的最终文件清单"));
+
+  const enUnavailable = labelOf(enSection, "retainedCandidateUnavailableBody");
+  assert.match(enUnavailable, /does not mean the Worker made no changes/i);
+  assert.match(enUnavailable, /no Candidate ever existed/i);
+  const zhUnavailable = labelOf(zhSection, "retainedCandidateUnavailableBody");
+  assert.ok(zhUnavailable.includes("不代表 Worker 没做过改动"));
+  assert.ok(zhUnavailable.includes("不代表候选从未存在"));
+});
+
+test("guided first Task UI uses opaque sample APIs and hands off to ordinary Task Detail", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.doesNotThrow(() => new Function(src));
+  const renderer = extractFunctionSource(src, "renderGuidedSampleCard");
+  assert.ok(renderer.includes('setAttribute("data-fl-role", "guided-first-task")'));
+  assert.ok(renderer.includes('postJSON("/api/ops/sample-task/prepare"'));
+  assert.ok(renderer.includes('postJSON("/api/ops/sample-task/submit"'));
+  assert.ok(renderer.includes("workerProfileId: guidedWorkerId"));
+  assert.ok(renderer.includes("previewRevisionDigest: sample.preview.previewRevisionDigest"));
+  assert.ok(renderer.includes("confirm: true"));
+  assert.ok(renderer.includes("showTask(sample.taskId)"), "submitted sample opens ordinary Task Detail");
+  assert.ok(!renderer.includes("filePath"), "browser never supplies a private generated path");
+  assert.ok(!renderer.includes("provider:"), "browser never hard-codes a Provider");
+  assert.ok(!renderer.includes("auto"), "onboarding renderer adds no automatic execution loop");
+  for (const key of [
+    "guidedSampleTitle", "guidedSampleBody", "guidedSampleNoWorker",
+    "guidedSampleNotPrepared", "guidedSamplePrepare", "guidedSamplePrepared",
+    "guidedSampleStart", "guidedSampleSubmitted", "guidedSampleSubmittedNext",
+    "guidedSampleUnknown",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.doesNotMatch(enSection.match(/guidedSampleBody:\s*"([^"]+)/)?.[1] ?? "", /Daemon|MCP|Candidate|YAML/);
+  assert.doesNotMatch(zhSection.match(/guidedSampleBody:\s*"([^"]+)/)?.[1] ?? "", /Daemon|MCP|Candidate|YAML/);
 });

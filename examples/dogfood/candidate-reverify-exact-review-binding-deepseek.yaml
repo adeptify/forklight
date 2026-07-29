@@ -1,0 +1,152 @@
+version: 2
+name: Close candidate reverification and exact Main Review revision binding
+project: ../..
+taskClass: forklight-candidate-evidence-handoff
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    A no-Worker candidate reverification can report success only after capturing
+    an immutable revision for its exact verification event, and Main Review
+    accept can bind only that exact revision rather than any older revision with
+    matching Diff bytes.
+  presentation:
+    summary: 重新验证通过后先封存当前版本；主调度验收时还必须确认这个版本正是本次验证产生的，旧版本即使代码相同也不能顶替。
+    language: zh-CN
+  context:
+    - Task ac43b931-840a-49fb-938b-d551935f07b2 correctly attempted to add revision capture after candidate reverification, but independent verification found a deeper acceptance gap.
+    - recordMainReview currently calls resolveLatestRevisionForAttempt and checks only current Diff digest; it does not require the revision verificationEventSequence to equal the latest verification.completed sequence.
+    - Therefore, if capture of a new revision fails and the current Diff bytes equal an older revision, Main accept may incorrectly bind the older revision to the newer verification.
+    - The prior candidate also stored the raw capture exception in a public event payload, which can include an absolute local path; this task must use stable content-free failure evidence.
+  inScope:
+    - In candidate reverification, after canonical verification.completed and before Task success, call the existing captureCandidateRevision for the retained Attempt, exact new verification sequence, current Diff, affected paths, file count, line count, and verification result.
+    - A passing verification whose revision capture fails must stay failed, preserve the Attempt, consume only the authorized allowance, record one stable candidate-evidence failure without raw exception/path/content, and perform no retry.
+    - In recordMainReview accept, resolve the Candidate Revision for the exact current Attempt and exact latest verificationEventSequence; never fall back to an older revision merely because its digest matches.
+    - Preserve the explicit legacy rule only when the Task has no candidate.revision.captured history at all; once revision evidence exists, missing exact-sequence evidence must reject.
+    - Add regression coverage for Main-edited Diff handoff, unchanged Diff handoff, forced capture failure with an older matching revision, stale sequence rejection, legacy no-revision compatibility, privacy, and normal Integration preflight.
+    - Preserve zero Worker/new Attempt/model-cost facts in candidate reverification and all existing Main Review and Integration digest checks.
+  outOfScope:
+    - Worker retries, correction Attempts, automatic Main accept, automatic Integration, schema changes, Competition, Hub redesign, Provider changes, daemon lifecycle changes, token statistics, commit, or push.
+    - Accepting any revision from a different verification sequence, weakening current Diff digest checks, exposing raw capture errors, adding retries/adaptation, or modifying unrelated remediation/correction logic.
+  executionSteps:
+    - Reproduce the failed assertion from Task ac43b931-840a-49fb-938b-d551935f07b2 and trace exact revision selection in recordMainReview.
+    - Implement revision capture in candidate reverification before success with one shared cost-fact/completion path and stable failure evidence.
+    - Change Main Review accept to resolve and bind only the revision for verification.sequence, retaining the documented all-legacy exception.
+    - Add focused tests that seed an old same-digest revision, force new capture failure, and prove accept plus Integration fail closed.
+    - Run focused reverification/revision/Main Review/Integration/remediation tests, then the complete suite once; do not expand to unrelated failures.
+  deliverables:
+    - Fail-closed fresh Candidate Revision capture for candidate reverification.
+    - Exact verification-sequence binding in Main Review accept.
+    - Deterministic privacy and end-to-end handoff regression coverage.
+  modules:
+    - name: Candidate reverification evidence handoff
+      responsibility: Produce new verification evidence and its exact immutable candidate version before reporting success.
+      consumes:
+        - Retained Attempt, current Diff and patch metrics, acceptance results, authorization and allowance.
+      produces:
+        - Passed result plus exact Candidate Revision, or failed result plus stable content-free evidence.
+      boundaries:
+        - No Worker, new Attempt, provider call, retry, adaptation, accept, or Integration.
+    - name: Main Review exact binding
+      responsibility: Bind accept to the candidate version created for the exact latest verification event.
+      consumes:
+        - Latest verification, current Attempt, ordered Candidate Revision events, and current Diff digest.
+      produces:
+        - Digest-bound accept or one stable rejection; legacy unbound accept only when no revision history exists.
+      boundaries:
+        - No stale sequence fallback, no candidate mutation, no automatic Integration, no inference from event text.
+    - name: Evidence-chain regression suite
+      responsibility: Prove verification, revision, accept, and preflight all refer to the same candidate bytes and verification event.
+      consumes:
+        - Temporary stores/workspaces with edited, unchanged, legacy, stale, and capture-failure histories.
+      produces:
+        - Deterministic pass/fail and privacy evidence.
+      boundaries:
+        - No real Provider, user home, source mutation, Integration apply, activation, commit, or push.
+  callChain:
+    - Main repairs or retains a useful failed candidate and explicitly authorizes one no-Worker reverification.
+    - Acceptance commands run locally and append a new verification.completed event.
+    - ForkLight captures the current Diff as a Candidate Revision tied to that exact event before Task success.
+    - Main Review accept resolves only the revision for the same Attempt and verification sequence, then checks current Diff digest.
+    - Existing Integration preflight validates the fresh review and exact revision normally.
+  scenarios:
+    - name: Main changes the candidate
+      given: An older failed revision exists and Main changes the retained Diff before a passing reverify.
+      when: Reverification and fresh Main accept run.
+      then: A new exact revision is captured, accept binds it, and Integration preflight passes.
+    - name: Same Diff but new verification
+      given: The Diff bytes are unchanged but a newer verification passes.
+      when: Reverification completes.
+      then: A revision for the new sequence is captured and only that revision can be accepted.
+    - name: New capture fails while old same-Diff revision exists
+      given: An older matching revision exists and the current passing reverification cannot persist its new revision.
+      when: Main attempts accept.
+      then: Task remains failed, the event exposes no path, accept rejects the missing exact-sequence revision, preflight rejects, and nothing retries.
+    - name: True legacy Task
+      given: No Candidate Revision event exists anywhere in Task history.
+      when: Passing verification receives Main accept.
+      then: Existing legacy unbound acceptance remains compatible and Integration applies its existing legacy checks.
+  risks:
+    - Digest-only matching is insufficient because equal bytes do not prove which verification produced the evidence.
+    - Raw filesystem exceptions leak local paths; public event payload must use a stable code/message and keep internals out of the projection.
+    - Duplicating completion/cost construction can drift, so keep one small helper or a visibly single authoritative construction path.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 750
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/candidate-reverification.ts
+    - src/core/main-review.ts
+    - tests/candidate-reverification.test.ts
+    - tests/main-review.test.ts
+acceptance:
+  criteria:
+    - Passing reverification captures the exact current Candidate Revision before Task success; capture failure remains failed with no raw path, retry, Worker, Attempt, tokens, model cost, Main accept, or Integration authority.
+    - Main Review accept binds only a revision whose Attempt and verification sequence exactly match the latest passing verification and whose digest matches the current Diff.
+    - Older same-digest revisions cannot replace missing new evidence; true legacy Tasks with no revision history retain existing compatibility.
+    - Main-edited and unchanged-Diff handoff both reach fresh Main accept and normal Integration preflight through the new exact revision.
+    - Focused and complete suites remain green.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/candidate-reverification.test.ts tests/candidate-revision.test.ts tests/main-review.test.ts tests/integration.test.ts tests/main-remediation.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

@@ -9,6 +9,7 @@ import {
   verifyMainRemediation,
   REMEDIATION_REASON_MAX_LENGTH,
 } from "../src/core/main-remediation.js";
+import { recordMainReview } from "../src/core/main-review.js";
 import type {
   AttemptRecord,
   RemediationCheckRecord,
@@ -80,6 +81,52 @@ function attempt(tid: string, ord: number, st: AttemptRecord["status"]): Attempt
   };
 }
 
+function createSucceededFixture(
+  store: StateStore,
+  id: string,
+  sourcePath: string,
+  commands: string[] = ["node -e ''"],
+): { task: TaskRecord; attempt: AttemptRecord; verificationSequence: number } {
+  const currentAttempt = attempt(id, 1, "succeeded");
+  const task: TaskRecord = {
+    ...taskRecord(id, "succeeded", sourcePath, commands),
+    currentAttemptId: currentAttempt.id,
+  };
+  store.createTask(task);
+  store.createAttempt(currentAttempt);
+  const verification = store.addEvent(
+    task.id,
+    currentAttempt.id,
+    "verification.completed",
+    "Independent verification passed",
+    passedVerification,
+  );
+  return {
+    task,
+    attempt: currentAttempt,
+    verificationSequence: verification.sequence,
+  };
+}
+
+async function assertRemediationRejectedWithoutMutation(
+  store: StateStore,
+  taskId: string,
+  expected: RegExp,
+): Promise<void> {
+  const eventsBefore = store.listEvents(taskId).map((event) => event.id);
+  await assert.rejects(
+    verifyMainRemediation(
+      store,
+      { taskId, reason: "Main repair should not be authorized", confirm: true },
+      30000,
+    ),
+    expected,
+  );
+  assert.deepEqual(store.listEvents(taskId).map((event) => event.id), eventsBefore);
+  assert.equal(store.getRemediationChecks(taskId).length, 0);
+  assert.equal(store.getRemediationDisposition(taskId), undefined);
+}
+
 // --- Domain validation tests ---
 
 test("remediation verify rejects missing confirm", async () => {
@@ -114,11 +161,11 @@ test("remediation verify rejects oversized reason", async () => {
   }
 });
 
-test("remediation verify rejects nonterminal Task statuses", async () => {
+test("remediation verify rejects active Task statuses", async () => {
   const home = mkdtempSync(path.join(tmpdir(), "fl-rem-"));
   const store = new StateStore(home);
   try {
-    for (const status of ["succeeded", "running", "queued", "preparing", "verifying"] as const) {
+    for (const status of ["running", "queued", "preparing", "verifying"] as const) {
       const id = `t-${status}`;
       const task = taskRecord(id, status, home, ["echo ok"]);
       store.createTask(task);
@@ -621,6 +668,284 @@ test("remediation isolates acceptance commands from inherited Git variables", as
       if (originalGitDir === undefined) delete process.env.GIT_DIR;
       else process.env.GIT_DIR = originalGitDir;
     }
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// --- Machine-successful Task revised by Main ---
+
+test("succeeded Task with current Main revise can record a repaired delivery", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-succeeded-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const fixture = createSucceededFixture(
+      store,
+      "t-succeeded-revise",
+      sourceDir,
+      ["node -e 'console.log(\"SECRET_OUTPUT\")'"],
+    );
+    recordMainReview(store, fixture.task.id, {
+      decision: "revise",
+      reason: "Private Main reasoning about a factual boundary",
+      confirm: true,
+    });
+    const taskBefore = store.getTask(fixture.task.id);
+    const attemptBefore = store.getAttempt(fixture.attempt.id);
+    const eventsBefore = store.listEvents(fixture.task.id);
+
+    const result = await verifyMainRemediation(
+      store,
+      { taskId: fixture.task.id, reason: "Private Main repair reason", confirm: true },
+      30000,
+    );
+
+    assert.equal(result.check.status, "passed");
+    assert.equal(result.disposition?.status, "verified-repaired-delivered");
+    assert.deepEqual(store.getTask(fixture.task.id), taskBefore);
+    assert.deepEqual(store.getAttempt(fixture.attempt.id), attemptBefore);
+    assert.equal(store.listEvents(fixture.task.id).slice(0, eventsBefore.length)
+      .every((event, index) => event.id === eventsBefore[index]!.id), true);
+
+    const remediationEvents = store.listEvents(fixture.task.id)
+      .filter((event) => event.type.startsWith("remediation."));
+    const publicEvidence = JSON.stringify(remediationEvents.map((event) => event.payload));
+    assert.doesNotMatch(publicEvidence, /Private Main|SECRET_OUTPUT|stdout|stderr/);
+
+    await assert.rejects(
+      verifyMainRemediation(
+        store,
+        { taskId: fixture.task.id, reason: "duplicate", confirm: true },
+        30000,
+      ),
+      /already has a passing remediation disposition/,
+    );
+    assert.equal(store.getRemediationChecks(fixture.task.id).length, 1);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded remediation fails closed without the exact latest Main revise", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-reject-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const withoutVerification = taskRecord(
+      "t-no-verification",
+      "succeeded",
+      sourceDir,
+      ["echo should-not-run"],
+    );
+    store.createTask(withoutVerification);
+    await assertRemediationRejectedWithoutMutation(
+      store,
+      withoutVerification.id,
+      /requires independent verification evidence/,
+    );
+
+    const withoutReview = createSucceededFixture(store, "t-no-review", sourceDir);
+    await assertRemediationRejectedWithoutMutation(
+      store,
+      withoutReview.task.id,
+      /requires a valid Main review/,
+    );
+
+    for (const decision of ["accept", "reject"] as const) {
+      const fixture = createSucceededFixture(store, `t-review-${decision}`, sourceDir);
+      recordMainReview(store, fixture.task.id, {
+        decision,
+        reason: `Main chose ${decision}`,
+        confirm: true,
+      });
+      await assertRemediationRejectedWithoutMutation(
+        store,
+        fixture.task.id,
+        /requires a Main revise decision/,
+      );
+    }
+
+    const malformed = createSucceededFixture(store, "t-malformed-review", sourceDir);
+    store.addEvent(
+      malformed.task.id,
+      malformed.attempt.id,
+      "main-review.completed",
+      "Malformed review",
+      {
+        decision: "revise",
+        reason: "invalid sequence",
+        attemptId: malformed.attempt.id,
+        verificationEventSequence: 0.5,
+      },
+    );
+    await assertRemediationRejectedWithoutMutation(
+      store,
+      malformed.task.id,
+      /requires a valid Main review/,
+    );
+
+    const superseded = createSucceededFixture(store, "t-superseded-review", sourceDir);
+    recordMainReview(store, superseded.task.id, {
+      decision: "revise",
+      reason: "First review requests a repair",
+      confirm: true,
+    });
+    recordMainReview(store, superseded.task.id, {
+      decision: "accept",
+      reason: "Newer review supersedes the repair request",
+      confirm: true,
+    });
+    await assertRemediationRejectedWithoutMutation(
+      store,
+      superseded.task.id,
+      /requires a Main revise decision/,
+    );
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded remediation rejects stale verification or Attempt bindings", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-binding-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const staleVerification = createSucceededFixture(store, "t-stale-verification", sourceDir);
+    recordMainReview(store, staleVerification.task.id, {
+      decision: "revise",
+      reason: "Bound to the first verification",
+      confirm: true,
+    });
+    store.addEvent(
+      staleVerification.task.id,
+      staleVerification.attempt.id,
+      "verification.completed",
+      "Newer independent verification",
+      passedVerification,
+    );
+    await assertRemediationRejectedWithoutMutation(
+      store,
+      staleVerification.task.id,
+      /stale verification event/,
+    );
+
+    const taskId = "t-wrong-attempt";
+    const currentAttempt = attempt(taskId, 1, "succeeded");
+    const otherAttempt = attempt(taskId, 2, "failed");
+    const task: TaskRecord = {
+      ...taskRecord(taskId, "succeeded", sourceDir, ["echo should-not-run"]),
+      currentAttemptId: currentAttempt.id,
+    };
+    store.createTask(task);
+    store.createAttempt(currentAttempt);
+    store.createAttempt(otherAttempt);
+    const wrongVerification = store.addEvent(
+      task.id,
+      otherAttempt.id,
+      "verification.completed",
+      "Verification from another Attempt",
+      passedVerification,
+    );
+    store.addEvent(
+      task.id,
+      currentAttempt.id,
+      "main-review.completed",
+      "Review claims the current Attempt",
+      {
+        decision: "revise",
+        reason: "typed but mismatched evidence",
+        attemptId: currentAttempt.id,
+        verificationEventSequence: wrongVerification.sequence,
+      },
+    );
+    await assertRemediationRejectedWithoutMutation(
+      store,
+      task.id,
+      /evidence does not belong to the current Attempt/,
+    );
+
+    const reviewEnvelope = createSucceededFixture(store, "t-review-envelope", sourceDir);
+    const noncurrentAttempt = attempt(reviewEnvelope.task.id, 2, "failed");
+    store.createAttempt(noncurrentAttempt);
+    store.addEvent(
+      reviewEnvelope.task.id,
+      noncurrentAttempt.id,
+      "main-review.completed",
+      "Review event from another Attempt",
+      {
+        decision: "revise",
+        reason: "payload claims current Attempt",
+        attemptId: reviewEnvelope.attempt.id,
+        verificationEventSequence: reviewEnvelope.verificationSequence,
+      },
+    );
+    await assertRemediationRejectedWithoutMutation(
+      store,
+      reviewEnvelope.task.id,
+      /review does not belong to the current Attempt/,
+    );
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("succeeded+revise failed acceptance records a check without delivery", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-command-fail-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const fixture = createSucceededFixture(
+      store,
+      "t-command-fail",
+      sourceDir,
+      ["node -e 'process.exit(3)'"],
+    );
+    recordMainReview(store, fixture.task.id, {
+      decision: "revise",
+      reason: "Main repair still needs verification",
+      confirm: true,
+    });
+    const result = await verifyMainRemediation(
+      store,
+      { taskId: fixture.task.id, reason: "verify repaired source", confirm: true },
+      30000,
+    );
+    assert.equal(result.check.status, "failed");
+    assert.equal(result.disposition, undefined);
+    assert.equal(store.getRemediationChecks(fixture.task.id).length, 1);
+    assert.equal(store.getRemediationDisposition(fixture.task.id), undefined);
+    assert.equal(store.getTask(fixture.task.id).status, "succeeded");
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("interrupted Task remediation remains compatible without Main review", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "fl-rem-interrupted-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  const store = new StateStore(home);
+  try {
+    const task = taskRecord("t-interrupted", "interrupted", sourceDir, ["node -e ''"]);
+    store.createTask(task);
+    const result = await verifyMainRemediation(
+      store,
+      { taskId: task.id, reason: "repair interrupted Task", confirm: true },
+      30000,
+    );
+    assert.equal(result.check.status, "passed");
+    assert.equal(result.disposition?.status, "verified-repaired-delivered");
+    assert.equal(store.getTask(task.id).status, "interrupted");
   } finally {
     store.close();
     rmSync(home, { recursive: true, force: true });

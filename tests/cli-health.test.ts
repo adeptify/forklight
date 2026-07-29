@@ -1,0 +1,417 @@
+import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+import {
+  buildHealthWorkerReadiness,
+  describeNextAction,
+  describeReason,
+  humanWorkerReadinessLines,
+  projectWorkerReadinessJson,
+  safeProviderVerificationSnapshot,
+  type RuntimeDoctorSnapshot,
+} from "../src/cli/health-readiness.js";
+import type { ProviderName, ProviderReadiness } from "../src/core/providers.js";
+import {
+  cloneDefaults,
+  type ForkLightSettings,
+} from "../src/core/settings.js";
+import type { ProviderHealthStatus, ProbeEvidence } from "../src/core/types.js";
+import { upsertModelConfig } from "../src/core/model-catalog.js";
+import {
+  upsertWorkerProfile,
+  type WorkerProfilesSettings,
+} from "../src/core/worker-profiles.js";
+import { StateStore } from "../src/state/store.js";
+import { resolveWorkerReadiness } from "../src/core/worker-readiness.js";
+
+function providerEvidence(
+  overrides: Partial<Record<ProviderName, Partial<ProviderReadiness>>> = {},
+): Record<ProviderName, ProviderReadiness> {
+  const settings = cloneDefaults();
+  const names: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"];
+  return Object.fromEntries(names.map((name) => {
+    const defaults = settings.providerDefaults[name];
+    return [name, {
+      ready: true,
+      authMode: name === "xai" ? "local-sign-in" : "api-key",
+      endpoint: defaults.defaultEndpoint,
+      defaultModel: defaults.defaultModel,
+      keychainService: defaults.defaultKeychainService,
+      ...overrides[name],
+    }];
+  })) as Record<ProviderName, ProviderReadiness>;
+}
+
+function settingsWithProfiles(): ForkLightSettings {
+  const defaults = cloneDefaults();
+  let catalog = defaults.modelCatalog;
+  catalog = upsertModelConfig(catalog, {
+    id: "minimax-m3",
+    label: "MiniMax M3",
+    provider: "minimax",
+    model: defaults.providerDefaults.minimax.defaultModel,
+    endpoint: defaults.providerDefaults.minimax.defaultEndpoint,
+  });
+  catalog = upsertModelConfig(catalog, {
+    id: "xai-grok",
+    label: "xAI Grok",
+    provider: "xai",
+    model: defaults.providerDefaults.xai.defaultModel,
+    endpoint: defaults.providerDefaults.xai.defaultEndpoint,
+  });
+  catalog = upsertModelConfig(catalog, {
+    id: "deepseek-flash",
+    label: "DeepSeek Flash",
+    provider: "deepseek",
+    model: defaults.providerDefaults.deepseek.defaultModel,
+    endpoint: defaults.providerDefaults.deepseek.defaultEndpoint,
+  });
+  let profiles: WorkerProfilesSettings = defaults.workerProfiles;
+  profiles = upsertWorkerProfile(profiles, {
+    id: "minimax-builder",
+    label: "MiniMax Builder",
+    runtime: "claude-code",
+    modelConfigId: "minimax-m3",
+    provider: "minimax",
+    model: defaults.providerDefaults.minimax.defaultModel,
+    endpoint: defaults.providerDefaults.minimax.defaultEndpoint,
+  }, catalog);
+  profiles = upsertWorkerProfile(profiles, {
+    id: "grok-builder",
+    label: "Grok Builder",
+    runtime: "grok-build",
+    modelConfigId: "xai-grok",
+    provider: "xai",
+    model: defaults.providerDefaults.xai.defaultModel,
+    endpoint: defaults.providerDefaults.xai.defaultEndpoint,
+  }, catalog);
+  return { ...defaults, modelCatalog: catalog, workerProfiles: profiles };
+}
+
+const ALL_RUNTIMES_READY = {
+  "claude-code": { ok: true },
+  "grok-build": { ok: true },
+} satisfies Partial<Record<string, RuntimeDoctorSnapshot>>;
+
+function readiness(providerStatus: Partial<Record<ProviderName, ProviderHealthStatus>> = {}) {
+  const providerVerification: Partial<Record<ProviderName, { status: ProviderHealthStatus }>> = {};
+  for (const [name, status] of Object.entries(providerStatus)) {
+    if (status === undefined) continue;
+    providerVerification[name as ProviderName] = { status };
+  }
+  return buildHealthWorkerReadiness({
+    settings: settingsWithProfiles(),
+    providers: providerEvidence(),
+    runtimeDoctors: ALL_RUNTIMES_READY,
+    providerVerification,
+  });
+}
+
+test("canonical resolver and CLI adapter agree for every Worker Profile", () => {
+  const settings = settingsWithProfiles();
+  const providers = providerEvidence();
+  const providerVerification = {
+    deepseek: { status: "verified" as const },
+    xai: { status: "stale" as const },
+  };
+  const canonical = resolveWorkerReadiness({
+    workerProfiles: settings.workerProfiles,
+    modelCatalog: settings.modelCatalog,
+    providerDefaults: settings.providerDefaults,
+    providers,
+    runtimes: ALL_RUNTIMES_READY,
+    providerVerification,
+  });
+  const adapter = buildHealthWorkerReadiness({
+    settings,
+    providers,
+    runtimeDoctors: ALL_RUNTIMES_READY,
+    providerVerification,
+  });
+  assert.deepEqual(adapter, canonical);
+});
+
+test("saved MiniMax Worker with verified evidence is ready and can launch", () => {
+  const results = readiness({ minimax: "verified", xai: "verified" });
+  assert.equal(results.length, 4);
+  const minimaxWorker = results.find((r) => r.workerId === "minimax-builder");
+  assert.ok(minimaxWorker, "expected MiniMax Worker to exist");
+  assert.equal(minimaxWorker!.state, "ready");
+  assert.equal(minimaxWorker!.canLaunch, true);
+  assert.equal(minimaxWorker!.reason, "ready");
+  assert.equal(minimaxWorker!.nextAction, "none");
+  assert.equal(minimaxWorker!.provider, "minimax");
+  assert.equal(minimaxWorker!.model, "MiniMax-M3");
+});
+
+test("locally launchable Worker is not falsely blocked when connection evidence is stale", () => {
+  const results = readiness({ minimax: "stale" });
+  const minimaxWorker = results.find((r) => r.workerId === "minimax-builder")!;
+  assert.equal(minimaxWorker.state, "launchable");
+  assert.equal(minimaxWorker.canLaunch, true);
+  assert.equal(minimaxWorker.reason, "connection-stale");
+  assert.equal(minimaxWorker.nextAction, "run-smoke-check");
+});
+
+test("locally launchable Worker with no connection evidence is launchable, not failed", () => {
+  const results = readiness();
+  const minimaxWorker = results.find((r) => r.workerId === "minimax-builder")!;
+  assert.equal(minimaxWorker.state, "launchable");
+  assert.equal(minimaxWorker.canLaunch, true);
+  assert.equal(minimaxWorker.reason, "connection-unverified");
+  assert.equal(minimaxWorker.nextAction, "run-smoke-check");
+});
+
+test("failed persisted connection surfaces needs-attention without blocking local launch", () => {
+  const results = readiness({ minimax: "failed" });
+  const minimaxWorker = results.find((r) => r.workerId === "minimax-builder")!;
+  assert.equal(minimaxWorker.state, "needs-attention");
+  assert.equal(minimaxWorker.canLaunch, true);
+  assert.equal(minimaxWorker.reason, "connection-failed");
+  assert.equal(minimaxWorker.nextAction, "check-provider");
+});
+
+test("missing local authentication blocks before runtime or connection claims", () => {
+  const results = buildHealthWorkerReadiness({
+    settings: settingsWithProfiles(),
+    providers: providerEvidence({
+      minimax: { ready: false, authMode: "none", error: "private diagnostic" },
+    }),
+    runtimeDoctors: ALL_RUNTIMES_READY,
+    providerVerification: { minimax: { status: "verified" } },
+  });
+  const minimaxWorker = results.find((r) => r.workerId === "minimax-builder")!;
+  assert.equal(minimaxWorker.state, "blocked");
+  assert.equal(minimaxWorker.canLaunch, false);
+  assert.equal(minimaxWorker.reason, "authentication-missing");
+  assert.equal(minimaxWorker.nextAction, "configure-authentication");
+  const serialized = JSON.stringify(results);
+  assert.equal(serialized.toLowerCase().includes("private diagnostic"), false);
+});
+
+test("unavailable runtime blocks even when authentication and evidence are present", () => {
+  const results = buildHealthWorkerReadiness({
+    settings: settingsWithProfiles(),
+    providers: providerEvidence(),
+    runtimeDoctors: {
+      "claude-code": { ok: false },
+      "grok-build": { ok: true },
+    } satisfies Partial<Record<string, RuntimeDoctorSnapshot>>,
+    providerVerification: { minimax: { status: "verified" } },
+  });
+  const minimaxWorker = results.find((r) => r.workerId === "minimax-builder")!;
+  assert.equal(minimaxWorker.state, "blocked");
+  assert.equal(minimaxWorker.canLaunch, false);
+  assert.equal(minimaxWorker.reason, "runtime-unavailable");
+  assert.equal(minimaxWorker.nextAction, "fix-runtime");
+});
+
+test("malformed saved model fails closed without inventing identity or fallbacks", () => {
+  // Simulate an already-persisted Worker whose saved modelConfigId
+  // no longer resolves to any catalog entry.  The readiness resolver
+  // must fail closed and never invent a Provider/model fallback.
+  const settings = settingsWithProfiles();
+  settings.workerProfiles = {
+    defaultProfileId: settings.workerProfiles.defaultProfileId,
+    profiles: [
+      ...settings.workerProfiles.profiles,
+      {
+        id: "broken-builder",
+        label: "Broken Builder",
+        runtime: "claude-code",
+        modelConfigId: "missing-model-config",
+      },
+    ],
+  };
+  const results = buildHealthWorkerReadiness({
+    settings,
+    providers: providerEvidence(),
+    runtimeDoctors: ALL_RUNTIMES_READY,
+    providerVerification: {},
+  });
+  const broken = results.find((r) => r.workerId === "broken-builder")!;
+  assert.equal(broken.state, "blocked");
+  assert.equal(broken.reason, "model-invalid");
+  assert.equal(broken.nextAction, "choose-model");
+  assert.equal(broken.provider, undefined);
+  assert.equal(broken.model, undefined);
+});
+
+test("results preserve saved Worker Profile order from the settings snapshot", () => {
+  const results = readiness();
+  const ids = results.map((r) => r.workerId);
+  assert.deepEqual(ids, [
+    "default",
+    "volcengine-glm52-1m",
+    "minimax-builder",
+    "grok-builder",
+  ]);
+});
+
+test("daemon-independent composition never starts a service or probes a Provider", async () => {
+  const settings = settingsWithProfiles();
+  const evidence: ProbeEvidence = {
+    provider: "minimax",
+    model: settings.providerDefaults.minimax.defaultModel,
+    endpointOrigin: new URL(settings.providerDefaults.minimax.defaultEndpoint).origin,
+    status: "verified",
+    latencyMs: 12,
+    timestamp: new Date(Date.now() - 1000).toISOString(),
+  };
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-health-"));
+  const store = new StateStore(home);
+  try {
+    store.saveProbeEvidence(evidence);
+    const snapshot = safeProviderVerificationSnapshot(
+      store,
+      settings,
+      providerEvidence(),
+      Date.now(),
+    );
+    assert.deepEqual(snapshot.minimax, { status: "verified" });
+  } finally {
+    store.close();
+  }
+});
+
+test("persisted probe evidence derives stale, failed, and unverified status safely", async () => {
+  const settings = settingsWithProfiles();
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-health-status-"));
+  const store = new StateStore(home);
+  try {
+    const now = Date.now();
+    const origin = new URL(settings.providerDefaults.deepseek.defaultEndpoint).origin;
+    const model = settings.providerDefaults.deepseek.defaultModel;
+    const stale: ProbeEvidence = {
+      provider: "deepseek",
+      model,
+      endpointOrigin: origin,
+      status: "verified",
+      latencyMs: 12,
+      timestamp: new Date(now - settings.probe.cacheLifetimeMs - 1000).toISOString(),
+    };
+    const failed: ProbeEvidence = {
+      provider: "minimax",
+      model: settings.providerDefaults.minimax.defaultModel,
+      endpointOrigin: new URL(settings.providerDefaults.minimax.defaultEndpoint).origin,
+      status: "failed",
+      latencyMs: 0,
+      timestamp: new Date(now - 1000).toISOString(),
+      failureCategory: "authentication",
+      failureSummary: "private failure detail that must not leak",
+    };
+    const mismatched: ProbeEvidence = {
+      provider: "volcengine",
+      model: "wrong-model",
+      endpointOrigin: origin,
+      status: "verified",
+      latencyMs: 0,
+      timestamp: new Date(now - 1000).toISOString(),
+    };
+    store.saveProbeEvidence(stale);
+    store.saveProbeEvidence(failed);
+    store.saveProbeEvidence(mismatched);
+    const snapshot = safeProviderVerificationSnapshot(
+      store,
+      settings,
+      providerEvidence(),
+      now,
+    );
+    assert.equal(snapshot.deepseek?.status, "stale");
+    assert.equal(snapshot.minimax?.status, "failed");
+    assert.equal(snapshot.volcengine?.status, "unverified");
+    assert.equal(snapshot.xai, undefined);
+
+    const results = buildHealthWorkerReadiness({
+      settings,
+      providers: providerEvidence(),
+      runtimeDoctors: ALL_RUNTIMES_READY,
+      providerVerification: snapshot,
+    });
+    const serialized = JSON.stringify(results);
+    assert.equal(serialized.toLowerCase().includes("private failure detail"), false);
+  } finally {
+    store.close();
+  }
+});
+
+test("JSON and human output agree on state, launchability, reason, and next action", () => {
+  const results = readiness({
+    minimax: "verified",
+    deepseek: "stale",
+    volcengine: "failed",
+  });
+  const projected = projectWorkerReadinessJson(results);
+  const human = humanWorkerReadinessLines(results);
+  for (const entry of projected) {
+    const canonical = results.find((r) => r.workerId === entry.workerId)!;
+    assert.equal(entry.state, canonical.state);
+    assert.equal(entry.canLaunch, canonical.canLaunch);
+    assert.equal(entry.reason, canonical.reason);
+    assert.equal(entry.nextAction, canonical.nextAction);
+    assert.equal(entry.runtime, canonical.runtime);
+    assert.match(human, new RegExp(`${entry.workerId} \\(${entry.workerLabel}\\): ${entry.state}`));
+    assert.match(human, new RegExp(`reason: ${describeReason(canonical.reason)}`));
+    assert.match(human, new RegExp(`next: ${describeNextAction(canonical.nextAction)}`));
+  }
+});
+
+const FORBIDDEN_TOKENS = [
+  "keychainService",
+  "endpoint",
+  "auth.json",
+  "/Users/",
+  "failureSummary",
+  "issues",
+  "command",
+  "token",
+  "secret",
+  "checks",
+  "ANTHROPIC_",
+  "https://",
+];
+
+test("JSON output exposes only the bounded readiness allowlist", () => {
+  const projected = projectWorkerReadinessJson(readiness({ minimax: "verified", xai: "verified" }));
+  const serialized = JSON.stringify(projected);
+  for (const forbidden of FORBIDDEN_TOKENS) {
+    assert.equal(serialized.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
+  }
+  for (const entry of projected) {
+    assert.ok(["ready", "launchable", "needs-attention", "blocked"].includes(entry.state));
+    assert.equal(typeof entry.canLaunch, "boolean");
+  }
+});
+
+test("human workers section exposes only the bounded readiness allowlist", () => {
+  const lines = humanWorkerReadinessLines(readiness({ minimax: "stale", xai: "failed" }));
+  for (const forbidden of FORBIDDEN_TOKENS) {
+    assert.equal(lines.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
+  }
+  assert.match(lines, /^workers:\n/m);
+});
+
+test("human workers section preserves saved order", () => {
+  const results = readiness();
+  const lines = humanWorkerReadinessLines(results);
+  const orderedIds = [
+    "default",
+    "volcengine-glm52-1m",
+    "minimax-builder",
+    "grok-builder",
+  ];
+  let cursor = 0;
+  for (const id of orderedIds) {
+    const index = lines.indexOf(`${id} (`);
+    assert.ok(index >= 0, `expected ${id} line in output`);
+    assert.ok(index >= cursor, `${id} appears out of saved order`);
+    cursor = index;
+  }
+});
+
+test("empty results produce an empty human section without throwing", () => {
+  assert.equal(humanWorkerReadinessLines([]), "workers: (none)\n");
+  assert.deepEqual(projectWorkerReadinessJson([]), []);
+});

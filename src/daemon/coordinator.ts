@@ -36,8 +36,8 @@ import {
   type MainCorrectionAuthorization,
 } from "../core/attempt-authorization.js";
 import { latestMainReview, recordMainReview } from "../core/main-review.js";
-import type { ProviderName } from "../core/providers.js";
-import { providerNames } from "../core/providers.js";
+import type { ProviderAuthInspector, ProviderName } from "../core/providers.js";
+import { providerNames, realProviderAuthInspector } from "../core/providers.js";
 import {
   createClaudeProbeRunner,
   ProviderProbeService,
@@ -57,6 +57,7 @@ import {
   prepareMainCorrectionTask,
   prepareReviseTask,
   prepareTaskWorkspace,
+  preflightTaskLaunchAuthentication,
   registerTaskFromSpec,
   resumeTask,
 } from "../core/runner.js";
@@ -125,11 +126,15 @@ import {
   launchActivationRunner,
   writeActivationHandoff,
 } from "../activation/runner.js";
+import { resolveTaskEffectivePolicy } from "../core/advanced-policy.js";
 import {
-  deriveEnforcementCapability,
-  enforcementCapabilityForRuntime,
-  resolveTaskEffectivePolicy,
-} from "../core/advanced-policy.js";
+  buildTaskAdmissionPreview,
+  enforcementCapabilityForTaskRuntime,
+  prepareTaskAdmission,
+  taskPolicyFromSettings,
+  PREVIEW_REVISION_DIGEST_PATTERN,
+  type SafeTaskAdmissionPreview,
+} from "../core/task-preview.js";
 import {
   deriveChildEffectivePolicy,
   evaluateAdaptationGate,
@@ -138,7 +143,6 @@ import {
   type AdaptationLineageEdgeProjection,
   type AdaptationParentProjection,
 } from "../core/adaptation.js";
-import { getWorkerAdapter } from "../workers/registry.js";
 import {
   verifyMainRemediation,
   projectRemediationVerifyResult,
@@ -164,6 +168,15 @@ export interface PlanRegistrationResult {
   planId: string;
   taskIdsByItemId: Record<string, string>;
 }
+
+/**
+ * One bounded stale-preview reason shared by the daemon and Hub. A bound
+ * submit_file fails closed with exactly this message when the supplied preview
+ * revision is missing, malformed, or no longer matches the current file bytes
+ * and effective admission settings. The Hub maps it to a "preview again"
+ * instruction without echoing any other daemon text.
+ */
+export const STALE_PREVIEW_REASON = "Task preview is out of date; preview again before submitting.";
 
 interface QueuedJob {
   taskId: string;
@@ -205,15 +218,7 @@ export async function probeProvidersBounded(
 }
 
 function taskPolicy(settings: ForkLightSettings): TaskPolicy {
-  return {
-    contractQuality: settings.contractQuality,
-    execution: settings.execution,
-    providerDefaults: settings.providerDefaults,
-    completionPolicy: settings.completionPolicy,
-    workerProfiles: settings.workerProfiles,
-    modelCatalog: settings.modelCatalog,
-    deliveryProfiles: settings.deliveryProfiles,
-  };
+  return taskPolicyFromSettings(settings);
 }
 
 function processExists(pid: number): boolean {
@@ -259,6 +264,7 @@ export class DaemonCoordinator {
     private readonly store: StateStore,
     private readonly settings: SettingsService,
     private readonly maxConcurrencyOverride?: number,
+    private readonly providerAuthInspector: ProviderAuthInspector = realProviderAuthInspector(),
   ) {}
 
   health(): Record<string, unknown> {
@@ -319,22 +325,53 @@ export class DaemonCoordinator {
    *  Uses the exact selected workerProfileId from the spec; never guesses by runtime. */
   private resolveEffectivePolicy(spec: TaskSpec): EffectivePolicySnapshot | undefined {
     const settings = this.settings.get();
-    let capabilities = enforcementCapabilityForRuntime(spec.runtime.name);
-    try {
-      const adapter = getWorkerAdapter(spec.runtime.name);
-      capabilities = deriveEnforcementCapability(adapter.capabilities());
-    } catch {
-      // Conservative defaults for unknown runtimes
-    }
-
+    const capabilities = enforcementCapabilityForTaskRuntime(spec.runtime.name);
     return resolveTaskEffectivePolicy(spec, settings, capabilities);
   }
 
-  async submitFile(taskFile: string): Promise<TaskRecord> {
+  /**
+   * Read-only Task Contract admission preview under current saved settings.
+   * Never registers, queues, prepares, verifies, integrates, or probes.
+   */
+  async validateFile(taskFile: string): Promise<SafeTaskAdmissionPreview> {
+    if (!path.isAbsolute(taskFile)) {
+      throw new Error("validate_file requires an absolute Task Contract file path");
+    }
+    return buildTaskAdmissionPreview(taskFile, this.settings.get());
+  }
+
+  /**
+   * Submit a Task Contract file. When expectedPreviewRevisionDigest is
+   * supplied, the canonical admission is prepared once from the current file
+   * bytes and settings snapshot, the digest is recomputed from that same
+   * prepared admission, and any missing/malformed/different value fails closed
+   * with the bounded stale-preview reason BEFORE any Task, event, workspace, or
+   * queue mutation. Callers that omit the value keep the existing
+   * non-interactive behavior.
+   */
+  async submitFile(
+    taskFile: string,
+    expectedPreviewRevisionDigest?: unknown,
+  ): Promise<TaskRecord> {
     const settings = this.settings.get();
-    const loaded = await loadTaskSpec(taskFile, taskPolicy(settings));
-    const effectivePolicy = this.resolveEffectivePolicy(loaded.spec);
-    const task = registerTaskFromSpec(this.store, loaded.spec, loaded.taskFile, effectivePolicy);
+    const prepared = await prepareTaskAdmission(taskFile, settings);
+    if (expectedPreviewRevisionDigest !== undefined) {
+      if (
+        typeof expectedPreviewRevisionDigest !== "string"
+        || !PREVIEW_REVISION_DIGEST_PATTERN.test(expectedPreviewRevisionDigest)
+      ) {
+        throw new Error(STALE_PREVIEW_REASON);
+      }
+      if (prepared.previewRevisionDigest !== expectedPreviewRevisionDigest) {
+        throw new Error(STALE_PREVIEW_REASON);
+      }
+    }
+    const task = registerTaskFromSpec(
+      this.store,
+      prepared.spec,
+      prepared.taskFile,
+      prepared.effectivePolicy,
+    );
     this.queueTask(task.id);
     return this.store.getTask(task.id);
   }
@@ -686,7 +723,9 @@ export class DaemonCoordinator {
   ): TaskRecord {
     if (confirm !== true) throw new Error("Main correction requires confirm: true");
     const task = this.store.getTask(taskId);
-    if (task.status !== "failed" && task.status !== "interrupted") {
+    // Succeeded is allowed only when the latest Main Review is revise (validated
+    // downstream by authorizeMainCorrection and resolveCorrectionEligibility).
+    if (task.status !== "failed" && task.status !== "interrupted" && task.status !== "succeeded") {
       throw new Error(`Task ${taskId} cannot be corrected from status ${task.status}`);
     }
     const execution = this.settings.get().execution;
@@ -2068,6 +2107,14 @@ export class DaemonCoordinator {
     // Read Attempt limits from immutable task snapshot, falling back to live settings for legacy tasks
     const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
     const maxExtraAttempts = task.effectivePolicy?.values.maxExtraAttempts ?? exec.maxExtraAttempts;
+
+    // Canonical launch admission. For a new Task this runs before any source
+    // copy; for resume/correction it still runs before a new Attempt or Worker.
+    // Authentication failure is environment evidence, never model-quality
+    // evidence, and does not trigger retry/adaptation.
+    if (!preflightTaskLaunchAuthentication(this.store, task, this.providerAuthInspector)) {
+      return;
+    }
 
     if (job.correcting) {
       await correctTask(

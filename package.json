@@ -26,13 +26,15 @@
     "node": ">=24.0.0"
   },
   "files": [
+    "dist/build-identity.json",
     "dist/src/",
     "docs/",
     "plugins/forklight/",
     ".agents/plugins/",
     "README.md",
     "AGENTS.md",
-    "examples/"
+    "examples/",
+    "fixtures/"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

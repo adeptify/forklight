@@ -14,7 +14,8 @@ import type { DirectCodexSampleReview } from "./core/direct-codex-review.js";
 import type { DirectCodexInboxItem } from "./core/direct-codex-workflow-service.js";
 import { forklightHome } from "./core/config.js";
 import { providerProbeBatchFailed } from "./core/provider-probe.js";
-import { providerReadiness } from "./core/providers.js";
+import { providerLabel, providerNames, providerReadiness } from "./core/providers.js";
+import type { RuntimeName } from "./core/runtime-names.js";
 import type { ProviderModelSummary } from "./core/statistics.js";
 import type {
   AttemptAuthorization, AttemptExecutionOptions, AttemptRecord, EventRecord,
@@ -37,14 +38,12 @@ import {
   resolveLatestRevision,
   validateStructuredCorrectionInput,
 } from "./core/candidate-revision.js";
-import { assessIntegrationFeasibility } from "./core/integration-feasibility.js";
 import { buildCompactIntegrationOperationView } from "./core/integration-operation.js";
 import type { IntegrationOperationView } from "./core/types.js";
-import { loadTaskSpec } from "./core/task.js";
 import {
-  assessTaskQualityWithPolicy,
-  effectiveQualityPolicyFromGlobal,
-} from "./core/contract-quality.js";
+  buildTaskAdmissionPreview,
+  formatTaskAdmissionPreviewHuman,
+} from "./core/task-preview.js";
 import { createKeychainStore } from "./core/secrets.js";
 import { SettingsService, type TaskPolicy } from "./core/settings.js";
 import {
@@ -60,8 +59,32 @@ import { readActivationHandoffContext } from "./activation/runner.js";
 import type { DaemonMethod } from "./daemon/protocol.js";
 import { createSystemInspector, SetupService } from "./setup/service.js";
 import { HubServer } from "./hub/server.js";
+import {
+  discoverOrClaimHub,
+  inspectHubStatus,
+  publishHubInstance,
+  releaseHubInstance,
+  replaceHubOwner,
+  type HubInspectionStatus,
+} from "./hub/instance.js";
 import { StateStore } from "./state/store.js";
 import { withCliExchangeReceipt, humanTokenReportLines } from "./cli/exchange-receipts.js";
+import {
+  buildHealthWorkerReadiness,
+  humanWorkerReadinessLines,
+  projectWorkerReadinessJson,
+  safeProviderVerificationSnapshot,
+  type RuntimeDoctorSnapshot,
+} from "./cli/health-readiness.js";
+import {
+  projectExecutionProviderReadiness,
+  resolveExecutionProviderFacts,
+  resolveDoctorResult,
+  renderDoctorHuman,
+  renderDoctorJson,
+  type DaemonHealthEvidence,
+  type LocalProviderFact,
+} from "./setup/doctor.js";
 import {
   buildCompactInspection,
   buildProgressCursor,
@@ -113,7 +136,7 @@ Usage:
   forklight list [--json]
   forklight stats [--json] [--provider <name>] [--model <name>] [--since <ISO>] [--until <ISO>]
   forklight routing <task-class> --candidates <json> [--json]
-  forklight daemon <start|status|stop>
+  forklight daemon <start|status|stop|restart>
   forklight health [--json]
   forklight settings <get|set|apply|reset> [...]
   forklight integration preflight <task-id> [--json]
@@ -142,6 +165,10 @@ Usage:
       # rerun a failed candidate's original acceptance suite without a Worker or new Attempt
   forklight hub [--no-open] [--port <port>]
       # starts backend daemon + Hub UI (only control-center UI)
+  forklight hub restart --confirm
+      # replaces a stale-version Hub owner after proving its identity
+  forklight hub status [--json]
+      # read-only Hub status; never starts, claims, replaces, or signals
   forklight doctor [--json]
 `;
 }
@@ -595,9 +622,10 @@ async function health(json: boolean): Promise<void> {
   const store = new StateStore(forklightHome());
   try {
     const settings = new SettingsService(store).get();
-    const readiness = providerReadiness(settings.providerDefaults);
+    const localReadiness = providerReadiness(settings.providerDefaults);
     const { listWorkerAdapters } = await import("./workers/registry.js");
     const runtimes: Record<string, unknown> = {};
+    const runtimeDoctors: Partial<Record<RuntimeName, RuntimeDoctorSnapshot>> = {};
     for (const adapter of listWorkerAdapters()) {
       const doctor = adapter.doctor();
       if (doctor instanceof Promise) continue;
@@ -608,14 +636,21 @@ async function health(json: boolean): Promise<void> {
         ...(doctor.version === undefined ? {} : { version: doctor.version }),
         issues: doctor.issues,
       };
+      runtimeDoctors[adapter.name] = { ok: doctor.ok };
     }
     const clientBuildIdentity = currentBuildIdentity();
     let daemonBuildIdentity: unknown;
+    let daemonEvidence: DaemonHealthEvidence | undefined;
     let identityStatus = "daemon-unavailable";
     let identityAction: string | undefined;
     try {
       const response = await daemonExchange("health");
       daemonBuildIdentity = response.serverIdentity;
+      daemonEvidence = {
+        ok: response.ok,
+        serverIdentity: response.serverIdentity,
+        result: response.result,
+      };
       if (isBuildIdentity(response.serverIdentity)) {
         const comparison = compareBuildIdentity(clientBuildIdentity, response.serverIdentity);
         identityStatus = comparison.sameBuild
@@ -633,6 +668,34 @@ async function health(json: boolean): Promise<void> {
     } catch {
       // Local CLI health remains useful even when the daemon is not running.
     }
+    const executionFacts = resolveExecutionProviderFacts({
+      clientBuildIdentity,
+      ...(daemonEvidence === undefined ? {} : { daemonEvidence }),
+      localProviders: providerNames().map((name) => ({
+        name,
+        label: providerLabel(name),
+        configured: localReadiness.providers[name].ready,
+        ready: localReadiness.providers[name].ready,
+        authMode: localReadiness.providers[name].authMode,
+        defaultModel: localReadiness.providers[name].defaultModel,
+      })),
+    });
+    const readiness = projectExecutionProviderReadiness(
+      executionFacts.providers,
+      localReadiness.providers,
+    );
+    const providerVerification = safeProviderVerificationSnapshot(
+      store,
+      settings,
+      readiness.providers,
+      Date.now(),
+    );
+    const workerReadiness = buildHealthWorkerReadiness({
+      settings,
+      providers: readiness.providers,
+      runtimeDoctors,
+      providerVerification,
+    });
     const result = {
       // Transition: ok still requires Claude + any provider (daemon submit can still pick Grok when doctor ok).
       ok: claudeVersion !== "unavailable" && readiness.anyReady,
@@ -640,7 +703,10 @@ async function health(json: boolean): Promise<void> {
       claudeCode: claudeVersion,
       runtimes,
       defaultRuntime: settings.execution.defaultRuntime,
+      providerReadinessSource: executionFacts.source,
+      providerReadinessSourceDetail: executionFacts.sourceDetail,
       providers: readiness.providers,
+      workers: projectWorkerReadinessJson(workerReadiness),
       home: forklightHome(),
       clientBuildIdentity,
       ...(daemonBuildIdentity === undefined ? {} : { daemonBuildIdentity }),
@@ -651,6 +717,9 @@ async function health(json: boolean): Promise<void> {
     else {
       process.stdout.write(`ok: ${result.ok}\nnode: ${result.node}\nclaudeCode: ${result.claudeCode}\n`);
       process.stdout.write(`defaultRuntime: ${result.defaultRuntime}\n`);
+      process.stdout.write(
+        `providerReadinessSource: ${result.providerReadinessSource} (${result.providerReadinessSourceDetail})\n`,
+      );
       process.stdout.write("runtimes:\n");
       for (const [name, runtime] of Object.entries(result.runtimes)) {
         const r = runtime as { ok?: boolean; displayName?: string; issues?: string[] };
@@ -664,6 +733,7 @@ async function health(json: boolean): Promise<void> {
           `  ${name}: ready=${provider.ready} model=${provider.defaultModel} endpoint=${provider.endpoint}\n`,
         );
       }
+      process.stdout.write(humanWorkerReadinessLines(workerReadiness));
       process.stdout.write(`home: ${result.home}\n`);
       process.stdout.write(
         `identity: ${result.identityStatus} protocol=${clientBuildIdentity.protocolVersion} build=${clientBuildIdentity.buildId}\n`,
@@ -726,6 +796,42 @@ function printProviderProbe(result: Record<string, unknown>): void {
       }
     }
   }
+}
+
+/** Render the read-only Hub status for a human. Never contains the URL,
+ *  token, nonce, raw record, private home path, or raw build id. */
+function humanHubStatusLines(status: HubInspectionStatus): string {
+  const lines: string[] = [];
+  const details: string[] = [];
+  if (status.pid !== undefined) details.push(`pid=${status.pid}`);
+  if (status.port !== undefined) details.push(`port=${status.port}`);
+  switch (status.state) {
+    case "stopped":
+      lines.push("No ForkLight Hub is active.");
+      lines.push("next: start one with `forklight hub`");
+      break;
+    case "current":
+      lines.push("A ForkLight Hub is active and matches this build.");
+      if (details.length > 0) lines.push(`details: ${details.join(" ")}`);
+      lines.push("next: use the existing Hub");
+      break;
+    case "different-build":
+      lines.push("A ForkLight Hub is active but runs a different build.");
+      if (details.length > 0) lines.push(`details: ${details.join(" ")}`);
+      lines.push("next: run `forklight hub restart --confirm` to replace it");
+      break;
+    case "legacy":
+      lines.push("A ForkLight Hub is active but its build version is unknown.");
+      if (details.length > 0) lines.push(`details: ${details.join(" ")}`);
+      lines.push("next: run `forklight hub restart --confirm` to replace it");
+      break;
+    case "unverified":
+      lines.push("ForkLight Hub ownership cannot be verified safely.");
+      if (status.reason !== undefined) lines.push(`reason: ${status.reason}`);
+      lines.push("next: investigate the Hub state before any lifecycle action");
+      break;
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 async function main(): Promise<void> {
@@ -891,51 +997,16 @@ async function main(): Promise<void> {
     const store = new StateStore(forklightHome());
     try {
       const settings = new SettingsService(store).get();
-      const policy: TaskPolicy = {
-        contractQuality: settings.contractQuality,
-        execution: settings.execution,
-        providerDefaults: settings.providerDefaults,
-        completionPolicy: settings.completionPolicy,
-        deliveryProfiles: settings.deliveryProfiles,
-      };
-      const loaded = await loadTaskSpec(required(positional, "task file"), policy);
-      const report = assessTaskQualityWithPolicy(
-        loaded.spec,
-        loaded.spec.qualityPolicy
-          ?? effectiveQualityPolicyFromGlobal(settings.contractQuality),
+      const preview = await buildTaskAdmissionPreview(
+        required(positional, "task file"),
+        settings,
       );
-      const integration = assessIntegrationFeasibility(loaded.spec, settings.integration);
       if (json) {
-        process.stdout.write(`${JSON.stringify({
-          taskFile: loaded.taskFile,
-          report,
-          integrationFeasibility: integration,
-        }, null, 2)}\n`);
+        process.stdout.write(`${JSON.stringify(preview, null, 2)}\n`);
       } else {
-        process.stdout.write(`Task Contract: ${report.passed ? "PASS" : "FAIL"} (${report.score}/100)\n`);
-        for (const check of report.checks) {
-          process.stdout.write(`${check.passed ? "✓" : "✗"} ${check.label} — ${check.detail}\n`);
-        }
-        if (report.warnings.length > 0) {
-          process.stdout.write(`Wording warnings (${report.warnings.length}):\n`);
-          for (const warning of report.warnings) {
-            process.stdout.write(`  ⚠ ${warning.field}: "${warning.term}" - ${warning.excerpt}\n`);
-          }
-        }
-        if (integration.applicable) {
-          process.stdout.write(
-            `Integration feasibility: ${integration.integratable ? "OK" : "WARN — executable but may not be integratable"}\n`,
-          );
-          process.stdout.write(
-            `  task budget: ${integration.taskMaxFiles} files / ${integration.taskMaxLines} lines; `
-            + `integration limit: ${integration.integrationMaxFiles} files / ${integration.integrationMaxLines} lines\n`,
-          );
-          for (const issue of integration.issues) {
-            process.stdout.write(`  ! ${issue}\n`);
-          }
-        }
+        process.stdout.write(formatTaskAdmissionPreviewHuman(preview));
       }
-      if (!report.passed) process.exitCode = 1;
+      if (!preview.quality.passed) process.exitCode = 1;
     } finally {
       store.close();
     }
@@ -1046,6 +1117,11 @@ async function main(): Promise<void> {
         return;
       }
       const result = await stopDaemon();
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return;
+    }
+    if (operation === "restart") {
+      const result = await restartDaemon();
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return;
     }
@@ -1598,30 +1674,67 @@ async function main(): Promise<void> {
     const store = new StateStore(forklightHome());
     const keychain = createKeychainStore();
     try {
-      const service = new SetupService(new SettingsService(store), keychain, inspector);
+      const settings = new SettingsService(store);
+      const service = new SetupService(settings, keychain, inspector);
       const prerequisites = service.inspectPrerequisites();
-      const providers = service.describeProviders();
-      const current = service.currentProvider();
+      const localProviderOptions = service.describeProviders();
+      const effective = settings.get();
+      const localReadiness = providerReadiness(effective.providerDefaults);
+      const localProviders: LocalProviderFact[] = localProviderOptions.map((provider) => ({
+        name: provider.name,
+        label: provider.label,
+        configured: localReadiness.providers[provider.name].ready,
+        ready: localReadiness.providers[provider.name].ready,
+        authMode: localReadiness.providers[provider.name].authMode,
+        defaultModel: provider.defaultModel,
+      }));
+
+      let daemonEvidence: DaemonHealthEvidence | undefined;
+      try {
+        const response = await daemonExchange("health");
+        daemonEvidence = {
+          ok: response.ok,
+          serverIdentity: response.serverIdentity,
+          result: response.result,
+        };
+      } catch {
+        // Doctor is read-only and never starts a missing Daemon.
+      }
+
+      const result = resolveDoctorResult({
+        prerequisites,
+        clientBuildIdentity: currentBuildIdentity(),
+        ...(daemonEvidence === undefined ? {} : { daemonEvidence }),
+        localProviders,
+        effectiveDefaultProvider: effective.execution.defaultProvider,
+      });
       if (json) {
-        process.stdout.write(`${JSON.stringify({ prerequisites, providers, current }, null, 2)}\n`);
+        process.stdout.write(renderDoctorJson(result));
       } else {
-        process.stdout.write("Prerequisites:\n");
-        for (const check of prerequisites) {
-          process.stdout.write(`  ${check.ready ? "✓" : "✗"} ${check.label}: ${check.message}\n`);
-          if (check.fix) process.stdout.write(`    fix: ${check.fix}\n`);
-        }
-        process.stdout.write("Providers:\n");
-        for (const p of providers) {
-          process.stdout.write(`  ${p.name} (${p.label}): configured=${p.configured} model=${p.defaultModel}\n`);
-        }
-        if (current) {
-          process.stdout.write(`Current default: ${current.providerLabel} model=${current.model} endpoint=${current.endpoint}\n`);
-        } else {
-          process.stdout.write("No provider configured.\n");
-        }
+        process.stdout.write(renderDoctorHuman(result));
       }
     } finally {
       store.close();
+    }
+    return;
+  }
+
+  if (command === "hub" && positional === "status") {
+    const statusJson = rest.includes("--json");
+    for (const flag of rest) {
+      if (flag !== "--json") {
+        throw new Error(`Unknown hub status flag: ${flag}\n\n${usage()}`);
+      }
+    }
+    const home = forklightHome();
+    const status = await inspectHubStatus(home, {
+      runIdentity: currentBuildIdentity(),
+      probeTimeoutMs: 1_000,
+    });
+    if (statusJson) {
+      process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+    } else {
+      process.stdout.write(humanHubStatusLines(status));
     }
     return;
   }
@@ -1637,98 +1750,195 @@ async function main(): Promise<void> {
       throw new Error("--port must be a valid port number (0-65535)");
     }
 
-    // One-shot stack: backend (daemon) + frontend (Hub UI).
-    process.stdout.write("Starting ForkLight stack (daemon + hub)...\n");
-    let daemonHealth: Record<string, unknown> | undefined;
-    try {
-      daemonHealth = await ensureDaemon() as Record<string, unknown>;
-      process.stdout.write("  [backend] daemon: up\n");
-    } catch (error) {
+    const home = forklightHome();
+    const runIdentity = currentBuildIdentity();
+    let discovery = await discoverOrClaimHub(home, { runIdentity });
+
+    // --- Explicit confirmed restart (hub restart --confirm) ---
+    if (positional === "restart") {
+      if (!hubOptions.includes("--confirm")) {
+        throw new Error(
+          "Hub restart requires explicit --confirm. A normal `forklight hub` diagnoses a stale owner; "
+          + "restart replaces it after proving the exact identity.\n\n" + usage(),
+        );
+      }
+      if (discovery.kind === "reuse") {
+        process.stdout.write(
+          "The active ForkLight Hub already runs this build. No replacement is needed.\n",
+        );
+        return;
+      }
+      if (discovery.kind === "stale-owner" || discovery.kind === "legacy-owner") {
+        process.stdout.write(
+          "Proving the diagnosed ForkLight Hub owner identity before restart…\n",
+        );
+        const replaceResult = await replaceHubOwner(
+          home,
+          discovery.replacement,
+          { graceTimeoutMs: 7_000 },
+        );
+        if (!replaceResult.success) {
+          process.stderr.write(
+            `ForkLight Hub restart failed: ${replaceResult.reason}\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        process.stdout.write(
+          "Old Hub owner exited cleanly. Starting a replacement…\n",
+        );
+        discovery = await discoverOrClaimHub(home, { runIdentity });
+      }
+      // A clean home already returned a start claim; proceed without inventing
+      // an old owner to restart.
+    }
+
+    // --- Version-aware reuse (matching build identity) ---
+    if (discovery.kind === "reuse") {
       process.stdout.write(
-        `  [backend] daemon: failed - ${error instanceof Error ? error.message : String(error)}\n`,
+        `ForkLight Hub is already active on http://127.0.0.1:${discovery.port}/\n`,
       );
+      if (!noOpen && process.platform === "darwin") {
+        try {
+          execFileSync("open", [discovery.url], { stdio: "ignore" });
+          process.stdout.write("Reopened the active Hub in browser.\n");
+        } catch {
+          process.stdout.write(`Open this URL: ${discovery.url}\n`);
+        }
+      } else {
+        process.stdout.write(`Open this URL: ${discovery.url}\n`);
+      }
+      return;
+    }
+
+    // --- Stale build identity (different version) ---
+    if (discovery.kind === "stale-owner") {
       process.stdout.write(
-        "  Hub UI will still start; operate views need a healthy daemon.\n",
+        `A ForkLight Hub is already active on http://127.0.0.1:${discovery.port}/\n`
+        + "It runs a different built product than this CLI.\n"
+        + "\n"
+        + "To replace it with the current build, run:\n"
+        + "  forklight hub restart --confirm\n"
+        + "\n"
+        + "Or stop the original Hub with Ctrl+C in its terminal and run this command again.\n",
       );
+      return;
     }
 
-    const inspector = createSystemInspector();
-    const store = new StateStore(forklightHome());
-    const settings = new SettingsService(store);
-    const keychain = createKeychainStore();
-    const setup = new SetupService(settings, keychain, inspector);
-    const staticRoot = findHubAssets();
-    let packageRoot: string | undefined;
-    try {
-      packageRoot = findPackageRoot();
-    } catch {
-      packageRoot = undefined;
-    }
-
-    const server = new HubServer({
-      settings,
-      setup,
-      keychain,
-      staticRoot,
-      account: () => inspector.account(),
-      port,
-      ...(packageRoot === undefined ? {} : { packageRoot }),
-      ensureDaemon: async () => {
-        const result = await ensureDaemon();
-        return result as Record<string, unknown>;
-      },
-      probeDaemon: () => probeDaemon(),
-      stopDaemon: () => stopDaemon(),
-      restartDaemon: () => restartDaemon(),
-      daemonRequest: <T = unknown>(method: DaemonMethod, params?: Record<string, unknown>) =>
-        daemonRequest<T>(method, params ?? {}),
-    });
-
-    let startedPort: number;
-    try {
-      startedPort = await server.start();
-    } catch (error) {
-      store.close();
-      throw new Error(
-        `Hub server could not start: ${error instanceof Error ? error.message : String(error)}`,
+    // --- Legacy descriptor (no build identity — version unknown) ---
+    if (discovery.kind === "legacy-owner") {
+      process.stdout.write(
+        `A ForkLight Hub is already active on http://127.0.0.1:${discovery.port}/\n`
+        + "Its version cannot be confirmed (the descriptor has no build identity).\n"
+        + "\n"
+        + "To replace it with the current build, run:\n"
+        + "  forklight hub restart --confirm\n"
+        + "\n"
+        + "Or stop the original Hub with Ctrl+C in its terminal and run this command again.\n",
       );
-    }
-    const token = server.getToken();
-    const url = `http://127.0.0.1:${startedPort}/#${encodeURIComponent(token)}`;
-    process.stdout.write(`  [frontend] hub UI: http://127.0.0.1:${startedPort}/\n`);
-    if (daemonHealth && daemonHealth.ok === false) {
-      process.stdout.write("  note: daemon health reported ok=false\n");
+      return;
     }
 
-    if (!noOpen && process.platform === "darwin") {
+    // --- Start a new Hub ---
+    const claim = discovery.claim;
+    const builtIdentity = currentBuildIdentity();
+    let store: StateStore | undefined;
+    let server: HubServer | undefined;
+    let requestStop: (() => void) | undefined;
+    try {
+      process.stdout.write("Starting ForkLight stack (daemon + hub)...\n");
+      let daemonHealth: Record<string, unknown> | undefined;
       try {
-        execFileSync("open", [url], { stdio: "ignore" });
-        process.stdout.write(`ForkLight Hub opened in browser. If it did not open, visit:\n${url}\n`);
-      } catch {
+        daemonHealth = await ensureDaemon() as Record<string, unknown>;
+        process.stdout.write("  [backend] daemon: up\n");
+      } catch (error) {
+        process.stdout.write(
+          `  [backend] daemon: failed - ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+        process.stdout.write(
+          "  Hub UI will still start; operate views need a healthy daemon.\n",
+        );
+      }
+
+      const inspector = createSystemInspector();
+      store = new StateStore(home);
+      const settings = new SettingsService(store);
+      const keychain = createKeychainStore();
+      const setup = new SetupService(settings, keychain, inspector);
+      const staticRoot = findHubAssets();
+      let packageRoot: string | undefined;
+      try { packageRoot = findPackageRoot(); } catch { packageRoot = undefined; }
+
+      server = new HubServer({
+        settings,
+        setup,
+        keychain,
+        staticRoot,
+        account: () => inspector.account(),
+        port,
+        nonce: claim.nonce,
+        ...(packageRoot === undefined ? {} : { packageRoot }),
+        ...(packageRoot === undefined ? {} : { sampleRoot: path.join(home, "samples") }),
+        ensureDaemon: async () => {
+          const result = await ensureDaemon();
+          return result as Record<string, unknown>;
+        },
+        probeDaemon: () => probeDaemon(),
+        stopDaemon: () => stopDaemon(),
+        restartDaemon: () => restartDaemon(),
+        daemonRequest: <T = unknown>(method: DaemonMethod, params?: Record<string, unknown>) =>
+          daemonRequest<T>(method, params ?? {}),
+      });
+
+      let startedPort: number;
+      try {
+        startedPort = await server.start();
+      } catch (error) {
+        throw new Error(
+          `Hub server could not start: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const token = server.getToken();
+      publishHubInstance(home, claim, startedPort, token, builtIdentity);
+      const url = `http://127.0.0.1:${startedPort}/#${encodeURIComponent(token)}`;
+      process.stdout.write(`  [frontend] hub UI: http://127.0.0.1:${startedPort}/\n`);
+      if (daemonHealth?.ok === false) {
+        process.stdout.write("  note: daemon health reported ok=false\n");
+      }
+
+      if (!noOpen && process.platform === "darwin") {
+        try {
+          execFileSync("open", [url], { stdio: "ignore" });
+          process.stdout.write(`ForkLight Hub opened in browser. If it did not open, visit:\n${url}\n`);
+        } catch {
+          process.stdout.write(`Open this URL for ForkLight Hub:\n${url}\n`);
+        }
+      } else {
         process.stdout.write(`Open this URL for ForkLight Hub:\n${url}\n`);
       }
-    } else {
-      process.stdout.write(`Open this URL for ForkLight Hub:\n${url}\n`);
-    }
-    process.stdout.write("Stack stays running until you press Ctrl+C (stops Hub UI; daemon keeps running).\n");
+      process.stdout.write(
+        "Stack stays running until you press Ctrl+C (stops Hub UI; daemon keeps running).\n",
+      );
 
-    const requestStop = (): void => { void server.stop(); };
-    process.once("SIGINT", requestStop);
-    process.once("SIGTERM", requestStop);
-    try {
+      requestStop = (): void => { void server?.stop(); };
+      process.once("SIGINT", requestStop);
+      process.once("SIGTERM", requestStop);
       await new Promise<void>((resolve) => {
         const check = setInterval(() => {
-          if (!server.isRunning()) {
+          if (!server?.isRunning()) {
             clearInterval(check);
             resolve();
           }
         }, 250);
       });
     } finally {
-      process.removeListener("SIGINT", requestStop);
-      process.removeListener("SIGTERM", requestStop);
-      await server.stop();
-      store.close();
+      if (requestStop !== undefined) {
+        process.removeListener("SIGINT", requestStop);
+        process.removeListener("SIGTERM", requestStop);
+      }
+      await server?.stop();
+      store?.close();
+      releaseHubInstance(home, claim);
     }
     process.stdout.write("Hub server stopped.\n");
     return;

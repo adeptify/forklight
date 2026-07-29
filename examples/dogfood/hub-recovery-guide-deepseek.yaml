@@ -1,0 +1,144 @@
+version: 2
+name: Explain Hub reuse and recovery without internal terms
+project: ../..
+taskClass: forklight-hub-recovery-guide
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    A first-time local user can read one short Hub recovery guide and know what happens on a repeated command, a closed terminal, a crashed Hub, an inaccessible live owner, an intentional restart, and a separate FORKLIGHT_HOME without learning descriptor, nonce, lock, or process-management internals.
+  presentation:
+    summary: 用户能看懂 Hub 为什么会复用、什么时候会自动恢复、什么时候会安全停住，以及想主动重启时该怎么做，不需要手工删文件或结束陌生进程。
+    language: zh-CN
+  context:
+    - README and docs/operations now state that repeated `forklight hub` commands reuse one authenticated Hub per FORKLIGHT_HOME, but they do not yet provide a complete plain-language recovery journey.
+    - The implementation keeps a private lifetime owner claim and descriptor, authenticates the existing loopback Hub before reuse, replaces only a dead owner's stale artifacts, and fails closed for a live incompatible or unauthenticated owner.
+    - The browser URL contains its local access token in the fragment. Users should reopen the URL printed by `forklight hub`, not copy the token into query parameters, logs, tickets, or shared messages.
+    - A repeated command exits after printing/opening the existing URL. Closing that second terminal does not stop the original Hub owner.
+    - This is a documentation-only delivery whose reviewed Integration must use the existing `forklight-self-upgrade` profile to exercise the real daemon handoff.
+  inScope:
+    - Add one compact troubleshooting/recovery section to README Quick Start near the Hub command, using normal user language and a small situation/action table or equivalent scan-friendly structure.
+    - Add the corresponding operator-level explanation to docs/operations, including first start, repeated start, original owner exit, crash recovery, live-but-unprovable owner, intentional restart, and different FORKLIGHT_HOME behavior.
+    - Clearly state that users should rerun `forklight hub` as the default recovery action and should not manually delete ownership files, scan/kill processes, reuse a random port, or expose the URL fragment token.
+    - "Distinguish Hub lifetime from daemon lifetime: stopping the Hub UI does not imply the daemon or active Worker Tasks are stopped."
+    - Keep exact file names, nonce/lock mechanics, and low-level diagnostics in an optional operator note only if needed; do not put them in the normal Quick Start path.
+    - Keep every claim aligned with tests/hub-instance.test.ts and the implemented CLI behavior; do not promise force-restart, remote access, cloud sharing, or automatic browser-session recovery that does not exist.
+  outOfScope:
+    - Any TypeScript, JavaScript, CSS, test, CLI, daemon, Hub server, authentication, lifecycle, settings, Worker, Integration, or Provider code change.
+    - Changing token storage, permissions, stale-owner decisions, timeouts, ports, process signals, or FORKLIGHT_HOME semantics.
+    - Adding commands or flags, generating screenshots, changing product positioning, translating the whole documentation set, commit, or push.
+  executionSteps:
+    - Read the current Hub Quick Start, operations lifecycle section, and the implemented/tested reuse behavior before writing.
+    - Build one user journey around the question “what should I do now?” rather than listing internal state fields.
+    - Use the same factual situations in README and operations, with README concise and operations slightly more diagnostic.
+    - Audit every sentence against implemented behavior, especially closing the second terminal, live authentication failure, intentional restart, token secrecy, and daemon independence.
+    - Run the focused Hub lifecycle tests and full acceptance once; return any behavior ambiguity to Main instead of inventing a recovery promise.
+  deliverables:
+    - Plain-language README Hub recovery guide.
+    - Matching operations troubleshooting guide with safe next actions and explicit boundaries.
+  modules:
+    - name: Quick-start recovery story
+      responsibility: Tell an ordinary local user what happened and the single safe next action for each common Hub lifecycle situation.
+      consumes:
+        - Current CLI output, authenticated reuse behavior, and user-visible Hub/daemon lifetime boundaries.
+      produces:
+        - A compact scan-friendly README recovery section without internal protocol vocabulary.
+      boundaries:
+        - No unsupported command, hidden file manipulation, process scanning, token exposure, or remote-use promise.
+    - name: Operator recovery reference
+      responsibility: Give a maintainer enough factual detail to diagnose reuse versus safe refusal while preserving the same user-facing next actions.
+      consumes:
+        - Hub instance tests, owner/reuse rules, crash recovery behavior, and separate-home behavior.
+      produces:
+        - An operations section covering normal, crash, conflict, restart, and isolation scenarios.
+      boundaries:
+        - Documentation only; implementation details remain secondary and may not expand cleanup authority.
+  callChain:
+    - User runs `forklight hub` and reads the printed local URL or Quick Start recovery note.
+    - "The guide maps the visible situation to one plain-language explanation: new owner, reused owner, stale recovery, or safe refusal."
+    - The user follows one bounded action, normally rerunning the command or intentionally stopping the known owner before rerunning.
+    - If deeper diagnosis is needed, the operations guide explains the Hub/daemon boundary and why ForkLight refuses to kill or replace an unproven live owner.
+  scenarios:
+    - name: Repeated command from another terminal
+      given: The original Hub is healthy and still owns the same local ForkLight home.
+      when: The user runs `forklight hub` again, optionally with another requested port.
+      then: The guide explains that the existing authenticated URL is reused, the second command exits, and closing that second terminal does not stop the owner.
+    - name: Original Hub crashed
+      given: The recorded owner process is gone and only stale private lifecycle data remains.
+      when: The user runs `forklight hub` again.
+      then: The guide says ForkLight safely clears only its stale local ownership data and starts one replacement; the user does not delete files or hunt PIDs.
+    - name: Live owner cannot be authenticated
+      given: A live process still holds ownership but ForkLight cannot prove the expected Hub identity.
+      when: Another start is attempted.
+      then: The guide explains the safe refusal and tells the user to stop the known original Hub intentionally or inspect the operator guide, never to kill a guessed process.
+    - name: Hub UI stops while daemon continues
+      given: The user presses Ctrl+C in the original Hub terminal.
+      when: The Hub listener closes.
+      then: The guide states that the UI stopped but the daemon and already-running Task execution are separate; rerunning Hub reconnects to that local execution layer.
+    - name: Separate local home
+      given: The user intentionally sets a different FORKLIGHT_HOME.
+      when: They run `forklight hub`.
+      then: The guide explains that it is a separate local environment and can have its own one active Hub.
+  risks:
+    - Documentation can imply a force-restart feature that does not exist, so every recovery action must match the current CLI.
+    - Mixing Hub and daemon lifetime can make users stop active work unnecessarily, so their boundaries must be explicit.
+    - Printing the authenticated URL is necessary, but describing its token carelessly could encourage sharing; secrecy guidance must be direct without exposing a sample token.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 260
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - README.md
+    - docs/operations.md
+    - tests/hub-instance.test.ts
+acceptance:
+  criteria:
+    - README and operations explain the same implemented first-start, reuse, crash, conflict, intentional-restart, and separate-home behavior without contradictory next actions.
+    - The normal user path says what happened and what to do next without requiring descriptor, nonce, lock, socket, or PID knowledge.
+    - Token secrecy and Hub-versus-daemon lifetime are explicit; stopping the UI is never described as stopping Worker execution.
+    - No unsupported force restart, process killing, manual lifecycle-file deletion, remote access, cloud sharing, or automatic browser recovery is promised.
+    - Only README.md and docs/operations.md change, and all existing implementation tests remain green.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-instance.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

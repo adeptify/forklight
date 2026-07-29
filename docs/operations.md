@@ -78,6 +78,107 @@ The Hub control center provides the browser UI (configure + operate):
 forklight hub                      # starts daemon + Hub on 127.0.0.1
 ```
 
+#### Hub lifecycle
+
+**First start.** The daemon starts if it is not already running, the Hub listener
+binds to a loopback port, and—unless `--no-open` is used—the browser opens a local
+URL carrying a private access token in its fragment. That token remains valid
+for this Hub owner's lifetime. A private lifetime claim is written at startup;
+an authenticated descriptor is published once the listener is ready. The Hub
+runs until the owning process receives SIGINT or SIGTERM; a clean exit removes
+both records.
+
+**Repeated command (another terminal).** A second `forklight hub` reads the
+existing claim, confirms the recorded owner PID is alive, probes the Hub server
+to prove it owns the stored token and nonce, compares the recorded build
+identity with the current CLI's build identity, and reuses the authenticated URL
+only when they match exactly. The command prints the existing address and exits.
+The original Hub owner is unaffected; closing the second terminal stops nothing.
+
+**Stale version diagnosis (build identity mismatch).** When the recorded Hub
+descriptor carries a different build identity than the invoking CLI, ForkLight
+diagnoses the mismatch instead of reusing the old Hub. It prints an explanation
+and the exact confirmed restart command. The old Hub remains running — no signal
+is sent automatically. This prevents a newly rebuilt static UI from being served
+by a long-lived Hub whose API shape is stale.
+
+**Legacy descriptor (version unknown).** If the descriptor was published by an
+older ForkLight version without a build identity, the CLI treats the owner as
+live-but-version-unknown and prints the same confirmed restart action rather
+than assuming it matches.
+
+**Confirmed restart.** Run `forklight hub restart --confirm` to replace a stale
+or legacy Hub owner. ForkLight repeats the complete ownership and authentication
+proof against the exact descriptor and claim on disk immediately before
+signalling. If ownership, PID, token, or nonce changed since the diagnosis, the
+restart fails closed without signalling or deleting either process. Only after
+the old PID, listener, descriptor, and claim are all confirmed gone does a
+replacement start. ForkLight never sends SIGKILL automatically — a timed-out
+owner is reported with the remaining evidence and the operator must investigate.
+
+**Read-only status.** Run `forklight hub status` (or `forklight hub status --json`)
+to ask whether a Hub is active without starting, claiming, replacing, signalling,
+or mutating anything. Status reads the existing claim and descriptor, checks the
+recorded PID is alive, and performs the same bounded authenticated loopback proof
+as reuse. It returns one of five bounded states: `stopped` (no records), `current`
+(loopback proven, exact same build as this CLI), `different-build` (loopback
+proven, descriptor carries a different build), `legacy` (loopback proven, the
+descriptor has no build identity at all), or `unverified` (records are missing,
+malformed, inconsistent, dead, or failed authentication). Proven `pid` and `port`
+are only included when the full ownership and loopback proof succeeded; the
+output never contains the URL, fragment token, nonce, private home path, or
+raw record bytes. JSON output uses the same safe projection.
+
+**Restart timeout recovery.** When the old Hub owner does not exit within the
+grace period (7 s), ForkLight prints the remaining evidence (PID, listener,
+claim file, descriptor file) and exits without starting a replacement. Do not
+delete files or kill processes manually until you have read the reported
+evidence. Investigate the old Hub owner terminal, wait, and run the restart
+command again when the old owner has released its resources.
+
+**Original owner exits or crashes.** When the recorded PID no longer belongs to
+a running owner, the next `forklight hub` removes the old claim and descriptor
+and acquires a fresh owner. The operator never needs to delete files or look up
+process IDs. If the PID has already been reused by a live process, ForkLight
+uses the safe-refusal path below instead of assuming it is stale.
+
+**Live owner cannot be authenticated (safe refusal).** If the claim PID is alive
+but the liveness probe fails—the server stopped without cleanup, the token
+mismatched, or an unrelated process reused the PID—ForkLight polls for a bounded
+period, then exits with an error. It never signals, kills, or replaces a live
+process it cannot authenticate. Stop the original Hub only when you know which
+terminal owns it; never guess a process ID.
+
+**Intentional restart.** Stop the original Hub with Ctrl+C in its terminal, then
+run `forklight hub`. The clean exit removes the claim, so the new invocation
+starts immediately without manual cleanup.
+
+**Hub UI stopped while daemon continues.** Ctrl+C stops the Hub owner. The daemon
+runs independently and continues serving CLI commands, scheduling tasks, and
+managing Workers. Rerun `forklight hub` to reconnect the UI. Stop the daemon
+separately with `forklight daemon stop`.
+
+**Separate `FORKLIGHT_HOME`.** Each home is an intentionally isolated local
+environment with its own daemon state, settings, task history, and Hub claim. A
+different home has its own active Hub and never interferes with another home's.
+
+#### Default recovery action
+
+For any unknown Hub state, run `forklight hub`. The command handles stale
+records, proves live identity, diagnoses version mismatches, and refuses only
+when a live but unauthenticated owner exists. Do **not** manually delete files
+from `FORKLIGHT_HOME`, scan for processes with system utilities, or reuse a port
+you assume to be free. The URL printed by `forklight hub` carries a private
+local access token in the fragment; never copy the full URL into logs, tickets,
+or shared messages.
+
+> **Operator note (low-level diagnostics).** The lifetime claim and authenticated
+> descriptor are stored as `FORKLIGHT_HOME/.hub-owner.json` and
+> `FORKLIGHT_HOME/hub-instance.json`, both with owner-only permissions. The claim
+> is published atomically to prevent races. A corrupted or unknown-version file
+> with a live PID is never replaced; one without a live PID is treated as stale
+> and replaced automatically.
+
 Hub serves: model/worker configuration, Main install (Plugin/MCP/Skill),
 daemon lifecycle, plan boards, task statuses, provider verification, competition
 results, statistics, and task decision views. Supervise mutations (resume,
@@ -371,6 +472,7 @@ mutation bypass.
 | Settings read | `forklight settings get` | **No** |
 | Settings write | `forklight settings set` | **No** |
 | Hub UI | `forklight hub` | **No** for browse; supervise actions need confirm |
+| Hub status (read-only) | `forklight hub status` | **No** — read-only, never claims, replaces, or signals |
 | Integration preflight | `forklight integration preflight` | **No** |
 | Integration status/wait/history | `forklight integration status` | **No** |
 | Health check | `forklight health` | **No** |

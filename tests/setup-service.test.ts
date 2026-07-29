@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { selectLocalAccountName } from "../src/core/config.js";
 import { SettingsService } from "../src/core/settings.js";
 import { SetupService } from "../src/setup/service.js";
 import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
@@ -39,6 +40,18 @@ function inspector(overrides: Partial<SetupSystemInspector> = {}): SetupSystemIn
     ...overrides,
   };
 }
+
+test("local account selection survives os.userInfo failure with bounded fallbacks", () => {
+  assert.equal(
+    selectLocalAccountName([undefined, "fallback-user", "ignored"]),
+    "fallback-user",
+  );
+  assert.equal(
+    selectLocalAccountName([undefined, " unsafe account ", "safe_account"]),
+    "safe_account",
+  );
+  assert.equal(selectLocalAccountName([undefined, "", "bad/account"]), undefined);
+});
 
 async function fixture(system = inspector()) {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-setup-"));

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { userInfo } from "node:os";
+import { localAccountName } from "../core/config.js";
 import {
   isProviderName,
   providerDefinition,
@@ -30,7 +30,7 @@ export function createSystemInspector(): SetupSystemInspector {
   return {
     platform: () => process.platform,
     nodeVersion: () => process.version,
-    account: () => userInfo().username,
+    account: localAccountName,
     commandExists(command) {
       try {
         execFileSync("which", [command], { stdio: "ignore" });

@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import type { StateStore } from "../state/store.js";
 import { copyForVerification } from "./integration-verification-copy.js";
+import { latestMainReview } from "./main-review.js";
 import { runCaptured } from "./process.js";
 import { isoTimestamp as timestamp } from "./time.js";
 import { verifierProcessEnvironment } from "../workspace/verifier-git.js";
 import type {
+  EventRecord,
   RemediationCheckRecord,
   RemediationDisposition,
   TaskRecord,
@@ -18,8 +20,68 @@ export const REMEDIATION_REASON_MAX_LENGTH = 1000;
 
 // --- Validation ---
 
-function isTerminalTask(task: TaskRecord): boolean {
-  return task.status === "failed" || task.status === "interrupted";
+function latestEvent(
+  events: readonly EventRecord[],
+  type: EventRecord["type"],
+): EventRecord | undefined {
+  return events
+    .filter((event) => event.type === type)
+    .reduce<EventRecord | undefined>(
+      (latest, event) => latest === undefined || event.sequence > latest.sequence
+        ? event
+        : latest,
+      undefined,
+    );
+}
+
+/**
+ * Failed/interrupted Tasks keep their historical remediation path. A machine-
+ * successful Task is eligible only when the latest typed Main review says
+ * `revise` for the current Attempt and the latest independent verification.
+ * Every rejection is decided before commands or durable remediation records.
+ */
+function remediationEligibilityError(
+  store: StateStore,
+  task: TaskRecord,
+): string | undefined {
+  if (task.status === "failed" || task.status === "interrupted") return undefined;
+  if (task.status !== "succeeded") {
+    return "remediation verification requires failed or interrupted Task";
+  }
+
+  const events = store.listEvents(task.id);
+  const verificationEvent = latestEvent(events, "verification.completed");
+  if (verificationEvent === undefined) {
+    return "remediation verification for succeeded Tasks requires independent verification evidence";
+  }
+
+  const reviewEvent = latestEvent(events, "main-review.completed");
+  const review = latestMainReview(events);
+  if (
+    reviewEvent === undefined
+    || review === undefined
+    || !Number.isSafeInteger(review.verificationEventSequence)
+    || review.verificationEventSequence < 1
+  ) {
+    return "remediation verification for succeeded Tasks requires a valid Main review";
+  }
+  if (review.decision !== "revise") {
+    return "remediation verification for succeeded Tasks requires a Main revise decision";
+  }
+  if (
+    task.currentAttemptId === undefined
+    || review.attemptId !== task.currentAttemptId
+    || reviewEvent.attemptId !== task.currentAttemptId
+  ) {
+    return "remediation verification review does not belong to the current Attempt";
+  }
+  if (verificationEvent.attemptId !== task.currentAttemptId) {
+    return "remediation verification evidence does not belong to the current Attempt";
+  }
+  if (review.verificationEventSequence !== verificationEvent.sequence) {
+    return "remediation verification review references a stale verification event";
+  }
+  return undefined;
 }
 
 function hasPassingDisposition(store: StateStore, taskId: string): boolean {
@@ -93,8 +155,9 @@ export async function verifyMainRemediation(
 
   // 3. Load and validate Task
   const task = store.getTask(input.taskId);
-  if (!isTerminalTask(task)) {
-    throw new Error("remediation verification requires failed or interrupted Task");
+  const eligibilityError = remediationEligibilityError(store, task);
+  if (eligibilityError !== undefined) {
+    throw new Error(eligibilityError);
   }
 
   // 4. Duplicate pass: reject before executing commands

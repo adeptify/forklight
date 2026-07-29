@@ -36,7 +36,8 @@ function categoryFromPayload(payload: unknown): WorkerFailureCategory | undefine
 }
 
 /**
- * Read failureCategory from worker.failed and verification.completed events,
+ * Read failureCategory from launch preflight, worker.failed, and
+ * verification.completed events,
  * newest sequence first.
  * Returns the newest classified category even when a later bare worker.failed
  * (no payload) exists — matching runner.ts after claude normalizer events.
@@ -48,7 +49,9 @@ export function failureCategoryFromEvents(
   const classified = events
     .filter(
       (event) =>
-        event.type === "worker.failed" || event.type === "verification.completed",
+        event.type === "task.launch-preflight.failed"
+        || event.type === "worker.failed"
+        || event.type === "verification.completed",
     )
     .slice()
     .sort((left, right) => (right.sequence ?? 0) - (left.sequence ?? 0));

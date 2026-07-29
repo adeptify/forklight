@@ -1,0 +1,136 @@
+version: 2
+name: Add one truthful daemon restart command
+project: ../..
+taskClass: forklight-cli-daemon-restart
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    A local user can run `forklight daemon restart` and receive the same safe,
+    fully awaited stop-then-start behavior already used by the Hub, with a
+    truthful result from the new daemon and no hidden second lifecycle path.
+  presentation:
+    summary: 用户可以用一条 restart 命令完整重启后台服务；命令必须等旧进程真正退出，再返回新服务的真实状态。
+    language: zh-CN
+  context:
+    - The shared daemon client already exports `restartDaemon(home)`, which awaits `stopDaemon(home)` and then `ensureDaemon(home)`.
+    - "The Hub uses that shared helper, but the CLI usage and daemon command branch currently expose only start, status, and stop. A real operator attempt therefore returned `Unknown daemon operation: restart`."
+    - This is a deliberately small M0 candidate. It must reuse existing lifecycle behavior, not redesign daemon ownership, activation, or the Hub.
+    - Quality and safety are hard; file and line guidance is warning evidence only. Do not broaden the task to nearby CLI cleanup.
+  inScope:
+    - Add `restart` to the public CLI usage for `forklight daemon`.
+    - Route `forklight daemon restart` to the existing shared `restartDaemon()` helper exactly once and print its returned health/result in the same JSON style as start/status/stop.
+    - "Add deterministic CLI-level coverage in an isolated temporary `FORKLIGHT_HOME`: start one daemon, record its PID, invoke restart, prove the old PID is gone, prove the returned/new health has a different live PID and matching build identity, and clean up without touching the user's daemon."
+    - "Cover restart when no daemon is running: it should start one daemon and return its real health rather than fail."
+    - Keep unknown daemon operations rejected and keep activation handoff stop behavior unchanged.
+  outOfScope:
+    - Changing `restartDaemon`, `stopDaemon`, `ensureDaemon`, daemon ownership, activation receipts, Hub controls, UI, MCP, Worker scheduling, Integration authority, timeouts, retry policy, Provider configuration, commit, or push.
+    - Adding force-kill behavior, broad process scans, retries, a second restart implementation, or tests that use the user's real ForkLight home/socket/database.
+    - Rewording unrelated CLI help or restructuring the CLI parser.
+  executionSteps:
+    - Trace the existing daemon CLI branch, `restartDaemon` helper, and isolated daemon test utilities before editing.
+    - Make the smallest CLI routing and usage change that calls the shared helper once.
+    - Add isolated real-process tests for running and stopped starting states, exact old-PID exit, new health/build identity, cleanup, and unknown-operation rejection.
+    - Run the focused commands and full acceptance once. Return any unrelated baseline failure to Main; do not expand scope to fix it.
+  deliverables:
+    - Public `forklight daemon restart` CLI route backed only by the shared restart helper.
+    - Deterministic isolated lifecycle regression tests and updated CLI usage.
+  modules:
+    - name: Daemon CLI routing
+      responsibility: Translate one explicit restart command into one call to the shared daemon lifecycle helper and print the returned result.
+      consumes:
+        - CLI operation `restart` and the configured ForkLight home.
+      produces:
+        - JSON health for the newly running daemon or an actionable failure from the existing lifecycle helper.
+      boundaries:
+        - No duplicate stop/start logic, no force kill, no activation authority, no user-home access in tests.
+    - name: Restart lifecycle verification
+      responsibility: Prove the public command waits for the old process and exposes the actual replacement.
+      consumes:
+        - Temporary ForkLight homes, the public source CLI, and daemon health/PID evidence.
+      produces:
+        - Deterministic pass/fail evidence for running, stopped, and invalid-operation cases.
+      boundaries:
+        - No Provider calls, project mutation, user daemon, Hub, commit, or push.
+  callChain:
+    - User runs `forklight daemon restart`.
+    - The existing CLI daemon branch selects `restart` and calls the imported shared `restartDaemon()` once.
+    - "`restartDaemon()` awaits the existing full stop proof, then starts a fresh daemon and returns its real health."
+    - CLI prints that returned object and exits only after the replacement is reachable.
+  scenarios:
+    - name: Running daemon is replaced
+      given: One healthy daemon owns the isolated home and reports PID A.
+      when: The public restart command runs.
+      then: PID A is gone before the command returns, one healthy daemon with different PID B owns the home, and returned identity matches the client build.
+    - name: Stopped daemon is started
+      given: No daemon owns the isolated home.
+      when: The public restart command runs.
+      then: It returns one newly running daemon's truthful health without treating the stopped state as an error.
+    - name: Unknown operation stays rejected
+      given: A daemon operation other than start, status, stop, or restart.
+      when: The CLI parses it.
+      then: It exits with the existing unknown-operation error and performs no lifecycle mutation.
+  risks:
+    - A separate restart implementation could drift from Hub behavior, so CLI must call the shared helper instead of composing new lifecycle logic.
+    - A test using the default home could restart the user's daemon, so every process and check must receive a unique temporary `FORKLIGHT_HOME`.
+    - Checking only a JSON success flag could hide an old process leak, so the running-daemon test must prove old PID exit and new PID ownership.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 600
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - tests/daemon-cli.test.ts
+    - tests/daemon.test.ts
+    - tests/helpers/detached-daemon.ts
+acceptance:
+  criteria:
+    - Public help includes restart and the daemon branch calls only the existing shared helper once.
+    - "A real isolated running daemon is fully replaced: old PID gone, new different PID live, one reachable socket, and returned/client build identities match."
+    - Restart with no owner starts one daemon; invalid operations remain rejected without mutation.
+    - Tests never read, stop, signal, or write the user's real ForkLight home and always clean up temporary child processes and files.
+    - The complete existing suite, strict TypeScript, and diff whitespace validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon-cli.test.ts tests/daemon.test.ts tests/build-identity.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - git diff --check

@@ -46,6 +46,11 @@ import { verifyTask } from "./verifier.js";
 import { checkpointSatisfied, resolveTerminalAfterVerification } from "./checkpoint.js";
 import { getWorkerAdapter } from "../workers/registry.js";
 import type { WorkerExecutionResult } from "../workers/types.js";
+import {
+  providerLabel,
+  providerLaunchAuthentication,
+  type ProviderAuthInspector,
+} from "./providers.js";
 
 export interface RunResult {
   task: TaskRecord;
@@ -54,6 +59,50 @@ export interface RunResult {
 }
 
 export type ProgressListener = (event: NormalizedWorkerEvent) => void;
+
+export class TaskLaunchAuthenticationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TaskLaunchAuthenticationError";
+  }
+}
+
+/**
+ * Fail one Task before workspace preparation or Attempt creation when the
+ * selected Worker's exact local authentication path is not readable. The
+ * event is safe for Task Detail and explicitly records that no Worker ran.
+ */
+export function preflightTaskLaunchAuthentication(
+  store: StateStore,
+  task: TaskRecord,
+  inspector?: ProviderAuthInspector,
+): boolean {
+  const result = providerLaunchAuthentication(task.spec, inspector);
+  if (result.ready) return true;
+
+  const label = providerLabel(task.spec.provider.name);
+  const message = `Worker could not start because ${label} authentication is not readable. Re-save or renew this Worker's authentication, then start a new Task.`;
+  store.setTaskStatus(task.id, "failed", {
+    finishedAt: timestamp(),
+    workerPid: null,
+    error: message,
+  });
+  store.addEvent(
+    task.id,
+    undefined,
+    "task.launch-preflight.failed",
+    message,
+    {
+      failureCategory: "authentication",
+      reasonCode: result.reasonCode,
+      provider: task.spec.provider.name,
+      workerInvoked: false,
+      workspacePrepared: false,
+      attemptCreated: false,
+    },
+  );
+  return false;
+}
 
 function latestRemediationFeedback(store: StateStore, taskId: string): string | undefined {
   const packet = buildRemediationPacket(store.listEvents(taskId));
@@ -643,8 +692,14 @@ export async function runNewTask(
   onCreated?: (task: TaskRecord) => void,
   policy?: TaskPolicy,
 ): Promise<RunResult> {
-  const task = await createTask(store, taskFile, policy);
+  const loaded = await loadTaskSpec(taskFile, policy);
+  const effectivePolicy = resolvePolicyFromTaskSpec(loaded.spec, policy);
+  let task = registerTaskFromSpec(store, loaded.spec, loaded.taskFile, effectivePolicy);
   onCreated?.(task);
+  if (!preflightTaskLaunchAuthentication(store, task)) {
+    throw new TaskLaunchAuthenticationError(store.getTask(task.id).error ?? "Worker authentication is not readable");
+  }
+  task = await prepareTaskWorkspace(store, task);
   return executeAttempt(
     store,
     task,
@@ -693,8 +748,20 @@ export async function resumeTask(
  * workspace, session, and logs remain immutable. */
 export function prepareMainCorrectionTask(store: StateStore, taskId: string): TaskRecord {
   const task = store.getTask(taskId);
-  if (task.status !== "failed" && task.status !== "interrupted") {
+  if (task.status !== "failed" && task.status !== "interrupted" && task.status !== "succeeded") {
     throw new Error(`Task ${taskId} cannot prepare correction from status ${task.status}`);
+  }
+  // For succeeded tasks, a valid durable correction grant must already exist.
+  // This prevents direct or reordered callers from queuing a succeeded Task
+  // without the required authorization evidence.
+  if (task.status === "succeeded") {
+    const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? 3;
+    const pending = resolvePendingCorrectionGrant(store, taskId, baseMaxAttempts);
+    if (pending === null) {
+      throw new Error(
+        "correction rejected: no pending correction grant for succeeded Task; call authorizeMainCorrection first",
+      );
+    }
   }
   store.setTaskStatus(taskId, "queued", {
     finishedAt: null,

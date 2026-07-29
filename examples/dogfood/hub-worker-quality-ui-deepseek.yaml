@@ -1,0 +1,156 @@
+version: 2
+name: Configure Worker Contract Quality in Hub
+project: ../..
+taskClass: forklight-hub-quality-config
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+deliveryProfileId: forklight-self-upgrade
+contract:
+  outcome: >-
+    A user can edit every existing per-Worker Task Contract Quality override in the Hub, see the effective value and whether it comes from the Worker or global settings before saving, and later reopen the Worker without losing any Quality value.
+  presentation:
+    summary: 每个 Worker 的任务说明质量要求都能在 Hub 里调整，并在保存前看见实际生效值和来源；这些要求只影响任务说明是否清楚，不会混成执行时的文件或代码行数限制。
+    language: zh-CN
+  context:
+    - The core already validates `WorkerProfile.contractQuality` and resolves its mode plus seven numeric fields against global defaults with explicit Worker/global provenance.
+    - Hub Worker editing currently exposes Advanced execution policy and its shared backend preview, but it neither edits nor previews `contractQuality`; a save from the UI can therefore not intentionally configure this existing Worker capability.
+    - Contract Quality is an authoring layer for Task Contract clarity. Its `maxFiles` and `maxDiffLines` are not the same settings as execution `fileLimit`, `changedLineLimit`, or Integration feasibility.
+    - M0 needs one small accepted delivery to exercise the real `forklight-self-upgrade` build, activation handoff, replacement daemon, identity check, and leak checks. Do not broaden this candidate into a settings redesign.
+  inScope:
+    - Add one clearly named Contract Quality group inside the existing Worker Advanced editor with mode, maxFiles, maxDiffLines, maxFocusPaths, minScenarios, minCallChainSteps, minOutcomeCharacters, and minModuleResponsibilityCharacters.
+    - Preserve inherit semantics by omitting untouched fields. Allow explicit null only for the three existing maximum fields and non-negative integers for the four existing minimum fields.
+    - Hydrate saved Worker overrides exactly on edit and include the canonical `contractQuality` object in the existing Worker Profile upsert payload without deleting unrelated profile fields.
+    - Extend the existing Worker preview endpoint narrowly so it validates existing and draft Quality overrides with the shared validator and returns `previewQualityPolicy` rows from the shared resolver.
+    - In Hub, show the effective Quality mode/value and Worker/global source before save, separately from execution enforcement phase. Explain in plain Chinese and English that this layer checks Task description quality and does not cap Worker output files or changed lines.
+    - Show a short readable Quality summary on each Worker card, with exact field detail remaining secondary.
+    - Add focused HTTP and UI asset regression tests for round-trip persistence, explicit null/zero, inherited provenance, invalid values, edit preservation, bilingual keys, and separation from execution limits.
+  outOfScope:
+    - Changing Contract Quality validation, defaults, resolution precedence, Task snapshots, Task admission behavior, execution advanced policy, Integration limits, Safety invariants, Worker runtime, Provider identity, model routing, automatic adaptation, retry, Competition, commit, or push.
+    - Adding project-level or Task-level Quality editing, creating a second settings page, duplicating resolver math in JavaScript, translating user-authored values, or auto-saving form changes.
+    - Changing Hub request authentication, Worker Profile schema, Store schema, CLI/MCP shapes, Delivery Profile commands, or activation handoff logic.
+  executionSteps:
+    - Trace the existing Worker editor draft/hydration/save path, the advanced preview endpoint, `validateContractQualityOverride`, and `previewQualityPolicy` before editing.
+    - Extend the preview request with optional existing/draft Quality objects, merge only validated typed fields, and return a separate Quality preview collection while preserving the current execution preview response.
+    - Build a separate Quality editor section using the exact eight existing fields and unambiguous inherit/unlimited/zero behavior.
+    - Hydrate edit state, collect only intentional overrides, save through the existing Worker upsert, and render shared backend preview rows with plain-language source labels.
+    - Add bilingual user-facing copy and focused tests. Keep technical field names and raw objects in secondary disclosures only.
+    - Run focused tests and the complete suite once. If an existing API cannot preserve omission versus explicit null, stop and return that exact gap to Main instead of inventing a new sentinel.
+  deliverables:
+    - Hub Worker Contract Quality editor and effective provenance preview.
+    - Lossless Worker Profile round trip for all existing Quality override values.
+    - Focused backend/UI regressions proving Quality and execution settings stay distinct.
+  modules:
+    - name: Quality preview bridge
+      responsibility: Validate the optional Worker Quality draft and obtain canonical effective values/provenance from the existing shared resolver.
+      consumes:
+        - Existing Worker contractQuality, draft overrides, and current global Contract Quality settings.
+      produces:
+        - A separate bounded list of mode/value/source preview rows alongside the unchanged execution preview.
+      boundaries:
+        - No persistence, Task creation, duplicated default values, command execution, or Safety/Integration policy.
+    - name: Worker Quality editor
+      responsibility: Let a user edit, understand, and save the eight existing Worker Quality fields without confusing them with runtime output limits.
+      consumes:
+        - Saved Worker Profile, user form edits, bilingual labels, and preview rows.
+      produces:
+        - One canonical optional contractQuality object in the existing upsert request plus a readable pre-save preview.
+      boundaries:
+        - No autosave, Provider call, Task mutation, arbitrary JSON editor, or hidden field reset.
+    - name: Quality UI regression suite
+      responsibility: Prove validation, inheritance, explicit null/zero, round-trip edit preservation, provenance, bilingual copy, and execution/Quality separation.
+      consumes:
+        - Temporary Hub settings, authenticated HTTP requests, and static UI assets.
+      produces:
+        - Deterministic focused evidence plus the complete existing regression suite.
+      boundaries:
+        - No live Provider, real Keychain mutation, browser timing authorization, source Integration, activation, commit, or push.
+  callChain:
+    - User opens one Worker and expands Advanced settings.
+    - Hub hydrates saved execution and Contract Quality overrides into separate groups.
+    - A Quality edit sends validated draft data to the existing preview route.
+    - Backend uses the shared Contract Quality validator/resolver and returns effective value plus Worker/global provenance.
+    - Hub explains the result before save and submits the optional canonical contractQuality object through the existing Worker upsert.
+    - Reopening the Worker reproduces the saved overrides; later Task creation continues to use the existing immutable Quality snapshot path.
+  scenarios:
+    - name: Development Worker uses loose authoring guidance
+      given: A Worker inherits hard global Quality values.
+      when: User selects warn, makes maximum fields unlimited, and keeps minimum fields at explicit zero.
+      then: Preview labels every edited value as Worker-owned, save persists null and zero exactly, and reopening shows the same choices.
+    - name: Worker inherits global Quality
+      given: A Worker has no contractQuality override.
+      when: User opens the Quality group without editing it.
+      then: Preview shows all effective values from global settings and saving unrelated Worker fields does not create guessed Quality overrides.
+    - name: Invalid Quality value
+      given: User submits an unsupported mode, negative minimum, zero maximum, unknown field, or malformed object.
+      when: Preview or Worker save is requested.
+      then: Shared validation rejects the request with bounded content-free feedback and preserves saved settings.
+    - name: Quality and execution limits stay distinct
+      given: The Worker has both Contract Quality maxFiles and execution fileLimit values.
+      when: The editor and preview render them.
+      then: They appear in separately explained groups and neither value overwrites or supplies the other.
+  risks:
+    - Reusing the words files and lines without a layer explanation would make users think authoring guidance limits Worker output.
+    - Recreating defaults or provenance in app.js would drift from the Task resolver and produce misleading previews.
+    - Treating blank maximums as omission in every case would make explicit unlimited impossible; treating every untouched blank as null would silently override global values.
+    - Editing an existing Worker must not erase pricingRoute, execution advancedPolicy, model selection, or legacy-compatible fields.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 950
+provider:
+  name: deepseek
+  model: deepseek-v4-pro[1M]
+  endpoint: https://api.deepseek.com/anthropic
+  keychainService: forklight.deepseek.api-key
+  pricingRoute: deepseek-direct-payg
+runtime:
+  name: claude-code
+  executable: claude
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Every existing per-Worker Contract Quality override can be edited and reopened losslessly in Hub, including explicit null maximums and zero minimums.
+    - Pre-save preview is computed by the shared backend resolver and truthfully shows Worker/global provenance without duplicating policy semantics in JavaScript.
+    - Contract Quality and execution output limits are visibly separate in Chinese and English and never overwrite one another.
+    - Invalid or malformed Quality drafts reject before settings mutation; unrelated Worker fields survive edit/save.
+    - The complete existing suite remains green and the delivery candidate is eligible for normal Main review and self-upgrade Integration.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-settings.test.ts tests/hub-ui-assets.test.ts tests/contract-quality.test.ts tests/worker-profiles.test.ts
+    - npm test
+    - npx tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+    - node --check src/hub/public/app.js
+    - git diff --check
