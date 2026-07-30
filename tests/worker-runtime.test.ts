@@ -8,10 +8,18 @@ import {
 import { parseTaskSpec } from "../src/core/task.js";
 import { cloneDefaults } from "../src/core/settings.js";
 import { getWorkerAdapter, listWorkerAdapters, resetWorkerRegistryForTests } from "../src/workers/registry.js";
-import { buildWorkerPrompt, claudeToolProtocolLines } from "../src/core/task.js";
+import {
+  buildWorkerPrompt,
+  claudeToolProtocolLines,
+  GENERIC_CODING_SUMMARY_INSTRUCTION,
+  isReviewGraphReviewerTaskFile,
+  reviewerTerminalOutputLines,
+  workerPromptAppendicesForTask,
+} from "../src/core/task.js";
 import {
   buildGrokCliArgs,
   buildGrokSandboxProfile,
+  GrokBuildAdapter,
   GROK_CONNECTIVITY_SAFE_ERROR,
   grokAllowTools,
   grokDisallowedTools,
@@ -20,7 +28,15 @@ import {
   seedGrokHomeAuth,
 } from "../src/workers/grok.js";
 import { failureCategoryFromEvents } from "../src/core/worker-failure.js";
-import { GrokEventNormalizer } from "../src/events/grok-normalize.js";
+import {
+  appendGrokTextDelta,
+  createGrokTextAssembly,
+  extractGrokTextDeltaFromLine,
+  GROK_ASSEMBLED_TEXT_MAX,
+  GrokEventNormalizer,
+  isMeaningfulGrokResultText,
+  resolveGrokTerminalResultText,
+} from "../src/events/grok-normalize.js";
 import type { TaskRecord, TaskSpec } from "../src/core/types.js";
 import { checkpointSatisfied } from "../src/core/checkpoint.js";
 import { mkdtemp } from "node:fs/promises";
@@ -182,6 +198,8 @@ test("Grok adapter prompt has no Claude checkpoint MCP tool name", () => {
   });
   assert.ok(!prompt.includes("mcp__forklight_checkpoint__run"));
   assert.ok(prompt.includes("does not support ForkLight checkpoint"));
+  // Ordinary Tasks still receive the generic coding-summary instruction.
+  assert.ok(prompt.includes(GENERIC_CODING_SUMMARY_INSTRUCTION));
   const defaultCc = buildWorkerPrompt(
     parseTaskSpec(minimalContract(), "/tmp", policy()),
     false,
@@ -190,10 +208,59 @@ test("Grok adapter prompt has no Claude checkpoint MCP tool name", () => {
   assert.ok(claudeToolProtocolLines(["src"]).some((line) => line.includes("Glob") || line.includes("focus")));
 });
 
+test("Review Graph reviewer Tasks replace generic coding summary with strict JSON instructions", () => {
+  const spec = parseTaskSpec(minimalContract(), "/tmp", policy());
+  const ordinary = workerPromptAppendicesForTask(
+    { taskFile: "/tmp/task.yaml" },
+    { toolLines: ["read files"] },
+  );
+  assert.equal(ordinary.terminalOutputLines, undefined);
+  assert.equal(isReviewGraphReviewerTaskFile("/tmp/task.yaml"), false);
+
+  const reviewerTaskFile =
+    "forklight://review-graph/adb2e3cf-8d7a-4d79-83a7-46f71397b027/assignment/a1";
+  assert.equal(isReviewGraphReviewerTaskFile(reviewerTaskFile), true);
+  // Do not infer from allowEdits=false alone.
+  assert.equal(isReviewGraphReviewerTaskFile("forklight://test/readonly"), false);
+
+  const reviewerAppendices = workerPromptAppendicesForTask(
+    { taskFile: reviewerTaskFile },
+    {
+      toolLines: ["read files"],
+      checkpointLines: ["", "Checkpoint: skipped"],
+    },
+  );
+  assert.deepEqual(reviewerAppendices.terminalOutputLines, reviewerTerminalOutputLines());
+
+  const reviewerPrompt = buildWorkerPrompt(spec, false, undefined, reviewerAppendices);
+  assert.ok(reviewerPrompt.includes("Return exactly one raw JSON object"));
+  assert.ok(!reviewerPrompt.includes(GENERIC_CODING_SUMMARY_INSTRUCTION));
+  assert.ok(!reviewerPrompt.includes("files changed, contract behavior delivered"));
+
+  // Grok-shaped appendix path (same override helper used by the adapter).
+  const grok = new GrokBuildAdapter();
+  const grokTask = {
+    spec,
+    taskFile: reviewerTaskFile,
+  } as TaskRecord;
+  const grokReviewerPrompt = buildWorkerPrompt(
+    spec,
+    false,
+    undefined,
+    workerPromptAppendicesForTask(grokTask, {
+      toolLines: grok.toolProtocolAppendix(grokTask),
+      checkpointLines: grok.checkpointProtocolAppendix(grokTask),
+    }),
+  );
+  assert.ok(grokReviewerPrompt.includes("Return exactly one raw JSON object"));
+  assert.ok(!grokReviewerPrompt.includes(GENERIC_CODING_SUMMARY_INSTRUCTION));
+});
+
 test("GrokEventNormalizer maps stream lines", () => {
   const n = new GrokEventNormalizer();
   const completed = n.parseLine(JSON.stringify({ type: "result", result: "done" }));
   assert.equal(completed[0]?.type, "worker.completed");
+  assert.equal(completed[0]?.terminal?.resultText, "done");
   const endOk = n.parseLine(JSON.stringify({
     type: "end",
     stopReason: "EndTurn",
@@ -202,14 +269,79 @@ test("GrokEventNormalizer maps stream lines", () => {
   }));
   assert.equal(endOk[0]?.type, "worker.completed");
   assert.equal(endOk[0]?.terminal?.costUsd, 0.01);
+  // Normal EndTurn alone is not useful result content (live dogfood regression).
+  assert.equal(endOk[0]?.terminal?.resultText, undefined);
+  assert.equal(isMeaningfulGrokResultText("EndTurn"), false);
   const thought = n.parseLine(JSON.stringify({ type: "thought", data: "hmm" }));
   assert.equal(thought[0]?.type, "worker.message");
   const failed = n.parseLine(JSON.stringify({ type: "error", message: "auth" }));
   assert.equal(failed[0]?.type, "worker.failed");
   const cancelled = n.parseLine(JSON.stringify({ type: "end", stopReason: "Cancelled" }));
   assert.equal(cancelled[0]?.type, "worker.failed");
+  assert.equal(cancelled[0]?.terminal?.resultText, "Cancelled");
   const tool = n.parseLine(JSON.stringify({ type: "tool_start", tool: "read_file" }));
   assert.equal(tool[0]?.type, "worker.tool.started");
+});
+
+test("Grok text-delta assembly reconstructs EndTurn results and keeps explicit precedence", () => {
+  // Live dogfood: ordered text deltas form valid JSON; terminal is only EndTurn.
+  const chunks = [
+    '{"schemaVersion":1,',
+    '"reviewedRevisionId":"rev-1",',
+    '"proposedDisposition":"revise",',
+    '"summary":"ok",',
+    '"findings":[]}',
+  ];
+  let assembly = createGrokTextAssembly();
+  for (const chunk of chunks) {
+    const line = JSON.stringify({ type: "text", data: chunk });
+    const delta = extractGrokTextDeltaFromLine(line);
+    assert.equal(delta, chunk);
+    assembly = appendGrokTextDelta(assembly, delta!);
+  }
+  const endEvent = new GrokEventNormalizer().parseLine(JSON.stringify({
+    type: "end",
+    stopReason: "EndTurn",
+  }));
+  assert.equal(endEvent[0]?.terminal?.resultText, undefined);
+  const reconstructed = resolveGrokTerminalResultText({
+    explicitResultText: endEvent[0]?.terminal?.resultText,
+    assembly,
+    isError: false,
+  });
+  assert.equal(reconstructed, chunks.join(""));
+  assert.ok(reconstructed?.includes('"proposedDisposition":"revise"'));
+  assert.notEqual(reconstructed, "EndTurn");
+
+  // Explicit meaningful terminal content remains authoritative over deltas.
+  const withExplicit = resolveGrokTerminalResultText({
+    explicitResultText: "AUTHORITATIVE_RESULT",
+    assembly,
+    isError: false,
+  });
+  assert.equal(withExplicit, "AUTHORITATIVE_RESULT");
+
+  // Overflow fails closed: no arbitrary suffix retained as a complete result.
+  let overflowed = createGrokTextAssembly();
+  overflowed = appendGrokTextDelta(overflowed, "x".repeat(GROK_ASSEMBLED_TEXT_MAX));
+  overflowed = appendGrokTextDelta(overflowed, "y");
+  assert.equal(overflowed.overflow, true);
+  assert.equal(overflowed.text, "");
+  const overflowResult = resolveGrokTerminalResultText({
+    explicitResultText: undefined,
+    assembly: overflowed,
+    isError: false,
+  });
+  assert.equal(overflowResult, undefined);
+  // Explicit content still wins even if deltas overflowed.
+  assert.equal(
+    resolveGrokTerminalResultText({
+      explicitResultText: "still-wins",
+      assembly: overflowed,
+      isError: false,
+    }),
+    "still-wins",
+  );
 });
 
 test("Worker connection evidence requires the same Attempt's canonical completion", async () => {

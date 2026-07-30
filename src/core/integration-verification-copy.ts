@@ -1,12 +1,39 @@
-import { cp, lstat, mkdir, realpath, symlink } from "node:fs/promises";
+import { cp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  materializeDeclaredLocalPackages,
+  materializeProjectDependencies,
+} from "../workspace/dependency-materializer.js";
 
 /**
- * Copy the current original project to an isolated temporary verification
- * directory.  Excluded directories (.git, node_modules, configured excludes)
- * are not copied.  If the source has a node_modules directory it is
- * symlinked rather than copied so dependency resolution works.
+ * Isolated verification environment owned by Integration and Main remediation.
+ *
+ * Layout (one disposable container):
+ *   cleanupRoot/
+ *     project/          ← command cwd (isolated project copy)
+ *     <sibling>/...     ← declared relative file:/link: package mirrors
+ *
+ * Callers always delete `cleanupRoot` in finally so sibling mirrors are never
+ * left beside /tmp. `projectCwd` is intentionally distinct from `cleanupRoot`
+ * so relative dependencies such as file:../sibling/sdk resolve inside the
+ * owned container. Setup failures also remove the partial container before
+ * rethrowing so no sibling mirror is leaked.
+ */
+export interface VerificationEnvironment {
+  /** Working directory for acceptance commands (isolated project root). */
+  projectCwd: string;
+  /** Owned container root that callers must delete in finally. */
+  cleanupRoot: string;
+}
+
+/**
+ * Copy the current original project into an isolated temporary verification
+ * container. Excluded directories (.git, node_modules, configured excludes)
+ * are not copied. Runtime dependencies and root-manifest declared relative
+ * file:/link: package roots are materialized via the canonical dependency
+ * materializer so verifiers never see an external symlink outside the owned
+ * container.
  *
  * Extracted from integration.ts so that the Main remediation verification
  * service can reuse the same isolated-acceptance pattern without changing
@@ -15,34 +42,30 @@ import path from "node:path";
 export async function copyForVerification(
   sourcePath: string,
   excludes: string[],
-): Promise<string> {
-  const tmpDir = path.join(
+): Promise<VerificationEnvironment> {
+  const cleanupRoot = path.join(
     tmpdir(),
     `fl-verify-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
-  await mkdir(tmpDir, { recursive: true, mode: 0o700 });
+  const projectCwd = path.join(cleanupRoot, "project");
 
-  const excludeSet = new Set([".git", "node_modules", ...excludes]);
-  const filter = (src: string): boolean => {
-    const rel = path.relative(sourcePath, src);
-    if (!rel || rel === ".") return true;
-    return !rel.split(path.sep).some((part) => excludeSet.has(part));
-  };
-
-  await cp(sourcePath, tmpDir, { recursive: true, filter });
-
-  const srcModules = path.join(sourcePath, "node_modules");
   try {
-    const st = await lstat(srcModules);
-    const dependencyPath = st.isSymbolicLink()
-      ? await realpath(srcModules)
-      : srcModules;
-    if ((await lstat(dependencyPath)).isDirectory()) {
-      await symlink(dependencyPath, path.join(tmpDir, "node_modules"), "dir");
-    }
-  } catch {
-    // No node_modules in source — fine for simple projects
-  }
+    await mkdir(projectCwd, { recursive: true, mode: 0o700 });
 
-  return tmpDir;
+    const excludeSet = new Set([".git", "node_modules", ...excludes]);
+    const filter = (src: string): boolean => {
+      const rel = path.relative(sourcePath, src);
+      if (!rel || rel === ".") return true;
+      return !rel.split(path.sep).some((part) => excludeSet.has(part));
+    };
+
+    await cp(sourcePath, projectCwd, { recursive: true, filter });
+    await materializeProjectDependencies(sourcePath, projectCwd, ["node_modules"]);
+    await materializeDeclaredLocalPackages(sourcePath, projectCwd, cleanupRoot);
+
+    return { projectCwd, cleanupRoot };
+  } catch (error) {
+    await rm(cleanupRoot, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
 }

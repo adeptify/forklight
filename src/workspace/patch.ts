@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import type { WriteStream } from "node:fs";
+import { lstat, rename, rm } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import path from "node:path";
 import type {
@@ -8,8 +9,50 @@ import type {
   TaskPaths,
   WorkspacePatchReport,
 } from "../core/types.js";
+import { RUNTIME_DEPENDENCY_DIRECTORIES } from "./dependency-materializer.js";
 import type { PathPolicy } from "./path-policy.js";
 import { workspacePatchPaths } from "./path-policy.js";
+
+interface StashedDependency {
+  original: string;
+  stashed: string;
+}
+
+/**
+ * Temporarily move runtime dependency mirrors out of baseline/workspace so
+ * `git diff --no-index` never walks verifier-only node_modules. Candidate
+ * patches stay free of dependency noise; mirrors are restored afterward.
+ */
+async function stashRuntimeDependencyMirrors(paths: TaskPaths): Promise<StashedDependency[]> {
+  const stashed: StashedDependency[] = [];
+  for (const name of RUNTIME_DEPENDENCY_DIRECTORIES) {
+    for (const root of [paths.baseline, paths.workspace]) {
+      const original = path.join(root, name);
+      try {
+        await lstat(original);
+      } catch {
+        continue;
+      }
+      const stashedPath = path.join(
+        paths.root,
+        `.forklight-dep-stash-${root === paths.baseline ? "baseline" : "workspace"}-${name}`,
+      );
+      await rm(stashedPath, { recursive: true, force: true });
+      await rename(original, stashedPath);
+      stashed.push({ original, stashed: stashedPath });
+    }
+  }
+  return stashed;
+}
+
+async function restoreRuntimeDependencyMirrors(
+  stashed: readonly StashedDependency[],
+): Promise<void> {
+  for (const entry of stashed) {
+    await rm(entry.original, { recursive: true, force: true }).catch(() => undefined);
+    await rename(entry.stashed, entry.original);
+  }
+}
 
 function decodeGitPathToken(token: string): string | undefined {
   if (!token.startsWith('"')) return token;
@@ -99,6 +142,21 @@ function toEvidence(artifactPath: string, acc: SectionAccumulator): PatchEvidenc
 }
 
 export async function writeWorkspacePatchReport(
+  paths: TaskPaths,
+  policy: PathPolicy,
+): Promise<WorkspacePatchReport> {
+  // Verifier-only dependency mirrors must not enter Candidate patches. Stash
+  // them for the duration of the baseline↔workspace comparison, then restore
+  // so subsequent acceptance/debug inspection still sees local dependencies.
+  const stashedDependencies = await stashRuntimeDependencyMirrors(paths);
+  try {
+    return await writeWorkspacePatchReportCore(paths, policy);
+  } finally {
+    await restoreRuntimeDependencyMirrors(stashedDependencies);
+  }
+}
+
+async function writeWorkspacePatchReportCore(
   paths: TaskPaths,
   policy: PathPolicy,
 ): Promise<WorkspacePatchReport> {

@@ -13,16 +13,33 @@ import { isoTimestamp as timestamp } from "./time.js";
 import { isTerminalTaskStatus } from "./task-progress.js";
 import { assertProviderRuntimePair } from "./runtime-names.js";
 import {
+  resolveWorkerSelection,
+  type ResolvedWorkerSelection,
+} from "./worker-profiles.js";
+import {
+  buildCandidateGapContract,
+  candidateRevisionMatchesCurrentDiff,
+  latestMainReview,
+  resolveLatestRevision,
+  resolveRevisionForAttempt,
+} from "./candidate-revision.js";
+import {
   enforcementCapabilityForRuntime,
   resolveTaskEffectivePolicy,
 } from "./advanced-policy.js";
 import type {
+  CompetitionCandidateIdentity,
   CompetitionCandidateRecord,
   CompetitionCandidateScore,
   CompetitionEvaluationRecord,
   CompetitionFactorScore,
+  CompetitionMainDecision,
+  CompetitionMainDecisionKind,
+  CompetitionReason,
+  CompetitionRetainedPartial,
   CompletionPolicyCheck,
   CompetitionRecord,
+  CompetitionTrigger,
   ProviderSpec,
   RankingFactor,
   RankingPolicy,
@@ -46,10 +63,98 @@ export const DEFAULT_RANKING_POLICY: RankingPolicy = {
 export type RankingPolicyOverride = Partial<Record<RankingFactor, number>>;
 
 export interface CandidateOverride {
-  providerName: string;
-  modelName: string;
+  /** Provider name (legacy explicit entrance). Ignored when workerProfileId is set. */
+  providerName?: string;
+  /** Model name (legacy explicit entrance). Ignored when workerProfileId is set. */
+  modelName?: string;
   /** Positive finite cap, or null for unlimited (no Claude budget flag). */
   maxBudgetUsd?: number | null;
+  /** Saved Worker Profile id. When set on every candidate, the Competition is
+   *  a reasoned mixed-runtime admission: each candidate is resolved from its
+   *  own Profile into a frozen provider/model/runtime/effort identity and a
+   *  Main reason is required. providerName/modelName are ignored. */
+  workerProfileId?: string;
+}
+
+/** Bounded Main reason a Competition is worth running. A reason is only
+ *  supplied for the reasoned Worker-Profile entrance, so intent must be
+ *  consider or required and at least one explicit trigger must be present.
+ *  Intent and triggers are separate from evidence uncertainty; both are
+ *  validated and frozen at admission so later settings edits cannot rewrite
+ *  history. */
+export interface CompetitionReasonInput {
+  intent: "none" | "consider" | "required";
+  triggers?: CompetitionTrigger[];
+  /** Plain-language explanation of why a second (or further) Worker run is
+   *  worth the cost. Bounded non-empty string (≤ 1000 chars). */
+  note: string;
+}
+
+/** Admission options. New reasoned admissions require `reason` (consider or
+ *  required intent with explicit triggers); legacy provider/model-only
+ *  submissions must omit `reason` and are stored reason-unavailable without
+ *  inventing history. */
+export interface CompetitionCreateOptions {
+  reason?: CompetitionReasonInput;
+  /** Explicit legacy marker (provider/model-only). When true a reason is
+   *  forbidden; admission is stored reason-unavailable. */
+  legacy?: boolean;
+  /** Optional canonical Worker readiness verifier for the new entrance. The
+   *  daemon supplies one built from the existing readiness semantics; when
+   *  omitted (e.g. unit tests) readiness is not re-checked here. */
+  readinessVerifier?: WorkerReadinessVerifier;
+}
+
+/** Verifies every selected Worker Profile is launchable under the existing
+ *  readiness semantics (model, pairing, authentication, runtime, permissions).
+ *  Throws a privacy-safe message if any selected Profile is not launchable;
+ *  the admission is all-or-nothing before any workspace preparation. */
+export type WorkerReadinessVerifier = (profileIds: readonly string[]) => void;
+
+const COMPETITION_REASON_NOTE_MAX = 1000;
+const COMPETITION_VALID_TRIGGERS = new Set<CompetitionTrigger>([
+  "critical",
+  "multiple-plausible-solutions",
+  "new-family",
+  "user-requested",
+]);
+
+/** Validate and freeze a Main Competition reason. A reason is only ever
+ *  supplied for the reasoned Worker-Profile entrance, so intent must be
+ *  consider or required and at least one explicit trigger must be present.
+ *  Returns the immutable reason stored on the Competition record. */
+export function validateCompetitionReason(input: unknown): CompetitionReason {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Competition reason must be an object");
+  }
+  const o = input as Record<string, unknown>;
+  if (o.intent !== "consider" && o.intent !== "required") {
+    throw new Error("Competition reason intent must be consider or required");
+  }
+  const triggersRaw = Array.isArray(o.triggers) ? o.triggers : [];
+  const triggers: CompetitionTrigger[] = [];
+  const seen = new Set<string>();
+  for (const t of triggersRaw) {
+    if (typeof t !== "string" || !COMPETITION_VALID_TRIGGERS.has(t as CompetitionTrigger)) {
+      throw new Error("Competition reason triggers contains an unsupported Main reason");
+    }
+    if (seen.has(t)) continue;
+    seen.add(t);
+    triggers.push(t as CompetitionTrigger);
+  }
+  if (triggers.length === 0) {
+    throw new Error("Competition reason requires at least one explicit trigger");
+  }
+  if (typeof o.note !== "string") {
+    throw new Error("Competition reason note must be a string");
+  }
+  const note = o.note.trim();
+  if (note.length === 0 || note.length > COMPETITION_REASON_NOTE_MAX) {
+    throw new Error(
+      `Competition reason note must be 1-${COMPETITION_REASON_NOTE_MAX} characters`,
+    );
+  }
+  return { intent: o.intent as CompetitionReason["intent"], triggers, note };
 }
 
 export interface CompetitionCandidateInput {
@@ -455,13 +560,19 @@ interface CompetitionScorer {
 
 // --- Competition coordinator ---
 
+/** Rebuild a legacy candidate ProviderSpec from provider defaults. The parent
+ *  runtime is retained (legacy admissions share one runtime); source-only
+ *  pricingRoute/keychainAccount fields are dropped so the candidate identity is
+ *  rebuilt truthfully. */
 function cloneSpec(
   original: TaskSpec,
-  override: CandidateOverride,
+  providerName: string,
+  modelName: string,
+  maxBudgetUsd: number | null | undefined,
   providerDefaults: import("./settings.js").ProviderDefaultsSettings,
 ): TaskSpec {
   const cloned = structuredClone(original);
-  const name = override.providerName as TaskSpec["provider"]["name"];
+  const name = providerName as TaskSpec["provider"]["name"];
   assertProviderRuntimePair(name, original.runtime.name);
   const providerDef = providerDefaults[name];
   // Provider, endpoint, Keychain identity, and billing route form one identity.
@@ -469,66 +580,243 @@ function cloneSpec(
   // fields, so rebuild instead of partially mutating the cloned ProviderSpec.
   const rebuiltProvider: ProviderSpec = {
     name,
-    model: override.modelName,
+    model: modelName,
     endpoint: providerDef.defaultEndpoint,
     keychainService: providerDef.defaultKeychainService,
   };
   cloned.provider = rebuiltProvider;
-  if (override.maxBudgetUsd !== undefined) {
-    cloned.runtime.maxBudgetUsd = override.maxBudgetUsd;
+  if (maxBudgetUsd !== undefined) {
+    cloned.runtime.maxBudgetUsd = maxBudgetUsd;
   }
   return cloned;
 }
 
-function validateCandidates(
-  candidates: CandidateOverride[],
+/** Clone the contract spec from one candidate's own resolved Worker identity.
+ *  Each candidate keeps its own provider/model/runtime/effort/policy - it never
+ *  inherits the parent Task's runtime or Profile, so a Claude Code Worker and a
+ *  Grok Build Worker can truthfully compete in one Competition. */
+function cloneSpecFromIdentity(
+  original: TaskSpec,
+  resolved: ResolvedWorkerSelection,
+): TaskSpec {
+  const cloned = structuredClone(original);
+  cloned.provider = {
+    name: resolved.provider as ProviderSpec["name"],
+    model: resolved.model,
+    endpoint: resolved.endpoint,
+    keychainService: resolved.keychainService,
+    ...(resolved.pricingRoute === undefined ? {} : { pricingRoute: resolved.pricingRoute }),
+  };
+  cloned.runtime = {
+    ...cloned.runtime,
+    name: resolved.runtime,
+    executable: resolved.runtime === "grok-build" ? "grok" : "claude",
+    effort: resolved.effort,
+    maxBudgetUsd: resolved.maxBudgetUsd,
+  };
+  if (resolved.profileId !== undefined) {
+    cloned.workerProfileId = resolved.profileId;
+  }
+  return cloned;
+}
+
+function identityKey(identity: CompetitionCandidateIdentity): string {
+  return `${identity.provider}\0${identity.model}\0${identity.runtime}\0${identity.effort}`;
+}
+
+interface ResolvedCandidate {
+  override: CandidateOverride;
+  spec: TaskSpec;
+  identity: CompetitionCandidateIdentity | undefined;
+  providerName: string;
+  modelName: string;
+}
+
+interface ResolvedAdmission {
+  resolved: ResolvedCandidate[];
+  reason: CompetitionReason | undefined;
+  legacy: boolean;
+}
+
+function validateCandidateCount(count: number, settings: ForkLightSettings): void {
+  const comp = settings.competition;
+  if (count < comp.minCandidates) {
+    throw new Error(
+      `Competition requires at least ${comp.minCandidates} candidates, got ${count}`,
+    );
+  }
+  if (count > comp.maxCandidates) {
+    throw new Error(
+      `Competition allows at most ${comp.maxCandidates} candidates, got ${count}`,
+    );
+  }
+}
+
+function validateLegacyCandidate(
+  candidate: CandidateOverride,
+  contractRuntime: string,
   settings: ForkLightSettings,
 ): void {
-  const comp = settings.competition;
-  if (candidates.length < comp.minCandidates) {
+  const providerName = typeof candidate.providerName === "string"
+    ? candidate.providerName.trim()
+    : "";
+  const modelName = typeof candidate.modelName === "string"
+    ? candidate.modelName.trim()
+    : "";
+  if (!providerName || !modelName) {
+    throw new Error("Every candidate must specify a nonempty providerName and modelName");
+  }
+  if (!isProviderName(providerName)) {
     throw new Error(
-      `Competition requires at least ${comp.minCandidates} candidates, got ${candidates.length}`,
+      `Unsupported provider: ${providerName}. Supported: ${providerNames().join(", ")}`,
     );
   }
-  if (candidates.length > comp.maxCandidates) {
-    throw new Error(
-      `Competition allows at most ${comp.maxCandidates} candidates, got ${candidates.length}`,
-    );
-  }
-
-  const seen = new Set<string>();
-  for (const candidate of candidates) {
-    const providerName = typeof candidate.providerName === "string"
-      ? candidate.providerName.trim()
-      : "";
-    const modelName = typeof candidate.modelName === "string"
-      ? candidate.modelName.trim()
-      : "";
-    if (!providerName || !modelName) {
-      throw new Error("Every candidate must specify a nonempty providerName and modelName");
+  // Legacy admissions share the parent runtime; reject an illegal pairing
+  // before any workspace preparation or Worker launch.
+  assertProviderRuntimePair(providerName, contractRuntime);
+  if (candidate.maxBudgetUsd !== undefined && candidate.maxBudgetUsd !== null) {
+    if (!Number.isFinite(candidate.maxBudgetUsd) || candidate.maxBudgetUsd <= 0) {
+      throw new Error(`Candidate maxBudgetUsd must be positive or null, got ${candidate.maxBudgetUsd}`);
     }
-    if (!isProviderName(providerName)) {
+    if (candidate.maxBudgetUsd > settings.execution.maximumBudgetUsd) {
       throw new Error(
-        `Unsupported provider: ${providerName}. Supported: ${providerNames().join(", ")}`,
+        `Candidate maxBudgetUsd $${candidate.maxBudgetUsd} exceeds configured maximum $${settings.execution.maximumBudgetUsd}`,
       );
     }
-    const key = `${providerName}:${modelName}`;
-    if (seen.has(key)) {
-      throw new Error(`Duplicate candidate: ${providerName}/${modelName}`);
-    }
-    seen.add(key);
+  }
+}
 
-    if (candidate.maxBudgetUsd !== undefined && candidate.maxBudgetUsd !== null) {
-      if (!Number.isFinite(candidate.maxBudgetUsd) || candidate.maxBudgetUsd <= 0) {
-        throw new Error(`Candidate maxBudgetUsd must be positive or null, got ${candidate.maxBudgetUsd}`);
-      }
-      if (candidate.maxBudgetUsd > settings.execution.maximumBudgetUsd) {
-        throw new Error(
-          `Candidate maxBudgetUsd $${candidate.maxBudgetUsd} exceeds configured maximum $${settings.execution.maximumBudgetUsd}`,
-        );
-      }
+/** Resolve and freeze every candidate's Worker identity and effective policy
+ *  before any workspace preparation or Worker launch. New reasoned admissions
+ *  resolve each candidate from its own saved Worker Profile; legacy explicit
+ *  admissions keep the shared provider/model runtime and are stored
+ *  reason-unavailable. Invalid pairings, duplicates, missing reasons, and count
+ *  violations stop here. */
+function resolveCandidateAdmission(
+  contractSpec: TaskSpec,
+  candidates: CandidateOverride[],
+  settings: ForkLightSettings,
+  options: CompetitionCreateOptions,
+): ResolvedAdmission {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    throw new Error("Competition requires at least one candidate");
+  }
+  validateCandidateCount(candidates.length, settings);
+
+  // A candidate is either a saved Worker Profile reference or a legacy
+  // provider/model pair - never both. Reject ambiguous per-candidate fields
+  // before determining the entrance kind.
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i]!;
+    if (
+      candidate.workerProfileId !== undefined
+      && (candidate.providerName !== undefined || candidate.modelName !== undefined)
+    ) {
+      throw new Error(
+        `candidates[${i}] must reference a Worker Profile or provider/model, not both`,
+      );
     }
   }
+
+  const profileBased = candidates.filter((c) => c.workerProfileId !== undefined).length;
+  if (profileBased > 0 && profileBased !== candidates.length) {
+    throw new Error(
+      "Competition candidates must either all reference a Worker Profile or all use legacy provider/model",
+    );
+  }
+  const newEntrance = profileBased > 0;
+
+  let reason: CompetitionReason | undefined;
+  let legacy: boolean;
+  if (newEntrance) {
+    if (options.reason === undefined) {
+      throw new Error("A reasoned Competition admission requires a Main reason");
+    }
+    reason = validateCompetitionReason(options.reason);
+    legacy = false;
+  } else {
+    // Legacy provider/model-only admission stays reason-unavailable. A reason
+    // cannot be attached to a legacy entrance - that would invent history.
+    if (options.reason !== undefined) {
+      throw new Error(
+        "Legacy provider/model Competition cannot carry a Main reason; use Worker Profile references for a reasoned admission",
+      );
+    }
+    legacy = true;
+  }
+
+  const resolved: ResolvedCandidate[] = [];
+  const seenLegacy = new Set<string>();
+  const seenIdentity = new Set<string>();
+  for (const candidate of candidates) {
+    if (newEntrance) {
+      const selection = resolveWorkerSelection(
+        {
+          workerProfileId: candidate.workerProfileId!,
+          ...(candidate.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: candidate.maxBudgetUsd }),
+        },
+        {
+          execution: settings.execution,
+          providerDefaults: settings.providerDefaults,
+          workerProfiles: settings.workerProfiles,
+          modelCatalog: settings.modelCatalog,
+        },
+      );
+      const identity: CompetitionCandidateIdentity = {
+        provider: selection.provider,
+        model: selection.model,
+        runtime: selection.runtime,
+        effort: selection.effort,
+        maxBudgetUsd: selection.maxBudgetUsd,
+        ...(selection.profileId === undefined ? {} : { workerProfileId: selection.profileId }),
+      };
+      const key = identityKey(identity);
+      if (seenIdentity.has(key)) {
+        throw new Error(
+          `Duplicate candidate identity: ${identity.provider}/${identity.model} (${identity.runtime}/${identity.effort})`,
+        );
+      }
+      seenIdentity.add(key);
+      const spec = cloneSpecFromIdentity(contractSpec, selection);
+      resolved.push({
+        override: candidate,
+        spec,
+        identity,
+        providerName: identity.provider,
+        modelName: identity.model,
+      });
+    } else {
+      validateLegacyCandidate(candidate, contractSpec.runtime.name, settings);
+      const providerName = typeof candidate.providerName === "string" ? candidate.providerName.trim() : "";
+      const modelName = typeof candidate.modelName === "string" ? candidate.modelName.trim() : "";
+      const key = `${providerName}:${modelName}`;
+      if (seenLegacy.has(key)) {
+        throw new Error(`Duplicate candidate: ${providerName}/${modelName}`);
+      }
+      seenLegacy.add(key);
+      const spec = cloneSpec(contractSpec, providerName, modelName, candidate.maxBudgetUsd, settings.providerDefaults);
+      resolved.push({
+        override: candidate,
+        spec,
+        identity: undefined,
+        providerName,
+        modelName,
+      });
+    }
+  }
+
+  // New entrance: prove every selected Profile is launchable under the
+  // existing readiness semantics (model, pairing, authentication, runtime,
+  // permissions) before any workspace preparation. All-or-nothing: one
+  // not-launchable Profile rejects the whole admission.
+  if (newEntrance && options.readinessVerifier !== undefined) {
+    const profileIds = resolved
+      .map((r) => r.identity?.workerProfileId)
+      .filter((id): id is string => typeof id === "string");
+    options.readinessVerifier(profileIds);
+  }
+
+  return { resolved, reason, legacy };
 }
 
 export class CompetitionCoordinator {
@@ -542,9 +830,13 @@ export class CompetitionCoordinator {
     contractSpec: TaskSpec,
     contractTaskFile: string,
     candidates: CandidateOverride[],
+    options: CompetitionCreateOptions = {},
   ): Promise<{ competition: CompetitionRecord; taskIds: string[] }> {
     const effectiveSettings = this.settings.get();
-    validateCandidates(candidates, effectiveSettings);
+    // Resolve and freeze every candidate identity and the Main reason before any
+    // workspace preparation or Worker launch. Invalid pairings, duplicates,
+    // missing reasons, and count violations stop here.
+    const admission = resolveCandidateAdmission(contractSpec, candidates, effectiveSettings, options);
 
     const competitionId = randomUUID();
     const createdAt = timestamp();
@@ -579,24 +871,14 @@ export class CompetitionCoordinator {
       });
 
       // 2. Create candidate tasks and clone every workspace from that snapshot.
-      for (let ordinal = 0; ordinal < candidates.length; ordinal++) {
-        const override = candidates[ordinal]!;
-        const providerName = override.providerName.trim();
-        const modelName = override.modelName.trim();
+      for (let ordinal = 0; ordinal < admission.resolved.length; ordinal++) {
+        const resolved = admission.resolved[ordinal]!;
+        const candidateSpec = resolved.spec;
+        const providerName = resolved.providerName;
+        const modelName = resolved.modelName;
         const taskId = randomUUID();
         const sessionId = randomUUID();
 
-        const candidateSpec = cloneSpec(
-          contractSpec,
-          {
-            providerName,
-            modelName,
-            ...(override.maxBudgetUsd === undefined
-              ? {}
-              : { maxBudgetUsd: override.maxBudgetUsd }),
-          },
-          effectiveSettings.providerDefaults,
-        );
         const effectivePolicy = resolveTaskEffectivePolicy(
           candidateSpec,
           effectiveSettings,
@@ -633,6 +915,15 @@ export class CompetitionCoordinator {
               model: modelName,
               competitionId,
               ordinal,
+              ...(resolved.identity === undefined
+                ? {}
+                : {
+                    runtime: resolved.identity.runtime,
+                    effort: resolved.identity.effort,
+                    ...(resolved.identity.workerProfileId === undefined
+                      ? {}
+                      : { workerProfileId: resolved.identity.workerProfileId }),
+                  }),
             },
           },
           extraEvents: [
@@ -657,6 +948,7 @@ export class CompetitionCoordinator {
           ordinal,
           providerName,
           modelName,
+          ...(resolved.identity === undefined ? {} : { identity: resolved.identity }),
         });
       }
 
@@ -670,6 +962,8 @@ export class CompetitionCoordinator {
         rankingPolicy: creationPolicy,
         createdAt,
         updatedAt: createdAt,
+        ...(admission.reason === undefined ? {} : { reason: admission.reason }),
+        ...(admission.legacy ? { legacy: true } : {}),
       };
 
       this.store.createCompetitionExecution(registrations, competition, candidateRecords);
@@ -696,7 +990,41 @@ export class CompetitionCoordinator {
 
   reconcile(competitionId: string): CompetitionEvaluationRecord | undefined {
     const competition = this.store.getCompetition(competitionId);
-    if (competition.status !== "running") return undefined;
+    if (competition.status !== "running") {
+      // A completed Competition may be evaluated once more after Main's exact
+      // revise produced a newer Attempt on the selected Candidate. This is not
+      // a retry loop: the ordinary correction allowance remains authoritative,
+      // and only a terminal Attempt newer than the recorded revise can enter.
+      if (competition.mainDecision?.decision !== "revise") return undefined;
+      const revisedCandidate = this.store
+        .getCompetitionCandidates(competitionId)
+        .find((candidate) => candidate.id === competition.mainDecision?.candidateId);
+      if (revisedCandidate === undefined) return undefined;
+      const attempts = this.store.listAttempts(revisedCandidate.taskId);
+      const latestAttempt = attempts.reduce<import("./types.js").AttemptRecord | undefined>(
+        (latest, attempt) => latest === undefined || attempt.ordinal > latest.ordinal
+          ? attempt
+          : latest,
+        undefined,
+      );
+      if (
+        latestAttempt === undefined
+        || latestAttempt.id === competition.mainDecision.attemptId
+        || !isTerminalTaskStatus(latestAttempt.status)
+      ) {
+        return undefined;
+      }
+      const latestEvaluation = this.store
+        .listCompetitionEvaluations(competitionId)
+        .at(-1);
+      if (
+        latestEvaluation !== undefined
+        && latestAttempt.finishedAt !== undefined
+        && latestEvaluation.createdAt >= latestAttempt.finishedAt
+      ) {
+        return undefined;
+      }
+    }
 
     const candidateRecords = this.store.getCompetitionCandidates(competitionId);
     const terminal = candidateRecords.every((candidate) => {
@@ -722,5 +1050,155 @@ export class CompetitionCoordinator {
       });
       return undefined;
     }
+  }
+
+  /** Resolve the candidate record for a competition, or throw. */
+  private requireCandidate(competitionId: string, candidateId: string): CompetitionCandidateRecord {
+    const records = this.store.getCompetitionCandidates(competitionId);
+    const record = records.find((c) => c.id === candidateId);
+    if (record === undefined) {
+      throw new Error(`Candidate ${candidateId} does not belong to competition ${competitionId}`);
+    }
+    return record;
+  }
+
+  /** Record a Competition-level Main decision bound to one exact Candidate
+   *  Revision. It is an explicit derivation of the chosen candidate Task's
+   *  latest Main Review: the referenced attempt, verification, and revision
+   *  must match that Task-level Main Review exactly. The Task-level Main Review
+   *  remains the canonical exact-revision authority; this decision never
+   *  authorizes a retry, successor, or Integration by itself. */
+  recordMainDecision(
+    competitionId: string,
+    candidateId: string,
+    decision: CompetitionMainDecisionKind,
+    reason: string,
+  ): CompetitionMainDecision {
+    if (decision !== "accept" && decision !== "revise" && decision !== "reject") {
+      throw new Error("Competition Main decision must be accept, revise, or reject");
+    }
+    const trimmedReason = typeof reason === "string" ? reason.trim() : "";
+    if (trimmedReason.length === 0 || trimmedReason.length > 1000) {
+      throw new Error("Competition Main decision reason must be 1-1000 characters");
+    }
+    // Validate the competition exists and the candidate belongs to it.
+    const candidate = this.requireCandidate(competitionId, candidateId);
+    const events = this.store.listEvents(candidate.taskId);
+    const review = latestMainReview(events);
+    if (review === undefined) {
+      throw new Error(
+        "Competition Main decision requires a Task-level Main Review on the candidate first",
+      );
+    }
+    if (review.decision !== decision) {
+      throw new Error(
+        `Competition Main decision ${decision} does not match the candidate's latest Main Review ${review.decision}`,
+      );
+    }
+    // Every Competition decision is about one immutable Candidate Revision.
+    // This is required for revise as well as accept: otherwise a correction
+    // grant could accidentally target a newer Diff than the one Main reviewed.
+    const task = this.store.getTask(candidate.taskId);
+    const revision = resolveRevisionForAttempt(
+      events,
+      review.attemptId,
+      review.verificationEventSequence,
+    );
+    if (
+      revision === undefined
+      || revision.taskId !== candidate.taskId
+      || !candidateRevisionMatchesCurrentDiff(task, revision)
+      || (review.candidateRevisionId !== undefined && review.candidateRevisionId !== revision.id)
+      || (review.acceptedPatchDigest !== undefined && review.acceptedPatchDigest !== revision.patchDigest)
+    ) {
+      throw new Error(
+        "Competition Main decision requires the candidate's exact Candidate Revision id and patch digest for the current Diff",
+      );
+    }
+    const result: CompetitionMainDecision = {
+      decision,
+      candidateId,
+      taskId: candidate.taskId,
+      attemptId: review.attemptId,
+      verificationEventSequence: review.verificationEventSequence,
+      candidateRevisionId: revision.id,
+      acceptedPatchDigest: revision.patchDigest,
+      reason: trimmedReason,
+      createdAt: timestamp(),
+    };
+    this.store.updateCompetition(competitionId, { mainDecision: result });
+    this.store.addEvent(
+      candidate.taskId,
+      review.attemptId,
+      "competition.main-decision.completed",
+      `Competition Main decision: ${decision}`,
+      result,
+    );
+    return result;
+  }
+
+  /** Record bounded retained-partial evidence for one non-selected Candidate.
+   *  Reusable paths are validated against that Candidate's latest revision
+   *  affected set and remaining gaps describe what a future M2 successor would
+   *  still need. Stores evidence only - it never starts a Worker, retry,
+   *  successor, or Integration. */
+  recordRetainedPartial(
+    competitionId: string,
+    candidateId: string,
+    reusablePaths: unknown,
+    remainingGaps: unknown,
+  ): CompetitionRetainedPartial {
+    const competition = this.store.getCompetition(competitionId);
+    // Retained-partial preserves reusable work from a failed or non-selected
+    // Candidate. It must never be recorded for the final accepted Candidate:
+    // that candidate is the delivered choice, not partial work for M2.
+    if (
+      competition.mainDecision?.decision === "accept"
+      && competition.mainDecision.candidateId === candidateId
+    ) {
+      throw new Error(
+        "retained-partial cannot be recorded for the final accepted Candidate",
+      );
+    }
+    const candidate = this.requireCandidate(competitionId, candidateId);
+    const events = this.store.listEvents(candidate.taskId);
+    const revision = resolveLatestRevision(events);
+    if (revision === undefined || revision.taskId !== candidate.taskId) {
+      throw new Error(
+        "retained-partial requires the candidate's latest CandidateRevision evidence",
+      );
+    }
+    // Reuse the canonical gap-contract builder so path-safety, counts, and
+    // gap-text bounds are enforced identically to Main correction contracts.
+    const contract = buildCandidateGapContract(
+      revision.id,
+      reusablePaths,
+      remainingGaps,
+      revision.affectedPaths,
+    );
+    const entry: CompetitionRetainedPartial = {
+      candidateId,
+      taskId: candidate.taskId,
+      reusablePaths: contract.reusablePaths,
+      remainingGaps: contract.remainingGaps,
+      candidateRevisionId: revision.id,
+    };
+    const current = this.store.getCompetition(competitionId).retainedPartial ?? [];
+    const others = current.filter((item) => item.candidateId !== candidateId);
+    this.store.updateCompetition(competitionId, { retainedPartial: [...others, entry] });
+    this.store.addEvent(
+      candidate.taskId,
+      revision.attemptId,
+      "competition.retained-partial.completed",
+      "Main retained bounded partial Candidate evidence",
+      {
+        competitionId,
+        candidateId,
+        reusablePathCount: entry.reusablePaths.length,
+        remainingGapCount: entry.remainingGaps.length,
+        candidateRevisionId: revision.id,
+      },
+    );
+    return entry;
   }
 }

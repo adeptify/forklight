@@ -20,15 +20,17 @@ M1 closes only after all three gates pass:
    saved Worker.
 2. **M1.3 — clean-environment journey:** a new local user reaches the reviewed
    first Task in about 15 minutes without internal ForkLight knowledge.
-3. **M1.4 — daily project evidence:** ten representative Tasks across Adeptify,
-   Dia, and NovelRPGPlay reach truthful final outcomes without manual database
-   or internal configuration edits.
+3. **M1.4 — daily project evidence (portfolio complete):** at least ten
+   representative, non-demo outcomes across the user's currently active projects
+   reach truthful final delivery without manual database or internal
+   configuration edits. Relay and Elsewhere currently prove **13/10**; this does
+   not replace the separate clean-environment gate.
 
 ## Current clean-environment evidence
 
 | Journey step | Current evidence | Disposition |
 | --- | --- | --- |
-| Install package and open one Hub | A frozen external `bundle-evidence.json` names the exact tarball and SHA, with full prepack, isolated-prefix install, CLI/MCP load, exact installed build-identity match, sensitive-filename scan, and real one-owner Hub handoffs | Latest exact artifact evidence is recorded outside the self-referential package docs; new-user timing and Hub journey remain |
+| Install package and open one Hub | `npm run bundle:clean -- --output <new-dir>` produces a frozen external `bundle-evidence.json` naming the exact tarball and SHA, with full prepack, isolated-prefix install, CLI/MCP load, exact installed build-identity match, isolated Hub/daemon lifecycle, sensitive-filename scan, and honest clean-user limitations | Repeatable package verification is checked in; new-user timing and Hub journey remain |
 | Detect prerequisites | SetupService and Hub status tests | Implemented |
 | Save a Provider key | Hub Keychain route, rollback tests, exact discarded-output launch read, content-free argv, future-readable Keychain ACL, and a controlled Daemon restart reading all three existing items | Current-machine persistence verified; clean-user entry and prompt comprehension remain |
 | Create a saved Worker and preview effective policy | Hub form, canonical Worker Profile, readiness and admission preview tests | Implemented |
@@ -135,28 +137,33 @@ remain more important than forcing a slow first run to fail at minute 15.
 
 ## M1.4 real-task portfolio
 
-The read-only candidate inventory is now recorded in
-[`m1-real-task-portfolio.md`](./m1-real-task-portfolio.md). It deliberately
-includes admission status, source-overlap risk, user-facing outcomes, module
-boundaries, acceptance commands, and bounded execution policy. Candidate
-selection is not delivery evidence: no business-project Task has been started
-from this list, and every item still requires same-day source-drift review and
-user alignment before submission.
+The authoritative inventory and per-result evidence are recorded in
+[`m1-real-task-portfolio.md`](./m1-real-task-portfolio.md). The latest user
+direction replaces the historical fixed Adeptify/Dia/NovelRPGPlay split: natural
+real work may come from Relay, Elsewhere, Collision, Museum, Adeptify, or Dia;
+NovelRPGPlay is not mandatory.
 
-After the clean journey passes, run ten non-demo Tasks:
+The strict result count is now **13/10**:
 
-- at least two Tasks in each of Adeptify, Dia, and NovelRPGPlay;
-- cover UI/interaction, backend behavior, bug repair, tests/reliability, and at
-  least one cross-module change;
-- use every required Worker path where it is a reasonable fit, without forced
-  competition or round-robin model usage;
-- keep the original machine result, Main decision, retained Candidate,
-  correction/reverification cost, final delivery, failure category, and next
-  action;
-- do not choose only easy Tasks to manufacture a success rate.
+- Relay Gmail production readiness: **4** delivered outcomes;
+- Relay Gmail durable incremental sync: **5** delivered outcomes;
+- Elsewhere experience redesign M0–M1: **4** delivered outcomes.
 
-All ten need a truthful terminal outcome. A failed Task is valid evidence only
-when the failure is understandable, no unauthorized mutation occurred, useful
-work is retained when possible, and the next action is explicit. M1 cannot close
-if the portfolio shows that normal project work still needs continuous manual
-database, config, or workspace repair.
+One Goal milestone counts once only when it produces a distinct user result and
+its delivery gate is satisfied. Attempts, corrections, handoffs, reviews, and
+reverifications do not create extra portfolio entries. Eleven results have an
+exact accepted-Candidate Integration. Two retain failed machine Task records but
+have explicit Goal delivery evidence after Main repair: one against the original
+acceptance contract and one against formally amended acceptance. They are counted
+as delivered results, not mislabeled as successful Worker Tasks.
+
+The portfolio spans interaction/UI, domain behavior, provider integration,
+transactional recovery, restart durability, failure preservation, onboarding,
+and documentation. Every result retains its original machine truth, Main
+decision, delivery basis, and next action. No additional Worker Task should be
+started merely to increase this count.
+
+M1 as a whole remains open because M1.3 still needs one independent new macOS
+user, disposable VM, or genuinely new Mac to complete the install → configure →
+first Task → understand → review → integrate → restart journey. A repeat on the
+development account or another synthetic bundle is not that proof.

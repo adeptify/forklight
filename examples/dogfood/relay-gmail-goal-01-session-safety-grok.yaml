@@ -1,0 +1,119 @@
+version: 2
+name: Harden Relay Gmail OAuth session safety
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-oauth-session-safety
+taskFamily: relay-gmail-production-readiness
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Relay's Gmail browser authorization binds every completion to one fresh PKCE
+    session. Missing or mismatched state, expired sessions, changed client identity,
+    and unsafe non-loopback redirect addresses stop before token exchange or secret
+    mutation, while the existing successful local flow remains clear and usable.
+  presentation:
+    summary: 收紧 Gmail 浏览器授权边界，确保回调确实属于刚才那次本机授权，不泄露密钥，也不破坏现有成功路径。
+    language: zh-CN
+  context:
+    - The current uncommitted Relay work already implements Gmail Authorization Code plus PKCE and passes npm run check. Preserve it as the baseline.
+    - Current completion accepts a missing state when a pending session exists, has no pending-session expiry, and can resolve a different saved client after the session starts.
+    - Relay is local-first. OAuth redirect completion must remain on a loopback HTTP origin and secrets stay only in SecretStore.
+    - Main selected Grok 4.5 as the default Worker for 2026-07-30 and 2026-07-31. Do not use another Provider, commit, or push.
+  inScope:
+    - Require the exact pending state for a normal browser completion and reject missing or mismatched state before network or SecretStore mutation.
+    - Give pending PKCE sessions a clear finite lifetime and clear an expired session before returning a readable restart instruction.
+    - Bind exchange inputs to the pending session's client id, redirect URI, verifier, and state; keep explicit dependency seams only where tests need deterministic inputs.
+    - Validate that the configured redirect URI is a local loopback HTTP callback suitable for Relay's local server.
+    - Add regression tests for valid completion, missing/mismatched state, expiry, identity drift, unsafe redirect, no outbound exchange on rejection, and no secret leakage.
+  outOfScope:
+    - Refresh-token rotation, connector sync behavior, UI redesign, Google Cloud project setup, adding dependencies, changing the public product roadmap, or any commit/push.
+    - Removing the current manual paste fallback entirely; it may require a full callback URL carrying the correct state.
+  executionSteps:
+    - Trace the adapter, application use case, route callback, SecretStore, and current Gmail OAuth tests before editing.
+    - Define one canonical pending-session validator used by every completion path.
+    - Make rejection happen before token exchange and credential writes, then extend focused tests.
+    - Run the focused tests, full Relay check, and diff hygiene once.
+  deliverables:
+    - Fresh exact-state PKCE completion boundary with loopback redirect validation.
+    - Deterministic security and compatibility tests with user-readable errors.
+  modules:
+    - name: Gmail OAuth session authority
+      responsibility: Create, persist, validate, expire, and consume one local PKCE session.
+      consumes:
+        - Client id, loopback redirect URI, verifier, state, creation time, callback code, and current time.
+      produces:
+        - One validated token-exchange input or a stable restart instruction before side effects.
+      boundaries:
+        - No connector sync, UI state, Item data, arbitrary redirect host, token output, commit, or push.
+    - name: Application and callback path
+      responsibility: Route browser and pasted callbacks through the same validated completion use case.
+      consumes:
+        - Callback URL or code plus state and the pending session.
+      produces:
+        - A secret-free success/failure response and updated connector metadata only after success.
+      boundaries:
+        - No direct SecretStore access in UI/API routes and no second completion pipeline.
+  callChain:
+    - Settings starts Gmail authorization through RelayServices and the application auth use case.
+    - The adapter creates one loopback-bound PKCE session and returns the Google authorization URL.
+    - Google callback or pasted callback enters the same application completion use case.
+    - The adapter validates exact state, age, client, redirect, and verifier before exchanging the code.
+    - Only a successful exchange binds credentials and clears the pending session.
+  scenarios:
+    - name: Exact fresh callback succeeds
+      given: One fresh pending session and its exact callback state.
+      when: Google returns a valid code.
+      then: One token exchange occurs, credentials remain private, and the pending session is consumed.
+    - name: Missing or stale callback stops safely
+      given: A pending session is missing state, has another state, is expired, or uses a changed identity.
+      when: Completion is attempted.
+      then: No token request or credential write occurs and the user is told to restart authorization.
+  risks:
+    - Over-tightening can break the paste flow, so retain the full callback URL path and prove it with tests.
+    - Time-based tests can become flaky, so inject or persist deterministic timestamps without adding a new framework.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 700
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 700
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/adapters/connectors/gmail-oauth.ts
+    - src/application/connector-auth.ts
+    - src/app/api/v1/connectors/gmail/oauth/route.ts
+    - src/app/api/v1/connectors/gmail/oauth/callback/route.ts
+    - tests/gmail-oauth.test.ts
+acceptance:
+  criteria:
+    - Every normal completion requires one fresh exact pending state and loopback callback identity before network or secret mutation.
+    - Existing successful OAuth completion remains functional and responses never expose access, refresh, verifier, client-secret, or pending-session content.
+    - Relay's complete lint, tests, and production build remain green without commit or push.
+  commands:
+    - node --test --import tsx tests/gmail-oauth.test.ts tests/boundary-and-mutation-path.test.ts
+    - npm run check
+    - git diff --check

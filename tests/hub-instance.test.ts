@@ -15,15 +15,26 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import {
   discoverOrClaimHub,
+  HUB_STARTUP_OWNERSHIP_CHANGED_MESSAGE,
+  HUB_STARTUP_REPLACE_FAILED_MESSAGE,
+  HUB_STARTUP_TIMEOUT_MESSAGE,
+  hubCliLaunchArguments,
   inspectHubStatus,
   publishHubInstance,
   releaseHubInstance,
   replaceHubOwner,
+  resolveHubOpenUrl,
+  resolveHubStartupTimeoutMs,
+  restartHubDetached,
+  type HubChildHandle,
+  type HubDiscovery,
+  type HubInspectionStatus,
   type HubOwnerClaim,
+  type HubReplacementTarget,
 } from "../src/hub/instance.js";
 import type { BuildIdentity } from "../src/core/build-identity.js";
 import { stopDaemon } from "../src/daemon/client.js";
@@ -1360,4 +1371,504 @@ test("inspectHubStatus fails closed when comparator is missing or malformed", as
     if (claim !== undefined) releaseHubInstance(home, claim);
     cleanupHome(home);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Detached Hub restart coordinator
+// ---------------------------------------------------------------------------
+
+function fakeClaim(pid = 1111): HubOwnerClaim {
+  return {
+    schemaVersion: 1,
+    pid,
+    nonce: "n".repeat(24),
+    createdAtMs: 1_700_000_000_000,
+  };
+}
+
+function fakeReplacement(port = 4321): HubReplacementTarget {
+  const claim = fakeClaim(2222);
+  const descriptor = {
+    schemaVersion: 1 as const,
+    pid: claim.pid,
+    port,
+    token: "t".repeat(32),
+    nonce: claim.nonce,
+    buildIdentity: STALE_BUILD,
+  };
+  return {
+    claim,
+    descriptor,
+    claimRaw: JSON.stringify(claim),
+    descriptorRaw: JSON.stringify(descriptor),
+  };
+}
+
+function childHandle(pid: number, exited = false): HubChildHandle {
+  return {
+    pid,
+    exited,
+    exitCode: exited ? 1 : null,
+    signalCode: null,
+  };
+}
+
+test("resolveHubStartupTimeoutMs accepts 1000-60000 and rejects out of range", () => {
+  assert.equal(resolveHubStartupTimeoutMs(1_000), 1_000);
+  assert.equal(resolveHubStartupTimeoutMs(60_000), 60_000);
+  assert.equal(resolveHubStartupTimeoutMs(), 30_000);
+  assert.throws(() => resolveHubStartupTimeoutMs(999), /1000 to 60000/);
+  assert.throws(() => resolveHubStartupTimeoutMs(60_001), /1000 to 60000/);
+  assert.throws(() => resolveHubStartupTimeoutMs(1.5), /1000 to 60000/);
+});
+
+test("hubCliLaunchArguments uses argv arrays without a shell", () => {
+  // Resolve as if called from src/hub/instance.ts (production module location).
+  const instanceModuleUrl = pathToFileURL(path.join(root, "src", "hub", "instance.ts")).href;
+  const launch = hubCliLaunchArguments(instanceModuleUrl);
+  assert.equal(launch.executable, process.execPath);
+  assert.equal(launch.mode, "source-dev");
+  assert.ok(launch.args.every((part) => typeof part === "string"));
+  assert.ok(!launch.args.some((part) => part.includes("&&") || part.includes("|")));
+  const cliArg = launch.args.find((part) => part.endsWith(`${path.sep}cli.ts`));
+  assert.equal(cliArg, path.join(root, "src", "cli.ts"));
+
+  const distModuleUrl = pathToFileURL(path.join(root, "dist", "src", "hub", "instance.js")).href;
+  const distLaunch = hubCliLaunchArguments(distModuleUrl);
+  assert.equal(distLaunch.mode, "dist");
+  assert.equal(
+    distLaunch.args.find((part) => part.endsWith(`${path.sep}cli.js`)),
+    path.join(root, "dist", "src", "cli.js"),
+  );
+});
+test("detached restart no-ops when Hub is already current", async () => {
+  const home = makeHome();
+  let launches = 0;
+  let replaces = 0;
+  let inspects = 0;
+  try {
+    const result = await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      discover: async () => ({ kind: "reuse", port: 5555, url: "http://127.0.0.1:5555/#x" }),
+      replace: async () => {
+        replaces += 1;
+        return { success: true, reason: "should not run" };
+      },
+      launch: () => {
+        launches += 1;
+        return childHandle(9999);
+      },
+      inspect: async () => {
+        inspects += 1;
+        return {
+          state: "current",
+          pid: 3333,
+          port: 5555,
+          nextAction: "none",
+        };
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.state, "current");
+    assert.equal(result.replacement, "none-needed");
+    assert.equal(result.nextAction, "use-existing-hub");
+    assert.equal(result.pid, 3333);
+    assert.equal(result.port, 5555);
+    assert.equal(inspects, 2, "no-op must confirm the same owner twice");
+    assert.equal(launches, 0, "current hub must not launch a child");
+    assert.equal(replaces, 0, "current hub must not signal a replacement");
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("detached restart fails closed when current owner changes during confirmation", async () => {
+  const home = makeHome();
+  let launches = 0;
+  let inspects = 0;
+  try {
+    const result = await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      discover: async () => ({ kind: "reuse", port: 5555, url: "http://127.0.0.1:5555/#x" }),
+      launch: () => {
+        launches += 1;
+        return childHandle(9999);
+      },
+      inspect: async () => {
+        inspects += 1;
+        if (inspects === 1) {
+          return { state: "current", pid: 3333, port: 5555, nextAction: "none" };
+        }
+        // Second confirmation sees a different owner.
+        return { state: "current", pid: 4444, port: 5555, nextAction: "none" };
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "failed");
+    assert.equal(result.replacement, "not-started");
+    assert.equal(result.nextAction, "investigate");
+    assert.equal(result.reason, HUB_STARTUP_OWNERSHIP_CHANGED_MESSAGE);
+    assert.equal(launches, 0, "ownership race during no-op must not launch");
+    assert.equal(inspects, 2);
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("detached restart replaces a stale owner once and waits for current child", async () => {
+  const home = makeHome();
+  let launches = 0;
+  let replaces = 0;
+  let launchedPort: number | undefined;
+  const replacement = fakeReplacement(4_100);
+  try {
+    const result = await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      startupTimeoutMs: 1_000,
+      pollIntervalMs: 1,
+      discover: async () => ({
+        kind: "stale-owner",
+        port: 4_100,
+        url: "http://127.0.0.1:4100/#x",
+        replacement,
+      }),
+      replace: async (_home, target) => {
+        replaces += 1;
+        assert.equal(target.claim.pid, replacement.claim.pid);
+        return { success: true, reason: "old owner gone" };
+      },
+      launch: (_home, port) => {
+        launches += 1;
+        launchedPort = port;
+        return childHandle(7_701);
+      },
+      inspect: async () => ({
+        state: "current",
+        pid: 7_701,
+        port: 4_100,
+        nextAction: "none",
+      }),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.state, "ready");
+    assert.equal(result.replacement, "replaced");
+    assert.equal(result.pid, 7_701);
+    assert.equal(result.port, 4_100);
+    assert.equal(replaces, 1);
+    assert.equal(launches, 1, "exactly one child after replacement");
+    assert.equal(launchedPort, 4_100, "prior port preserved by default");
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("detached restart starts on a clean home after releasing the parent claim", async () => {
+  const home = makeHome();
+  let launches = 0;
+  let released = 0;
+  const claim = fakeClaim(5_001);
+  try {
+    const result = await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      startupTimeoutMs: 1_000,
+      pollIntervalMs: 1,
+      discover: async () => ({ kind: "start", claim }),
+      releaseClaim: (_home, releasedClaim) => {
+        released += 1;
+        assert.equal(releasedClaim.pid, claim.pid);
+      },
+      launch: () => {
+        launches += 1;
+        return childHandle(5_002);
+      },
+      inspect: async () => ({
+        state: "current",
+        pid: 5_002,
+        port: 4_200,
+        nextAction: "none",
+      }),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.state, "ready");
+    assert.equal(result.replacement, "started");
+    assert.equal(released, 1, "parent start claim must be released before launch");
+    assert.equal(launches, 1);
+    assert.equal(result.pid, 5_002);
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("detached restart preserves prior port and honors explicit override", async () => {
+  const home = makeHome();
+  const replacement = fakeReplacement(4_300);
+  const ports: Array<number | undefined> = [];
+  try {
+    await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      startupTimeoutMs: 1_000,
+      pollIntervalMs: 1,
+      discover: async () => ({
+        kind: "stale-owner",
+        port: 4_300,
+        url: "http://127.0.0.1:4300/#x",
+        replacement,
+      }),
+      replace: async () => ({ success: true, reason: "gone" }),
+      launch: (_home, port) => {
+        ports.push(port);
+        return childHandle(8_001);
+      },
+      inspect: async () => ({
+        state: "current",
+        pid: 8_001,
+        port: 4_300,
+        nextAction: "none",
+      }),
+    });
+    await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      port: 4_444,
+      startupTimeoutMs: 1_000,
+      pollIntervalMs: 1,
+      discover: async () => ({
+        kind: "stale-owner",
+        port: 4_300,
+        url: "http://127.0.0.1:4300/#x",
+        replacement,
+      }),
+      replace: async () => ({ success: true, reason: "gone" }),
+      launch: (_home, port) => {
+        ports.push(port);
+        return childHandle(8_002);
+      },
+      inspect: async () => ({
+        state: "current",
+        pid: 8_002,
+        port: 4_444,
+        nextAction: "none",
+      }),
+    });
+    assert.deepEqual(ports, [4_300, 4_444]);
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("detached restart times out after one launch without relaunching", async () => {
+  const home = makeHome();
+  let launches = 0;
+  let now = 0;
+  try {
+    const result = await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      // Public floor remains 1000ms; virtual clock advances without real waits.
+      startupTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+      nowMs: () => now,
+      sleepMs: async (ms) => {
+        now += ms;
+      },
+      discover: async () => ({ kind: "start", claim: fakeClaim() }),
+      releaseClaim: () => undefined,
+      launch: () => {
+        launches += 1;
+        return childHandle(9_001);
+      },
+      inspect: async () => ({ state: "stopped", nextAction: "start" }),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "failed");
+    assert.equal(result.replacement, "started");
+    assert.equal(result.nextAction, "investigate");
+    assert.match(result.reason ?? "", /startup timeout/);
+    assert.match(result.reason ?? "", /check hub status/i);
+    assert.match(result.reason ?? "", /may still become ready/i);
+    assert.ok(
+      result.reason?.startsWith(HUB_STARTUP_TIMEOUT_MESSAGE),
+      "timeout reason must use the fixed public message",
+    );
+    assert.ok(!(result.reason ?? "").includes("retry"), "timeout must not invite direct retry");
+    assert.equal(launches, 1, "timeout must never relaunch");
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("detached restart fails closed when the child exits early", async () => {
+  const home = makeHome();
+  let launches = 0;
+  try {
+    const result = await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      startupTimeoutMs: 1_000,
+      pollIntervalMs: 1,
+      discover: async () => ({ kind: "start", claim: fakeClaim() }),
+      releaseClaim: () => undefined,
+      launch: () => {
+        launches += 1;
+        return childHandle(9_101, true);
+      },
+      inspect: async () => ({ state: "stopped", nextAction: "start" }),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "failed");
+    assert.match(result.reason ?? "", /exited before becoming ready/);
+    assert.equal(launches, 1);
+    assert.equal(result.nextAction, "investigate");
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("detached restart fails closed on ownership race without a second launch", async () => {
+  const home = makeHome();
+  let launches = 0;
+  try {
+    const result = await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      startupTimeoutMs: 1_000,
+      pollIntervalMs: 1,
+      discover: async () => ({ kind: "start", claim: fakeClaim() }),
+      releaseClaim: () => undefined,
+      launch: () => {
+        launches += 1;
+        return childHandle(9_201);
+      },
+      inspect: async () => ({
+        state: "current",
+        pid: 42_042,
+        port: 4_500,
+        nextAction: "none",
+      }),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "failed");
+    assert.match(result.reason ?? "", /ownership changed/);
+    assert.equal(launches, 1, "ownership race must not launch again");
+    assert.equal(result.nextAction, "investigate");
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("detached restart does not launch when exact replacement fails", async () => {
+  const home = makeHome();
+  let launches = 0;
+  const replacement = fakeReplacement();
+  const internalReason =
+    "ForkLight Hub ownership changed after diagnosis; nothing was signalled; secret=abc";
+  try {
+    const result = await restartHubDetached(home, {
+      runIdentity: TEST_BUILD,
+      discover: async () => ({
+        kind: "stale-owner",
+        port: replacement.descriptor.port,
+        url: "http://127.0.0.1:1/#x",
+        replacement,
+      }),
+      replace: async () => ({
+        success: false,
+        reason: internalReason,
+      }),
+      launch: () => {
+        launches += 1;
+        return childHandle(1);
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.replacement, "not-started");
+    assert.equal(launches, 0);
+    assert.equal(result.reason, HUB_STARTUP_REPLACE_FAILED_MESSAGE);
+    assert.equal(result.nextAction, "investigate");
+    const serialized = JSON.stringify(result);
+    assert.ok(!serialized.includes(internalReason), "must not forward internal replace text");
+    assert.ok(!serialized.includes("nothing was signalled"));
+    assert.ok(!serialized.includes("secret=abc"));
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("detached restart result JSON is privacy-safe", async () => {
+  const home = makeHome();
+  const secretHome = path.join(home, "secret-private-home");
+  const token = "TokEn_leak_" + "x".repeat(24);
+  const nonce = "NonCe_leak_" + "y".repeat(16);
+  try {
+    const result = await restartHubDetached(secretHome, {
+      runIdentity: TEST_BUILD,
+      startupTimeoutMs: 1_000,
+      pollIntervalMs: 1,
+      discover: async () => ({
+        kind: "stale-owner",
+        port: 4_600,
+        url: `http://127.0.0.1:4600/#${token}`,
+        replacement: {
+          ...fakeReplacement(4_600),
+          descriptor: {
+            ...fakeReplacement(4_600).descriptor,
+            token,
+            nonce,
+          },
+        },
+      }),
+      replace: async () => ({ success: true, reason: "gone" }),
+      launch: () => childHandle(9_301),
+      inspect: async () => ({
+        state: "current",
+        pid: 9_301,
+        port: 4_600,
+        nextAction: "none",
+      }),
+    });
+    const serialized = JSON.stringify(result);
+    assert.ok(!serialized.includes(token), "result must not contain token");
+    assert.ok(!serialized.includes(nonce), "result must not contain nonce");
+    assert.ok(!serialized.includes(secretHome), "result must not contain home path");
+    assert.ok(!serialized.includes("http://"), "result must not contain URL");
+    assert.ok(!serialized.includes("FORKLIGHT"), "result must not contain env keys");
+    assert.ok(!/"token"\s*:/.test(serialized));
+    assert.ok(!/"nonce"\s*:/.test(serialized));
+    assert.deepEqual(
+      Object.keys(result).sort(),
+      ["nextAction", "ok", "pid", "port", "replacement", "state"].sort(),
+    );
+  } finally {
+    cleanupHome(home);
+  }
+});
+
+test("resolveHubOpenUrl only returns the URL for the proven owner", async () => {
+  const home = makeHome();
+  let close: (() => Promise<void>) | undefined;
+  let claim: HubOwnerClaim | undefined;
+  try {
+    const first = await discoverOrClaimHub(home, options());
+    assert.equal(first.kind, "start");
+    claim = first.claim;
+    const token = randomBytes(32).toString("base64url");
+    const live = await liveHub(token, claim.nonce);
+    close = live.close;
+    publishHubInstance(home, claim, live.port, token, TEST_BUILD);
+    const url = resolveHubOpenUrl(home, claim.pid, live.port);
+    assert.ok(url?.includes(`:${live.port}/#`));
+    assert.ok(url?.includes(encodeURIComponent(token)));
+    assert.equal(resolveHubOpenUrl(home, claim.pid + 1, live.port), undefined);
+    assert.equal(resolveHubOpenUrl(home, claim.pid, live.port + 1), undefined);
+  } finally {
+    await close?.();
+    if (claim !== undefined) releaseHubInstance(home, claim);
+    cleanupHome(home);
+  }
+});
+
+test("detached restart discovery type stays closed for coordinator seams", async () => {
+  // Compile-time shape guard: seams accept the same HubDiscovery closed union.
+  const kinds: HubDiscovery["kind"][] = ["reuse", "stale-owner", "legacy-owner", "start"];
+  const states: HubInspectionStatus["state"][] = [
+    "stopped", "current", "different-build", "legacy", "unverified",
+  ];
+  assert.equal(kinds.length, 4);
+  assert.equal(states.length, 5);
 });

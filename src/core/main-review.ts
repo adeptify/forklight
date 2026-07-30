@@ -22,6 +22,56 @@ function verificationPassed(payload: unknown): payload is VerificationResult {
     && (payload as { passed?: unknown }).passed === true;
 }
 
+function hasRevisionHistory(
+  events: ReadonlyArray<{ type: string }>,
+): boolean {
+  return events.some((event) => event.type === "candidate.revision.captured");
+}
+
+/**
+ * Bind modern Main decisions to the exact CandidateRevision for the current
+ * Attempt + verification when revision evidence exists. Legacy Tasks without
+ * revision history remain unbound.
+ */
+function resolveRevisionBinding(
+  store: StateStore,
+  taskId: string,
+  decision: MainReviewDecisionKind,
+  attemptId: string,
+  verificationSequence: number,
+): { candidateRevisionId?: string; acceptedPatchDigest?: string } {
+  const task = store.getTask(taskId);
+  const events = store.listEvents(taskId);
+  const modernHistory = hasRevisionHistory(events);
+  // Accept always attempts binding (legacy fall-through when no history).
+  // Revise/reject bind only when modern revision history exists.
+  if (decision !== "accept" && !modernHistory) {
+    return {};
+  }
+  const revision = resolveRevisionForAttempt(events, attemptId, verificationSequence);
+  if (
+    revision !== undefined
+    && revision.taskId === taskId
+    && candidateRevisionMatchesCurrentDiff(task, revision)
+  ) {
+    return {
+      candidateRevisionId: revision.id,
+      acceptedPatchDigest: revision.patchDigest,
+    };
+  }
+  if (modernHistory) {
+    throw new Error(
+      decision === "accept"
+        ? "main review accept requires the current Diff to match the latest CandidateRevision for this Attempt"
+        : "main review requires the current Diff to match the exact CandidateRevision for this Attempt and verification",
+    );
+  }
+  // Legacy: no revision available — decision without digest binding.
+  // Integration preflight will still verify the diff but cannot enforce
+  // revision-digest binding for legacy tasks.
+  return {};
+}
+
 export function recordMainReview(
   store: StateStore,
   taskId: string,
@@ -55,36 +105,25 @@ export function recordMainReview(
     throw new Error("main review Attempt does not belong to Task");
   }
 
-  // When accepting, bind to the CandidateRevision that matches this verification.
-  // The integration preflight will reject if the live Diff digest does not match.
-  let candidateRevisionId: string | undefined;
-  let acceptedPatchDigest: string | undefined;
-  if (input.decision === "accept") {
-    const revision = resolveRevisionForAttempt(events, attempt.id, verification.sequence);
-    if (
-      revision !== undefined
-      && revision.taskId === taskId
-      && candidateRevisionMatchesCurrentDiff(task, revision)
-    ) {
-      candidateRevisionId = revision.id;
-      acceptedPatchDigest = revision.patchDigest;
-    } else if (events.some((event) => event.type === "candidate.revision.captured")) {
-      throw new Error(
-        "main review accept requires the current Diff to match the latest CandidateRevision for this Attempt",
-      );
-    }
-    // Legacy: no revision available — accept without digest binding.
-    // Integration preflight will still verify the diff but cannot enforce
-    // revision-digest binding for legacy tasks.
-  }
+  const binding = resolveRevisionBinding(
+    store,
+    taskId,
+    input.decision,
+    attempt.id,
+    verification.sequence,
+  );
 
   const decision: MainReviewDecision = {
     decision: input.decision,
     reason,
     attemptId: attempt.id,
     verificationEventSequence: verification.sequence,
-    ...(candidateRevisionId === undefined ? {} : { candidateRevisionId }),
-    ...(acceptedPatchDigest === undefined ? {} : { acceptedPatchDigest }),
+    ...(binding.candidateRevisionId === undefined
+      ? {}
+      : { candidateRevisionId: binding.candidateRevisionId }),
+    ...(binding.acceptedPatchDigest === undefined
+      ? {}
+      : { acceptedPatchDigest: binding.acceptedPatchDigest }),
   };
   store.addEvent(
     taskId,

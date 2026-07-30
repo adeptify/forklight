@@ -1,0 +1,81 @@
+version: 2
+name: Inspect Goal bounded-stop live proof
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-goal-live-proof
+taskFamily: forklight-main-orchestration
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: Confirm that the current Hub Goal source is readable and syntactically valid without changing any file.
+  presentation:
+    summary: 只读检查 Goal 展示代码，为长程 Goal 的停止与重启实测提供一个真实 Grok 里程碑。
+    language: zh-CN
+  context:
+    - This is a read-only live proof for durable Goal supervision.
+    - The Task must produce ordinary Worker and independent verification evidence but no source change.
+  inScope:
+    - Read the Goal status helpers in the Hub source.
+    - Report whether the configured syntax check is appropriate.
+  outOfScope:
+    - Do not edit any file, create a patch, commit, push, or start another Worker.
+  executionSteps:
+    - Inspect the focused Hub source.
+    - Run or reason about the configured syntax check and return a concise result.
+  deliverables:
+    - A concise read-only inspection result.
+  modules:
+    - name: Goal Hub presentation
+      responsibility: Explain Goal state and next action to the user.
+      consumes:
+        - Privacy-safe Goal projection.
+      produces:
+        - Readable Goal status text.
+      boundaries:
+        - No source mutation in this live proof.
+  callChain:
+    - Main submits the Goal.
+    - ForkLight launches this isolated Grok Task.
+    - Independent verification runs the syntax check.
+    - Goal waits for Main acceptance without launching dependent Tasks.
+  scenarios:
+    - name: read-only milestone
+      given: The Hub source is present.
+      when: Grok inspects it and verification runs.
+      then: The Task succeeds without a diff and the Goal reaches a Main decision point.
+  risks:
+    - A Worker edit would invalidate this proof, so editing is disabled.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 20
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 300000
+  workerStopGraceMs: 10000
+  fileLimit: 1
+  fileLimitMode: warn
+  changedLineLimit: 20
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+acceptance:
+  criteria:
+    - The Hub source remains unchanged and parses as JavaScript.
+  commands:
+    - node --check src/hub/public/app.js

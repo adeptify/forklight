@@ -6,8 +6,12 @@ deliveryProfiles:
       buildCommands:
         - npm run build
       activationCommands:
+        # Stop the old daemon, wait for the endpoint to clear, then start once
+        # with a bounded readiness window long enough for durable recovery.
+        # daemon start launches exactly one child and returns confirmed health
+        # (or a truthful timeout/exit); do not paper over start with status retries.
         - >-
-          node dist/src/cli.js daemon stop; for i in {1..100}; do node dist/src/cli.js daemon status >/dev/null 2>&1 || break; sleep 0.05; done; node dist/src/cli.js daemon start
+          node dist/src/cli.js daemon stop; for i in {1..100}; do node dist/src/cli.js daemon status >/dev/null 2>&1 || break; sleep 0.05; done; node dist/src/cli.js daemon start --startup-timeout-ms 60000
       activationCheckCommands:
         - >-
           node dist/src/cli.js health --json | node -e 'let data=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => data += chunk); process.stdin.on("end", () => { const value = JSON.parse(data); if (value.identityStatus !== "matched") process.exit(1); });'

@@ -1,0 +1,174 @@
+version: 2
+name: Make Integration observation read-only during daemon transitions
+project: /Users/yijunwang/code/forklight
+taskClass: integration-observer-no-autostart
+taskFamily: forklight-self-upgrade
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: forklight-self-upgrade
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-v4-pro
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；只读路由没有同类实测差异，本任务也不需要 Provider 专项验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      xai/grok-4.5: 0
+      deepseek/deepseek-v4-pro[1M]: 0
+
+contract:
+  outcome: >-
+    Integration status, wait, and history are observation commands. If the
+    daemon is temporarily unavailable during an activation handoff or is
+    stopped after a failure, these commands must never start a replacement
+    daemon. They must fail fast with bounded guidance to retry the same
+    operation after the transition, while preserving unchanged behavior when
+    an existing daemon is reachable.
+  presentation:
+    summary: 查看合入进度只负责“看”，后台切换时宁可明确告诉 Main 稍后重查，也不能偷偷拉起另一个旧服务争抢位置。
+    language: zh-CN
+  context:
+    - During recovery of Integration 65252e11-90e3-49f4-a70a-756704eb3986, the daemon socket disappeared during the activation window.
+    - The CLI branches for integration status, wait, and history call ensureDaemon before their read-only daemon request.
+    - A status query during the transition therefore started the locally installed dist before the authorized activation runner finished, creating a competing daemon with the previous build identity.
+    - daemon status and Hub status already have non-starting probe behavior; this Task aligns Integration observers with that ownership rule.
+    - The newly activated daemon already contains connection-local EPIPE protection; completing this Task through automatic Integration is the next M0 regression proof.
+  inScope:
+    - Remove implicit daemon startup from CLI Integration status, wait, and history only.
+    - Centralize a bounded observer request path that calls an existing daemon but never invokes ensureDaemon, startDaemonProcess, restartDaemon, or another lifecycle mutation.
+    - When the socket is absent, refused, reset, or closes during activation, return a clear privacy-safe error that says the daemon may be transitioning or stopped and tells Main to retry the same observation later.
+    - Preserve the original transport error only as an internal cause if useful; do not expose home paths, socket paths, operation content, or credentials.
+    - Preserve active-daemon output, compact/deep-audit behavior, exchange-receipt attribution, timeout validation, and operation-id validation.
+    - Add executable CLI tests proving a fresh isolated home remains without a daemon process/socket after status, wait, and history observations.
+    - Add active-daemon regression tests for successful status/history and bounded wait behavior.
+    - Update concise operator documentation to distinguish observation from start/restart commands.
+  outOfScope:
+    - Changing Integration stage semantics, recovering a genuinely killed process, local database reconstruction of operation views, changing preflight/apply startup behavior, changing daemon status, changing Hub lifecycle, client-disconnect transport handling, Provider calls, UI redesign, commit, or push.
+  executionSteps:
+    - Trace every Integration CLI subcommand and identify which are observation-only versus lifecycle/mutating.
+    - Add one no-start observer transport helper with fixed bounded unavailable guidance.
+    - Route status, wait, and history through it while leaving preflight/apply behavior unchanged.
+    - Prove absent-daemon observers do not create a socket, PID, or detached daemon and do not wait for automatic bootstrap.
+    - Prove an existing daemon still returns the same structured results and wait timeout semantics.
+    - Run focused CLI/daemon tests, strict build, full check, and diff hygiene.
+  deliverables:
+    - Side-effect-free Integration status, wait, and history CLI observation.
+    - Clear transition/stopped guidance with no private transport details.
+    - Regression tests covering absent and active daemon paths.
+    - Operator documentation and no changes to mutation commands.
+  modules:
+    - name: Integration observer transport
+      responsibility: Send read-only Integration queries only to an already-running daemon and normalize daemon-unavailable errors for Main.
+      consumes:
+        - Existing operation or Task identity and an Integration read method.
+      produces:
+        - The unchanged daemon response, or a bounded retry-later observation error.
+      boundaries:
+        - Never starts, stops, restarts, claims, or replaces a daemon and never fabricates Integration state.
+    - name: CLI Integration observers
+      responsibility: Validate inputs, preserve exchange receipts and presentation, and use the no-start transport for status, wait, and history.
+      consumes:
+        - CLI arguments and the optional currently running daemon.
+      produces:
+        - Existing human/JSON views when reachable or one actionable transition message when unavailable.
+      boundaries:
+        - Preflight and apply keep their existing lifecycle behavior; no local state reconstruction or UI work.
+  callChain:
+    - Main invokes Integration status, wait, or history.
+    - CLI validates identifiers and timeout before opening the existing daemon socket.
+    - If reachable, the daemon returns the canonical view and the existing renderer/receipt path remains unchanged.
+    - If unavailable, CLI returns bounded retry guidance and exits without starting any process.
+    - The authorized activation runner remains the only actor allowed to start the replacement during handoff.
+  scenarios:
+    - name: Activation socket gap
+      given: The old daemon has stopped and the authorized activation runner has not exposed the replacement socket yet.
+      when: Main runs Integration status or wait.
+      then: The command reports a temporary unavailable observation and starts no daemon.
+    - name: Failed or manually stopped daemon
+      given: No daemon is running in an isolated home.
+      when: Main runs status, wait, or history.
+      then: Each command fails fast, leaves no socket/process, and tells Main to retry after explicitly restoring the daemon.
+    - name: Existing daemon
+      given: The correct daemon is already reachable.
+      when: Main observes status, waits, or reads history.
+      then: Existing canonical output, compact/deep-audit selection, and timeout semantics are unchanged.
+    - name: Mutating Integration command
+      given: Main explicitly invokes preflight or confirmed apply.
+      when: No daemon is running.
+      then: Existing startup and mutation rules remain unchanged; this Task does not silently alter them.
+  risks:
+    - Removing ensureDaemon without translating low-level socket errors would confuse Main; return one bounded actionable observer error.
+    - Reusing a broad wrapper could accidentally affect preflight/apply; scope it to the three observation commands.
+    - A test that only checks exit code may miss a leaked detached daemon; assert the isolated endpoint remains absent after a bounded grace interval.
+    - Treating an unavailable daemon as outcome-unknown would fabricate state; report observation unavailable instead.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 550
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 550
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - src/daemon/client.ts
+    - tests/daemon-cli.test.ts
+    - tests/cli-supervision.test.ts
+    - docs/operations.md
+acceptance:
+  criteria:
+    - Integration status, wait, and history never start a missing daemon and give bounded retry guidance without private socket/path details.
+    - Existing-daemon observation outputs, timeout rules, compact/deep-audit behavior, and exchange receipts remain unchanged.
+    - Preflight/apply lifecycle behavior and all Integration state semantics remain unchanged.
+    - The accepted change can complete a full automatic self-upgrade under the EPIPE-hardened daemon.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon-cli.test.ts tests/cli-supervision.test.ts tests/cli-exchange-receipts.test.ts
+    - npm run build
+    - npm run check
+    - git diff --check

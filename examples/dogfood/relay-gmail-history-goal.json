@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "Relay Gmail durable incremental sync",
+  "objective": "Deliver one user-complete Gmail manual sync journey: bounded first sync, restart-safe incremental history, no partial cursor advance, explicit stale-history rebuild, readable recovery UI, and source-aligned proof. Grok is the default Worker; MiniMax is used once for the critical adapter so a real partial Candidate may be handed to Volcengine GLM if Main finds bounded remaining gaps.",
+  "planFile": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-history-goal-plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 3,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "cursor-contract", "gate": "integration" },
+    { "itemId": "live-history-adapter", "gate": "integration" },
+    { "itemId": "explicit-recovery", "gate": "integration" },
+    { "itemId": "recovery-ui", "gate": "integration" },
+    { "itemId": "restart-e2e-docs", "gate": "integration" }
+  ]
+}

@@ -1,0 +1,106 @@
+version: 2
+name: Make Relay Gmail setup documentation match the shipped product
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-setup-docs-continuation
+taskFamily: relay-gmail-production-readiness-continuation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    A new local user can configure Gmail without reading source: README and env example
+    state the exact Google OAuth app type, redirect URI, scopes, safe local behavior,
+    draft-only default, and recovery path, with automated checks against shipped names.
+  presentation:
+    summary: 补齐真正开箱可用的 Gmail 配置说明，并与界面和代码保持一致。
+    language: zh-CN
+  context:
+    - The preceding milestone integrates the explanation-first Gmail UI and callback bridge.
+    - Documentation must describe shipped behavior only and must not promise automatic send, background sync, or cloud security.
+    - Actual env names, redirect path, scopes, local-only boundary, and draft behavior are authoritative from source.
+    - Use Grok 4.5. Do not commit or push.
+  inScope:
+    - Document the Google OAuth client application type and exact authorized redirect URI.
+    - Document required Gmail scopes/permissions, client id/optional secret inputs, and safe local-only credential handling.
+    - Explain the recommended browser flow, advanced token fallback, explicit sync, draft-only default, and reauthorization recovery.
+    - Update .env.example with accurate non-secret placeholders and concise comments.
+    - Add source/docs contract tests that compare env names, path, scopes, privacy vocabulary, and default behavior.
+    - Perform a final primary-UI privacy vocabulary audit and fix only proven mismatches.
+  outOfScope:
+    - Product feature expansion, Google Cloud automation, deployment guide, i18n framework, dependencies, commit, or push.
+  executionSteps:
+    - Read source constants and current README/env examples before writing claims.
+    - Add one short setup path plus recovery and security boundary sections.
+    - Add deterministic tests tying docs/env text to shipped constants and banned secret transport.
+    - Run focused and full acceptance once.
+  deliverables:
+    - Copyable Gmail setup and recovery documentation.
+    - Accurate env example and final docs/UI privacy regressions.
+  modules:
+    - name: Setup documentation
+      responsibility: Explain exact shipped local setup and recovery in user language.
+      consumes: [env names, redirect path, scopes, UI flow, draft default]
+      produces: [README steps and safe env placeholders]
+      boundaries: [no production promises, real secrets, or automatic-send claim]
+    - name: Documentation contract
+      responsibility: Detect drift between source, env example, docs, and primary UI privacy rules.
+      consumes: [source constants and artifact text]
+      produces: [deterministic drift/privacy tests]
+      boundaries: [no brittle full-page snapshot or browser automation]
+  callChain:
+    - User reads the setup section and creates the documented Google OAuth client.
+    - User registers the exact redirect and enters non-secret configuration through Relay.
+    - The shipped browser flow authorizes Gmail and explicit sync imports mail.
+    - Recovery instructions return failed authorization to a new safe attempt.
+  scenarios:
+    - name: Fresh local install
+      given: A user has Relay running and no Gmail configuration.
+      when: They follow README and env guidance.
+      then: Every field and redirect matches the shipped UI/API without reading source.
+    - name: Authorization expires
+      given: Refresh cannot recover.
+      when: The user follows recovery guidance.
+      then: They restart authorization without exposing or copying private token data.
+  risks:
+    - Documentation can silently drift from source; contract tests must check exact identifiers and paths.
+    - Overclaiming security or send behavior would mislead users; scope statements must be explicit.
+  changeBudget: { maxFiles: 5, maxDiffLines: 700 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 700
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - README.md
+    - .env.example
+    - src/adapters/connectors/gmail-oauth.ts
+    - src/components/ConnectorAuthWizard.tsx
+    - tests/user-chrome-copy.test.ts
+acceptance:
+  criteria:
+    - README and env example exactly match shipped OAuth app type, env names, redirect path, scopes, local boundary, sync action, draft default, and recovery.
+    - Docs, tests, and primary UI contain no real secret or instruction to transport OAuth code/state/token/verifier through unsafe surfaces.
+    - Claims stay within local product behavior and do not promise automatic send or background sync.
+    - Full Relay lint, tests, and production build pass without commit or push.
+  commands:
+    - node --test --import tsx tests/user-chrome-copy.test.ts tests/gmail-oauth.test.ts tests/boundary-and-mutation-path.test.ts
+    - npm run check
+    - git diff --check

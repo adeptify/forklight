@@ -1,0 +1,101 @@
+version: 2
+name: Implement a bounded percentage clamp for Review Graph dogfood
+project: /tmp/forklight-review-dogfood.dRHm2I
+taskClass: review-graph-live-proof
+taskFamily: bounded-javascript-change
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Make clampPercentage return values within 0 through 100, including values
+    below zero and above one hundred, and add focused executable tests. Keep the
+    existing module interface and make no unrelated changes.
+  presentation:
+    summary: 用一个极小的真实改动验证 Grok 实现、MiniMax 只读审查、Main 决策和安全合入的完整链路。
+    language: zh-CN
+  context:
+    - This is an isolated temporary dogfood project for the exact-revision Review Graph.
+    - Grok is the implementation Worker; MiniMax will only be assigned later as an explicit independent read-only judge.
+    - No commit, push, provider change, retry loop, or unrelated file is needed.
+  inScope:
+    - Update math.js so clampPercentage clamps finite numeric inputs to the inclusive 0 to 100 range.
+    - Extend math.test.js with boundary, below-range, above-range, and in-range cases.
+  outOfScope:
+    - New dependencies, API redesign, non-number coercion policy, CLI/UI work, commits, pushes, retries, or broad refactoring.
+  executionSteps:
+    - Inspect the two existing JavaScript files.
+    - Implement the smallest clear clamp behavior.
+    - Add focused tests and run npm test once.
+  deliverables:
+    - Correct clampPercentage behavior.
+    - Executable focused tests.
+  modules:
+    - name: Percentage clamp
+      responsibility: Convert a finite numeric percentage into the inclusive 0 to 100 range.
+      consumes:
+        - A finite JavaScript number.
+      produces:
+        - The same in-range value, zero for values below zero, or one hundred for values above one hundred.
+      boundaries:
+        - No coercion, dependency, filesystem, network, or interface changes.
+  callChain:
+    - A caller passes a finite number to clampPercentage.
+    - The function applies the lower and upper bounds.
+    - Tests observe the returned number for in-range and out-of-range inputs.
+  scenarios:
+    - name: Below range
+      given: A finite number below zero.
+      when: clampPercentage is called.
+      then: It returns zero.
+    - name: Above range
+      given: A finite number above one hundred.
+      when: clampPercentage is called.
+      then: It returns one hundred.
+    - name: Within range
+      given: A finite number from zero through one hundred.
+      when: clampPercentage is called.
+      then: It returns the original value.
+  risks:
+    - Overengineering input validation would obscure this proof, so finite numeric input is the explicit boundary.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 60
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 300000
+  workerStopGraceMs: 10000
+  fileLimit: 2
+  fileLimitMode: warn
+  changedLineLimit: 60
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - math.js
+    - math.test.js
+acceptance:
+  criteria:
+    - Values below zero return zero, values above one hundred return one hundred, and values within the range are unchanged.
+    - Focused tests cover lower, upper, and in-range behavior without dependencies or unrelated changes.
+  commands:
+    - npm test
+    - node --input-type=module -e "import('./math.js').then(({clampPercentage:c}) => { if (c(-1) !== 0 || c(0) !== 0 || c(42) !== 42 || c(100) !== 100 || c(101) !== 100) process.exit(1); })"

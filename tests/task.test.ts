@@ -4,7 +4,20 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { buildTaskRecord, createTask, registerTaskFromSpec } from "../src/core/runner.js";
-import { assessTaskQuality, buildWorkerPrompt, loadTaskSpec, parseTaskSpec } from "../src/core/task.js";
+import {
+  REVIEW_SUMMARY_MAX,
+  reviewerOutputBoundsLine,
+} from "../src/core/review-graph.js";
+import {
+  assessTaskQuality,
+  buildWorkerPrompt,
+  GENERIC_CODING_SUMMARY_INSTRUCTION,
+  isReviewGraphReviewerTaskFile,
+  loadTaskSpec,
+  parseTaskSpec,
+  reviewerTerminalOutputLines,
+  workerPromptAppendicesForTask,
+} from "../src/core/task.js";
 import { attemptRuntimeBudget, budgetArguments } from "../src/workers/claude.js";
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "../src/core/settings.js";
 import { validateDeliveryProfilesSettings } from "../src/core/delivery-profiles.js";
@@ -60,6 +73,35 @@ test("includes independent verification feedback in a resumed Worker prompt", as
   );
   assert.match(prompt, /Correction feedback from independent verification/);
   assert.match(prompt, /boundary assertion was incorrect/);
+});
+
+test("ordinary Task prompts keep the generic coding summary; reviewer Tasks replace it", async () => {
+  const loaded = await loadTaskSpec(path.resolve("examples/deepseek-checkout.yaml"));
+  const ordinary = buildWorkerPrompt(loaded.spec, false);
+  assert.ok(ordinary.includes(GENERIC_CODING_SUMMARY_INSTRUCTION));
+  assert.ok(!ordinary.includes("Return exactly one raw JSON object"));
+  // Ordinary Workers must not receive reviewer JSON field bounds.
+  assert.ok(!ordinary.includes(reviewerOutputBoundsLine()));
+  assert.ok(!ordinary.includes(`summary ≤ ${REVIEW_SUMMARY_MAX} chars`));
+
+  assert.equal(
+    isReviewGraphReviewerTaskFile("forklight://review-graph/g1/assignment/a1"),
+    true,
+  );
+  const reviewerPrompt = buildWorkerPrompt(
+    loaded.spec,
+    false,
+    undefined,
+    workerPromptAppendicesForTask(
+      { taskFile: "forklight://review-graph/g1/assignment/a1" },
+    ),
+  );
+  for (const line of reviewerTerminalOutputLines()) {
+    assert.ok(reviewerPrompt.includes(line), `missing: ${line}`);
+  }
+  assert.ok(!reviewerPrompt.includes(GENERIC_CODING_SUMMARY_INSTRUCTION));
+  // Reviewer-only terminal instructions expose exact parser numeric bounds.
+  assert.ok(reviewerPrompt.includes(reviewerOutputBoundsLine()));
 });
 
 test("prompts the Worker to run the bounded non-authoritative checkpoint when available", async () => {

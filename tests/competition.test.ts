@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,11 +10,28 @@ import {
   DEFAULT_RANKING_POLICY,
   rankingPolicy,
   scoreCandidates,
+  validateCompetitionReason,
   type CandidateOverride,
   type CompetitionCandidateInput,
 } from "../src/core/competition.js";
+import {
+  CandidateHandoffError,
+  buildHandoffInstruction,
+  buildHandoffSuccessorSpec,
+  executeCandidateHandoff,
+  filterPatchToSelectedPaths,
+  projectCandidateHandoff,
+  recoverCandidateHandoffs,
+  resolveHandoffViewForTask,
+} from "../src/core/candidate-handoff.js";
+import { resolveWorkerSelection } from "../src/core/worker-profiles.js";
 import type { CompetitionSettings } from "../src/core/settings.js";
 import { SettingsService } from "../src/core/settings.js";
+import { upsertModelConfig } from "../src/core/model-catalog.js";
+import { upsertWorkerProfile } from "../src/core/worker-profiles.js";
+import { recordMainReview } from "../src/core/main-review.js";
+import { authorizeMainCorrection } from "../src/core/attempt-authorization.js";
+import { resolveCorrectionEligibility } from "../src/core/candidate-revision.js";
 import type {
   AttemptRecord,
   CompetitionCandidateRecord,
@@ -1183,6 +1201,1555 @@ test("daemon coordinator recovery reconciles already-terminal running competitio
     assert.equal(after.status, "completed");
     const evals = store.listCompetitionEvaluations(competition.id);
     assert.equal(evals.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+// --- Reasoned mixed-runtime Competition admission and Main judgment ---
+
+function sha256(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function seedGrokBuilderProfile(settings: SettingsService): void {
+  const current = settings.get();
+  const catalog = upsertModelConfig(current.modelCatalog, {
+    id: "xai-grok-builder",
+    label: "xAI Grok Builder",
+    provider: "xai",
+    model: "grok-4.5",
+    endpoint: "https://api.x.ai/v1",
+  });
+  const profiles = upsertWorkerProfile(
+    current.workerProfiles,
+    {
+      id: "grok-builder",
+      label: "Grok Builder",
+      runtime: "grok-build",
+      modelConfigId: "xai-grok-builder",
+      effort: "high",
+      maxBudgetUsd: 1.0,
+    },
+    catalog,
+  );
+  settings.update({ modelCatalog: catalog, workerProfiles: profiles });
+}
+
+const REASONED_OPTIONS = {
+  reason: {
+    intent: "required" as const,
+    triggers: ["user-requested" as const],
+    note: "Critical task with two plausible solutions; worth a bounded second run.",
+  },
+};
+
+/** Simulate a terminal candidate with verification, optional revision, and an
+ *  optional bound Main Review. Mirrors how the daemon records real evidence. */
+function completeCandidate(
+  store: StateStore,
+  task: TaskRecord,
+  opts: {
+    passed?: boolean;
+    withRevision?: boolean;
+    review?: "accept" | "revise" | "reject";
+  } = {},
+): { attemptId: string } {
+  const passed = opts.passed ?? true;
+  const attemptId = randomUUID();
+  const attempt: AttemptRecord = {
+    id: attemptId,
+    taskId: task.id,
+    ordinal: 1,
+    status: "succeeded",
+    sessionId: task.sessionId,
+    rawLogPath: "/log",
+    startedAt: at(0),
+    finishedAt: at(5),
+  };
+  store.createAttempt(attempt);
+  store.setTaskStatus(task.id, "succeeded", {
+    currentAttemptId: attemptId,
+    startedAt: at(0),
+    finishedAt: at(5),
+  });
+  const ev = store.addEvent(
+    task.id,
+    attemptId,
+    "verification.completed",
+    passed ? "Independent verification passed" : "Independent verification failed",
+    verification(passed),
+  );
+  if (opts.withRevision) {
+    mkdirSync(path.dirname(task.paths.diff), { recursive: true });
+    const diffContent = "diff --git a/readme.md b/readme.md\n@@ -1 +1,2 @@\n-old\n+new\n";
+    writeFileSync(task.paths.diff, diffContent);
+    const revisionId = randomUUID();
+    store.addEvent(
+      task.id,
+      attemptId,
+      "candidate.revision.captured",
+      "Candidate revision captured for attempt ordinal 1",
+      {
+        id: revisionId,
+        taskId: task.id,
+        attemptId,
+        attemptOrdinal: 1,
+        verificationEventSequence: ev.sequence,
+        patchDigest: sha256(diffContent),
+        affectedPaths: ["readme.md"],
+        filesChanged: 1,
+        changedLines: 2,
+        verificationPassed: passed,
+        createdAt: at(6),
+        privateArtifactPath: path.join(task.paths.root, "revisions", `${revisionId}.patch`),
+      },
+    );
+  }
+  if (opts.review !== undefined) {
+    recordMainReview(store, task.id, {
+      decision: opts.review,
+      reason: "test Main review",
+      confirm: true,
+    });
+  }
+  return { attemptId };
+}
+
+test("validateCompetitionReason bounds intent, triggers, and note", () => {
+  const reason = validateCompetitionReason({
+    intent: "required",
+    triggers: ["user-requested", "user-requested", "critical"],
+    note: "  worth it  ",
+  });
+  assert.equal(reason.intent, "required");
+  assert.deepEqual(reason.triggers, ["user-requested", "critical"]);
+  assert.equal(reason.note, "worth it");
+  assert.throws(() => validateCompetitionReason({ intent: "maybe", triggers: ["user-requested"], note: "x" }), /consider or required/);
+  assert.throws(() => validateCompetitionReason({ intent: "none", triggers: ["user-requested"], note: "x" }), /consider or required/);
+  assert.throws(() => validateCompetitionReason({ intent: "required", triggers: ["bogus"], note: "x" }), /unsupported/);
+  assert.throws(() => validateCompetitionReason({ intent: "required", triggers: [], note: "x" }), /at least one explicit trigger/);
+  assert.throws(() => validateCompetitionReason({ intent: "required", triggers: ["user-requested"], note: "" }), /note/);
+});
+
+test("mixed-runtime competition freezes each candidate's own Worker identity from its Profile", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    const baseSpec = makeContractSpec(src);
+    const candidates: CandidateOverride[] = [
+      { workerProfileId: "default" },
+      { workerProfileId: "grok-builder" },
+    ];
+
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", candidates, REASONED_OPTIONS);
+    const stored = store.getCompetition(competition.id);
+    assert.equal(stored.legacy, undefined);
+    assert.equal(stored.reason?.intent, "required");
+    assert.equal(stored.reason?.note, REASONED_OPTIONS.reason.note);
+
+    const storedCandidates = store.getCompetitionCandidates(competition.id);
+    assert.equal(storedCandidates.length, 2);
+    const claude = storedCandidates.find((c) => c.identity?.runtime === "claude-code")!;
+    const grok = storedCandidates.find((c) => c.identity?.runtime === "grok-build")!;
+    assert.ok(claude, "expected a claude-code candidate");
+    assert.ok(grok, "expected a grok-build candidate");
+    assert.equal(grok.identity?.provider, "xai");
+    assert.equal(grok.identity?.effort, "high");
+    assert.equal(claude.identity?.provider, "deepseek");
+    assert.equal(claude.identity?.workerProfileId, "default");
+
+    // Each candidate Task keeps its own runtime, not the parent's.
+    const claudeTask = store.getTask(claude.taskId);
+    const grokTask = store.getTask(grok.taskId);
+    assert.equal(claudeTask.spec.runtime.name, "claude-code");
+    assert.equal(grokTask.spec.runtime.name, "grok-build");
+    assert.equal(grokTask.spec.provider.name, "xai");
+  } finally {
+    cleanup();
+  }
+});
+
+test("reasoned admission rejects missing reason, mixed entrance kinds, and unknown profiles before launch", async () => {
+  const src = makeSourceProject();
+  const { coordinator, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    const baseSpec = makeContractSpec(src);
+
+    // New entrance without a reason stops before any workspace preparation.
+    await assert.rejects(
+      () => coordinator.create(baseSpec, "/test.yaml", [
+        { workerProfileId: "default" },
+        { workerProfileId: "grok-builder" },
+      ]),
+      /reason/,
+    );
+
+    // Mixed entrance kinds (one Profile, one provider/model) are rejected.
+    await assert.rejects(
+      () => coordinator.create(baseSpec, "/test.yaml", [
+        { workerProfileId: "default" },
+        { providerName: "deepseek", modelName: "v4" },
+      ], REASONED_OPTIONS),
+      /all reference a Worker Profile/,
+    );
+
+    // Unknown profile is rejected before launch (readiness).
+    await assert.rejects(
+      () => coordinator.create(baseSpec, "/test.yaml", [
+        { workerProfileId: "default" },
+        { workerProfileId: "no-such-profile" },
+      ], REASONED_OPTIONS),
+      /Unknown worker profile|workerProfileId/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("legacy explicit competition is stored reason-unavailable and carries no frozen identity", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const stored = store.getCompetition(competition.id);
+    assert.equal(stored.legacy, true);
+    assert.equal(stored.reason, undefined);
+
+    for (const c of store.getCompetitionCandidates(competition.id)) {
+      assert.equal(c.identity, undefined, "legacy candidates must not carry a frozen identity");
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("Competition Main decision accept derives from the candidate Main Review and sets the exact final choice", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const chosen = candidates[0]!;
+    completeCandidate(store, store.getTask(chosen.taskId), { withRevision: true, review: "accept" });
+
+    const decision = coordinator.recordMainDecision(
+      competition.id,
+      chosen.id,
+      "accept",
+      "This exact revision is the final choice.",
+    );
+    assert.equal(decision.decision, "accept");
+    assert.equal(decision.candidateId, chosen.id);
+    assert.equal(decision.taskId, chosen.taskId);
+    assert.ok(decision.candidateRevisionId, "accept must bind the exact Candidate Revision");
+    assert.ok(decision.acceptedPatchDigest, "accept must bind the exact patch digest");
+
+    const stored = store.getCompetition(competition.id);
+    assert.equal(stored.mainDecision?.decision, "accept");
+    assert.equal(stored.mainDecision?.candidateRevisionId, decision.candidateRevisionId);
+  } finally {
+    cleanup();
+  }
+});
+
+test("machine recommendation alone is not a final choice and never auto-integrates", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const candidates = store.getCompetitionCandidates(competition.id);
+    completeCandidate(store, store.getTask(candidates[0]!.taskId), { withRevision: false });
+    store.setTaskStatus(candidates[1]!.taskId, "failed", {
+      startedAt: at(0), finishedAt: at(3), error: "Provider unavailable",
+    });
+    const evaluation = coordinator.reconcile(competition.id);
+    assert.ok(evaluation?.recommendation, "machine comparison should produce a recommendation");
+
+    // No Main decision yet: machine comparison is waiting for Main.
+    const stored = store.getCompetition(competition.id);
+    assert.equal(stored.mainDecision, undefined);
+    // Integration preflight on the recommended candidate must still require Main accept.
+    const recommendedTaskId = candidates.find(
+      (c) => c.id === evaluation!.recommendation!.candidateId,
+    )!.taskId;
+    const { preflightIntegration } = await import("../src/core/integration.js");
+    const receipt = await preflightIntegration(store, recommendedTaskId, {
+      reviewedPatchMaxFiles: 50, reviewedPatchMaxLines: 5000, verificationTimeoutMs: 60_000,
+      reviewReceiptTtlMs: 60_000, backupRetentionCount: 1, autoRollback: false,
+    } as never);
+    assert.ok(
+      receipt.rejectionReasons.some((r: string) => /Main agent review acceptance is required/i.test(r)),
+      "machine recommendation must not make a candidate integrable without Main accept",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("retained-partial stores reusable evidence without retrying or handoff", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const retained = candidates[1]!;
+    const retainedTask = store.getTask(retained.taskId);
+    // The non-selected candidate failed but left a revision with reusable work.
+    completeCandidate(store, retainedTask, { passed: false, withRevision: true });
+    store.setTaskStatus(retained.taskId, "failed", { error: "verification failed" });
+
+    const entry = coordinator.recordRetainedPartial(
+      competition.id,
+      retained.id,
+      ["readme.md"],
+      [{ description: "Missing edge case for empty input", acceptanceExpectation: "Acceptance command covers empty input" }],
+    );
+    assert.equal(entry.candidateId, retained.id);
+    assert.deepEqual(entry.reusablePaths, ["readme.md"]);
+    assert.equal(entry.remainingGaps.length, 1);
+
+    const stored = store.getCompetition(competition.id);
+    assert.equal(stored.retainedPartial?.length, 1);
+    // The original failure is preserved; no retry or successor started.
+    assert.equal(store.getTask(retained.taskId).status, "failed");
+  } finally {
+    cleanup();
+  }
+});
+
+test("retained-partial rejects reusable paths not in the candidate revision affected set", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const retained = candidates[1]!;
+    completeCandidate(store, store.getTask(retained.taskId), { passed: false, withRevision: true });
+    store.setTaskStatus(retained.taskId, "failed", { error: "verification failed" });
+
+    assert.throws(
+      () => coordinator.recordRetainedPartial(
+        competition.id,
+        retained.id,
+        ["not-in-revision.md"],
+        [{ description: "Missing edge case for empty input", acceptanceExpectation: "Acceptance command covers empty input" }],
+      ),
+      /not in the referenced revision affected set/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("Competition Main decision requires a matching Task-level Main Review", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const chosen = candidates[0]!;
+    completeCandidate(store, store.getTask(chosen.taskId), { withRevision: true });
+
+    // No Task-level Main Review yet.
+    assert.throws(
+      () => coordinator.recordMainDecision(competition.id, chosen.id, "accept", "reason"),
+      /Main Review on the candidate first/,
+    );
+
+    // Record accept, then try revise -> mismatch.
+    recordMainReview(store, chosen.taskId, { decision: "accept", reason: "ok", confirm: true });
+    assert.throws(
+      () => coordinator.recordMainDecision(competition.id, chosen.id, "revise", "reason"),
+      /does not match/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact Competition Main revise authorizes one bounded same-Candidate correction", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const chosen = store.getCompetitionCandidates(competition.id)[0]!;
+    completeCandidate(store, store.getTask(chosen.taskId), {
+      withRevision: true,
+      review: "revise",
+    });
+
+    const before = resolveCorrectionEligibility(store, chosen.taskId);
+    assert.equal(before.eligible, false);
+    assert.equal(before.category, "competition-main-revise-required");
+
+    const decision = coordinator.recordMainDecision(
+      competition.id,
+      chosen.id,
+      "revise",
+      "Repair the named gap on this exact Candidate Revision.",
+    );
+    assert.ok(decision.candidateRevisionId);
+    assert.ok(decision.acceptedPatchDigest);
+
+    const eligible = resolveCorrectionEligibility(store, chosen.taskId);
+    assert.equal(eligible.eligible, true);
+    assert.ok(eligible.latestRevision);
+    const execution = authorizeMainCorrection(
+      store,
+      chosen.taskId,
+      {
+        feedback: "Repair the named edge case only.",
+        maxBudgetUsd: null,
+        confirm: true,
+        gapContract: {
+          schemaVersion: 1,
+          candidateRevisionId: eligible.latestRevision!.id,
+          reusablePaths: ["readme.md"],
+          remainingGaps: [{
+            description: "The empty input path is not handled yet.",
+            acceptanceExpectation: "The acceptance test covers empty input explicitly.",
+          }],
+        },
+      },
+      1,
+      1,
+    );
+    assert.equal(execution.maximumOrdinal, 2);
+    assert.equal(store.listAttempts(chosen.taskId).length, 1, "authorization does not start a Worker");
+
+    assert.throws(
+      () => authorizeMainCorrection(
+        store,
+        chosen.taskId,
+        {
+          feedback: "Try to authorize another correction.",
+          maxBudgetUsd: null,
+          confirm: true,
+          gapContract: {
+            schemaVersion: 1,
+            candidateRevisionId: eligible.latestRevision!.id,
+            reusablePaths: ["readme.md"],
+            remainingGaps: [{
+              description: "The empty input path is not handled yet.",
+              acceptanceExpectation: "The acceptance test covers empty input explicitly.",
+            }],
+          },
+        },
+        1,
+        1,
+      ),
+      /conflicts|allowance|pending correction grant/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("reasoned admission fails closed on incoherent intent, triggers, legacy reason, and ambiguous candidate fields", async () => {
+  const src = makeSourceProject();
+  const { coordinator, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    const baseSpec = makeContractSpec(src);
+    const profileCandidates = [{ workerProfileId: "default" }, { workerProfileId: "grok-builder" }];
+    const legacyCandidates = [{ providerName: "deepseek", modelName: "v4" }, { providerName: "minimax", modelName: "m3" }];
+
+    // intent none is not a reasoned admission.
+    await assert.rejects(
+      () => coordinator.create(baseSpec, "/test.yaml", profileCandidates, {
+        reason: { intent: "none", triggers: ["user-requested"], note: "x" },
+      }),
+      /consider or required/,
+    );
+    // empty triggers is not a reasoned admission.
+    await assert.rejects(
+      () => coordinator.create(baseSpec, "/test.yaml", profileCandidates, {
+        reason: { intent: "required", triggers: [], note: "x" },
+      }),
+      /at least one explicit trigger/,
+    );
+    // legacy provider/model cannot carry a reason.
+    await assert.rejects(
+      () => coordinator.create(baseSpec, "/test.yaml", legacyCandidates, REASONED_OPTIONS),
+      /cannot carry a Main reason/,
+    );
+    // ambiguous per-candidate Profile plus provider/model fields.
+    await assert.rejects(
+      () => coordinator.create(baseSpec, "/test.yaml", [
+        { workerProfileId: "default", providerName: "deepseek", modelName: "v4" },
+        { workerProfileId: "grok-builder" },
+      ], REASONED_OPTIONS),
+      /not both/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("reasoned admission verifies Worker readiness all-or-nothing before workspace preparation", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, settings, home, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    const baseSpec = makeContractSpec(src);
+    const candidates = [{ workerProfileId: "default" }, { workerProfileId: "grok-builder" }];
+    // Verifier rejects because grok-builder is not launchable.
+    const failingVerifier = (profileIds: readonly string[]) => {
+      if (profileIds.includes("grok-builder")) {
+        throw new Error("Competition candidate Worker Profile is not launchable: grok-builder (authentication-missing)");
+      }
+    };
+    await assert.rejects(
+      () => coordinator.create(baseSpec, "/test.yaml", candidates, {
+        ...REASONED_OPTIONS,
+        readinessVerifier: failingVerifier,
+      }),
+      /not launchable/,
+    );
+    // All-or-nothing: no Task, event, competition, or workspace persisted.
+    assert.equal(store.listTasks().length, 0);
+    assert.equal(store.listCompetitions().length, 0);
+    const runsDir = path.join(home, "runs");
+    assert.equal(existsSync(runsDir) ? readdirSync(runsDir).length : 0, 0);
+    const compDir = path.join(home, "competitions");
+    assert.equal(existsSync(compDir) ? readdirSync(compDir).length : 0, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("Competition Main accept requires the exact Candidate Revision id and digest", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const chosen = candidates[0]!;
+    // Verified candidate with a Task-level accept but NO Candidate Revision
+    // (legacy digest-less accept). Competition accept must fail closed.
+    completeCandidate(store, store.getTask(chosen.taskId), { withRevision: false, review: "accept" });
+    assert.throws(
+      () => coordinator.recordMainDecision(competition.id, chosen.id, "accept", "final choice"),
+      /exact Candidate Revision id and patch digest/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("retained-partial rejects the final accepted Candidate", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const chosen = candidates[0]!;
+    completeCandidate(store, store.getTask(chosen.taskId), { withRevision: true, review: "accept" });
+    coordinator.recordMainDecision(competition.id, chosen.id, "accept", "final choice");
+    // The accepted candidate cannot be marked retained-partial.
+    assert.throws(
+      () => coordinator.recordRetainedPartial(
+        competition.id,
+        chosen.id,
+        ["readme.md"],
+        [{ description: "Missing edge case for empty input", acceptanceExpectation: "Acceptance command covers empty input" }],
+      ),
+      /final accepted Candidate/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("Integration preflight for a Competition candidate requires Competition Main accept of the exact revision", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, cleanup } = setupCoordinator(src);
+  try {
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { providerName: "deepseek", modelName: "v4" },
+      { providerName: "minimax", modelName: "m3" },
+    ]);
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const chosen = candidates[0]!;
+    completeCandidate(store, store.getTask(chosen.taskId), { withRevision: true, review: "accept" });
+
+    const { preflightIntegration } = await import("../src/core/integration.js");
+    const integrationSettings = {
+      reviewedPatchMaxFiles: 50, reviewedPatchMaxLines: 5000, verificationTimeoutMs: 60_000,
+      reviewReceiptTtlMs: 60_000, backupRetentionCount: 1, autoRollback: false,
+    } as never;
+
+    // Task-level accept alone is not enough for a Competition candidate.
+    const before = await preflightIntegration(store, chosen.taskId, integrationSettings);
+    assert.ok(
+      before.rejectionReasons.some((r: string) =>
+        /Competition Main accept of this exact Candidate Revision is required/i.test(r)),
+      "preflight must require Competition Main accept before the Task-level accept can pass",
+    );
+
+    // Record the Competition-level accept of the exact revision.
+    coordinator.recordMainDecision(competition.id, chosen.id, "accept", "final choice");
+    const after = await preflightIntegration(store, chosen.taskId, integrationSettings);
+    assert.ok(
+      !after.rejectionReasons.some((r: string) =>
+        /Competition Main accept of this exact Candidate Revision is required/i.test(r)),
+      "the Competition Main accept reason must be cleared once the exact decision is recorded",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("daemon submitCompetition rejects a non-launchable Profile all-or-nothing before workspace preparation", async () => {
+  const src = makeSourceProject();
+  const home = mkdtempSync(path.join(tmpdir(), "forklight-comp-ready-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  seedGrokBuilderProfile(settings);
+  // Mock inspector reports no readable credentials, so resolveWorkerReadiness
+  // blocks every Profile at authentication (before any runtime check), making
+  // the verdict deterministic regardless of which runtimes are installed.
+  const mockInspector = {
+    hasReadableKeychainValue: () => false,
+    hasLocalGrokSignIn: () => false,
+  } as never;
+  const { DaemonCoordinator } = await import("../src/daemon/coordinator.js");
+  const daemon = new DaemonCoordinator(store, settings, undefined, mockInspector);
+  const baseSpec = makeContractSpec(src);
+  try {
+    await assert.rejects(
+      () => daemon.submitCompetition(baseSpec, "/test.yaml", [
+        { workerProfileId: "default" },
+        { workerProfileId: "grok-builder" },
+      ], REASONED_OPTIONS),
+      /not launchable/,
+    );
+    // All-or-nothing: no Task, competition, or workspace persisted.
+    assert.equal(store.listTasks().length, 0);
+    assert.equal(store.listCompetitions().length, 0);
+    const runsDir = path.join(home, "runs");
+    assert.equal(existsSync(runsDir) ? readdirSync(runsDir).length : 0, 0);
+    const compDir = path.join(home, "competitions");
+    assert.equal(existsSync(compDir) ? readdirSync(compDir).length : 0, 0);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(src, { recursive: true, force: true });
+  }
+});
+
+// --- Cross-Worker Candidate handoff ---
+
+function makeTwoFileSourceProject(): string {
+  const root = mkdtempSync(path.join(tmpdir(), "forklight-handoff-src-"));
+  mkdirSync(path.join(root, "src"), { recursive: true });
+  writeFileSync(path.join(root, "README.md"), "# Test\n");
+  writeFileSync(path.join(root, "src", "a.ts"), "export const a = 1;\n");
+  writeFileSync(path.join(root, "src", "b.ts"), "export const b = 1;\n");
+  return root;
+}
+
+/** Build a realistic two-file Candidate Diff and private artifact for handoff tests. */
+function completeTwoFileCandidate(
+  store: StateStore,
+  task: TaskRecord,
+  opts: { passed?: boolean } = {},
+): { attemptId: string; revisionId: string; patchText: string } {
+  const passed = opts.passed ?? false;
+  const attemptId = randomUUID();
+  const attempt: AttemptRecord = {
+    id: attemptId,
+    taskId: task.id,
+    ordinal: 1,
+    status: "succeeded",
+    sessionId: task.sessionId,
+    rawLogPath: "/log",
+    startedAt: at(0),
+    finishedAt: at(5),
+  };
+  store.createAttempt(attempt);
+  store.setTaskStatus(task.id, passed ? "succeeded" : "failed", {
+    currentAttemptId: attemptId,
+    startedAt: at(0),
+    finishedAt: at(5),
+    ...(passed ? {} : { error: "verification failed" }),
+  });
+
+  // Candidate workspace final bytes for both changed files.
+  mkdirSync(path.join(task.paths.workspace, "src"), { recursive: true });
+  writeFileSync(path.join(task.paths.workspace, "src", "a.ts"), "export const a = 2;\n");
+  writeFileSync(path.join(task.paths.workspace, "src", "b.ts"), "export const b = 2;\n");
+  // Baseline remains original (as prepared from project).
+  if (!existsSync(path.join(task.paths.baseline, "src", "a.ts"))) {
+    mkdirSync(path.join(task.paths.baseline, "src"), { recursive: true });
+    writeFileSync(path.join(task.paths.baseline, "src", "a.ts"), "export const a = 1;\n");
+    writeFileSync(path.join(task.paths.baseline, "src", "b.ts"), "export const b = 1;\n");
+    writeFileSync(path.join(task.paths.baseline, "README.md"), "# Test\n");
+  }
+
+  const patchText = [
+    "diff --git a/baseline/src/a.ts b/workspace/src/a.ts",
+    "--- a/baseline/src/a.ts",
+    "+++ b/workspace/src/a.ts",
+    "@@ -1 +1 @@",
+    "-export const a = 1;",
+    "+export const a = 2;",
+    "diff --git a/baseline/src/b.ts b/workspace/src/b.ts",
+    "--- a/baseline/src/b.ts",
+    "+++ b/workspace/src/b.ts",
+    "@@ -1 +1 @@",
+    "-export const b = 1;",
+    "+export const b = 2;",
+    "",
+  ].join("\n");
+  mkdirSync(path.dirname(task.paths.diff), { recursive: true });
+  writeFileSync(task.paths.diff, patchText);
+  const revisionId = randomUUID();
+  const artifactPath = path.join(task.paths.root, "revisions", `${revisionId}.patch`);
+  mkdirSync(path.dirname(artifactPath), { recursive: true });
+  writeFileSync(artifactPath, patchText);
+  const ev = store.addEvent(
+    task.id,
+    attemptId,
+    "verification.completed",
+    passed ? "Independent verification passed" : "Independent verification failed",
+    verification(passed),
+  );
+  store.addEvent(
+    task.id,
+    attemptId,
+    "candidate.revision.captured",
+    "Candidate revision captured for attempt ordinal 1",
+    {
+      id: revisionId,
+      taskId: task.id,
+      attemptId,
+      attemptOrdinal: 1,
+      verificationEventSequence: ev.sequence,
+      patchDigest: sha256(patchText),
+      affectedPaths: ["src/a.ts", "src/b.ts"],
+      filesChanged: 2,
+      changedLines: 4,
+      verificationPassed: passed,
+      createdAt: at(6),
+      privateArtifactPath: artifactPath,
+    },
+  );
+  return { attemptId, revisionId, patchText };
+}
+
+test("filterPatchToSelectedPaths keeps only approved whole-file sections", () => {
+  const patch = [
+    "diff --git a/baseline/src/a.ts b/workspace/src/a.ts",
+    "--- a/baseline/src/a.ts",
+    "+++ b/workspace/src/a.ts",
+    "@@ -1 +1 @@",
+    "-export const a = 1;",
+    "+export const a = 2;",
+    "diff --git a/baseline/src/b.ts b/workspace/src/b.ts",
+    "--- a/baseline/src/b.ts",
+    "+++ b/workspace/src/b.ts",
+    "@@ -1 +1 @@",
+    "-export const b = 1;",
+    "+export const b = 2;",
+    "",
+  ].join("\n");
+  const filtered = filterPatchToSelectedPaths(patch, ["src/a.ts"]);
+  assert.ok(filtered.includes("src/a.ts"));
+  assert.ok(!filtered.includes("src/b.ts"));
+  assert.throws(
+    () => filterPatchToSelectedPaths(patch, ["src/missing.ts"]),
+    /missing from the exact Candidate Diff/,
+  );
+});
+
+test("cross-Worker handoff imports only retained path, freezes destination, leaves source immutable", async () => {
+  const src = makeTwoFileSourceProject();
+  const { store, settings, home, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    const coordinator = new CompetitionCoordinator(store, settings);
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { workerProfileId: "default" },
+      { workerProfileId: "grok-builder" },
+    ], {
+      ...REASONED_OPTIONS,
+      readinessVerifier: () => {},
+    });
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const retained = candidates.find((c) => c.identity?.workerProfileId === "default")
+      ?? candidates[0]!;
+    const destination = candidates.find((c) => c.id !== retained.id)!;
+    const sourceTask = store.getTask(retained.taskId);
+    const { revisionId } = completeTwoFileCandidate(store, sourceTask, { passed: false });
+
+    const entry = coordinator.recordRetainedPartial(
+      competition.id,
+      retained.id,
+      ["src/a.ts"],
+      [{
+        description: "src/b.ts still needs the second export completed",
+        acceptanceExpectation: "src/b.ts exports the updated constant and acceptance passes",
+      }],
+    );
+    assert.equal(entry.candidateRevisionId, revisionId);
+    assert.deepEqual(entry.reusablePaths, ["src/a.ts"]);
+
+    const sourceBefore = structuredClone(store.getTask(retained.taskId));
+    const eventsBefore = store.listEvents(retained.taskId).length;
+    const attemptsBefore = store.listAttempts(retained.taskId).length;
+    const handoffReason = "Hand retained a.ts work to the Grok builder for the remaining gap.";
+
+    const view = await executeCandidateHandoff(
+      store,
+      settings.get(),
+      {
+        competitionId: competition.id,
+        candidateId: retained.id,
+        candidateRevisionId: revisionId,
+        destinationWorkerProfileId: "grok-builder",
+        reason: handoffReason,
+        confirm: true,
+      },
+      { canLaunch: () => ({ ok: true }) },
+    );
+
+    assert.equal(view.status, "prepared");
+    assert.equal(view.originKind, "competition");
+    assert.equal(view.competitionId, competition.id);
+    assert.equal(view.sourceCandidateId, retained.id);
+    assert.equal(view.goalId, undefined);
+    assert.equal(view.destinationWorkerProfileId, "grok-builder");
+    assert.equal(view.reusablePathCount, 1);
+    assert.equal(view.remainingGapCount, 1);
+    assert.equal(view.sourceDigestPrefix.length, 12);
+    assert.ok(!JSON.stringify(view).includes(path.join(home, "runs")));
+    assert.ok(!JSON.stringify(view).includes("export const"));
+    const durable = store.getCandidateHandoff(view.id);
+    assert.equal(durable.origin.kind, "competition");
+    if (durable.origin.kind === "competition") {
+      assert.equal(durable.origin.competitionId, competition.id);
+      assert.equal(durable.origin.sourceCandidateId, retained.id);
+    }
+
+    // Source Task immutable: status, attempts, error unchanged.
+    const sourceAfter = store.getTask(retained.taskId);
+    assert.equal(sourceAfter.status, sourceBefore.status);
+    assert.equal(sourceAfter.error, sourceBefore.error);
+    assert.equal(store.listAttempts(retained.taskId).length, attemptsBefore);
+    assert.ok(store.listEvents(retained.taskId).length > eventsBefore); // audit only
+
+    // Successor uses destination identity, not source.
+    const successor = store.getTask(view.successorTaskId);
+    assert.equal(successor.status, "queued");
+    assert.equal(successor.spec.workerProfileId, "grok-builder");
+    assert.equal(successor.spec.provider.name, "xai");
+    assert.equal(successor.spec.runtime.name, "grok-build");
+    assert.notEqual(successor.id, retained.taskId);
+    // Destination instruction carries the retained path and remaining gap text.
+    assert.equal(successor.spec.version, 2);
+    if (successor.spec.version === 2) {
+      const promptSurface = [
+        ...successor.spec.contract.context,
+        ...successor.spec.contract.inScope,
+        ...successor.spec.contract.executionSteps,
+      ].join("\n");
+      assert.ok(promptSurface.includes("src/a.ts"));
+      assert.ok(promptSurface.includes("src/b.ts still needs the second export completed"));
+      assert.ok(promptSurface.includes("src/b.ts exports the updated constant and acceptance passes"));
+      assert.ok(!promptSurface.includes("revisions/"));
+      assert.ok(!promptSurface.includes(sourceTask.paths.root));
+    }
+
+    // Selected-path-only import with byte proof.
+    assert.equal(
+      readFileSync(path.join(successor.paths.workspace, "src", "a.ts"), "utf8"),
+      "export const a = 2;\n",
+    );
+    assert.equal(
+      readFileSync(path.join(successor.paths.workspace, "src", "b.ts"), "utf8"),
+      "export const b = 1;\n",
+      "non-reusable Candidate path must remain absent as a Candidate change",
+    );
+    // Baseline is clean current project so final Diff can include retained + new work.
+    assert.equal(
+      readFileSync(path.join(successor.paths.baseline, "src", "a.ts"), "utf8"),
+      "export const a = 1;\n",
+    );
+
+    // Exact replay is idempotent: same competition/candidate/revision/profile/reason.
+    const again = await executeCandidateHandoff(
+      store,
+      settings.get(),
+      {
+        competitionId: competition.id,
+        candidateId: retained.id,
+        candidateRevisionId: revisionId,
+        destinationWorkerProfileId: "grok-builder",
+        reason: handoffReason,
+        confirm: true,
+      },
+      { canLaunch: () => ({ ok: true }) },
+    );
+    assert.equal(again.successorTaskId, view.successorTaskId);
+    assert.equal(again.id, view.id);
+
+    // Changed reason is not an exact replay: reject before mutation, one successor kept.
+    await assert.rejects(
+      () => executeCandidateHandoff(
+        store,
+        settings.get(),
+        {
+          competitionId: competition.id,
+          candidateId: retained.id,
+          candidateRevisionId: revisionId,
+          destinationWorkerProfileId: "grok-builder",
+          reason: "A different reason must not reuse the prior handoff authorization.",
+          confirm: true,
+        },
+        { canLaunch: () => ({ ok: true }) },
+      ),
+      (err: unknown) => err instanceof CandidateHandoffError && err.code === "duplicate-handoff",
+    );
+    const handoffs = store.listCandidateHandoffsByCompetitionId(competition.id);
+    assert.equal(handoffs.length, 1);
+    const successorCount = store.listTasks().filter((t) =>
+      store.getCandidateHandoffBySuccessorTaskId(t.id) !== undefined
+    ).length;
+    assert.equal(successorCount, 1);
+
+    // Loop guard: a handoff successor cannot authorize another hop.
+    const succView = resolveHandoffViewForTask(store, view.successorTaskId);
+    assert.equal(succView?.isSuccessor, true);
+    assert.ok(store.getCandidateHandoffBySuccessorTaskId(view.successorTaskId));
+    void destination;
+  } finally {
+    cleanup();
+  }
+});
+
+test("handoff fails closed on same Profile, final choice, stale revision, and non-launchable destination", async () => {
+  const src = makeTwoFileSourceProject();
+  const { store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    const coordinator = new CompetitionCoordinator(store, settings);
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { workerProfileId: "default" },
+      { workerProfileId: "grok-builder" },
+    ], {
+      ...REASONED_OPTIONS,
+      readinessVerifier: () => {},
+    });
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const retained = candidates.find((c) => c.identity?.workerProfileId === "default")!;
+    const chosen = candidates.find((c) => c.id !== retained.id)!;
+    const sourceTask = store.getTask(retained.taskId);
+    const { revisionId } = completeTwoFileCandidate(store, sourceTask, { passed: false });
+    coordinator.recordRetainedPartial(
+      competition.id,
+      retained.id,
+      ["src/a.ts"],
+      [{
+        description: "src/b.ts still needs the second export completed",
+        acceptanceExpectation: "src/b.ts exports the updated constant and acceptance passes",
+      }],
+    );
+
+    // Same profile
+    await assert.rejects(
+      () => executeCandidateHandoff(
+        store,
+        settings.get(),
+        {
+          competitionId: competition.id,
+          candidateId: retained.id,
+          candidateRevisionId: revisionId,
+          destinationWorkerProfileId: "default",
+          reason: "Same profile must fail closed.",
+          confirm: true,
+        },
+        { canLaunch: () => ({ ok: true }) },
+      ),
+      (err: unknown) => err instanceof CandidateHandoffError && err.code === "same-profile",
+    );
+
+    // Non-launchable
+    await assert.rejects(
+      () => executeCandidateHandoff(
+        store,
+        settings.get(),
+        {
+          competitionId: competition.id,
+          candidateId: retained.id,
+          candidateRevisionId: revisionId,
+          destinationWorkerProfileId: "grok-builder",
+          reason: "Non-launchable destination must fail closed.",
+          confirm: true,
+        },
+        { canLaunch: () => ({ ok: false, reason: "authentication-missing" }) },
+      ),
+      (err: unknown) => err instanceof CandidateHandoffError && err.code === "profile-not-launchable",
+    );
+
+    // Stale revision id
+    await assert.rejects(
+      () => executeCandidateHandoff(
+        store,
+        settings.get(),
+        {
+          competitionId: competition.id,
+          candidateId: retained.id,
+          candidateRevisionId: randomUUID(),
+          destinationWorkerProfileId: "grok-builder",
+          reason: "Stale revision must fail closed.",
+          confirm: true,
+        },
+        { canLaunch: () => ({ ok: true }) },
+      ),
+      (err: unknown) => err instanceof CandidateHandoffError && err.code === "stale-revision",
+    );
+
+    // Final accepted choice: handoff guard only needs Competition mainDecision.accept
+    // on this candidate. Force the durable decision without Main-review accept on a
+    // failed verification (accept requires passing verification).
+    const retTask = store.getTask(retained.taskId);
+    const attemptId = store.listAttempts(retained.taskId)[0]!.id;
+    store.updateCompetition(competition.id, {
+      mainDecision: {
+        decision: "accept",
+        candidateId: retained.id,
+        taskId: retained.taskId,
+        attemptId,
+        verificationEventSequence: store.listEvents(retained.taskId)
+          .filter((event) => event.type === "verification.completed")
+          .at(-1)!.sequence,
+        candidateRevisionId: revisionId,
+        acceptedPatchDigest: sha256(readFileSync(retTask.paths.diff, "utf8")),
+        reason: "final choice for guard",
+        createdAt: at(9),
+      },
+    });
+    void chosen;
+    await assert.rejects(
+      () => executeCandidateHandoff(
+        store,
+        settings.get(),
+        {
+          competitionId: competition.id,
+          candidateId: retained.id,
+          candidateRevisionId: revisionId,
+          destinationWorkerProfileId: "grok-builder",
+          reason: "Final choice cannot be handed off.",
+          confirm: true,
+        },
+        { canLaunch: () => ({ ok: true }) },
+      ),
+      (err: unknown) => err instanceof CandidateHandoffError && err.code === "final-choice",
+    );
+
+    // No successor Task created by the failed attempts above.
+    assert.equal(store.listCandidateHandoffs().length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("handoff preparation failure launches no Worker and restart recovery is idempotent", async () => {
+  const src = makeTwoFileSourceProject();
+  const { store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    const coordinator = new CompetitionCoordinator(store, settings);
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { workerProfileId: "default" },
+      { workerProfileId: "grok-builder" },
+    ], {
+      ...REASONED_OPTIONS,
+      readinessVerifier: () => {},
+    });
+    const retained = store.getCompetitionCandidates(competition.id)
+      .find((c) => c.identity?.workerProfileId === "default")!;
+    const sourceTask = store.getTask(retained.taskId);
+    const { revisionId, patchText } = completeTwoFileCandidate(store, sourceTask, { passed: false });
+    coordinator.recordRetainedPartial(
+      competition.id,
+      retained.id,
+      ["src/a.ts"],
+      [{
+        description: "src/b.ts still needs the second export completed",
+        acceptanceExpectation: "src/b.ts exports the updated constant and acceptance passes",
+      }],
+    );
+
+    // Tamper the private artifact after retention so apply/byte proof fails.
+    const artifact = path.join(sourceTask.paths.root, "revisions", `${revisionId}.patch`);
+    writeFileSync(artifact, patchText.replace("export const a = 2;", "export const a = 99;"));
+    const failReason = "Tampered artifact must fail preparation without launching a Worker.";
+
+    const failed = await executeCandidateHandoff(
+      store,
+      settings.get(),
+      {
+        competitionId: competition.id,
+        candidateId: retained.id,
+        candidateRevisionId: revisionId,
+        destinationWorkerProfileId: "grok-builder",
+        reason: failReason,
+        confirm: true,
+      },
+      { canLaunch: () => ({ ok: true }) },
+    );
+    // Digest mismatch is caught before apply as stale-revision/materialization-failed.
+    assert.equal(failed.status, "failed");
+    assert.ok(failed.failureCode === "stale-revision" || failed.failureCode === "materialization-failed" || failed.failureCode === "apply-mismatch");
+    const successor = store.getTask(failed.successorTaskId);
+    assert.equal(successor.status, "failed");
+    assert.equal(store.listAttempts(failed.successorTaskId).length, 0, "no Worker Attempt on prep failure");
+
+    // Restore artifact; exact replay of the failed authorization returns the same record.
+    writeFileSync(artifact, patchText);
+    const again = await executeCandidateHandoff(
+      store,
+      settings.get(),
+      {
+        competitionId: competition.id,
+        candidateId: retained.id,
+        candidateRevisionId: revisionId,
+        destinationWorkerProfileId: "grok-builder",
+        reason: failReason,
+        confirm: true,
+      },
+      { canLaunch: () => ({ ok: true }) },
+    );
+    assert.equal(again.id, failed.id);
+    assert.equal(again.successorTaskId, failed.successorTaskId);
+    assert.equal(again.status, "failed");
+    assert.equal(store.listCandidateHandoffs().length, 1);
+
+    // Restart recovery of a prepared handoff re-queues the same successor once.
+    // Create a fresh competition path: clear by using a new competition.
+  } finally {
+    cleanup();
+  }
+});
+
+test("handoff restart recovery finishes preparation once without duplicating successors", async () => {
+  const src = makeTwoFileSourceProject();
+  const { store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    const coordinator = new CompetitionCoordinator(store, settings);
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { workerProfileId: "default" },
+      { workerProfileId: "grok-builder" },
+    ], {
+      ...REASONED_OPTIONS,
+      readinessVerifier: () => {},
+    });
+    const retained = store.getCompetitionCandidates(competition.id)
+      .find((c) => c.identity?.workerProfileId === "default")!;
+    const sourceTask = store.getTask(retained.taskId);
+    const { revisionId } = completeTwoFileCandidate(store, sourceTask, { passed: false });
+    coordinator.recordRetainedPartial(
+      competition.id,
+      retained.id,
+      ["src/a.ts"],
+      [{
+        description: "src/b.ts still needs the second export completed",
+        acceptanceExpectation: "src/b.ts exports the updated constant and acceptance passes",
+      }],
+    );
+
+    // Authorize only (skip prepare) by writing durable record via successful path then
+    // rewinding status to authorized and clearing workspace — simulates crash mid-prepare.
+    const prepared = await executeCandidateHandoff(
+      store,
+      settings.get(),
+      {
+        competitionId: competition.id,
+        candidateId: retained.id,
+        candidateRevisionId: revisionId,
+        destinationWorkerProfileId: "grok-builder",
+        reason: "Prepare once, then simulate restart recovery.",
+        confirm: true,
+      },
+      { canLaunch: () => ({ ok: true }) },
+    );
+    assert.equal(prepared.status, "prepared");
+    const record = store.getCandidateHandoff(prepared.id);
+    // exactOptionalPropertyTypes: omit preparedAt rather than assign undefined.
+    const { preparedAt: _dropPreparedAt, ...rewindBase } = record;
+    void _dropPreparedAt;
+    store.updateCandidateHandoff({
+      ...rewindBase,
+      status: "authorized",
+      updatedAt: at(20),
+      nextAction: "wait-for-successor",
+    });
+    store.setTaskStatus(prepared.successorTaskId, "queued", { finishedAt: null, error: null });
+    // Clear workspace to force re-materialization.
+    rmSync(store.getTask(prepared.successorTaskId).paths.workspace, { recursive: true, force: true });
+    rmSync(store.getTask(prepared.successorTaskId).paths.baseline, { recursive: true, force: true });
+
+    const recovery = await recoverCandidateHandoffs(store);
+    assert.ok(recovery.recoveredHandoffIds.includes(prepared.id));
+    assert.ok(recovery.queueTaskIds.includes(prepared.successorTaskId));
+    const after = store.getCandidateHandoff(prepared.id);
+    assert.equal(after.status, "prepared");
+    assert.equal(store.listCandidateHandoffs().length, 1);
+    assert.equal(
+      readFileSync(path.join(store.getTask(prepared.successorTaskId).paths.workspace, "src", "a.ts"), "utf8"),
+      "export const a = 2;\n",
+    );
+
+    // Second recovery is idempotent.
+    const recovery2 = await recoverCandidateHandoffs(store);
+    assert.equal(store.listCandidateHandoffs().length, 1);
+    assert.ok(recovery2.queueTaskIds.includes(prepared.successorTaskId));
+    assert.equal(projectCandidateHandoff(after).sourceDigestPrefix.length, 12);
+
+    // If the prepared successor was already running when the Daemon stopped,
+    // one system-owned continuation is durable and idempotent. It is not a
+    // quality retry and a second interruption cannot loop forever.
+    const successor = store.getTask(prepared.successorTaskId);
+    const firstAttemptId = randomUUID();
+    store.createAttempt({
+      id: firstAttemptId,
+      taskId: successor.id,
+      ordinal: 1,
+      status: "interrupted",
+      sessionId: successor.sessionId,
+      rawLogPath: path.join(successor.paths.logs, "attempt-1.jsonl"),
+      startedAt: at(21),
+      finishedAt: at(22),
+      exitCode: 130,
+      error: "ForkLight daemon restarted during execution",
+    });
+    store.setTaskStatus(successor.id, "interrupted", {
+      currentAttemptId: firstAttemptId,
+      finishedAt: at(22),
+      error: "ForkLight daemon restarted during execution",
+    });
+
+    const interruptedRecovery = await recoverCandidateHandoffs(store);
+    assert.ok(interruptedRecovery.queueTaskIds.includes(successor.id));
+    assert.equal(store.getTask(successor.id).status, "interrupted");
+    const recoveryGrants = store.listEvents(successor.id).filter((event) => (
+      event.type === "attempt.authorization.granted"
+      && (event.payload as { kind?: string } | undefined)?.kind === "restart-recovery"
+    ));
+    assert.equal(recoveryGrants.length, 1);
+    assert.equal(
+      projectCandidateHandoff(store.getCandidateHandoff(prepared.id), "succeeded").nextAction,
+      "review-successor",
+    );
+
+    const interruptedRecoveryReplay = await recoverCandidateHandoffs(store);
+    assert.ok(interruptedRecoveryReplay.queueTaskIds.includes(successor.id));
+    assert.equal(
+      store.listEvents(successor.id).filter((event) => (
+        event.type === "attempt.authorization.granted"
+        && (event.payload as { kind?: string } | undefined)?.kind === "restart-recovery"
+      )).length,
+      1,
+    );
+
+    const secondAttemptId = randomUUID();
+    store.createAttempt({
+      id: secondAttemptId,
+      taskId: successor.id,
+      ordinal: 2,
+      status: "interrupted",
+      sessionId: successor.sessionId,
+      rawLogPath: path.join(successor.paths.logs, "attempt-2.jsonl"),
+      startedAt: at(23),
+      finishedAt: at(24),
+      exitCode: 130,
+      error: "ForkLight daemon restarted during recovery",
+    });
+    store.setTaskStatus(successor.id, "interrupted", {
+      currentAttemptId: secondAttemptId,
+      finishedAt: at(24),
+      error: "ForkLight daemon restarted during recovery",
+    });
+    const cappedRecovery = await recoverCandidateHandoffs(store);
+    assert.ok(!cappedRecovery.queueTaskIds.includes(successor.id));
+    assert.equal(store.getTask(successor.id).status, "interrupted");
+  } finally {
+    cleanup();
+  }
+});
+
+test("handoff delivers all bounded gaps and freezes destination Profile advanced policy", async () => {
+  const src = makeTwoFileSourceProject();
+  const { store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    // Destination Profile advanced policy differs from source-Task override.
+    const current = settings.get();
+    const grok = current.workerProfiles.profiles.find((profile) => profile.id === "grok-builder");
+    assert.ok(grok);
+    settings.update({
+      workerProfiles: upsertWorkerProfile(
+        current.workerProfiles,
+        {
+          ...grok,
+          advancedPolicy: {
+            ...(grok.advancedPolicy ?? {}),
+            baseMaxAttempts: 3,
+            maxExtraAttempts: 2,
+            maxMainCorrections: 2,
+          },
+        },
+        current.modelCatalog,
+      ),
+    });
+
+    const coordinator = new CompetitionCoordinator(store, settings);
+    const baseSpec = makeContractSpec(src);
+    // Stale source-Task Worker override that must NOT win on the successor.
+    baseSpec.advancedPolicyOverride = {
+      baseMaxAttempts: 9,
+      maxExtraAttempts: 8,
+      maxMainCorrections: 7,
+    };
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { workerProfileId: "default" },
+      { workerProfileId: "grok-builder" },
+    ], {
+      ...REASONED_OPTIONS,
+      readinessVerifier: () => {},
+    });
+    const retained = store.getCompetitionCandidates(competition.id)
+      .find((c) => c.identity?.workerProfileId === "default")!;
+    const sourceTask = store.getTask(retained.taskId);
+    // Source candidate keeps its own frozen policy from create; handoff clones this spec.
+    const mutatedSource = store.getTask(retained.taskId);
+    const { revisionId } = completeTwoFileCandidate(store, sourceTask, { passed: false });
+
+    // Eight max-bound gaps + one reusable path near allowed maxima.
+    const pad = (label: string, size: number): string => {
+      const body = `${label} `;
+      return (body.repeat(Math.ceil(size / body.length))).slice(0, size);
+    };
+    const remainingGaps = Array.from({ length: 8 }, (_, index) => ({
+      description: pad(`Gap ${index + 1} description for remaining incomplete work.`, 500),
+      acceptanceExpectation: pad(`Gap ${index + 1} acceptance must stay fully visible to Worker.`, 500),
+    }));
+    assert.equal(remainingGaps[0]!.description.length, 500);
+    assert.equal(remainingGaps[7]!.acceptanceExpectation.length, 500);
+
+    coordinator.recordRetainedPartial(
+      competition.id,
+      retained.id,
+      ["src/a.ts"],
+      remainingGaps,
+    );
+
+    // Ensure the source Task still carries the stale override the handoff must strip.
+    assert.equal(mutatedSource.spec.advancedPolicyOverride?.baseMaxAttempts, 9);
+
+    const view = await executeCandidateHandoff(
+      store,
+      settings.get(),
+      {
+        competitionId: competition.id,
+        candidateId: retained.id,
+        candidateRevisionId: revisionId,
+        destinationWorkerProfileId: "grok-builder",
+        reason: "Deliver every gap and freeze destination advanced policy.",
+        confirm: true,
+      },
+      { canLaunch: () => ({ ok: true }) },
+    );
+    assert.equal(view.status, "prepared");
+    assert.equal(view.remainingGapCount, 8);
+
+    const successor = store.getTask(view.successorTaskId);
+    assert.equal(successor.spec.workerProfileId, "grok-builder");
+    assert.equal(successor.spec.advancedPolicyOverride, undefined);
+    assert.equal(successor.effectivePolicy?.profileId, "grok-builder");
+    assert.equal(successor.effectivePolicy?.values.baseMaxAttempts, 3);
+    assert.equal(successor.effectivePolicy?.values.maxExtraAttempts, 2);
+    assert.equal(successor.effectivePolicy?.values.maxMainCorrections, 2);
+    // Source override must not leak into successor effective policy.
+    assert.notEqual(successor.effectivePolicy?.values.baseMaxAttempts, 9);
+    assert.equal(successor.effectivePolicy?.provenance.baseMaxAttempts, "worker");
+
+    assert.equal(successor.spec.version, 2);
+    if (successor.spec.version === 2) {
+      const surface = [
+        ...successor.spec.contract.context,
+        ...successor.spec.contract.inScope,
+        ...successor.spec.contract.executionSteps,
+      ].join("\n");
+      assert.ok(surface.includes("src/a.ts"));
+      for (const gap of remainingGaps) {
+        assert.ok(surface.includes(gap.description), "every gap description must reach the Worker");
+        assert.ok(
+          surface.includes(gap.acceptanceExpectation),
+          "every gap acceptance expectation must reach the Worker",
+        );
+      }
+      assert.ok(!surface.includes(path.join(sourceTask.paths.root, "revisions")));
+      assert.ok(!surface.includes("privateArtifactPath"));
+    }
+
+    // Pure builder also preserves max-bound instruction content without truncation.
+    const selection = resolveWorkerSelection(
+      { workerProfileId: "grok-builder" },
+      {
+        execution: settings.get().execution,
+        providerDefaults: settings.get().providerDefaults,
+        workerProfiles: settings.get().workerProfiles,
+        ...(settings.get().modelCatalog === undefined
+          ? {}
+          : { modelCatalog: settings.get().modelCatalog }),
+      },
+    );
+    const built = buildHandoffSuccessorSpec(mutatedSource.spec, selection, {
+      reusablePaths: ["src/a.ts"],
+      remainingGaps,
+      digestPrefix: "abcd1234ef00",
+    });
+    assert.equal(built.advancedPolicyOverride, undefined);
+    assert.equal(built.workerProfileId, "grok-builder");
+    if (built.version === 2) {
+      const text = built.contract.context.join("\n");
+      assert.ok(text.includes(remainingGaps[7]!.description));
+      assert.ok(text.includes(remainingGaps[7]!.acceptanceExpectation));
+    }
+    const instruction = buildHandoffInstruction(["src/a.ts"], remainingGaps, "abcd1234ef00");
+    assert.ok(instruction.includes(remainingGaps[7]!.description));
+    assert.ok(!instruction.includes("revisions/"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("handoff rejects non-exact replay of destination Profile while preserving one successor", async () => {
+  const src = makeTwoFileSourceProject();
+  const { store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    // Add a third launchable profile for non-exact destination replay.
+    const current = settings.get();
+    settings.update({
+      workerProfiles: upsertWorkerProfile(
+        current.workerProfiles,
+        {
+          id: "alt-builder",
+          label: "Alt Builder",
+          runtime: "grok-build",
+          modelConfigId: "xai-grok-builder",
+          effort: "medium",
+          maxBudgetUsd: 1.0,
+        },
+        current.modelCatalog,
+      ),
+    });
+
+    const coordinator = new CompetitionCoordinator(store, settings);
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { workerProfileId: "default" },
+      { workerProfileId: "grok-builder" },
+    ], {
+      ...REASONED_OPTIONS,
+      readinessVerifier: () => {},
+    });
+    const retained = store.getCompetitionCandidates(competition.id)
+      .find((c) => c.identity?.workerProfileId === "default")!;
+    const sourceTask = store.getTask(retained.taskId);
+    const { revisionId } = completeTwoFileCandidate(store, sourceTask, { passed: false });
+    coordinator.recordRetainedPartial(
+      competition.id,
+      retained.id,
+      ["src/a.ts"],
+      [{
+        description: "src/b.ts still needs the second export completed",
+        acceptanceExpectation: "src/b.ts exports the updated constant and acceptance passes",
+      }],
+    );
+    const reason = "First handoff to grok-builder only.";
+    const first = await executeCandidateHandoff(
+      store,
+      settings.get(),
+      {
+        competitionId: competition.id,
+        candidateId: retained.id,
+        candidateRevisionId: revisionId,
+        destinationWorkerProfileId: "grok-builder",
+        reason,
+        confirm: true,
+      },
+      { canLaunch: () => ({ ok: true }) },
+    );
+    assert.equal(first.status, "prepared");
+
+    await assert.rejects(
+      () => executeCandidateHandoff(
+        store,
+        settings.get(),
+        {
+          competitionId: competition.id,
+          candidateId: retained.id,
+          candidateRevisionId: revisionId,
+          destinationWorkerProfileId: "alt-builder",
+          reason,
+          confirm: true,
+        },
+        { canLaunch: () => ({ ok: true }) },
+      ),
+      (err: unknown) => err instanceof CandidateHandoffError && err.code === "duplicate-handoff",
+    );
+    assert.equal(store.listCandidateHandoffs().length, 1);
+    assert.equal(store.getCandidateHandoff(first.id).successorTaskId, first.successorTaskId);
   } finally {
     cleanup();
   }

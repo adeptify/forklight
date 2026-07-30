@@ -1,0 +1,119 @@
+version: 2
+name: Keep Relay Gmail authorization usable after access-token expiry
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-oauth-token-refresh
+taskFamily: relay-gmail-production-readiness
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    A Gmail account authorized through Relay remains usable after Google's short-lived
+    access token expires: Relay stores only the minimum private expiry/refresh facts,
+    refreshes through one adapter path before Gmail calls, rotates returned secrets,
+    and gives a readable reauthorization result when refresh cannot recover.
+  presentation:
+    summary: 让 Gmail 授权不是一小时后失效的一次性体验；到期时安全刷新，无法刷新时明确告诉用户重新授权。
+    language: zh-CN
+  context:
+    - This Task starts only after the session-safety milestone is accepted and integrated into the Relay source.
+    - The current OAuth flow stores a refresh token but Gmail health/sync consume only the access token and never use expiry or refresh evidence.
+    - All secrets must remain in SecretStore or environment-backed adapter boundaries; Domain, Item, events, API JSON, and UI must never receive them.
+    - Main selected Grok 4.5 as the default Worker for this run. Do not commit or push.
+  inScope:
+    - Persist access-token expiry metadata from token exchange without exposing it as a credential value.
+    - Add one adapter-owned async resolver that returns a usable Gmail access token, refreshing shortly before expiry when a refresh token and client identity are available.
+    - Send the refresh request to Google's token endpoint, rotate access/refresh values when returned, and update expiry atomically enough for this local single-process product.
+    - Make Gmail health and sync consume the same resolver rather than implementing refresh twice.
+    - Return typed, secret-free needs-auth behavior when refresh is unavailable, rejected, or malformed.
+    - Add deterministic mocked tests for unexpired reuse, successful refresh, refresh-token rotation, failure, and privacy.
+  outOfScope:
+    - Background schedules, multi-process refresh locking, database credential rows, UI redesign, silent fixture fallback policy, new dependencies, or commit/push.
+  executionSteps:
+    - Trace token creation, credential resolution, Gmail health/sync, and current tests.
+    - Define one small private token-lifecycle record and one usable-token resolver inside the connector adapter boundary.
+    - Route both health and sync through it, then prove behavior and privacy.
+    - Run focused and full acceptance once.
+  deliverables:
+    - Durable local Gmail access-token expiry and refresh lifecycle.
+    - Shared health/sync resolver plus deterministic no-secret tests.
+  modules:
+    - name: Gmail token lifecycle adapter
+      responsibility: Reuse or refresh a private access token and persist rotated private facts.
+      consumes:
+        - SecretStore token handles, expiry, refresh token, OAuth client identity, current time, and Google token response.
+      produces:
+        - A usable private access token for an immediate Gmail request or a typed needs-auth failure.
+      boundaries:
+        - No Item/Event/UI token data, no schedules, no database schema, and no general OAuth framework.
+    - name: Gmail connector calls
+      responsibility: Use the same lifecycle resolver for health and message sync.
+      consumes:
+        - Usable-token result and Gmail HTTP responses.
+      produces:
+        - Existing health/sync domain-safe results.
+      boundaries:
+        - No duplicated refresh implementation or secret-bearing errors.
+  callChain:
+    - OAuth completion stores access, refresh, and expiry facts in SecretStore.
+    - Gmail health or sync asks the adapter resolver for one usable token.
+    - The resolver reuses a fresh token or refreshes and rotates it once.
+    - The connector performs the Gmail request and emits only content/health results.
+  scenarios:
+    - name: Expired access token refreshes once
+      given: An expired access token and valid refresh/client facts.
+      when: Health or sync needs Gmail.
+      then: One refresh occurs, rotated facts are stored, and the Gmail call uses the new access token.
+    - name: Refresh cannot recover
+      given: Missing or rejected refresh evidence.
+      when: Gmail access is requested.
+      then: No stale-token loop occurs and the caller receives a secret-free reauthorization instruction.
+  risks:
+    - Accidentally returning the token through status would breach the product boundary; tests must inspect every public result.
+    - Duplicated refresh logic between health and sync would drift; one resolver is mandatory.
+  changeBudget:
+    maxFiles: 6
+    maxDiffLines: 900
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 6
+  fileLimitMode: warn
+  changedLineLimit: 900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/adapters/connectors/gmail-oauth.ts
+    - src/adapters/connectors/credentials.ts
+    - src/adapters/connectors/gmail.ts
+    - src/adapters/connectors/index.ts
+    - tests/gmail-oauth.test.ts
+    - tests/connectors-and-product.test.ts
+acceptance:
+  criteria:
+    - Health and sync share one private resolver that reuses fresh access or refreshes expired access exactly once per request path.
+    - Public results, persisted domain rows, errors, and test output contain no access token, refresh token, client secret, or verifier.
+    - Relay's complete lint, tests, and production build remain green without commit or push.
+  commands:
+    - node --test --import tsx tests/gmail-oauth.test.ts tests/connectors-and-product.test.ts
+    - npm run check
+    - git diff --check

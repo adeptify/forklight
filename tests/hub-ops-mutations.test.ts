@@ -176,12 +176,125 @@ async function makeOpsHub(options: { guidedSample?: boolean } = {}) {
       if (method === "revise") return { id: params.taskId, status: "queued" } as T;
       if (method === "correct") return { id: params.taskId, status: "queued" } as T;
       if (method === "main_review") return { ok: true, decision: params.decision } as T;
+      if (method === "review_graph_create") {
+        if (params.confirm !== true) throw new Error("review_graph_create requires confirm: true");
+        return {
+          created: true,
+          reviewerTaskId: "reviewer-task-1",
+          graph: {
+            id: "graph-1",
+            status: "pending",
+            candidateRevisionId: "rev-1",
+            nextAction: "Wait for the read-only judge",
+          },
+        } as T;
+      }
+      if (method === "review_graph_status") {
+        return {
+          id: "graph-1",
+          status: "pending",
+          candidateRevisionId: "rev-1",
+          assignments: [],
+          nextAction: "Wait for the read-only judge",
+        } as T;
+      }
       if (method === "integration_preflight") return { feasible: true, taskId: params.taskId } as T;
       if (method === "integration_apply") return { operationId: "op-1", status: "started" } as T;
+      if (method === "goal_list") {
+        return [{
+          goalId: "goal-1",
+          name: "Durable goal",
+          status: "waiting",
+          objective: "Supervise four tasks",
+          nextAction: "Record a fresh Main accept",
+          whatIsWaiting: "Waiting for Main accept",
+          policy: { maxDurationMs: null },
+          progress: { satisfied: 1, total: 4, percent: 25 },
+        }] as T;
+      }
+      if (method === "goal_status") {
+        return {
+          goalId: params.goalId,
+          name: "Durable goal",
+          status: "waiting",
+          objective: "Supervise four tasks",
+          nextAction: "Record a fresh Main accept",
+          whatJustHappened: "Foundation machine gate satisfied",
+          whatIsWaiting: "Waiting for Main accept",
+          policy: { maxDurationMs: null, maxCorrectionRounds: 1, maxReviewRounds: 1, maxNoNewEvidenceCycles: 2 },
+          counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+          milestones: [],
+          progress: { satisfied: 1, total: 4, percent: 25 },
+        } as T;
+      }
+      if (method === "goal_advance") {
+        if (params.confirm !== true) throw new Error("goal_advance requires explicit confirm: true");
+        return {
+          advanced: true,
+          newEvidence: false,
+          noNewEvidenceCycles: 1,
+          goal: { goalId: params.goalId, status: "waiting", nextAction: "Provide new evidence or stop" },
+        } as T;
+      }
+      if (method === "goal_stop") {
+        if (params.confirm !== true) throw new Error("goal_stop requires explicit confirm: true");
+        return {
+          goalId: params.goalId,
+          status: "stopped",
+          reasonCode: "main-stop",
+          reason: "Main stopped this Goal",
+          nextAction: "History remains readable",
+        } as T;
+      }
+      if (method === "goal_task_handoff") {
+        if (params.confirm !== true) throw new Error("goal_task_handoff requires confirm: true");
+        return {
+          id: "handoff-goal-1",
+          status: "prepared",
+          originKind: "goal-task",
+          goalId: "goal-1",
+          itemId: "service",
+          sourceTaskId: params.taskId,
+          successorTaskId: "succ-1",
+          reusablePathCount: Array.isArray(params.reusablePaths) ? params.reusablePaths.length : 0,
+          remainingGapCount: Array.isArray(params.remainingGaps) ? params.remainingGaps.length : 0,
+          destinationWorkerProfileId: params.destinationWorkerProfileId,
+          nextAction: "wait-for-successor",
+        } as T;
+      }
       if (method === "provider_probe") return { providers: { deepseek: { status: "ok" } } } as T;
       if (method === "provider_status") return { providers: { deepseek: { ready: true } } } as T;
       if (method === "competition_compare") {
         return { competitionId: params.competitionId, recommendation: { candidateId: "c1" } } as T;
+      }
+      if (method === "competition_main_decision") {
+        return {
+          competitionId: params.competitionId,
+          candidateId: params.candidateId,
+          decision: params.decision,
+        } as T;
+      }
+      if (method === "competition_retained_partial") {
+        return {
+          competitionId: params.competitionId,
+          candidateId: params.candidateId,
+          reusablePaths: params.reusablePaths,
+          remainingGaps: params.remainingGaps,
+        } as T;
+      }
+      if (method === "competition_handoff") {
+        return {
+          id: "handoff-1",
+          status: "prepared",
+          competitionId: params.competitionId,
+          sourceCandidateId: params.candidateId,
+          sourceCandidateRevisionId: params.candidateRevisionId,
+          destinationWorkerProfileId: params.destinationWorkerProfileId,
+          successorTaskId: "successor-1",
+          reusablePathCount: 1,
+          remainingGapCount: 1,
+          nextAction: "wait-for-successor",
+        } as T;
       }
       if (method === "status") {
         return {
@@ -427,6 +540,10 @@ test("Hub Task Detail contains safe deliveryPlan with counts only", async () => 
             version: 2,
             provider: { name: "deepseek", model: "deepseek-v4-flash" },
             runtime: { name: "claude-code" },
+            routingDecision: {
+              selectedWorkerProfileId: "deepseek-primary",
+              selectedBecause: { code: "best-evidence" },
+            },
             worker: { focusPaths: [] },
             contract: { outcome: "test", inScope: [], outOfScope: [], executionSteps: [], deliverables: [] },
             acceptance: { criteria: [], commands: [] },
@@ -441,7 +558,20 @@ test("Hub Task Detail contains safe deliveryPlan with counts only", async () => 
       }
       if (method === "task_decision") return {} as T;
       if (method === "task_economics") return {} as T;
-      if (method === "inspect") return { events: [], attempts: [] } as T;
+      if (method === "inspect") return {
+        events: [],
+        attempts: [],
+        competitionContext: {
+          competitionId: "comp-1",
+          candidate: { candidateId: "candidate-1", providerName: "deepseek", modelName: "deepseek-v4-flash" },
+          candidates: [
+            { candidateId: "candidate-1", providerName: "deepseek", modelName: "deepseek-v4-flash" },
+            { candidateId: "candidate-2", providerName: "minimax", modelName: "minimax-m3" },
+          ],
+          machineComparison: { state: "recommendation", recommendation: { candidateId: "candidate-1" } },
+          nextAction: "main-review",
+        },
+      } as T;
       throw new Error(`unexpected ${method}`);
     },
   });
@@ -449,7 +579,11 @@ test("Hub Task Detail contains safe deliveryPlan with counts only", async () => 
   try {
     const res = await doHttp(`http://127.0.0.1:${port}/api/ops/tasks/t1`, "GET", server.getToken());
     assert.equal(res.status, 200);
-    const body = res.body as { deliveryPlan?: Record<string, unknown> };
+    const body = res.body as {
+      deliveryPlan?: Record<string, unknown>;
+      routingDecision?: Record<string, unknown>;
+      competitionContext?: Record<string, unknown>;
+    };
     assert.ok(body.deliveryPlan, "Task Detail must include deliveryPlan");
     const plan = body.deliveryPlan!;
     assert.equal(plan.resolutionSource, "project");
@@ -463,6 +597,13 @@ test("Hub Task Detail contains safe deliveryPlan with counts only", async () => 
     assert.equal(stages.sourceVerify, "required");
     assert.equal(stages.artifactBuild, "required");
     assert.equal(stages.runtimeActivation, "required");
+    assert.equal(body.routingDecision?.selectedWorkerProfileId, "deepseek-primary");
+    assert.equal(body.competitionContext?.competitionId, "comp-1");
+    assert.equal(body.competitionContext?.nextAction, "main-review");
+    assert.equal(
+      ((body.competitionContext?.candidates as Array<Record<string, unknown>>)[1] ?? {}).modelName,
+      "minimax-m3",
+    );
 
     // Verify no command text leaked
     const serialized = JSON.stringify(plan);
@@ -684,6 +825,182 @@ test("Hub calibration publish derives identity and fixes conservative evidence p
   }
 });
 
+test("GET /api/ops/routing-evidence-coverage forwards canonical aggregate read-only", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-rec-bridge-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const expected = {
+    eligibleTerminalTaskCount: 12,
+    withTaskClassCount: 3,
+    withTaskFamilyCount: 2,
+    withCompleteRoutingDecisionCount: 1,
+    distinctTaskClassCount: 2,
+    distinctTaskFamilyCount: 1,
+  };
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
+      calls.push({ method, params });
+      if (method === "routing_evidence_coverage") return expected as T;
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/routing-evidence-coverage`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, expected);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "routing_evidence_coverage");
+    assert.deepEqual(calls[0]!.params, {});
+    const mutating = [
+      "submit_file", "submit", "resume", "settings_update",
+      "provider_probe", "competition_submit",
+    ];
+    for (const method of mutating) {
+      assert.ok(!calls.some((call) => call.method === method), `${method} must not run`);
+    }
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("GET /api/ops/stats always requests compact statistics detail", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-stats-compact-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const expected = [{
+    provider: "deepseek",
+    model: "v4",
+    sampleSize: 2,
+    successCount: 1,
+    successRate: 0.5,
+    failureDistribution: { credential: 1 },
+    acceptedDeliveryCount: 1,
+    acceptedDeliveryRate: 0.5,
+    mainRepairedDeliveryCount: 0,
+    remediationCheckCount: 0,
+  }];
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
+      calls.push({ method, params });
+      if (method === "statistics") {
+        assert.equal(params.detail, "compact");
+        assert.equal("failures" in (expected[0] ?? {}), false);
+        return expected as T;
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/stats`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, expected);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "statistics");
+    assert.deepEqual(calls[0]!.params, { detail: "compact" });
+    assert.doesNotMatch(JSON.stringify(res.body), /"failures"|"taskId"|"diagnostic"/);
+    const mutating = [
+      "submit_file", "submit", "resume", "settings_update",
+      "provider_probe", "competition_submit",
+    ];
+    for (const method of mutating) {
+      assert.ok(!calls.some((call) => call.method === method), `${method} must not run`);
+    }
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("GET /api/ops/routing-evidence-coverage rejects without token and bounds daemon errors", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-rec-bridge-err-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T = unknown>(
+      method: string,
+      params: Record<string, unknown> = {},
+    ): Promise<T> => {
+      calls.push({ method, params });
+      throw new Error("routing_evidence_coverage is temporarily unavailable");
+    },
+  });
+  const port = await server.start();
+  try {
+    const unauthorized = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/routing-evidence-coverage`,
+      "GET",
+    );
+    assert.equal(unauthorized.status, 401);
+    assert.equal(calls.length, 0, "no daemon call without token");
+
+    const failed = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/routing-evidence-coverage`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(failed.status, 503);
+    const body = failed.body as { error?: string };
+    assert.ok(body.error && body.error.includes("routing_evidence_coverage"));
+    assert.ok(!JSON.stringify(body).includes("\n    at "), "raw stack must not leak");
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
 test("model_routing bridge validates taskClass and candidates before daemon call", async () => {
   const ctx = await makeOpsHub();
   try {
@@ -852,6 +1169,146 @@ test("resume and revise call daemon with correct methods", async () => {
   }
 });
 
+test("goal list/status and confirmed advance/stop stay privacy-safe", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const list = await doHttp(`${ctx.base}/api/ops/goals`, "GET", ctx.token);
+    assert.equal(list.status, 200);
+    assert.ok(Array.isArray(list.body));
+    assert.equal((list.body as Array<{ goalId: string }>)[0]?.goalId, "goal-1");
+    assert.ok(ctx.calls.some((c) => c.method === "goal_list"));
+
+    const detail = await doHttp(`${ctx.base}/api/ops/goals/goal-1`, "GET", ctx.token);
+    assert.equal(detail.status, 200);
+    const body = detail.body as Record<string, unknown>;
+    assert.equal(body.goalId, "goal-1");
+    assert.equal((body.policy as { maxDurationMs: null }).maxDurationMs, null);
+    assert.doesNotMatch(JSON.stringify(body), /resultText|sk-/);
+
+    const noConfirm = await doHttp(`${ctx.base}/api/ops/goals/goal-1/advance`, "POST", ctx.token, {});
+    assert.equal(noConfirm.status, 422);
+
+    const advance = await doHttp(`${ctx.base}/api/ops/goals/goal-1/advance`, "POST", ctx.token, {
+      confirm: true,
+    });
+    assert.equal(advance.status, 200);
+    assert.equal((advance.body as { action: string }).action, "goal_advance");
+    assert.ok(ctx.calls.some((c) => c.method === "goal_advance" && c.params.confirm === true));
+
+    const stop = await doHttp(`${ctx.base}/api/ops/goals/goal-1/stop`, "POST", ctx.token, {
+      confirm: true,
+    });
+    assert.equal(stop.status, 200);
+    assert.equal((stop.body as { action: string }).action, "goal_stop");
+    assert.ok(ctx.calls.some((c) => c.method === "goal_stop" && c.params.confirm === true));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("goal task handoff requires confirm and forwards retained paths to daemon", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const noConfirm = await doHttp(
+      `${ctx.base}/api/ops/tasks/task-service/goal-handoff`,
+      "POST",
+      ctx.token,
+      {
+        candidateRevisionId: "rev-1",
+        reusablePaths: ["src/a.ts"],
+        remainingGaps: [{
+          description: "finish the remaining export module carefully",
+          acceptanceExpectation: "module exports the updated constant and checks pass",
+        }],
+        destinationWorkerProfileId: "grok-builder",
+        reason: "hand partial work",
+      },
+    );
+    assert.equal(noConfirm.status, 422);
+
+    const ok = await doHttp(
+      `${ctx.base}/api/ops/tasks/task-service/goal-handoff`,
+      "POST",
+      ctx.token,
+      {
+        candidateRevisionId: "rev-1",
+        reusablePaths: ["src/a.ts"],
+        remainingGaps: [{
+          description: "finish the remaining export module carefully",
+          acceptanceExpectation: "module exports the updated constant and checks pass",
+        }],
+        destinationWorkerProfileId: "grok-builder",
+        reason: "hand partial work",
+        confirm: true,
+      },
+    );
+    assert.equal(ok.status, 200);
+    assert.equal((ok.body as { action: string }).action, "goal_task_handoff");
+    const call = ctx.calls.find((c) => c.method === "goal_task_handoff");
+    assert.ok(call);
+    assert.equal(call!.params.confirm, true);
+    assert.equal(call!.params.taskId, "task-service");
+    assert.equal(call!.params.destinationWorkerProfileId, "grok-builder");
+    assert.deepEqual(call!.params.reusablePaths, ["src/a.ts"]);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("review_graph_create requires confirm, profile, and reason", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const noConfirm = await doHttp(`${ctx.base}/api/ops/tasks/t1/review-graph`, "POST", ctx.token, {
+      reviewerWorkerProfileId: "default",
+      reason: "second opinion",
+    });
+    assert.equal(noConfirm.status, 422);
+
+    const noProfile = await doHttp(`${ctx.base}/api/ops/tasks/t1/review-graph`, "POST", ctx.token, {
+      reason: "second opinion",
+      confirm: true,
+    });
+    assert.equal(noProfile.status, 422);
+
+    const ok = await doHttp(`${ctx.base}/api/ops/tasks/t1/review-graph`, "POST", ctx.token, {
+      reviewerWorkerProfileId: "default",
+      reason: "second opinion",
+      confirm: true,
+    });
+    assert.equal(ok.status, 200);
+    assert.equal((ok.body as { action: string }).action, "review_graph_create");
+    const call = ctx.calls.find((c) => c.method === "review_graph_create");
+    assert.ok(call);
+    assert.equal(call!.params.taskId, "t1");
+    assert.equal(call!.params.reviewerWorkerProfileId, "default");
+    assert.equal(call!.params.confirm, true);
+
+    // Plural 1–3 judge set is accepted and forwarded intact.
+    const multi = await doHttp(`${ctx.base}/api/ops/tasks/t1/review-graph`, "POST", ctx.token, {
+      reviewerWorkerProfileIds: ["default", "volcengine-glm52-1m"],
+      reason: "two independent judges",
+      confirm: true,
+    });
+    assert.equal(multi.status, 200);
+    const multiCall = ctx.calls.filter((c) => c.method === "review_graph_create").at(-1);
+    assert.ok(multiCall);
+    assert.deepEqual(multiCall!.params.reviewerWorkerProfileIds, [
+      "default",
+      "volcengine-glm52-1m",
+    ]);
+    assert.equal(multiCall!.params.confirm, true);
+
+    const tooMany = await doHttp(`${ctx.base}/api/ops/tasks/t1/review-graph`, "POST", ctx.token, {
+      reviewerWorkerProfileIds: ["a", "b", "c", "d"],
+      reason: "too many judges",
+      confirm: true,
+    });
+    assert.equal(tooMany.status, 422);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test("main_review requires confirm and valid decision", async () => {
   const ctx = await makeOpsHub();
   try {
@@ -878,6 +1335,95 @@ test("main_review requires confirm and valid decision", async () => {
     assert.ok(call);
     assert.equal(call!.params.confirm, true);
     assert.equal(call!.params.decision, "accept");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("Competition Main decision and retained-partial Hub routes preserve explicit authority", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const noConfirm = await doHttp(
+      `${ctx.base}/api/ops/competitions/comp-1/main-decision`,
+      "POST",
+      ctx.token,
+      { candidateId: "cand-1", decision: "revise", reason: "Repair one exact gap." },
+    );
+    assert.equal(noConfirm.status, 422);
+
+    const decision = await doHttp(
+      `${ctx.base}/api/ops/competitions/comp-1/main-decision`,
+      "POST",
+      ctx.token,
+      {
+        candidateId: "cand-1",
+        decision: "revise",
+        reason: "Repair one exact gap.",
+        confirm: true,
+      },
+    );
+    assert.equal(decision.status, 200);
+    const decisionCall = ctx.calls.find((call) => call.method === "competition_main_decision");
+    assert.ok(decisionCall);
+    assert.deepEqual(decisionCall!.params, {
+      competitionId: "comp-1",
+      candidateId: "cand-1",
+      decision: "revise",
+      reason: "Repair one exact gap.",
+      confirm: true,
+    });
+
+    const retained = await doHttp(
+      `${ctx.base}/api/ops/competitions/comp-1/retained-partial`,
+      "POST",
+      ctx.token,
+      {
+        candidateId: "cand-2",
+        reusablePaths: ["src/useful.ts"],
+        remainingGaps: [{
+          description: "The empty state still needs handling.",
+          acceptanceExpectation: "The empty-state behavior has a passing test.",
+        }],
+        confirm: true,
+      },
+    );
+    assert.equal(retained.status, 200);
+    const retainedCall = ctx.calls.find((call) => call.method === "competition_retained_partial");
+    assert.ok(retainedCall);
+    assert.equal(retainedCall!.params.confirm, true);
+    assert.deepEqual(retainedCall!.params.reusablePaths, ["src/useful.ts"]);
+
+    const noHandoffConfirm = await doHttp(
+      `${ctx.base}/api/ops/competitions/comp-1/handoff`,
+      "POST",
+      ctx.token,
+      {
+        candidateId: "cand-2",
+        candidateRevisionId: "rev-1",
+        destinationWorkerProfileId: "grok-builder",
+        reason: "Hand retained work to a different Worker.",
+      },
+    );
+    assert.equal(noHandoffConfirm.status, 422);
+
+    const handoff = await doHttp(
+      `${ctx.base}/api/ops/competitions/comp-1/handoff`,
+      "POST",
+      ctx.token,
+      {
+        candidateId: "cand-2",
+        candidateRevisionId: "rev-1",
+        destinationWorkerProfileId: "grok-builder",
+        reason: "Hand retained work to a different Worker.",
+        confirm: true,
+      },
+    );
+    assert.equal(handoff.status, 200);
+    const handoffCall = ctx.calls.find((call) => call.method === "competition_handoff");
+    assert.ok(handoffCall);
+    assert.equal(handoffCall!.params.confirm, true);
+    assert.equal(handoffCall!.params.destinationWorkerProfileId, "grok-builder");
+    assert.equal(handoffCall!.params.candidateRevisionId, "rev-1");
   } finally {
     await ctx.cleanup();
   }
@@ -1233,6 +1779,9 @@ test("Hub public UI wires supervise, daemon, provider probe, compare controls", 
 
   // Competition compare
   assert.ok(app.includes("/compare"), "competition compare");
+  assert.ok(app.includes("/main-decision"), "Competition Main decision action");
+  assert.ok(app.includes("competitionDecisionControls"), "Competition decision control is rendered");
+  assert.ok(app.includes("renderTaskCompetitionContext"), "Task Detail explains actual Competition context");
 
   // OOB readiness
   assert.ok(app.includes("rReadiness") || app.includes("readyTitle"), "readiness surface");

@@ -1,0 +1,171 @@
+version: 2
+name: Make Goal cards explain stopped and completed states in the active language
+project: /Users/yijunwang/code/forklight
+taskClass: hub-goal-overview-plain-language
+taskFamily: bounded-javascript-change
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: bounded-javascript-change
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；本任务是普通 Hub 展示修正，不需要跨 Provider 验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Make every Goal card in the Chinese or English Hub explain its durable state
+    in the selected language. A stopped Goal must say stopped instead of unknown,
+    and overview/list/detail next-action text must prefer the localized reason-code
+    and next-action-code meaning over stored English prose. Preserve bounded raw
+    fallback only for unknown legacy codes, without changing Goal execution,
+    persistence, scheduling, or API contracts.
+  presentation:
+    summary: 让总览里的目标卡片直接用当前语言说明“已停止、已完成、在等什么、下一步做什么”，不再混入后台英文或显示状态未知。
+    language: zh-CN
+  context:
+    - A live Chinese Hub audit on 2026-07-30 showed stopped Goals with the badge 状态未知 and raw English nextAction text such as Main stopped this Goal.
+    - Goal Detail already has goalReasonLabel, goalStoryHappenedText, goalStoryWaitingText, and goalNextActionLabel helpers with bilingual message keys.
+    - rOverview still renders g.nextAction before its localized code, while statusLabel does not recognize the durable stopped status.
+    - Existing stored English reason/nextAction text must remain readable only for unknown legacy codes; known codes must use the selected Hub language.
+  inScope:
+    - Add a user-facing stopped status label in both English and Chinese and map the durable stopped status to it.
+    - Introduce or reuse one canonical Goal next-action presentation helper so overview, Goal list, and Goal Detail prefer known nextActionCode localization over raw stored prose.
+    - Ensure completed and stopped Goal cards never leak known stored English reason/next-action prose when Hub language is Chinese.
+    - Preserve safe raw fallback for unknown/legacy next-action codes and missing historical structured fields.
+    - Add focused behavior tests that execute the presentation helpers in both languages and assert the live stopped/completed scenarios.
+  outOfScope:
+    - Goal state-machine, scheduler, persistence, daemon, API shape, migration/backfill, task/plan/competition cards, visual redesign, Provider calls, Competition, commit, or push.
+  executionSteps:
+    - Trace the current statusLabel and all three Goal card/detail next-action rendering paths.
+    - Extract the smallest canonical presentation helper needed to distinguish known structured codes from legacy fallback text.
+    - Add bilingual stopped status copy and apply the helper consistently without changing stored data.
+    - Extend focused Hub asset behavior tests for Chinese stopped/completed cards, English parity, and unknown legacy fallback.
+    - Run syntax, focused tests, full test suite, build, and diff hygiene.
+  deliverables:
+    - Stopped Goal badges render as Stopped or 已停止 instead of Unknown or 状态未知.
+    - Known Goal next-action and terminal reason codes render in the selected Hub language on overview, list, and detail surfaces.
+    - Unknown legacy text remains readable rather than being erased or misclassified.
+    - Regression tests cover the exact live English-leak and stopped-status cases.
+  modules:
+    - name: Goal presentation helpers
+      responsibility: Convert durable Goal status and structured reason/action codes into selected-language user copy.
+      consumes:
+        - Goal status, reasonCode, nextActionCode, bounded legacy fallback text, and current Hub language.
+      produces:
+        - One truthful status badge and one plain-language next action for each Goal surface.
+      boundaries:
+        - Must not infer execution state, mutate Goal records, or replace unknown legacy evidence with invented meaning.
+    - name: Hub bilingual messages
+      responsibility: Supply matched English and Chinese labels for durable stopped status and any newly shared presentation text.
+      consumes:
+        - Stable presentation keys.
+      produces:
+        - Language-specific copy with no raw internal code exposure.
+      boundaries:
+        - User-authored Goal names and objectives are not translated.
+    - name: Hub behavior tests
+      responsibility: Execute extracted helpers against live-shaped completed, stopped, and legacy Goal projections.
+      consumes:
+        - English-stored Goal reason/action fixtures and both UI languages.
+      produces:
+        - Deterministic proof that known codes localize and unknown legacy text remains readable.
+      boundaries:
+        - No browser mutation, Provider request, daemon mutation, commit, or push.
+  callChain:
+    - Hub receives the existing read-only Goal projection containing status, reasonCode, nextActionCode, and legacy prose.
+    - Goal presentation helper recognizes a known structured code and asks i18n for the current-language meaning.
+    - Overview, Goal list, and Goal Detail render the same localized meaning; unknown historical codes fall back to bounded stored text.
+    - Tests exercise the helpers in English and Chinese and prevent the stopped/English-leak regression.
+  scenarios:
+    - name: Main-stopped Goal in Chinese overview
+      given: A Goal has status stopped, reasonCode main-stop, nextActionCode none, and stored English prose.
+      when: The Chinese Hub renders its overview card.
+      then: The badge says 已停止 and the explanatory line is Chinese with no Main stopped this Goal leakage.
+    - name: Completed Goal in Chinese overview
+      given: A Goal has status completed, reasonCode goal-completed, nextActionCode none, and stored English completion prose.
+      when: The Chinese Hub renders its overview card.
+      then: The card remains completed and its terminal explanation is Chinese rather than Every milestone gate is satisfied.
+    - name: English parity
+      given: The same structured Goal records are rendered in English.
+      when: The selected language is English.
+      then: The status and next action remain accurate English descriptions.
+    - name: Unknown legacy action
+      given: A historical Goal has an unknown nextActionCode and a bounded stored nextAction string.
+      when: Any Goal surface renders it.
+      then: The stored text remains visible because ForkLight cannot safely invent a structured meaning.
+  risks:
+    - Mapping every unknown code to none would hide historical evidence; recognize only the closed known-code set and preserve legacy fallback.
+    - Fixing only Goal Detail would leave the high-frequency overview regression; share the helper across all three paths.
+    - Treating stopped as failed would imply execution failure; give stopped its own neutral durable status label.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 260
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 3
+  fileLimitMode: warn
+  changedLineLimit: 260
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Known stopped/completed Goal states and next actions use the selected language on overview, Goal list, and Goal Detail.
+    - Unknown legacy codes preserve bounded stored text, while stopped is a first-class neutral status rather than unknown or failed.
+    - Goal execution and API behavior remain unchanged.
+  commands:
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - git diff --check

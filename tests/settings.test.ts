@@ -833,6 +833,7 @@ test("model routing defaults match spec", () => {
   assert.equal(s.modelRouting.weights.verifiedBehavior, 1);
   assert.equal(s.modelRouting.weights.modelQualityFailure, 0.5);
   assert.equal(s.modelRouting.weights.correctionChurn, 0.2);
+  assert.equal(s.modelRouting.weights.firstPassSuccess, 0.5);
   assert.equal(s.modelRouting.weights.officialCost, 0);
   assert.equal(s.modelRouting.weights.duration, 0);
   assert.equal(s.modelRouting.weights.budgetReliability, 0);
@@ -858,6 +859,7 @@ test("model routing partial update preserves other fields", async () => {
   assert.equal(s.modelRouting.weights.officialCost, 0.5);
   assert.equal(s.modelRouting.weights.duration, 0.3);
   assert.equal(s.modelRouting.weights.budgetReliability, 0.7);
+  assert.equal(s.modelRouting.weights.firstPassSuccess, 0.5); // default preserved
   assert.equal(s.modelRouting.weights.acceptedDelivery, 1); // unchanged
   // Other section unchanged
   assert.equal(s.execution.maxConcurrency, 2);
@@ -934,6 +936,7 @@ test("legacy settings gain modelRouting defaults on migration", async () => {
   assert.equal(migrated.modelRouting.minRelevantSamples, 5);
   assert.equal(migrated.modelRouting.weights.duration, 0);
   assert.equal(migrated.modelRouting.weights.budgetReliability, 0);
+  assert.equal(migrated.modelRouting.weights.firstPassSuccess, 0.5);
 });
 
 test("legacy modelRouting weights gain only budgetReliability without losing saved policy", async () => {
@@ -953,4 +956,23 @@ test("legacy modelRouting weights gain only budgetReliability without losing sav
   assert.equal(migrated.modelRouting.missingEvidenceMode, "strict");
   assert.equal(migrated.modelRouting.weights.acceptedDelivery, 2.5);
   assert.equal(migrated.modelRouting.weights.budgetReliability, 0);
+});
+
+test("legacy modelRouting weights gain firstPassSuccess default without losing saved policy", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-s-"));
+  const store = new StateStore(home);
+  const legacy = structuredClone(new SettingsService(store).get()) as unknown as Record<string, unknown>;
+  const routing = legacy.modelRouting as Record<string, unknown>;
+  routing.minRelevantSamples = 7;
+  routing.missingEvidenceMode = "strict";
+  const weights = routing.weights as Record<string, unknown>;
+  weights.correctionChurn = 0.4;
+  delete weights.firstPassSuccess;
+  store.saveSettings(legacy);
+
+  const migrated = new SettingsService(store).get();
+  assert.equal(migrated.modelRouting.minRelevantSamples, 7);
+  assert.equal(migrated.modelRouting.missingEvidenceMode, "strict");
+  assert.equal(migrated.modelRouting.weights.correctionChurn, 0.4);
+  assert.equal(migrated.modelRouting.weights.firstPassSuccess, 0.5);
 });

@@ -1,0 +1,105 @@
+version: 2
+name: Prove failed Gmail sync preserves every prior success fact
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-failure-preservation-continuation
+taskFamily: relay-gmail-production-readiness-continuation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    After a credentialed Gmail failure, Relay keeps every prior Gmail Item, cursor,
+    item count, and last-success time unchanged, while recording one truthful status
+    and readable recovery event that contains no secret.
+  presentation:
+    summary: 让同步失败只改变“失败状态”，不破坏任何上一次成功数据。
+    language: zh-CN
+  context:
+    - The preceding milestone integrates the truthful connector result boundary before this Task starts.
+    - Existing Relay bootstrap data includes Gmail Items whose externalId can be undefined.
+    - A prior Candidate test falsely filtered undefined externalId rows before asserting the entire set; never repeat that pattern.
+    - Use stable Item ids or a complete normalized snapshot for whole-set preservation, then assert externalId behavior separately.
+    - Use Grok 4.5. Do not commit or push.
+  inScope:
+    - Make connector failure update only truthful connector status and one bounded activity/recovery fact.
+    - Preserve exact prior Gmail items, cursor, itemCount, and lastSyncAt on all typed failures.
+    - Keep successful live and fixture transactions unchanged.
+    - Add deterministic repository-level tests including a prior Gmail row without externalId.
+    - Prove no new fixture item, partial item, raw error, stack, or secret appears on failure.
+  outOfScope:
+    - Adapter result redesign, retries, UI, docs, new persistence schema, dependencies, commit, or push.
+  executionSteps:
+    - Trace application transaction boundaries, repository lookup, connector metadata, and activity emission.
+    - Harden the failure mutation to one status/event path and keep all success facts unchanged.
+    - Compare stable ids or complete normalized Item snapshots before and after failure.
+    - Run focused and full acceptance once.
+  deliverables:
+    - Durable failure-state mutation with complete prior-data preservation.
+    - Regression tests that cannot fail merely because externalId is absent.
+  modules:
+    - name: Failure-state authority
+      responsibility: Record a truthful failure without touching last-success data.
+      consumes: [prior connector metadata, cursor, typed failure]
+      produces: [error status, safe activity, recoverable DomainError]
+      boundaries: [no item ingest, cursor advance, count/time rewrite, or retry]
+    - name: Preservation regression
+      responsibility: Compare the complete prior Gmail state using stable identities.
+      consumes: [before and after repository snapshots]
+      produces: [evidence of exact preservation and secret-free recovery]
+      boundaries: [do not assume externalId exists on every historical Item]
+  callChain:
+    - A live Gmail sync returns a typed failure.
+    - Application reads the prior connector and cursor.
+    - One failure transaction records status and recovery without success mutations.
+    - The API returns a safe DomainError and the next refresh shows preserved data.
+  scenarios:
+    - name: Existing mixed Gmail rows survive
+      given: Prior Gmail rows include both externalId and local-only rows.
+      when: Credentialed sync fails.
+      then: Stable ids and normalized rows, cursor, count, and last-success time are identical.
+    - name: Failure is readable
+      given: A provider, network, or needs-auth failure.
+      when: Application records it.
+      then: One status/event and one next action are visible without raw technical data.
+  risks:
+    - Emitting an activity from inside a transaction may affect ordering; preserve repository semantics.
+    - A weak test can pass while content changes; compare complete normalized rows, not only counts.
+  changeBudget: { maxFiles: 4, maxDiffLines: 600 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 4
+  fileLimitMode: warn
+  changedLineLimit: 600
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/application/connector-sync.ts
+    - src/application/services.ts
+    - src/domain/types.ts
+    - tests/connectors-and-product.test.ts
+acceptance:
+  criteria:
+    - Every prior Gmail Item including rows without externalId is unchanged after typed live failure.
+    - Cursor, itemCount, and lastSyncAt remain exact; only truthful status/activity changes.
+    - Recovery is readable and carries no provider body, stack, token, secret, or verifier.
+    - Full Relay lint, tests, and production build pass without commit or push.
+  commands:
+    - node --test --import tsx tests/connectors-and-product.test.ts tests/persistence-and-services.test.ts
+    - npm run check
+    - git diff --check

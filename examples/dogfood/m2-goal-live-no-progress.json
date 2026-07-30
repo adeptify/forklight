@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "Goal finite-idle stop across restart",
+  "objective": "Prove that unlimited total duration does not permit an idle Goal to loop forever.",
+  "planFile": "/Users/yijunwang/code/forklight/examples/dogfood/m2-goal-live-stop-plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": 5000,
+    "maxCorrectionRounds": 0,
+    "maxReviewRounds": 0,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "foundation", "gate": "main-accept" },
+    { "itemId": "service", "gate": "machine" },
+    { "itemId": "console", "gate": "machine" },
+    { "itemId": "finish", "gate": "machine" }
+  ]
+}

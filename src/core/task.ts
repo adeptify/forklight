@@ -27,6 +27,7 @@ import {
   deriveEffectiveQualityPolicy,
   effectiveQualityPolicyFromGlobal,
 } from "./contract-quality.js";
+import { reviewerOutputBoundsLine } from "./review-graph.js";
 import type {
   CompetitionTrigger,
   ContractTaskSpec,
@@ -924,6 +925,55 @@ export interface WorkerPromptAppendices {
   toolLines?: string[];
   /** Checkpoint section lines including blank first line if non-empty. */
   checkpointLines?: string[];
+  /**
+   * When set, replaces the generic final coding-summary instruction.
+   * Used only for durably identified Review Graph reviewer Tasks.
+   */
+  terminalOutputLines?: string[];
+}
+
+/** Durable internal namespace for Review Graph reviewer Tasks (not user content). */
+export const REVIEW_GRAPH_TASK_FILE_PREFIX = "forklight://review-graph/";
+
+/** True when taskFile is the durable Review Graph reviewer namespace marker. */
+export function isReviewGraphReviewerTaskFile(taskFile: string): boolean {
+  return typeof taskFile === "string"
+    && taskFile.startsWith(REVIEW_GRAPH_TASK_FILE_PREFIX);
+}
+
+/**
+ * Final prompt instruction for Review Graph reviewer Tasks.
+ * Replaces the generic coding-summary so judges emit one raw JSON object.
+ * Numeric bounds reuse Review Graph parser constants (single source of truth).
+ */
+export function reviewerTerminalOutputLines(): string[] {
+  return [
+    "Terminal output requirement:",
+    "- Return exactly one raw JSON object and nothing else.",
+    "- The object must include only: schemaVersion, reviewedRevisionId, proposedDisposition, summary, findings.",
+    `- ${reviewerOutputBoundsLine()}`,
+    "- Do not wrap the object in Markdown fences, and do not add prose, a coding summary, or a files-changed list before or after it.",
+    "- Do not return a generic summary of files changed, contract behavior, or remaining risks.",
+  ];
+}
+
+/** Generic terminal instruction for ordinary (non-reviewer) Tasks. */
+export const GENERIC_CODING_SUMMARY_INSTRUCTION =
+  "Return a concise summary containing: files changed, contract behavior delivered, verification evidence, and remaining risks.";
+
+/**
+ * Build appendices for a runtime adapter. Review Graph reviewer Tasks receive
+ * an explicit terminal-output override; ordinary Tasks are unchanged.
+ */
+export function workerPromptAppendicesForTask(
+  task: { taskFile: string },
+  appendices: WorkerPromptAppendices = {},
+): WorkerPromptAppendices {
+  if (!isReviewGraphReviewerTaskFile(task.taskFile)) return appendices;
+  return {
+    ...appendices,
+    terminalOutputLines: appendices.terminalOutputLines ?? reviewerTerminalOutputLines(),
+  };
 }
 
 export function buildWorkerPrompt(
@@ -939,6 +989,7 @@ export function buildWorkerPrompt(
   const checkpointLines = appendices?.checkpointLines !== undefined
     ? appendices.checkpointLines
     : claudeCheckpointProtocolLines(spec.acceptance.commands);
+  const terminalOutputLines = appendices?.terminalOutputLines;
   const lines = [
     resuming
       ? "Resume the previously interrupted task using the agreed execution contract."
@@ -1019,7 +1070,9 @@ export function buildWorkerPrompt(
     ...checkpointLines,
     ...feedbackSection(feedback),
     "",
-    "Return a concise summary containing: files changed, contract behavior delivered, verification evidence, and remaining risks.",
+    ...(terminalOutputLines !== undefined && terminalOutputLines.length > 0
+      ? terminalOutputLines
+      : [GENERIC_CODING_SUMMARY_INSTRUCTION]),
   );
   return lines.join("\n");
 }

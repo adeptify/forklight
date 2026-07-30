@@ -1,0 +1,185 @@
+version: 2
+name: Let one Goal milestone continue through an authorized cross-Worker handoff
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-goal-handoff-lineage-v1
+taskFamily: forklight-main-orchestration
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    A durable Goal milestone can continue through one already-authorized
+    cross-Worker Candidate handoff without rewriting the original Plan Task or
+    losing milestone gates. Goal status follows the exact one-hop successor for
+    machine, fresh Main-accept, Review Graph, Integration, evidence-progress,
+    restart, and no-progress decisions. It shows the original Worker, successor
+    Worker, retained-result handoff, current result, and one next action in plain
+    language. ForkLight never creates a handoff automatically, never votes,
+    retries, accepts, integrates, commits, or pushes for Main.
+  presentation:
+    summary: Goal 可以沿着一次已确认的跨 Worker 接力继续推进；旧任务和部分成果不被改写，裁判、Main 验收和安全合入都以接手后的最终结果为准。
+    language: zh-CN
+  context:
+    - Durable Goal currently evaluates each milestone only against its original Plan Task id.
+    - Cross-Worker handoff intentionally creates one ordinary successor Task and preserves the failed or partial source Task unchanged.
+    - Review Graph already binds to an exact Candidate Task and CandidateRevision; Goal already observes a graph attached to its original Task.
+    - Without a canonical effective milestone Task, an authorized successor may finish correctly while Goal remains stuck on the original failed Task.
+    - The current repository is dirty with owner and prior dogfood work. Preserve all changes and do not commit or push.
+    - Grok 4.5 is the owner-selected default for 2026-07-30 and 2026-07-31. This is one deterministic implementation Task, so no Competition or other Provider is justified.
+  inScope:
+    - >-
+      Add one read-only canonical resolver from a Goal milestone's original Task
+      to its effective Task: original when no handoff exists, or the exact
+      durable one-hop successor when an authorized, prepared, running,
+      succeeded, or failed handoff exists.
+    - Keep the original milestone Task id and Plan dependency identity immutable. Add bounded lineage fields for original Task, effective successor Task, handoff status, and both frozen Worker identities instead of overwriting history.
+    - Evaluate machine, fresh Main-accept, Review Graph, and exact Integration gates against the effective successor once a handoff is authoritative. A failed/interrupted successor must return a truthful bounded Main action; it must not fall back to source success or create another handoff.
+    - Include successor Task, Attempt, verification, CandidateRevision, Main Review, Review Graph, Integration, and handoff status in the Goal evidence digest. Polling or raw Worker text must still not count as progress.
+    - Treat an in-flight successor or its reviewer Tasks as Goal-owned work for no-progress purposes, so a running handoff cannot be stopped as idle. Goal stop must not kill an active successor and must not admit downstream work before the effective gate is satisfied.
+    - Reconcile and project the same effective lineage after Daemon restart without duplicating Task, Attempt, handoff, review, decision, Integration, or downstream admission.
+    - Explain on CLI, MCP, and Hub Goal Detail what was retained, who handed work to whom, which Task is now authoritative, what evidence is still missing, and the one next Main action. Keep ids/digests secondary and expose no prompt, patch, log, credential, endpoint, or private artifact path.
+    - Preserve existing behavior byte-for-byte in meaning when a milestone has no handoff. Existing non-Goal Plans and standalone handoff Tasks remain unchanged.
+    - Add deterministic behavior tests for machine/main-accept/integration gates through a successor, Review Graph on successor, successor failure/interruption, in-flight/no-progress behavior, restart projection, downstream queue-once, privacy, localization, and no-handoff regression.
+  outOfScope:
+    - Automatic retained-partial selection, automatic handoff creation, automatic destination routing, multi-hop/fan-out handoff, Candidate merging, contract rewriting, or changing the one-hop handoff authority.
+    - Automatic reviewer creation, majority voting, Main accept/revise/reject, correction, retry, adaptation, Integration, activation, commit, or push.
+    - Replacing Goal's Plan scheduler, changing ordinary Task lifecycle, exposing private Candidate contents, or claiming Main Token savings without an exact-pair baseline.
+  executionSteps:
+    - Trace Goal gate evaluation, evidence facts, in-flight ownership, projection, Plan dependency admission, candidate handoff records, Review Graph lookup, and restart reconciliation before editing.
+    - Define one canonical effective-milestone-lineage resolver reused by gate evaluation, evidence digest, in-flight detection, projection, and downstream scheduling.
+    - Add closed typed lineage fields and reason/next-action codes; update CLI/MCP/Hub presentation without duplicating business rules in the UI.
+    - Build fixtures where an original retained-partial Task hands selected files to a different Worker successor; exercise machine, reviewed, and integrated successor states plus failure and restart.
+    - Run focused checks once, then full repository verification once. Stop after one Candidate and at most one same-Candidate correction.
+  deliverables:
+    - Canonical Goal milestone effective-task/one-hop-handoff resolver.
+    - Successor-aware gate, evidence, in-flight, restart, and dependency behavior.
+    - Explanation-first CLI, MCP, and bilingual Hub Goal lineage presentation.
+    - Regression coverage proving no automatic mutation or duplicate downstream execution.
+  modules:
+    - name: Goal milestone lineage authority
+      responsibility: Resolve original versus effective successor Task from durable handoff evidence without changing the Plan or source history.
+      consumes:
+        - Goal milestone record, original Task, candidate handoff record, successor Task, frozen Worker identities.
+      produces:
+        - Privacy-safe effective lineage used by every Goal read and gate decision.
+      boundaries:
+        - One hop only; no mutation, implicit handoff, fallback to stale source evidence, or private content.
+    - name: Successor-aware Goal supervision
+      responsibility: Apply existing machine, Main, review, Integration, progress, restart, and stop rules to the effective Task.
+      consumes:
+        - Effective lineage plus existing Task, verification, CandidateRevision, Review Graph, Main Review, and Integration authorities.
+      produces:
+        - Correct milestone satisfaction, evidence digest, in-flight status, downstream admission, and next action.
+      boundaries:
+        - No duplicate scheduler, automatic decision, retry, correction, review, Integration, or Task creation.
+    - name: User-visible handoff journey
+      responsibility: Explain the original contribution, successor owner, retained work, current evidence, and next Main action.
+      consumes:
+        - Privacy-safe lineage and Goal projection.
+      produces:
+        - CLI/MCP JSON and bilingual Hub Goal Detail that a non-expert can understand.
+      boundaries:
+        - No raw patch, prompt, logs, credentials, endpoints, private paths, or false savings language.
+  callChain:
+    - Main explicitly retains part of one Competition Candidate and confirms a handoff through existing authority.
+    - Handoff creates and prepares exactly one successor Task while the Goal milestone retains its original Plan Task id.
+    - Goal resolves the successor as the effective milestone Task and waits for its actual machine, review, Main, or Integration evidence.
+    - Reviewers inspect only the successor's exact CandidateRevision; Main records a fresh decision after reviewer evidence.
+    - Existing dependency scheduling admits downstream Goal work exactly once only after the effective gate is satisfied.
+    - Daemon restart reconstructs the same lineage and evidence without creating or rewriting work.
+  scenarios:
+    - name: Successor completes an integration milestone
+      given: The original Goal Task has retained-partial evidence and one authorized successor.
+      when: The successor passes verification, is reviewed and Main-accepted, then its exact Candidate is integrated.
+      then: The original milestone becomes satisfied, downstream starts once, and source history remains unchanged.
+    - name: Successor is still running or under review
+      given: The source Task is terminal but its successor or successor reviewer is in flight.
+      when: Goal no-progress evaluation runs or the Daemon restarts.
+      then: Goal remains active, shows the successor/reviewer as current work, and does not create replacement work.
+    - name: Successor fails
+      given: One authorized successor reaches failed or interrupted without satisfying the gate.
+      when: Goal projects the milestone.
+      then: It names the successor failure and returns control to Main; it does not fall back to source evidence or authorize a second handoff.
+    - name: No handoff regression
+      given: A Goal milestone has no candidate handoff.
+      when: Goal evaluates and advances.
+      then: Existing original-Task gate, evidence, stop, restart, and downstream behavior remains unchanged.
+  risks:
+    - Reading source and successor evidence in different helpers could make status and scheduling disagree; all consumers must share one resolver.
+    - Treating any related Task as successor could accept stale or unrelated evidence; only the durable exact handoff record may redirect a milestone.
+    - Omitting successor reviewer or Attempt evidence from the digest could trigger false no-progress stops during valid work.
+    - Overwriting milestone.taskId would destroy Plan lineage and make restart/audit ambiguous; preserve original and project effective identity separately.
+  changeBudget:
+    maxFiles: 18
+    maxDiffLines: 3000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 18
+  fileLimitMode: warn
+  changedLineLimit: 3000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/goal.ts
+    - src/core/candidate-handoff.ts
+    - src/core/dependency-resolver.ts
+    - src/core/review-graph.ts
+    - src/core/main-review.ts
+    - src/core/integration.ts
+    - src/core/types.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/goal.test.ts
+    - tests/daemon.test.ts
+    - tests/review-graph.test.ts
+    - tests/integration.test.ts
+    - tests/hub-ui-assets.test.ts
+    - tests/hub-ops-mutations.test.ts
+acceptance:
+  criteria:
+    - A Goal milestone keeps its original Plan Task immutable but follows exactly one durable authorized handoff successor as its effective Task for machine, fresh Main-accept, Review Graph, and exact Integration gates.
+    - Successor Attempt, verification, revision, review graph, Main decision, Integration and handoff status drive the Goal evidence digest and no-progress logic; raw Worker messages and polling still do not count as progress.
+    - In-flight successor/reviewer work prevents false idle stop; restart preserves the same lineage and downstream admission occurs once only after the effective gate is truly satisfied.
+    - Failed/interrupted successor returns a bounded truthful Main action without source fallback, second handoff, retry, correction, automatic review/decision/Integration, or history rewrite.
+    - CLI, MCP, and bilingual Hub Goal Detail explain original Worker, successor Worker, retained work, current authority, evidence and next action without private content or internal-first copy.
+    - Milestones without handoff and non-Goal Plan/Task behavior retain their existing meaning; the complete repository remains green and no commit or push occurs.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/goal.test.ts tests/daemon.test.ts tests/review-graph.test.ts tests/integration.test.ts tests/hub-ui-assets.test.ts tests/hub-ops-mutations.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

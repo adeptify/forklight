@@ -6,7 +6,11 @@ import YAML from "yaml";
 import { daemonSocketPath } from "../core/config.js";
 import { parseRemediationAmendmentInput } from "../core/main-remediation.js";
 import { SettingsService } from "../core/settings.js";
-import type { StatisticsFilter } from "../core/statistics.js";
+import {
+  projectCompactProviderModelSummaries,
+  type StatisticsDetail,
+  type StatisticsFilter,
+} from "../core/statistics.js";
 import type { AttemptAuthorization, TaskStatus } from "../core/types.js";
 import { StateStore } from "../state/store.js";
 import { DaemonCoordinator } from "./coordinator.js";
@@ -123,6 +127,67 @@ function parseAttemptAuthorization(value: unknown): AttemptAuthorization | undef
   };
 }
 
+/** Parse and validate Competition candidate overrides. Each candidate is either
+ *  a saved Worker Profile reference (workerProfileId, new reasoned entrance) or
+ *  a legacy provider/model pair. Per-candidate maxBudgetUsd is optional. */
+function parseCompetitionCandidates(value: unknown): import("../core/competition.js").CandidateOverride[] {
+  const arr = requireArray(value, "candidates");
+  if (arr.length === 0) throw new Error("candidates must be a non-empty array");
+  return arr.map((raw, i) => {
+    const obj = strictObject(raw, `candidates[${i}]`);
+    const allowed = new Set(["providerName", "modelName", "maxBudgetUsd", "workerProfileId"]);
+    const extra = Object.keys(obj).filter((key) => !allowed.has(key));
+    if (extra.length > 0) {
+      throw new Error(`candidates[${i}] contains unknown fields: ${extra.join(", ")}`);
+    }
+    const candidate: import("../core/competition.js").CandidateOverride = {};
+    if (obj.providerName !== undefined) {
+      if (typeof obj.providerName !== "string" || obj.providerName.trim().length === 0) {
+        throw new Error(`candidates[${i}].providerName must be a non-empty string`);
+      }
+      candidate.providerName = obj.providerName;
+    }
+    if (obj.modelName !== undefined) {
+      if (typeof obj.modelName !== "string" || obj.modelName.trim().length === 0) {
+        throw new Error(`candidates[${i}].modelName must be a non-empty string`);
+      }
+      candidate.modelName = obj.modelName;
+    }
+    if (obj.workerProfileId !== undefined) {
+      if (typeof obj.workerProfileId !== "string" || obj.workerProfileId.trim().length === 0) {
+        throw new Error(`candidates[${i}].workerProfileId must be a non-empty string`);
+      }
+      candidate.workerProfileId = obj.workerProfileId;
+    }
+    if (obj.maxBudgetUsd !== undefined) {
+      if (obj.maxBudgetUsd !== null
+        && (typeof obj.maxBudgetUsd !== "number" || !Number.isFinite(obj.maxBudgetUsd) || obj.maxBudgetUsd <= 0)) {
+        throw new Error(`candidates[${i}].maxBudgetUsd must be null or a finite positive number`);
+      }
+      candidate.maxBudgetUsd = obj.maxBudgetUsd as number | null;
+    }
+    return candidate;
+  });
+}
+
+/** Parse optional Competition admission options: a bounded Main reason and/or
+ *  an explicit legacy flag. Absent options keep the legacy explicit behavior.
+ *  The reason content is re-validated by CompetitionCoordinator admission. */
+function parseCompetitionOptions(
+  params: Record<string, unknown>,
+): import("../core/competition.js").CompetitionCreateOptions {
+  const options: import("../core/competition.js").CompetitionCreateOptions = {};
+  if (params.reason !== undefined) {
+    const r = strictObject(params.reason, "reason");
+    const allowed = new Set(["intent", "triggers", "note"]);
+    const extra = Object.keys(r).filter((key) => !allowed.has(key));
+    if (extra.length > 0) throw new Error(`reason contains unknown fields: ${extra.join(", ")}`);
+    options.reason = r as unknown as import("../core/competition.js").CompetitionReasonInput;
+  }
+  if (params.legacy === true) options.legacy = true;
+  return options;
+}
+
 export class ForkLightDaemon {
   private readonly store: StateStore;
   private readonly settingsService: SettingsService;
@@ -180,12 +245,7 @@ export class ForkLightDaemon {
     }
     await this.coordinator.recover();
     this.server = net.createServer((socket) => {
-      const lines = createInterface({ input: socket, crlfDelay: Infinity });
-      lines.on("line", (line) => {
-        void this.handleLine(line).then((response) => {
-          socket.write(`${JSON.stringify(response)}\n`);
-        });
-      });
+      this.attachConnection(socket);
     });
     await new Promise<void>((resolve, reject) => {
       this.server?.once("error", reject);
@@ -194,6 +254,65 @@ export class ForkLightDaemon {
     await chmod(this.socketPath, 0o600);
     const owned = await stat(this.socketPath);
     this.ownedSocket = { dev: owned.dev, ino: owned.ino };
+  }
+
+  /**
+   * Per-connection transport boundary.
+   *
+   * Peer disconnect, reset, EPIPE, and writes to a destroyed stream are
+   * connection-local delivery loss only. An already-started handleLine/dispatch
+   * continues exactly once; transport loss never retries, cancels, or rewrites
+   * operation outcomes.
+   */
+  private attachConnection(socket: net.Socket): void {
+    let deliverable = true;
+    let cleanedUp = false;
+    const lines = createInterface({ input: socket, crlfDelay: Infinity });
+
+    const markUndeliverable = (): void => {
+      deliverable = false;
+    };
+
+    const cleanup = (): void => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      deliverable = false;
+      lines.close();
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+    };
+
+    // Install socket and readline error handling before any request processing.
+    // An empty socket listener alone is not enough: readline can also emit.
+    socket.on("error", () => {
+      markUndeliverable();
+      cleanup();
+    });
+    lines.on("error", () => {
+      markUndeliverable();
+      cleanup();
+    });
+    socket.on("close", cleanup);
+
+    const writeResponse = (response: DaemonResponse): void => {
+      if (!deliverable || socket.destroyed || !socket.writable) return;
+      try {
+        socket.write(`${JSON.stringify(response)}\n`, (error) => {
+          if (error) {
+            markUndeliverable();
+          }
+        });
+      } catch {
+        // Synchronous write failure is still connection-local delivery loss.
+        markUndeliverable();
+      }
+    };
+
+    lines.on("line", (line) => {
+      // Dispatch runs exactly once even if the peer disappears mid-flight.
+      void this.handleLine(line).then(writeResponse);
+    });
   }
 
   private probeSocketEndpoint(): Promise<boolean> {
@@ -414,13 +533,22 @@ export class ForkLightDaemon {
           typeof params.limit === "number" ? params.limit : undefined,
         );
       case "statistics": {
+        const detailRaw = params.detail;
+        let detail: StatisticsDetail = "compact";
+        if (detailRaw !== undefined) {
+          if (detailRaw !== "compact" && detailRaw !== "full") {
+            throw new Error('statistics detail must be "compact" or "full"');
+          }
+          detail = detailRaw;
+        }
         const filter: StatisticsFilter = {
           ...(typeof params.providerName === "string" ? { providerName: params.providerName } : {}),
           ...(typeof params.modelName === "string" ? { modelName: params.modelName } : {}),
           ...(typeof params.since === "string" ? { since: params.since } : {}),
           ...(typeof params.until === "string" ? { until: params.until } : {}),
         };
-        return this.coordinator.statistics(filter);
+        const full = this.coordinator.statistics(filter);
+        return detail === "full" ? full : projectCompactProviderModelSummaries(full);
       }
       case "settings_get":
         return this.coordinator.getSettings();
@@ -480,16 +608,66 @@ export class ForkLightDaemon {
       case "competition_submit_file":
         return this.coordinator.submitCompetitionFile(
           requiredString(params.taskFile, "taskFile"),
-          requireArray(params.candidates, "candidates") as import("../core/competition.js").CandidateOverride[],
+          parseCompetitionCandidates(params.candidates),
+          parseCompetitionOptions(params),
         );
       case "competition_submit":
         return this.coordinator.submitInlineCompetition(
           params.task,
           typeof params.baseDirectory === "string" ? params.baseDirectory : process.cwd(),
-          requireArray(params.candidates, "candidates") as import("../core/competition.js").CandidateOverride[],
+          parseCompetitionCandidates(params.candidates),
+          parseCompetitionOptions(params),
         );
       case "competition_status":
         return this.coordinator.competitionStatus(requiredString(params.competitionId, "competitionId"));
+      case "competition_main_decision": {
+        if (params.confirm !== true) {
+          throw new Error("competition_main_decision requires explicit confirm: true");
+        }
+        const decision = requiredString(params.decision, "decision");
+        if (decision !== "accept" && decision !== "revise" && decision !== "reject") {
+          throw new Error("decision must be accept, revise, or reject");
+        }
+        const reason = requiredString(params.reason, "reason").trim();
+        if (reason.length === 0 || reason.length > 1000) {
+          throw new Error("reason must be 1-1000 characters");
+        }
+        return this.coordinator.competitionMainDecision(
+          requiredString(params.competitionId, "competitionId"),
+          requiredString(params.candidateId, "candidateId"),
+          decision as "accept" | "revise" | "reject",
+          reason,
+          true,
+        );
+      }
+      case "competition_retained_partial": {
+        if (params.confirm !== true) {
+          throw new Error("competition_retained_partial requires explicit confirm: true");
+        }
+        return this.coordinator.competitionRetainedPartial(
+          requiredString(params.competitionId, "competitionId"),
+          requiredString(params.candidateId, "candidateId"),
+          params.reusablePaths,
+          params.remainingGaps,
+          true,
+        );
+      }
+      case "competition_handoff": {
+        if (params.confirm !== true) {
+          throw new Error("competition_handoff requires explicit confirm: true");
+        }
+        return this.coordinator.competitionHandoff({
+          competitionId: requiredString(params.competitionId, "competitionId"),
+          candidateId: requiredString(params.candidateId, "candidateId"),
+          candidateRevisionId: requiredString(params.candidateRevisionId, "candidateRevisionId"),
+          destinationWorkerProfileId: requiredString(
+            params.destinationWorkerProfileId,
+            "destinationWorkerProfileId",
+          ),
+          reason: requiredString(params.reason, "reason"),
+          confirm: true,
+        });
+      }
       case "competition_compare": {
         const override = typeof params.rankingWeights === "object" && params.rankingWeights !== null
           ? params.rankingWeights as import("../core/competition.js").RankingPolicyOverride
@@ -526,6 +704,9 @@ export class ForkLightDaemon {
         };
         return this.coordinator.economicsSummary(filter);
       }
+      case "routing_evidence_coverage":
+        // Read-only aggregate — no filter params, no Provider, no mutation.
+        return this.coordinator.routingEvidenceCoverage();
       case "direct_codex_capture":
         return this.coordinator.directCodexCapture(params.usage, params.metadata);
       case "direct_codex_guided_capture":
@@ -593,6 +774,90 @@ export class ForkLightDaemon {
         return this.coordinator.correctionEligibility(
           requiredString(params.taskId, "taskId"),
         );
+      case "review_graph_create": {
+        if (params.confirm !== true) {
+          throw new Error("review_graph_create requires explicit confirm: true");
+        }
+        const reason = requiredString(params.reason, "reason").trim();
+        if (reason.length < 1 || reason.length > 1000) {
+          throw new Error("reason must be 1-1000 characters");
+        }
+        const reviewerWorkerProfileIds = Array.isArray(params.reviewerWorkerProfileIds)
+          ? params.reviewerWorkerProfileIds
+          : undefined;
+        const reviewerWorkerProfileId = typeof params.reviewerWorkerProfileId === "string"
+          ? params.reviewerWorkerProfileId.trim()
+          : undefined;
+        if (
+          (reviewerWorkerProfileIds === undefined || reviewerWorkerProfileIds.length === 0)
+          && (reviewerWorkerProfileId === undefined || reviewerWorkerProfileId.length === 0)
+        ) {
+          throw new Error(
+            "reviewerWorkerProfileIds (1–3) or reviewerWorkerProfileId is required",
+          );
+        }
+        return this.coordinator.createReviewGraph({
+          taskId: requiredString(params.taskId, "taskId"),
+          ...(reviewerWorkerProfileIds === undefined
+            ? {}
+            : { reviewerWorkerProfileIds: reviewerWorkerProfileIds as string[] }),
+          ...(reviewerWorkerProfileId === undefined || reviewerWorkerProfileId.length === 0
+            ? {}
+            : { reviewerWorkerProfileId }),
+          reason,
+          confirm: true,
+        });
+      }
+      case "review_graph_status":
+        return this.coordinator.reviewGraphStatus(
+          requiredString(params.taskId, "taskId"),
+        );
+      case "goal_submit_file":
+        return this.coordinator.submitGoalFile(requiredString(params.goalFile, "goalFile"));
+      case "goal_status":
+        return this.coordinator.goalStatus(requiredString(params.goalId, "goalId"));
+      case "goal_list":
+        return this.coordinator.listGoals(
+          typeof params.limit === "number" ? params.limit : undefined,
+        );
+      case "goal_advance": {
+        if (params.confirm !== true) {
+          throw new Error("goal_advance requires explicit confirm: true");
+        }
+        return this.coordinator.advanceGoal(
+          requiredString(params.goalId, "goalId"),
+          true,
+        );
+      }
+      case "goal_stop": {
+        if (params.confirm !== true) {
+          throw new Error("goal_stop requires explicit confirm: true");
+        }
+        return this.coordinator.stopGoal(
+          requiredString(params.goalId, "goalId"),
+          true,
+        );
+      }
+      case "goal_task_handoff": {
+        if (params.confirm !== true) {
+          throw new Error("goal_task_handoff requires explicit confirm: true");
+        }
+        return this.coordinator.goalTaskHandoff({
+          taskId: requiredString(params.taskId, "taskId"),
+          candidateRevisionId: requiredString(
+            params.candidateRevisionId,
+            "candidateRevisionId",
+          ),
+          reusablePaths: params.reusablePaths,
+          remainingGaps: params.remainingGaps,
+          destinationWorkerProfileId: requiredString(
+            params.destinationWorkerProfileId,
+            "destinationWorkerProfileId",
+          ),
+          reason: requiredString(params.reason, "reason"),
+          confirm: true,
+        });
+      }
       case "model_routing": {
         const taskClass = requiredBoundedString(params.taskClass, "taskClass");
         const rawCandidates = requireArray(params.candidates, "candidates");
@@ -627,6 +892,22 @@ export class ForkLightDaemon {
         return this.coordinator.modelRouting(
           taskClass, candidates, taskFamily, competitionIntent, competitionTriggers,
         );
+      }
+      case "self_upgrade_evidence": {
+        // Read-only consecutive self-upgrade streak. Never starts Integration,
+        // never mutates state, never loads command streams.
+        const required = params.required === undefined
+          ? undefined
+          : (() => {
+              if (typeof params.required !== "number" || !Number.isSafeInteger(params.required)) {
+                throw new Error("required must be an integer from 1 to 20");
+              }
+              if (params.required < 1 || params.required > 20) {
+                throw new Error("required must be an integer from 1 to 20");
+              }
+              return params.required;
+            })();
+        return this.coordinator.selfUpgradeEvidence(required);
       }
       default:
         throw new Error(`Unknown daemon method: ${String(request.method)}`);

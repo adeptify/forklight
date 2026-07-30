@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "Relay Gmail production readiness final continuation",
+  "objective": "Complete the remaining truthful sync, exact preservation, readable onboarding, and setup documentation capabilities with Grok, finite correction/review authority, and no reopening of the two integrated foundations.",
+  "planFile": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-production-final-plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 3,
+    "maxReviewRounds": 1,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "honest-adapter-final", "gate": "integration" },
+    { "itemId": "failure-preservation-final", "gate": "integration" },
+    { "itemId": "onboarding-ui-final", "gate": "integration" },
+    { "itemId": "setup-docs-final", "gate": "integration" }
+  ]
+}

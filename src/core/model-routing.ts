@@ -26,6 +26,9 @@ export interface RoutingWeightSettings {
   verifiedBehavior: number;
   modelQualityFailure: number;
   correctionChurn: number;
+  /** Default 0.5 — prefers Workers that pass independent checks on Attempt one.
+   *  Omitted when comparable first-pass coverage is incomplete. */
+  firstPassSuccess: number;
   officialCost: number;
   duration: number;
   /** 0 by default — affects advice only after explicit opt-in and only when
@@ -81,6 +84,7 @@ export const DEFAULT_ROUTING_POLICY: RoutingPolicySettings = {
     verifiedBehavior: 1,
     modelQualityFailure: 0.5,
     correctionChurn: 0.2,
+    firstPassSuccess: 0.5,
     officialCost: 0,
     duration: 0,
     budgetReliability: 0,
@@ -92,6 +96,7 @@ export type RoutingFactorName =
   | "verifiedBehavior"
   | "modelQualityFailure"
   | "correctionChurn"
+  | "firstPassSuccess"
   | "officialCost"
   | "duration"
   | "budgetReliability";
@@ -101,6 +106,8 @@ export type RoutingFactorUnavailableReason =
   | "insufficient-relevant-samples"
   | "comparison-samples-incomplete"
   | "verified-behavior-coverage-incomplete"
+  | "first-pass-success-coverage-incomplete"
+  | "accepted-delivery-coverage-incomplete"
   | "official-cost-missing"
   | "official-cost-incomplete"
   | "official-cost-mixed-currency"
@@ -131,6 +138,23 @@ export type RoutingUncertaintyReason =
 // get the same type without importing from two places.
 export type { FrozenWorkerIdentity } from "./types.js";
 
+/** Compact per-candidate sample counts for explainability only.
+ *  Bound by candidate identity before sorting; never used for scoring. */
+export interface RoutingSampleCoverage {
+  /** Exact task-type finished Tasks for this candidate. */
+  exactTerminalCount: number;
+  /** Exact task-type usable (relevant) records for this candidate. */
+  exactRelevantCount: number;
+  /** Policy minimum before exact-type comparison is ready. */
+  exactMinRelevantSamples: number;
+  /** Broader-category finished Tasks when a task family was supplied. */
+  familyTerminalCount?: number;
+  /** Broader-category usable records when a task family was supplied. */
+  familyRelevantCount?: number;
+  /** Policy minimum before broader-category comparison is ready. */
+  familyMinRelevantSamples?: number;
+}
+
 export interface RoutingCandidateResult {
   provider: string;
   model: string;
@@ -141,6 +165,8 @@ export interface RoutingCandidateResult {
   /** Historical failure never permanently removes a candidate. */
   eligible: true;
   evidence: RoutingEvidence;
+  /** Identity-bound exact/family sample counts for truthful missing-evidence UI. */
+  sampleCoverage: RoutingSampleCoverage;
   factors: RoutingFactorResult[];
   totalScore: number;
   uncertainty: {
@@ -323,6 +349,67 @@ function behaviorPlan(weight: number, evidence: RoutingEvidence[], allSufficient
   };
 }
 
+/**
+ * Main/delivery-backed accepted final delivery. Higher accepted rate is better.
+ * Participates only when every candidate has enough comparable final-delivery
+ * samples (accepted + not-accepted). Machine success without Main/delivery
+ * evidence stays unavailable and never becomes a model score.
+ */
+function acceptedDeliveryPlan(
+  weight: number,
+  evidence: RoutingEvidence[],
+  allSufficient: boolean,
+  minRelevantSamples: number,
+): FactorPlan {
+  if (weight === 0) return disabledPlan("acceptedDelivery");
+  const complete = allSufficient && evidence.every(
+    (item) => item.acceptedDeliverySampleCount >= minRelevantSamples,
+  );
+  if (!complete) {
+    return {
+      name: "acceptedDelivery", weight, available: false,
+      reason: allSufficient
+        ? "accepted-delivery-coverage-incomplete"
+        : "comparison-samples-incomplete",
+      values: [], lowerIsBetter: false,
+    };
+  }
+  return {
+    name: "acceptedDelivery", weight, available: true,
+    values: evidence.map((item) => item.acceptedDeliveryRate),
+    lowerIsBetter: false,
+  };
+}
+
+/** First-pass verified success: higher Attempt-one pass rate is better.
+ *  Participates only when every candidate has enough comparable first-pass
+ *  samples. Missing or external outcomes never become synthetic zeros. */
+function firstPassSuccessPlan(
+  weight: number,
+  evidence: RoutingEvidence[],
+  allSufficient: boolean,
+  minRelevantSamples: number,
+): FactorPlan {
+  if (weight === 0) return disabledPlan("firstPassSuccess");
+  const complete = allSufficient && evidence.every(
+    (item) => item.firstPassVerifiedSampleCount >= minRelevantSamples,
+  );
+  if (!complete) {
+    return {
+      name: "firstPassSuccess", weight, available: false,
+      reason: allSufficient
+        ? "first-pass-success-coverage-incomplete"
+        : "comparison-samples-incomplete",
+      values: [], lowerIsBetter: false,
+    };
+  }
+  return {
+    name: "firstPassSuccess", weight, available: true,
+    values: evidence.map((item) => item.firstPassVerifiedSuccessRate),
+    lowerIsBetter: false,
+  };
+}
+
 /** Decide the budgetReliability factor for the candidate set.
  *  Higher completion-without-budget-exhaustion rate is better.
  *  Rejects the candidate set with stable reasons whenever evidence is not
@@ -426,10 +513,17 @@ function zeroEvidence(provider: string, model: string): RoutingEvidence {
     correctionChurn: 0,
     correctionChurnRate: 0,
     acceptedDeliveryCount: 0,
+    acceptedDeliverySampleCount: 0,
+    acceptedDeliveryNotAcceptedCount: 0,
+    acceptedDeliveryUnavailableCount: 0,
     acceptedDeliveryRate: 0,
     verifiedBehaviorSampleCount: 0,
     verifiedBehaviorCount: 0,
     verifiedBehaviorRate: 0,
+    firstPassVerifiedSampleCount: 0,
+    firstPassVerifiedSuccessCount: 0,
+    firstPassVerifiedSuccessRate: 0,
+    firstPassUnavailableCount: 0,
     officialCostAttemptCount: 0,
     officialCostQuotedAttemptCount: 0,
     officialCostUnavailableCount: 0,
@@ -574,20 +668,20 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     throw new Error("Routing advice requires at least two provider/model candidates");
   }
   const keys = candidateKeys(input.candidates);
-  const evidence = keys.map((key) =>
-    input.evidenceMap.get(key)
-      ?? zeroEvidence(
-        input.candidates.find((c) => `${c.provider}\0${c.model}` === key)?.provider ?? "unknown",
-        input.candidates.find((c) => `${c.provider}\0${c.model}` === key)?.model ?? "unknown",
-      ));
+  // Preserve the candidate's real provider/model on zero-history rows. Full
+  // Worker identity keys are four-part; never compare them to provider\0model.
+  const evidence = keys.map((key, index) => {
+    const candidate = input.candidates[index]!;
+    return input.evidenceMap.get(key)
+      ?? zeroEvidence(candidate.provider, candidate.model);
+  });
 
   const familyEvidence = input.familyEvidenceMap
-    ? keys.map((key) =>
-        input.familyEvidenceMap!.get(key)
-          ?? zeroEvidence(
-            input.candidates.find((c) => `${c.provider}\0${c.model}` === key)?.provider ?? "unknown",
-            input.candidates.find((c) => `${c.provider}\0${c.model}` === key)?.model ?? "unknown",
-          ))
+    ? keys.map((key, index) => {
+        const candidate = input.candidates[index]!;
+        return input.familyEvidenceMap!.get(key)
+          ?? zeroEvidence(candidate.provider, candidate.model);
+      })
     : undefined;
 
   const evidenceScope = resolveEvidenceScope(evidence, familyEvidence, input.policy);
@@ -599,9 +693,9 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
 
   const allSufficient = evidenceScope !== "none";
   const plans: FactorPlan[] = [
-    basePlan(
-      "acceptedDelivery", input.policy.weights.acceptedDelivery,
-      scoringEvidence.map((item) => item.acceptedDeliveryRate), allSufficient, false,
+    acceptedDeliveryPlan(
+      input.policy.weights.acceptedDelivery, scoringEvidence, allSufficient,
+      input.policy.minRelevantSamples,
     ),
     behaviorPlan(input.policy.weights.verifiedBehavior, scoringEvidence, allSufficient),
     basePlan(
@@ -611,6 +705,10 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     basePlan(
       "correctionChurn", input.policy.weights.correctionChurn,
       scoringEvidence.map((item) => item.correctionChurnRate), allSufficient, true,
+    ),
+    firstPassSuccessPlan(
+      input.policy.weights.firstPassSuccess, scoringEvidence, allSufficient,
+      input.policy.minRelevantSamples,
     ),
     costPlan(input.policy.weights.officialCost, scoringEvidence, allSufficient),
     durationPlan(input.policy.weights.duration, scoringEvidence, allSufficient),
@@ -631,6 +729,8 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     (sum, plan) => sum + (plan.available ? plan.weight : 0),
     0,
   );
+  // Snapshot coverage by the same identity index used for evidence lookup so
+  // later score/alphabetical sorting cannot reattach one model's counts to another.
   const results: RoutingCandidateResult[] = evidence.map((item, index) => {
     const factors = plans.map((plan) => factorResult(plan, index));
     const reasons: RoutingUncertaintyReason[] = [];
@@ -643,6 +743,19 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     if (activeWeight === 0) reasons.push("no-active-factors");
     const cost = factors.find((factor) => factor.factor === "officialCost")!;
     const candidate = input.candidates[index];
+    const familyItem = familyEvidence?.[index];
+    const sampleCoverage: RoutingSampleCoverage = {
+      exactTerminalCount: item.terminalTaskCount,
+      exactRelevantCount: item.relevantSampleCount,
+      exactMinRelevantSamples: input.policy.minRelevantSamples,
+      ...(familyItem === undefined
+        ? {}
+        : {
+            familyTerminalCount: familyItem.terminalTaskCount,
+            familyRelevantCount: familyItem.relevantSampleCount,
+            familyMinRelevantSamples: input.policy.familyMinRelevantSamples,
+          }),
+    };
     return {
       provider: item.provider,
       model: item.model,
@@ -650,6 +763,7 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
       ...(candidate?.effort !== undefined ? { effort: candidate.effort } : {}),
       eligible: true,
       evidence: item,
+      sampleCoverage,
       factors,
       totalScore: factors.reduce((sum, factor) => sum + factor.weightedScore, 0),
       uncertainty: {

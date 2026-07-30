@@ -1,0 +1,149 @@
+version: 2
+name: Scope self-upgrade streak to explicit ForkLight deliveries
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-self-upgrade-profile-scope
+taskFamily: forklight-self-upgrade
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    The authoritative M0 consecutive self-upgrade projection counts and breaks
+    only Integration results whose durable receipt explicitly identifies the
+    forklight-self-upgrade delivery profile. Integrations for Elsewhere, Relay,
+    or any other project are ignored: they neither add a success nor reset the
+    streak. A failed Integration with the exact self-upgrade identity still
+    stops the streak immediately.
+  presentation:
+    summary: 修正自升级进度口径：只看明确标记为 ForkLight 自升级的交付，普通项目合入不再把 3/3 错误清零。
+    language: zh-CN
+  context:
+    - ForkLight previously reached three consecutive proven four-stage self-upgrades. After ordinary Elsewhere Integration 7fdbec6b-d122-4bb4-b4b4-b9263146fd65 correctly applied with artifact/runtime not-applicable, `upgrade status --required 3` incorrectly returned 0/3 and named that ordinary operation as the break.
+    - src/core/self-upgrade-evidence.ts currently receives the newest Integration results across every Task from StateStore.listRecentIntegrationResults. It has no durable delivery-identity scope.
+    - Integration receipts already persist an immutable deliveryPlan. Explicit self-upgrades carry deliveryPlan.profileId=forklight-self-upgrade; ordinary Elsewhere deliveryPlan has no profile id.
+    - This is one bounded evidence-selection correction, not a new retry system or a reason to rerun any historical Worker. Preserve all current uncommitted work. Do not commit or push.
+  inScope:
+    - Add one canonical fixed self-upgrade delivery identity shared by the evidence service and durable selection path.
+    - Select newest-first Integration results by joining each result to its durable receipt and requiring the exact explicit delivery profile id before the pure streak calculator runs.
+    - Apply the result window to matching self-upgrade records, not to all-project records before filtering, so many ordinary Integrations cannot hide valid self-upgrade history.
+    - Preserve deterministic createdAt-desc/id-desc ordering and the existing maximum bounded window.
+    - >-
+      Treat missing, legacy, malformed, implicit/default, foreign, or lookalike
+      delivery identity as not a self-upgrade record: ignore it rather than
+      count it or break the streak.
+    - Keep exact-profile rejected, retained-failure, rolled-back, or insufficient four-stage evidence as the first real break; never skip a failed self-upgrade to find older successes.
+    - Keep public projection fields, privacy rules, read-only CLI/daemon/Hub behavior, required-count validation, and the four-stage qualification rule unchanged.
+    - >-
+      Add Store/Core/coordinator regressions using durable receipt+result
+      fixtures: three self-upgrade successes followed by newer ordinary applied
+      records stays 3/3; ordinary records between self-upgrade records are
+      ignored; exact-profile failure breaks; lookalike and missing identity do
+      not count; ordering/window stay bounded.
+    - Add a live-state regression shaped like the current history so `upgrade status` can return the historical 3/3 again after this self-upgrade completes.
+  outOfScope:
+    - Rewriting historical Integration records, changing Elsewhere, changing stage qualification, inferring identity from project path or command text, treating any four-stage delivery as self-upgrade, adding a user-selectable profile argument, retries, automatic correction, UI redesign, Provider/routing changes, commit, or push.
+  executionSteps:
+    - Trace Integration result and receipt persistence, recent-history ordering, coordinator evidence projection, and existing streak tests.
+    - Implement one bounded durable selector for the exact self-upgrade delivery profile, with safe handling for legacy or malformed receipts.
+    - Keep computeSelfUpgradeEvidence pure over already-scoped results and make the coordinator use only the scoped selector.
+    - Add the cross-project contamination regressions and run focused/full verification once.
+  deliverables:
+    - Exact-profile durable self-upgrade result selector and coordinator wiring.
+    - Regression evidence proving ordinary project Integrations cannot add to or reset M0 streaks.
+  modules:
+    - name: Durable delivery identity selector
+      responsibility: Return a bounded newest-first list of Integration results whose own receipt explicitly names the fixed self-upgrade profile.
+      consumes:
+        - Integration result rows, referenced receipt rows, exact profile constant, and bounded limit.
+      produces:
+        - Detached self-upgrade-only result records in deterministic order.
+      boundaries:
+        - No project-path inference, command inspection, result rewrite, unbounded scan, raw error projection, or foreign profile inclusion.
+    - name: Consecutive evidence service
+      responsibility: Feed only scoped records into the existing pure four-stage streak calculator.
+      consumes:
+        - Scoped result list and validated required count.
+      produces:
+        - Existing privacy-safe 0..N projection with a break only from a real self-upgrade record.
+      boundaries:
+        - No Integration start, daemon start, history mutation, automatic M0 completion, or UI-side recomputation.
+    - name: Cross-project regression evidence
+      responsibility: Prove ordinary application Integrations are neutral while exact-profile failures still stop the sequence.
+      consumes:
+        - Durable Task/receipt/result fixtures with mixed profiles and statuses.
+      produces:
+        - Deterministic Store/Core/daemon/CLI tests and full-suite evidence.
+      boundaries:
+        - No real Provider call, Worker run, history repair, private path, or timing assumption.
+  callChain:
+    - An Integration result references its immutable receipt.
+    - The Store selector joins result to receipt and keeps only exact explicit forklight-self-upgrade delivery identities before applying the bounded result limit.
+    - Coordinator passes that already-scoped newest-first list to computeSelfUpgradeEvidence.
+    - CLI and Hub continue rendering the same canonical projection; ordinary Elsewhere/Relay operations are invisible to this streak.
+  scenarios:
+    - name: Ordinary app delivery after ready streak
+      given: Three newest matching self-upgrade deliveries are complete successes, while an even newer Elsewhere Integration is applied with artifact/runtime not-applicable.
+      when: Main requests upgrade status for required=3.
+      then: The ordinary record is ignored and projection remains ready 3/3 with no break operation.
+    - name: Ordinary delivery between self-upgrades
+      given: Matching self-upgrade success, ordinary app failure, matching self-upgrade success, and matching self-upgrade failure are interleaved by time.
+      when: The selector and calculator run.
+      then: The ordinary failure is neutral, but the exact-profile self-upgrade failure is the first break.
+    - name: Legacy or lookalike identity
+      given: A result has no receipt plan, a default/implicit plan, malformed plan evidence, or profile id forklight-self-upgrade-copy.
+      when: evidence is selected.
+      then: It is ignored without leaking data, throwing into the public projection, counting, or breaking the streak.
+  risks:
+    - Filtering after a global LIMIT would let many ordinary Integrations hide older valid proofs; the database selection must scope before limiting.
+    - Inferring from four passed stages would let unrelated deployments inflate M0; exact durable delivery identity is required.
+    - Ignoring a true self-upgrade failure would make the streak dishonest; exact-profile terminal failures must still be preserved in order.
+  changeBudget:
+    maxFiles: 6
+    maxDiffLines: 900
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 6
+  fileLimitMode: warn
+  changedLineLimit: 900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/self-upgrade-evidence.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/core/types.ts
+    - tests/integration-operation.test.ts
+    - tests/daemon-cli.test.ts
+acceptance:
+  criteria:
+    - Self-upgrade evidence is selected by exact durable receipt delivery profile before the bounded window and ordinary project Integrations are neutral.
+    - Exact-profile failures still stop the streak; legacy, missing, malformed, implicit, foreign, and lookalike identities are ignored safely.
+    - Public schema, privacy, read-only behavior, stage qualification, and deterministic order remain unchanged.
+    - Focused tests, complete suite/build, Hub syntax, and diff hygiene remain green.
+  commands:
+    - node --test --import tsx tests/integration-operation.test.ts tests/daemon-cli.test.ts tests/daemon.test.ts tests/hub-settings.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

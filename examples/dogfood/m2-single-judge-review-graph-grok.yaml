@@ -1,0 +1,208 @@
+version: 2
+name: Add one read-only judge Worker to an exact Candidate Review Graph
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-review-graph-single-judge
+taskFamily: forklight-main-adjudication
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    From Task Detail or CLI, Main can explicitly assign one saved Worker as a
+    read-only judge for the current immutable Candidate Revision. ForkLight
+    gives that judge a bounded review packet, runs it as an ordinary persistent
+    Worker Task, strictly parses a structured review result, and shows the
+    input, judge identity, progress, findings, proposed disposition, and next
+    action. The judge cannot edit the Candidate, launch work, accept, correct,
+    integrate, commit, or push; Main remains the final authority and a review
+    never creates an automatic loop.
+  presentation:
+    summary: Main 可以为当前候选版本指派一个只读裁判；裁判只提出有证据的问题和建议，最终决定仍由 Main 作出。
+    language: zh-CN
+  context:
+    - CandidateRevision already freezes the exact Attempt, verification sequence, patch digest, affected paths, and a private patch artifact; Main accept/revise/reject now binds exact modern revision evidence.
+    - Standard Worker Tasks already persist Attempt resultText, survive daemon restart, support allowEdits false, and independently verify read-only Tasks without requiring a business Diff.
+    - The current product has no durable link between a Candidate Revision and a reviewer Task, no strict reviewer-result schema, no reviewer-specific Integration prohibition, and no Hub action or story explaining an independent review.
+    - Review output is evidence for Main, not a vote. A machine-green Candidate may still receive revise/reject findings, and Main may disagree with the judge if the Main reason is explicit.
+    - Model routing has no comparable exact-class or family samples. Main explicitly selected local Grok 4.5 for implementation because the owner requested Grok as the default on 2026-07-30 and 2026-07-31. Competition intent is none.
+    - Preserve every current uncommitted source, test, task-contract, and progress-document change. Do not commit or push.
+  inScope:
+    - Add versioned ReviewGraph and ReviewAssignment records designed for multiple assignments later, while this slice admits exactly one explicit reviewer Worker Profile and one round.
+    - Create the graph only for the latest valid Candidate Revision that still matches the retained Candidate Diff and its exact Task, Attempt, and verification evidence.
+    - Build one durable, private review packet containing the exact immutable patch, bounded original Contract and verification facts, safe affected paths, required output schema, and explicit read-only/stop rules; never include credentials, raw Worker logs, Main private prompts, Keychain data, or original source paths.
+    - Resolve the explicit saved reviewer Worker Profile through the same model/runtime/policy authority used by normal Tasks, freeze its effective policy, register a linked read-only reviewer Task, and queue it through the ordinary persistent daemon path.
+    - Require reviewer `allowEdits=false`, no Worker command authority, no delivery plan, no automatic retry/adaptation/correction, and one base Attempt. The review packet may be inspected but the original Candidate workspace and source project remain unreachable and unchanged.
+    - "Strictly parse exactly one bounded JSON result from the terminal reviewer resultText: schema version, reviewed revision id, proposed accept/revise/reject disposition, short summary, and zero to eight findings with severity, relative-path evidence, affected behavior, and recommendation."
+    - Treat missing, malformed, stale-revision, wrong-identity, oversized, credential-shaped, absolute-path, or extra-field output as a failed review result without changing the Candidate Task or starting another Worker.
+    - Reconcile terminal reviewer Tasks after normal completion and daemon restart; creation and completion must be idempotent, and the same reviewer identity cannot review the same revision twice in this one-round slice.
+    - Make every reviewer Task permanently non-integratable. For the Candidate Task, an explicitly created pending review blocks Integration; after terminal review evidence, require a fresh Main Review recorded later than that evidence so older acceptance cannot bypass the judge.
+    - Add CLI, daemon, MCP, Hub backend, and Task Detail controls. The UI must explain in plain English and Chinese what was reviewed, who reviewed it, whether the review output was usable, the findings, the judge suggestion, and that Main decides.
+    - Add executable core, persistence, restart, Integration, protocol, CLI/MCP, Hub projection, privacy, and UI regressions for the complete create-run-parse-Main-decision chain.
+  outOfScope:
+    - Two or three simultaneous judges, majority voting, score averaging, automatic aggregation, reviewer competition, reviewer correction, a second review round, no-new-evidence cycling, or durable Goal execution.
+    - Automatically selecting a reviewer, forcing reviewer identity to differ from the implementation Worker, or claiming independence when the same Profile is explicitly selected. The UI must show the actual identities and leave selection to Main in this slice.
+    - Letting reviewer findings mutate files, Task status, Main Review, Candidate Revision, correction authority, acceptance commands, routing history, or Integration results.
+    - Exposing the private patch artifact path, review-packet path, raw patch, raw reviewer resultText, absolute paths, command output, prompts, credentials, or source snippets in Hub/MCP safe projections.
+    - Store migrations that rewrite historical Tasks, Provider/runtime adapter changes, automatic Main decisions, automatic Integration, commit, push, or claims of Token/cost savings without paired evidence.
+  executionSteps:
+    - Trace CandidateRevision validation/private artifact authority, normal Task registration/preparation/queue/recovery, Attempt resultText persistence, Main Review ordering, Integration preflight, daemon/MCP routes, and Task Detail journey before editing.
+    - Define strict versioned graph, assignment, review-result, finding, status, and privacy-safe projection types plus durable Store CRUD and indexes.
+    - Implement one canonical create/reconcile service that validates exact revision freshness, builds the bounded packet, resolves the saved reviewer Profile, creates one read-only Task, and parses its terminal output idempotently.
+    - Add reviewer-Task Integration rejection and Candidate Integration freshness ordering without making judge disposition an automatic decision.
+    - Wire daemon, CLI, MCP, Hub mutation/read projections, and an explanation-first Task Detail card with explicit confirmation.
+    - Prove a real temporary end-to-end chain, restart reconciliation, malformed output, stale revision, duplicate assignment, reviewer edit attempt, reviewer Integration rejection, old-Main-accept invalidation, fresh Main override, and privacy boundaries.
+    - Run the focused suite once and the complete suite/build/syntax/diff checks once. Stop after one Candidate and return unresolved semantic gaps to Main rather than broadening or looping.
+  deliverables:
+    - Durable exact-revision Review Graph with one explicitly selected read-only judge Task.
+    - Strict structured judge-result validation and idempotent completion/restart reconciliation.
+    - Main/Integration ordering that consumes judge evidence without surrendering Main authority.
+    - Bilingual explanation-first Task Detail and safe CLI/MCP control surfaces.
+  modules:
+    - name: Review Graph core and persistence
+      responsibility: Bind one reviewer Task and one structured result to one exact immutable Candidate Revision.
+      consumes:
+        - Candidate Task, latest revision event and private artifact, exact Attempt/verification, reviewer Profile id, reason, confirmation, and frozen policy.
+      produces:
+        - Durable graph, assignment, private review packet, reviewer Task link, terminal result or typed failure, and safe graph projection.
+      boundaries:
+        - No Candidate mutation, Main decision, correction, retry, Integration, raw-log exposure, or inferred reviewer identity.
+    - name: Persistent reviewer execution and reconciliation
+      responsibility: Reuse the ordinary Worker Task lifecycle for one read-only judge and turn terminal resultText into validated evidence exactly once.
+      consumes:
+        - Read-only reviewer Task status, exact saved identity, Attempt resultText, packet schema, and restart state.
+      produces:
+        - Completed or failed assignment and graph state plus candidate-linked terminal evidence.
+      boundaries:
+        - No edits, delivery plan, extra Attempt, adaptation, second round, automatic replacement reviewer, or automatic Main action.
+    - name: Main and user decision surfaces
+      responsibility: Let Main start the review and let users understand input, process, output, findings, and next action before final handling.
+      consumes:
+        - Safe graph projection, saved Worker Profiles, Main Review event ordering, and Integration eligibility.
+      produces:
+        - CLI/MCP operations, Hub action/card, bilingual explanations, explicit blocking/fresh-review behavior, and regression evidence.
+      boundaries:
+        - No raw patch/result/log/path/credential content, automatic model choice, vote language, or claim that judge output equals acceptance.
+  callChain:
+    - A Worker Candidate reaches independent verification and an immutable Candidate Revision that still matches the retained Diff.
+    - Main explicitly selects one saved Worker Profile and confirms a judge review for that exact revision.
+    - ForkLight freezes a private bounded review packet, registers a linked allowEdits=false reviewer Task, and queues it through the ordinary daemon.
+    - The judge reads the packet and Candidate evidence, returns exactly one structured JSON result, and cannot modify or integrate the Candidate.
+    - ForkLight validates and persists findings or a typed invalid-output failure, including after restart, without starting another Worker.
+    - Task Detail shows what entered review, who reviewed it, what was found, the proposed disposition, and that Main decides.
+    - Main records a fresh accept/revise/reject after the terminal review evidence; only a fresh exact accept may make the Candidate eligible for explicit Integration.
+  scenarios:
+    - name: One independent review reaches Main
+      given: The latest Candidate Revision is current and one saved reviewer Profile is launchable.
+      when: Main confirms review and the reviewer returns valid bounded JSON.
+      then: One read-only reviewer Task completes, findings are stored against the exact revision, no Candidate files change, and Main sees one suggested disposition without automatic action.
+    - name: Reviewer output is unusable
+      given: The reviewer returns prose, extra keys, a wrong revision id, unsafe evidence, oversized text, or credential-shaped content.
+      when: The reviewer Task reaches a terminal state.
+      then: The assignment records a typed content-free failure, the Candidate stays unchanged, nothing retries, and Main may decide or explicitly start future work.
+    - name: Review invalidates an older acceptance
+      given: Main accepted Revision A before explicitly starting its judge review.
+      when: The linked review later becomes terminal.
+      then: Candidate Integration rejects the stale acceptance until Main records a fresh exact decision after the review; judge disposition does not decide for Main.
+    - name: Reviewer Task cannot be delivered
+      given: A reviewer Task passed its read-only checks.
+      when: Any Integration preflight is requested for that reviewer Task.
+      then: It rejects with a stable reason because reviewer evidence is not product code.
+    - name: Restart and duplicate safety
+      given: The daemon stops while the reviewer Task or graph is pending, or the same reviewer/revision is submitted twice.
+      when: The daemon recovers or Main repeats the request.
+      then: Existing work resumes/reconciles once, no duplicate reviewer Task is created, and no second round starts.
+    - name: Candidate changed before review
+      given: The latest recorded revision no longer matches the retained Candidate Diff or exact verification evidence.
+      when: Main requests a review.
+      then: ForkLight rejects before packet creation, Task registration, or Worker launch and tells Main to produce a fresh revision.
+  risks:
+    - Treating ordinary unstructured resultText as authoritative findings could fabricate quality evidence, so exact JSON schema and revision identity must fail closed.
+    - A reviewer Task is still a real Worker and can attempt edits; allowEdits=false, isolated packet input, no original paths, zero-change verification, and Integration rejection are all required defense layers.
+    - If old Main accept remains valid after a later review, findings can be silently bypassed; explicit review creation/terminal evidence must require a newer Main decision while preserving Main override authority.
+    - Broad multi-reviewer policy, voting, and Goal loops would obscure the first user path and inflate Token usage; preserve plural-ready records but enforce one assignment and one round here.
+    - Grok may overbuild the schema; one Attempt, one bounded correction, explicit focus paths, warning-only size guidance, full acceptance, and Main semantic review limit the risk.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 3200
+
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 20
+  fileLimitMode: warn
+  changedLineLimit: 3200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/candidate-revision.ts
+    - src/core/main-review.ts
+    - src/core/integration.ts
+    - src/core/runner.ts
+    - src/core/types.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/candidate-revision.test.ts
+    - tests/main-review.test.ts
+    - tests/integration.test.ts
+    - tests/daemon.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Main can explicitly select one saved Worker Profile to review the current exact Candidate Revision, and one linked read-only reviewer Task persists through the normal daemon lifecycle and restart.
+    - The reviewer receives a bounded private packet with exact patch/contract/verification evidence but no credentials, raw logs, Main private prompt, Keychain data, or original source paths.
+    - Exactly one strict structured result is accepted; malformed, unsafe, stale, mismatched, duplicate, or oversized output fails closed without Candidate mutation or another Worker.
+    - Reviewer Tasks cannot edit the Candidate, launch follow-up work, become correction inputs, or pass Integration preflight; judge results never create Main decisions automatically.
+    - An explicit pending or terminal review prevents an older Main accept from authorizing Candidate Integration; a fresh exact Main decision after terminal review restores Main's final authority.
+    - CLI, MCP, and Hub support the same explicit create/status path, and Task Detail explains review input, actual reviewer identity, progress, result/findings, failure, and next action in plain English and Chinese.
+    - Records and projections are plural-ready for future multiple judges but this slice creates one assignment, one round, no voting, no retry, and no automatic loop.
+    - The complete existing repository remains green and no commit or push occurs.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/review-graph.test.ts tests/integration.test.ts tests/daemon.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

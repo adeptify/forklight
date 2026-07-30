@@ -14,6 +14,9 @@ import {
   type PreparationObservation,
 } from "../src/workspace/copy.js";
 import {
+  copyForVerification,
+} from "../src/core/integration-verification-copy.js";
+import {
   parseAffectedPathsFromWorkspaceDiff,
   writeWorkspacePatchReport,
 } from "../src/workspace/patch.js";
@@ -110,14 +113,27 @@ test("isolates Worker changes and produces a diff", async () => {
   taskSpec.workspace.generatedPaths = ["dist/**"];
   await prepareWorkspace(taskSpec, paths);
 
-  assert.equal(await readlink(path.join(paths.workspace, "node_modules")), path.join(source, "node_modules"));
-  assert.equal(await readlink(path.join(paths.baseline, "node_modules")), path.join(source, "node_modules"));
+  // Workspace gets a real local dependency mirror; baseline stays dependency-free.
+  const workspaceModules = await lstat(path.join(paths.workspace, "node_modules"));
+  assert.equal(workspaceModules.isDirectory(), true);
+  assert.equal(workspaceModules.isSymbolicLink(), false);
+  await assert.rejects(
+    () => lstat(path.join(paths.baseline, "node_modules")),
+    /ENOENT/,
+  );
+  // Local mirror is not an external link to the source project.
+  const workspaceReal = await realpath(path.join(paths.workspace, "node_modules"));
+  const sourceReal = await realpath(path.join(source, "node_modules"));
+  assert.notEqual(workspaceReal, sourceReal);
+  assert.ok(workspaceReal.startsWith(await realpath(paths.workspace)));
+
   const workspaceContext = await readFile(
     path.join(paths.workspace, ".forklight", "workspace-context.md"),
     "utf8",
   );
   assert.match(workspaceContext, /value\.txt/);
   assert.match(workspaceContext, /Use Read for files/);
+  assert.match(workspaceContext, /Verifier-only dependency mirrors/);
 
   await writeFile(path.join(paths.workspace, "value.txt"), "after\n");
   await mkdir(path.join(paths.workspace, "dist"));
@@ -193,7 +209,7 @@ test("source compatibility hard-fails when an affected path changes in source", 
   assert.deepEqual(assessment.conflictingPaths, ["value.txt"]);
 });
 
-test("reuses a dependency directory that is already linked by a parent workspace", async () => {
+test("materializes content when source node_modules is a parent-workspace link", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "forklight-nested-workspace-"));
   const dependencies = path.join(root, "dependencies");
   const source = path.join(root, "source");
@@ -205,11 +221,22 @@ test("reuses a dependency directory that is already linked by a parent workspace
 
   const paths = taskPaths(path.join(root, "state"), "nested-task");
   const manifest = await prepareWorkspace(spec(source), paths);
-  const resolvedDependencies = await realpath(dependencies);
 
   assert.deepEqual(manifest.linkedDependencies, ["node_modules"]);
-  assert.equal(await readlink(path.join(paths.workspace, "node_modules")), resolvedDependencies);
-  assert.equal(await readlink(path.join(paths.baseline, "node_modules")), resolvedDependencies);
+  const workspaceModules = await lstat(path.join(paths.workspace, "node_modules"));
+  assert.equal(workspaceModules.isDirectory(), true);
+  assert.equal(workspaceModules.isSymbolicLink(), false);
+  // Content is mirrored locally; it is not an external symlink to the parent deps.
+  assert.equal(
+    await readFile(path.join(paths.workspace, "node_modules", "example", "index.js"), "utf8"),
+    "export default true;\n",
+  );
+  const workspaceReal = await realpath(path.join(paths.workspace, "node_modules"));
+  assert.notEqual(workspaceReal, await realpath(dependencies));
+  await assert.rejects(
+    () => lstat(path.join(paths.baseline, "node_modules")),
+    /ENOENT/,
+  );
 });
 
 test("bounded workspace context preserves totals and focus guidance", async () => {
@@ -618,7 +645,7 @@ test("prepareWorkspace awaits an async observer and fails closed on observer err
   );
 });
 
-test("prepareWorkspace dependency-link count reflects actual linked directories", async () => {
+test("prepareWorkspace dependency-link count reflects actual materialized directories", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "forklight-prep-dep-"));
   const source = path.join(root, "source");
   await mkdir(path.join(source, "node_modules", "example"), { recursive: true });
@@ -637,10 +664,455 @@ test("prepareWorkspace dependency-link count reflects actual linked directories"
   );
   assert.equal(linkComplete?.count, 1);
   assert.equal(linkComplete?.countKind, "dependencies");
-  // The same link lives in both baseline and workspace; the manifest
-  // count is unchanged from the pre-instrumentation contract.
-  assert.equal(await readlink(path.join(paths.workspace, "node_modules")), path.join(source, "node_modules"));
-  assert.equal(await readlink(path.join(paths.baseline, "node_modules")), path.join(source, "node_modules"));
+  // Workspace holds a local mirror; baseline remains dependency-free.
+  const workspaceModules = await lstat(path.join(paths.workspace, "node_modules"));
+  assert.equal(workspaceModules.isDirectory(), true);
+  assert.equal(workspaceModules.isSymbolicLink(), false);
+  await assert.rejects(
+    () => lstat(path.join(paths.baseline, "node_modules")),
+    /ENOENT/,
+  );
+});
+
+test("workspace dependency mirror is local and source dependencies stay immutable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-dep-immutable-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "node_modules", "example"), { recursive: true });
+  const original = "export const version = 1;\n";
+  await writeFile(path.join(source, "node_modules", "example", "index.js"), original);
+  await writeFile(path.join(source, "value.txt"), "business\n");
+  const paths = taskPaths(path.join(root, "state"), "dep-immutable");
+  const taskSpec = spec(source);
+  await prepareWorkspace(taskSpec, paths);
+
+  const depFile = path.join(paths.workspace, "node_modules", "example", "index.js");
+  await writeFile(depFile, "export const version = 999;\n");
+  assert.equal(
+    await readFile(path.join(source, "node_modules", "example", "index.js"), "utf8"),
+    original,
+    "editing the workspace mirror must not mutate source dependencies",
+  );
+
+  // Dependency edits never enter the Candidate business/integration diff.
+  const report = await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+  const diff = await readFile(paths.diff, "utf8");
+  assert.doesNotMatch(diff, /node_modules/);
+  assert.doesNotMatch(diff, /version = 999/);
+  assert.equal(report.business.filesChanged, 0);
+  assert.equal(report.integration.filesChanged, 0);
+});
+
+test("materialization preserves safe relative project-contained dependency links", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-dep-safe-link-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "node_modules", "pkg"), { recursive: true });
+  await writeFile(path.join(source, "node_modules", "pkg", "index.js"), "export default 1;\n");
+  // Classic .bin-style relative link that stays inside the dependency tree.
+  await symlink(
+    path.join("pkg", "index.js"),
+    path.join(source, "node_modules", "alias.js"),
+  );
+  await writeFile(path.join(source, "value.txt"), "ok\n");
+  const paths = taskPaths(path.join(root, "state"), "dep-safe-link");
+  await prepareWorkspace(spec(source), paths);
+
+  const linkPath = path.join(paths.workspace, "node_modules", "alias.js");
+  const linkMeta = await lstat(linkPath);
+  assert.equal(linkMeta.isSymbolicLink(), true);
+  const linkText = await readlink(linkPath);
+  assert.equal(path.isAbsolute(linkText), false);
+  assert.equal(
+    await readFile(linkPath, "utf8"),
+    "export default 1;\n",
+  );
+  // Resolved target stays inside the isolated workspace project.
+  const resolved = await realpath(linkPath);
+  assert.ok(resolved.startsWith(await realpath(paths.workspace)));
+});
+
+test("materialization fails closed on dependency links that escape the project", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-dep-escape-"));
+  const source = path.join(root, "source");
+  const outside = path.join(root, "outside-secret");
+  await mkdir(path.join(source, "node_modules"), { recursive: true });
+  await writeFile(outside, "secret\n");
+  await symlink(outside, path.join(source, "node_modules", "escape"));
+  await writeFile(path.join(source, "value.txt"), "ok\n");
+  const paths = taskPaths(path.join(root, "state"), "dep-escape");
+
+  await assert.rejects(
+    () => prepareWorkspace(spec(source), paths),
+    /dependency materialization rejected: dependency link escapes the project/,
+  );
+  // Fail closed: no partial command-ready mirror left behind.
+  await assert.rejects(
+    () => lstat(path.join(paths.workspace, "node_modules")),
+    /ENOENT/,
+  );
+});
+
+test("copyForVerification materializes a local node_modules mirror", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-verify-copy-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "node_modules", "example"), { recursive: true });
+  await writeFile(path.join(source, "node_modules", "example", "index.js"), "export default true;\n");
+  await writeFile(path.join(source, "app.js"), "console.log(1);\n");
+
+  const verifyEnv = await copyForVerification(source, []);
+  try {
+    assert.notEqual(verifyEnv.projectCwd, verifyEnv.cleanupRoot);
+    assert.equal(path.dirname(verifyEnv.projectCwd), verifyEnv.cleanupRoot);
+    const modules = await lstat(path.join(verifyEnv.projectCwd, "node_modules"));
+    assert.equal(modules.isDirectory(), true);
+    assert.equal(modules.isSymbolicLink(), false);
+    assert.equal(
+      await readFile(path.join(verifyEnv.projectCwd, "node_modules", "example", "index.js"), "utf8"),
+      "export default true;\n",
+    );
+    const verifyReal = await realpath(path.join(verifyEnv.projectCwd, "node_modules"));
+    const sourceReal = await realpath(path.join(source, "node_modules"));
+    assert.notEqual(verifyReal, sourceReal);
+  } finally {
+    await rm(verifyEnv.cleanupRoot, { recursive: true, force: true });
+  }
+});
+
+// --- Declared local package dependencies (file:/link: relative) ---
+
+const ELSEWHERE_RELATIVE = "../adeptify/client-core/sdk";
+
+async function writeElsewhereShapedFixture(root: string): Promise<{
+  app: string;
+  sdk: string;
+  sdkIndex: string;
+  originalSdkBytes: string;
+}> {
+  const app = path.join(root, "app");
+  const sdk = path.join(root, "adeptify", "client-core", "sdk");
+  await mkdir(app, { recursive: true });
+  await mkdir(sdk, { recursive: true });
+  const originalSdkBytes = "export const sdkVersion = 1;\n";
+  await writeFile(path.join(sdk, "package.json"), JSON.stringify({ name: "@adeptify/client-core", version: "1.0.0" }));
+  await writeFile(path.join(sdk, "index.js"), originalSdkBytes);
+  await writeFile(
+    path.join(app, "package.json"),
+    `${JSON.stringify({
+      name: "elsewhere-app",
+      version: "1.0.0",
+      dependencies: {
+        "@adeptify/client-core": `file:${ELSEWHERE_RELATIVE}`,
+      },
+      // Duplicate declaration across maps must dedupe deterministically.
+      devDependencies: {
+        "@adeptify/client-core": `file:${ELSEWHERE_RELATIVE}`,
+      },
+    }, null, 2)}\n`,
+  );
+  await writeFile(path.join(app, "value.txt"), "business\n");
+  return { app, sdk, sdkIndex: path.join(sdk, "index.js"), originalSdkBytes };
+}
+
+test("prepareWorkspace mirrors Elsewhere-shaped file: sibling SDK without Candidate pollution", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-local-pkg-prep-"));
+  const { app, sdkIndex, originalSdkBytes } = await writeElsewhereShapedFixture(root);
+  const paths = taskPaths(path.join(root, "state"), "local-pkg-prep");
+  const taskSpec = spec(app);
+
+  const manifest = await prepareWorkspace(taskSpec, paths);
+
+  assert.ok(manifest.linkedDependencies.includes(ELSEWHERE_RELATIVE));
+  const mirrored = path.join(paths.root, "adeptify", "client-core", "sdk");
+  assert.equal((await lstat(mirrored)).isDirectory(), true);
+  assert.equal(await readFile(path.join(mirrored, "index.js"), "utf8"), originalSdkBytes);
+  // Relative resolution from workspace matches the declared relationship.
+  const fromWorkspace = path.resolve(paths.workspace, ELSEWHERE_RELATIVE);
+  assert.equal(await realpath(fromWorkspace), await realpath(mirrored));
+  // Baseline itself must not contain the SDK mirror (sibling lives under Task root).
+  await assert.rejects(() => lstat(path.join(paths.baseline, "adeptify")), /ENOENT/);
+  // Mirror stays inside the Task isolation container, not under baseline/workspace.
+  const containerReal = await realpath(paths.root);
+  const mirroredReal = await realpath(mirrored);
+  assert.ok(mirroredReal.startsWith(containerReal + path.sep) || mirroredReal === containerReal);
+  assert.ok(!mirroredReal.startsWith((await realpath(paths.baseline)) + path.sep));
+  assert.ok(!mirroredReal.startsWith((await realpath(paths.workspace)) + path.sep));
+
+  // Mutate the mirror; original source SDK bytes stay unchanged.
+  await writeFile(path.join(mirrored, "index.js"), "export const sdkVersion = 999;\n");
+  assert.equal(await readFile(sdkIndex, "utf8"), originalSdkBytes);
+
+  // Business Candidate edit only; mirror never enters the integration diff.
+  await writeFile(path.join(paths.workspace, "value.txt"), "after\n");
+  const report = await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+  const diff = await readFile(paths.diff, "utf8");
+  assert.doesNotMatch(diff, /adeptify/);
+  assert.doesNotMatch(diff, /sdkVersion/);
+  assert.doesNotMatch(diff, /client-core/);
+  assert.deepEqual(report.business.affectedPaths, ["value.txt"]);
+  assert.deepEqual(report.integration.affectedPaths, ["value.txt"]);
+});
+
+test("copyForVerification mirrors Elsewhere-shaped sibling SDK and owns full cleanup root", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-local-pkg-verify-"));
+  const { app, sdkIndex, originalSdkBytes } = await writeElsewhereShapedFixture(root);
+
+  const verifyEnv = await copyForVerification(app, []);
+  try {
+    assert.equal(path.basename(verifyEnv.projectCwd), "project");
+    assert.equal(path.dirname(verifyEnv.projectCwd), verifyEnv.cleanupRoot);
+    const mirrored = path.join(verifyEnv.cleanupRoot, "adeptify", "client-core", "sdk");
+    assert.equal((await lstat(mirrored)).isDirectory(), true);
+    assert.equal(await readFile(path.join(mirrored, "index.js"), "utf8"), originalSdkBytes);
+    const fromProject = path.resolve(verifyEnv.projectCwd, ELSEWHERE_RELATIVE);
+    assert.equal(await realpath(fromProject), await realpath(mirrored));
+    // Isolated copy is not the original source package.
+    assert.notEqual(await realpath(mirrored), await realpath(path.dirname(sdkIndex)));
+
+    await writeFile(path.join(mirrored, "index.js"), "export const sdkVersion = 42;\n");
+    assert.equal(await readFile(sdkIndex, "utf8"), originalSdkBytes);
+  } finally {
+    await rm(verifyEnv.cleanupRoot, { recursive: true, force: true });
+  }
+  // Full container (project + sibling mirror) is gone after cleanup.
+  await assert.rejects(() => lstat(verifyEnv.cleanupRoot), /ENOENT/);
+  await assert.rejects(() => lstat(verifyEnv.projectCwd), /ENOENT/);
+  assert.equal(await readFile(sdkIndex, "utf8"), originalSdkBytes);
+});
+
+test("declared local package: absolute, escape, missing, non-dir, no package.json, malformed, conflict fail closed", async () => {
+  const {
+    planDeclaredLocalPackages,
+    materializeDeclaredLocalPackages,
+  } = await import("../src/workspace/dependency-materializer.js");
+
+  // Absolute target
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "forklight-local-abs-"));
+    const app = path.join(root, "app");
+    const container = path.join(root, "container");
+    await mkdir(app);
+    await mkdir(path.join(container, "project"), { recursive: true });
+    await writeFile(
+      path.join(app, "package.json"),
+      JSON.stringify({ dependencies: { x: "file:/tmp/secret-sdk" } }),
+    );
+    await assert.rejects(
+      () => planDeclaredLocalPackages(app, path.join(container, "project"), container),
+      /declared local dependency rejected: absolute file\/link target/,
+    );
+  }
+
+  // Destination escapes isolation container
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "forklight-local-esc-"));
+    const app = path.join(root, "app");
+    const sdk = path.join(root, "outside-sdk");
+    const container = path.join(root, "container");
+    await mkdir(app);
+    await mkdir(sdk);
+    await mkdir(path.join(container, "project"), { recursive: true });
+    await writeFile(path.join(sdk, "package.json"), JSON.stringify({ name: "x" }));
+    // Enough parent traversal from project/ to leave container.
+    await writeFile(
+      path.join(app, "package.json"),
+      JSON.stringify({ dependencies: { x: "file:../../../outside-sdk" } }),
+    );
+    // Source may or may not resolve; destination escape is the gate.
+    await assert.rejects(
+      () => planDeclaredLocalPackages(app, path.join(container, "project"), container),
+      /declared local dependency rejected: destination escapes isolation container/,
+    );
+  }
+
+  // Missing target
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "forklight-local-miss-"));
+    const app = path.join(root, "app");
+    const container = path.join(root, "container");
+    await mkdir(app);
+    await mkdir(path.join(container, "project"), { recursive: true });
+    await writeFile(
+      path.join(app, "package.json"),
+      JSON.stringify({ dependencies: { x: "file:../missing-sdk" } }),
+    );
+    await assert.rejects(
+      () => planDeclaredLocalPackages(app, path.join(container, "project"), container),
+      /declared local dependency rejected: target is missing or unreadable/,
+    );
+  }
+
+  // Non-directory target
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "forklight-local-file-"));
+    const app = path.join(root, "app");
+    const container = path.join(root, "container");
+    await mkdir(app);
+    await mkdir(path.join(container, "project"), { recursive: true });
+    await writeFile(path.join(root, "not-a-dir"), "file\n");
+    await writeFile(
+      path.join(app, "package.json"),
+      JSON.stringify({ dependencies: { x: "file:../not-a-dir" } }),
+    );
+    await assert.rejects(
+      () => planDeclaredLocalPackages(app, path.join(container, "project"), container),
+      /declared local dependency rejected: target is not a directory/,
+    );
+  }
+
+  // Missing target package.json
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "forklight-local-nopkg-"));
+    const app = path.join(root, "app");
+    const sdk = path.join(root, "sdk");
+    const container = path.join(root, "container");
+    await mkdir(app);
+    await mkdir(sdk);
+    await mkdir(path.join(container, "project"), { recursive: true });
+    await writeFile(path.join(sdk, "index.js"), "export default 1;\n");
+    await writeFile(
+      path.join(app, "package.json"),
+      JSON.stringify({ dependencies: { x: "file:../sdk" } }),
+    );
+    await assert.rejects(
+      () => planDeclaredLocalPackages(app, path.join(container, "project"), container),
+      /declared local dependency rejected: target package\.json is missing/,
+    );
+  }
+
+  // Malformed source package.json
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "forklight-local-mal-"));
+    const app = path.join(root, "app");
+    const container = path.join(root, "container");
+    await mkdir(app);
+    await mkdir(path.join(container, "project"), { recursive: true });
+    await writeFile(path.join(app, "package.json"), "{ not json");
+    await assert.rejects(
+      () => planDeclaredLocalPackages(app, path.join(container, "project"), container),
+      /declared local dependency rejected: source package\.json is malformed/,
+    );
+  }
+
+  // Same package name mapped to two different sources → conflict
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "forklight-local-conflict-"));
+    const app = path.join(root, "app");
+    const sdkA = path.join(root, "sdk-a");
+    const sdkB = path.join(root, "sdk-b");
+    const container = path.join(root, "container");
+    await mkdir(app);
+    await mkdir(sdkA);
+    await mkdir(sdkB);
+    await mkdir(path.join(container, "project"), { recursive: true });
+    await writeFile(path.join(sdkA, "package.json"), JSON.stringify({ name: "a" }));
+    await writeFile(path.join(sdkB, "package.json"), JSON.stringify({ name: "b" }));
+    await writeFile(
+      path.join(app, "package.json"),
+      JSON.stringify({
+        dependencies: { shared: "file:../sdk-a" },
+        devDependencies: { shared: "file:../sdk-b" },
+      }),
+    );
+    await assert.rejects(
+      () => planDeclaredLocalPackages(app, path.join(container, "project"), container),
+      /declared local dependency rejected: conflicting destinations/,
+    );
+  }
+
+  // Equivalent relative forms of the same source/destination dedupe
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "forklight-local-dedupe-path-"));
+    const app = path.join(root, "app");
+    const realSdk = path.join(root, "real-sdk");
+    const container = path.join(root, "container");
+    await mkdir(app);
+    await mkdir(realSdk);
+    await mkdir(path.join(container, "project"), { recursive: true });
+    await writeFile(path.join(realSdk, "package.json"), JSON.stringify({ name: "real" }));
+    await writeFile(
+      path.join(app, "package.json"),
+      JSON.stringify({
+        dependencies: {
+          one: "file:../real-sdk",
+          two: "file:.././real-sdk",
+        },
+      }),
+    );
+    const plans = await planDeclaredLocalPackages(
+      app,
+      path.join(container, "project"),
+      container,
+    );
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0]!.packageName, "one");
+  }
+
+  // link: protocol is accepted and copied (not re-linked externally)
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "forklight-local-link-"));
+    const app = path.join(root, "app");
+    const sdk = path.join(root, "sibling", "sdk");
+    const container = path.join(root, "container");
+    await mkdir(app);
+    await mkdir(sdk, { recursive: true });
+    await mkdir(path.join(container, "project"), { recursive: true });
+    await writeFile(path.join(sdk, "package.json"), JSON.stringify({ name: "sibling-sdk" }));
+    await writeFile(path.join(sdk, "index.js"), "export default 1;\n");
+    await writeFile(
+      path.join(app, "package.json"),
+      JSON.stringify({ dependencies: { "sibling-sdk": "link:../sibling/sdk" } }),
+    );
+    // Copy project package.json into destination for realism
+    await writeFile(
+      path.join(container, "project", "package.json"),
+      await readFile(path.join(app, "package.json"), "utf8"),
+    );
+    const materialized = await materializeDeclaredLocalPackages(
+      app,
+      path.join(container, "project"),
+      container,
+    );
+    assert.equal(materialized.length, 1);
+    assert.equal(materialized[0]!.protocol, "link");
+    assert.equal(materialized[0]!.relativeTarget, "../sibling/sdk");
+    const dest = path.join(container, "sibling", "sdk");
+    assert.equal((await lstat(dest)).isDirectory(), true);
+    assert.equal((await lstat(dest)).isSymbolicLink(), false);
+    assert.equal(await readFile(path.join(dest, "index.js"), "utf8"), "export default 1;\n");
+  }
+});
+
+test("declared local package: duplicate declarations are stable and deterministic", async () => {
+  const { planDeclaredLocalPackages } = await import("../src/workspace/dependency-materializer.js");
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-local-dedupe-"));
+  const app = path.join(root, "app");
+  const sdk = path.join(root, "sibling", "sdk");
+  const container = path.join(root, "container");
+  await mkdir(app);
+  await mkdir(sdk, { recursive: true });
+  await mkdir(path.join(container, "project"), { recursive: true });
+  await writeFile(path.join(sdk, "package.json"), JSON.stringify({ name: "sdk" }));
+  await writeFile(
+    path.join(app, "package.json"),
+    JSON.stringify({
+      dependencies: {
+        zed: "file:../sibling/sdk",
+        alpha: "file:../sibling/sdk",
+      },
+      devDependencies: {
+        alpha: "file:../sibling/sdk",
+      },
+    }),
+  );
+  const plans = await planDeclaredLocalPackages(
+    app,
+    path.join(container, "project"),
+    container,
+  );
+  assert.equal(plans.length, 1);
+  // First stable encounter: dependencies map, alpha before zed alphabetically...
+  // Discovery walks fields in order then sorts names within field, so alpha first.
+  assert.equal(plans[0]!.packageName, "alpha");
+  assert.equal(plans[0]!.relativeTarget, "../sibling/sdk");
 });
 
 async function preparedSnapshot(prefix: string): Promise<ReturnType<typeof taskPaths>> {

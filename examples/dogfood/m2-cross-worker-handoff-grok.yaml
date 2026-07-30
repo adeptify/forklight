@@ -1,0 +1,195 @@
+version: 2
+name: Add one durable cross-Worker Candidate handoff
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-cross-worker-handoff-v1
+taskFamily: forklight-main-orchestration
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    Main can explicitly hand one exact retained Competition Candidate to one
+    different saved Worker Profile without mutating the source Task or losing
+    its contract, reusable files, remaining gaps, independent acceptance, or
+    Integration safety. ForkLight creates one durable successor Task from the
+    current project snapshot, imports only the Main-approved reusable paths from
+    the exact Candidate revision, freezes the new Worker identity and a bounded
+    handoff record, and runs the successor through the ordinary Task lifecycle.
+    The operation is confirmation-gated, restart-safe, idempotent, limited to
+    one hop, and never automatically selects a Worker, retries, accepts,
+    integrates, commits, or pushes.
+  presentation:
+    summary: Main 可以把一个候选里确认可用的文件和剩余问题，明确交给另一个 Worker；旧任务不被改写，新任务仍需独立验收和 Main 决定。
+    language: zh-CN
+  context:
+    - Competition retained-partial currently stores reusable paths and remaining gaps for later M2 handoff but intentionally starts nothing.
+    - Existing correction reuses the same Task, workspace, session, frozen Provider, model, runtime, and Worker Profile; it cannot truthfully represent a different Worker taking over.
+    - CandidateRevision already binds an immutable exact patch digest, affected paths, Attempt and verification sequence; CandidateGapContract already validates reusable paths and bounded gaps.
+    - A successor based only on the prior Candidate workspace would make its final incremental Diff impossible to apply to the original project. The successor must keep a clean current-project baseline while importing approved Candidate paths into its workspace so its final Diff is complete.
+    - The current repository has many uncommitted owner/Main changes. Preserve them; do not commit or push.
+    - Grok 4.5 is the owner-selected default for 2026-07-30 and 2026-07-31. No Competition or second implementation model is needed for this Task.
+  inScope:
+    - Add an explicit Main operation that consumes one persisted Competition retained-partial entry, the exact current CandidateRevision identity, one different saved and launchable destination Worker Profile, a bounded reason, and confirm true.
+    - Fail closed before mutation when the Competition/candidate/revision/retained entry is missing or stale, the destination Profile equals the source Profile, is not launchable, the Candidate is the final accepted choice, any path is unsafe, a prior handoff already exists, or the source is itself a handoff successor.
+    - Persist a versioned privacy-safe handoff record with source Competition/candidate/Task/revision/digest, gap-contract digest and counts, destination frozen Worker identity, successor Task id, status, timestamps, and closed reason/next-action codes. Do not persist raw patch, prompts, command output, credentials, endpoints, absolute private artifact paths, or unbounded Provider text in public projections.
+    - Create exactly one new successor Task. Preserve the source Task Contract, project, acceptance, workspace policy, completion policy, delivery policy, task class/family, and Main-authored presentation; replace only Worker/Profile/Provider/runtime/effective Worker policy using the canonical saved-Profile resolver and freeze the handoff provenance.
+    - Prepare the successor from one current-project snapshot as its baseline and workspace. Apply only whole paths listed in retained reusablePaths from the exact Candidate Diff into the successor workspace. Do not import any other Candidate path. Reject before Worker launch if the selected path patch cannot apply cleanly or its resulting bytes do not match the Candidate workspace for every selected file.
+    - Give the destination Worker a generated handoff instruction naming reusable relative paths, every bounded remaining gap and acceptance expectation, the source Candidate digest prefix, and a one-pass stop rule. Never include the private revision artifact path or source Worker transcript.
+    - Make durable record, successor Task, lineage edge, and queue admission crash-safe and restart-idempotent. Recovery may finish an already-authorized preparation or queue the same successor once; it must never create a second successor or a second handoff authorization.
+    - Keep the source Task, CandidateRevision, Competition decision/evaluation, retained-partial evidence, Attempt history, usage and costs immutable. Record successor costs separately and expose source versus successor identities without calling it a retry.
+    - Let the successor use ordinary independent verification, CandidateRevision, Review Graph, fresh Main Review, Goal-independent Task lifecycle, and Integration. Integration must apply the successor's complete Diff from the current-project baseline; no source Candidate Main accept is inherited.
+    - >-
+      Add Daemon, CLI, MCP and Hub/Task Detail controls and bilingual
+      explanation-first projections: what was retained, who handed off to whom,
+      what the new Worker received, current status, failure cause, and the one
+      next action. Technical ids and digest prefix stay secondary.
+    - Add behavior tests for successful different-Profile handoff, selected-path-only import, complete successor Diff, source immutability, stale/tampered/path/apply/profile/final-choice/duplicate/hop rejection, restart recovery, no launch on preparation failure, CLI/MCP/Hub confirmation and privacy, and ordinary successor review/Integration boundaries.
+  outOfScope:
+    - Automatic Worker selection, model routing decision, voting, reviewer-to-implementer mutation, multi-hop or cyclic handoff, fan-out to several successors, merging several Candidates, hunk-level selection within one file, or dynamic contract rewriting.
+    - Reusing the old runtime session, changing the source Task Profile, transferring raw chat/logs, importing non-reusable Candidate paths, bypassing source compatibility, or treating a handoff as correction/retry/adaptation.
+    - Automatic Main accept/revise/reject, Review Graph creation, Integration, activation, commit, push, global setting changes, Provider adapter changes, or credential probing.
+    - Claiming Main Token savings without an exact-pair Direct Codex baseline. Show actual source/successor usage and exchange evidence separately.
+  executionSteps:
+    - Trace retained-partial persistence, CandidateRevision private patch access, workspace copy/patch helpers, saved Worker resolution/readiness, Task creation/preparation/recovery, lineage, Integration source compatibility, daemon protocol, CLI/MCP, and Hub Task Detail before editing.
+    - Define one canonical handoff request validator, durable record/projection, selected-path patch materializer, successor spec builder, lineage edge, and idempotent preparation state machine.
+    - Wire one explicit confirmed mutation through coordinator, daemon, CLI, MCP and Hub; reuse ordinary queue/runner/verifier/Main Review/Integration after preparation.
+    - Prove a temporary Competition Candidate with two changed files, retain exactly one file, hand it to a different saved Profile, verify only that file is preloaded, complete the second gap, restart once, and show one successor with a complete integratable Diff and fresh Main decision requirement.
+    - Run focused tests once and full build/test/syntax/diff checks once. Stop after one Candidate and at most one Main correction; do not broaden into multi-hop or auto-routing.
+  deliverables:
+    - Durable exact-revision cross-Worker handoff record and one-hop successor lineage.
+    - Selected-path-only Candidate materialization on a clean current-project baseline.
+    - Different saved Worker execution through the ordinary verified Task lifecycle.
+    - CLI, MCP and bilingual Hub controls/status with explicit Main confirmation and readable failure causes.
+  modules:
+    - name: Handoff authority and lineage
+      responsibility: Validate exact retained Candidate evidence, destination Worker and one-hop authority, then atomically bind one successor without rewriting history.
+      consumes:
+        - Competition retained-partial, CandidateRevision, Gap Contract, saved Worker Profile/readiness, Main reason and confirmation.
+      produces:
+        - Durable handoff record, frozen destination identity, successor Task id, lineage edge, safe status and next-action projection.
+      boundaries:
+        - No automatic selection, duplicate successor, source Task mutation, private content projection, retry semantics, or multi-hop.
+    - name: Selected Candidate materialization
+      responsibility: Build a current-project baseline and import only approved whole-file Candidate paths into the successor workspace with byte-level proof.
+      consumes:
+        - Current project snapshot, exact private Candidate Diff, approved reusable paths, Candidate workspace bytes and workspace policy.
+      produces:
+        - Successor baseline/workspace where final Diff includes every retained and newly completed change needed for Integration.
+      boundaries:
+        - No non-reusable path, hunk inference, stale patch, source overwrite, Worker launch before proof, or private artifact disclosure.
+    - name: Main and user handoff surfaces
+      responsibility: Explain and execute one explicit handoff while keeping Worker work, verification, Main decision and Integration separate.
+      consumes:
+        - Privacy-safe handoff projection, source/successor identities, counts, status, failure code and confirmation.
+      produces:
+        - Daemon/CLI/MCP/Hub operation, Task Detail journey and one next action in English and Chinese.
+      boundaries:
+        - No raw patch/log/prompt, automatic Main decision, automatic Integration, model recommendation, or false Token-saving claim.
+  callChain:
+    - Main records retained-partial on one non-selected Competition Candidate and chooses a different saved Worker Profile.
+    - ForkLight validates exact revision, selected paths, destination readiness, one-hop and duplicate guards before durable mutation.
+    - ForkLight creates one successor Task and handoff lineage, snapshots the current project, and imports only approved Candidate paths with byte proof.
+    - The destination Worker receives the original Task Contract plus generated reusable-path/gap instructions and performs one ordinary isolated Attempt.
+    - Independent verification produces a successor CandidateRevision whose Diff is complete relative to the current-project baseline.
+    - Main independently accepts, revises or rejects the successor; only a fresh exact accept can enter ordinary Integration.
+    - Daemon restart reconstructs the same preparation/queue state without duplicating authorization, successor, Attempt or lineage.
+  scenarios:
+    - name: Different Worker completes retained Candidate
+      given: A non-selected Candidate changed two files and Main retained exactly one path plus one remaining gap.
+      when: Main confirms handoff to a different launchable saved Worker.
+      then: One successor starts with only the retained path, completes the gap, passes independent verification, and exposes a complete two-file Diff requiring fresh Main review.
+    - name: Preparation fails closed
+      given: The retained revision is stale, selected patch cannot apply, or selected bytes do not match the exact Candidate workspace.
+      when: Main requests handoff.
+      then: No Worker launches, no second successor appears, source history is unchanged, and the user sees a bounded readable failure and next action.
+    - name: Restart during handoff
+      given: One handoff is authorized and its successor is preparing or queued.
+      when: The Daemon restarts.
+      then: The same record and successor recover once; no duplicate Task, authorization, materialization or Attempt is created.
+    - name: Loop guard
+      given: A Task is already a handoff successor or the same retained Candidate already has a handoff record.
+      when: Main requests another handoff.
+      then: ForkLight rejects before mutation and launches nothing.
+  risks:
+    - Using the Candidate workspace as the successor baseline would lose the retained patch from the final Integration Diff; baseline must remain the clean current project.
+    - Importing the full Candidate when Main approved only some files would silently retain rejected work; selected paths are whole-file and exact.
+    - Re-resolving Worker settings after admission could change identity or limits; the destination selection and effective policy must be frozen on the successor.
+    - Filesystem preparation and durable state can split across crashes; staged preparation and idempotent recovery must converge on one successor.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 3600
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 20
+  fileLimitMode: warn
+  changedLineLimit: 3600
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/competition.ts
+    - src/core/candidate-revision.ts
+    - src/core/task.ts
+    - src/core/types.ts
+    - src/core/settings.ts
+    - src/core/providers.ts
+    - src/core/runner.ts
+    - src/workspace/copy.ts
+    - src/workspace/patch.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/competition.test.ts
+    - tests/candidate-revision.test.ts
+    - tests/daemon.test.ts
+    - tests/integration.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - One explicit confirmed operation hands one exact retained Candidate to one different saved Worker by creating exactly one durable successor Task and never mutating the source Task, Candidate, Competition evidence or Attempts.
+    - The successor baseline is the current project snapshot; only Main-approved whole reusable paths are imported and byte-matched to the exact Candidate, while non-reusable Candidate paths remain absent and the final successor Diff is complete for ordinary Integration.
+    - Destination Worker identity/effective policy, exact source revision/digest, Gap Contract and one-hop lineage are frozen; stale, unsafe, duplicate, same-Profile, non-launchable, final-choice and successor-source requests fail before Worker launch.
+    - Preparation and queue admission recover across Daemon restart without duplicate handoff, Task, materialization or Attempt; preparation failure launches no Worker and preserves readable evidence.
+    - The successor uses ordinary independent verification, fresh Main review and Integration boundaries; no inherited accept, auto-review, auto-retry, auto-routing, auto-Integration, commit or push exists.
+    - CLI, MCP and Hub/Task Detail expose the confirmed operation and bilingual input-process-output-next story without raw patch, prompt, logs, credentials, endpoint, private path or false Token-savings language.
+    - Full repository tests, strict TypeScript, build, Hub JavaScript syntax and diff hygiene pass; no commit or push occurs.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/competition.test.ts tests/candidate-revision.test.ts tests/daemon.test.ts tests/integration.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

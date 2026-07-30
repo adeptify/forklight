@@ -1,0 +1,127 @@
+version: 2
+name: Prove and document Gmail incremental sync across restart
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-history-e2e-and-docs
+taskFamily: relay-gmail-incremental-sync
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Relay has one source-level end-to-end proof and one readable user guide for
+    Gmail incremental sync: first sync stores a real history cursor, a restarted
+    Relay uses that cursor to fetch only later changes, duplicate/replayed
+    changes do not duplicate Items, stale history preserves old data until an
+    explicitly confirmed rebuild succeeds, and every failure leaves a clear
+    recovery path. Documentation matches shipped limits and does not promise
+    background sync, push, deletion mirroring, or exact provider behavior Relay
+    does not implement.
+  presentation:
+    summary: 最后用一次跨重启完整旅程证明“首次同步 → 增量变化 → 游标过期 → 明确重建”真的闭环，并把用户该怎么做写清楚。
+    language: zh-CN
+  context:
+    - Prior milestones integrate cursor protocol, bounded Gmail HTTP behavior, atomic explicit recovery, and readable Connector UI.
+    - README currently explains OAuth and manual sync but not incremental cursor behavior or stale-history recovery.
+    - Relay already has real SQLite restart/persistence test helpers and source-contract UI tests; reuse them rather than adding a separate test harness.
+    - Google documents full versus partial sync, history.list pagination, non-contiguous ids, and stale startHistoryId HTTP 404 requiring full sync.
+    - Preserve dirty Relay work. Use Grok 4.5 and do not commit or push.
+  inScope:
+    - Add one deterministic end-to-end test using the real application service and SQLite repository across service recreation/restart.
+    - Drive a bounded credentialed full sync, persist the exact versioned cursor, recreate services against the same database, then drive paginated incremental history with new/duplicate/race-skipped messages.
+    - Prove the second sync sends the exact stored startHistoryId, ingests only new Items, keeps old Items, increments count only for created Items, and persists the final response historyId after complete pages/details.
+    - Drive stale-history normal failure, prove cursor/items/count/lastSync/account label preservation and no automatic provider retry, then drive one explicit rebuild success and verify dedupe plus cursor replacement.
+    - Add one failure-after-first-history-page case proving no partial ingest/cursor advance across restart.
+    - Update README and relevant changelog/roadmap status with plain-language manual sync behavior, first versus incremental behavior, stale-history rebuild action, privacy/data-preservation boundary, bounded recent snapshot, and unsupported background/push/deletion mirroring.
+    - Keep docs coupled to source constants, API request modes, UI labels and OAuth scopes through focused source-contract tests; avoid brittle full-file prose regexes or real-looking secrets.
+    - Audit primary user copy for internal terms such as historyId/cursor/provider error in the prominent path. Technical details may remain in an Advanced/docs subsection where needed for diagnosis.
+  outOfScope:
+    - Live Google account calls, external E2E infrastructure, background sync, scheduler, push/watch, Item deletion/update from Gmail, attachments/full bodies, OAuth changes, new UI design, release publishing, commit, or push.
+  executionSteps:
+    - Trace SQLite test fixtures, application service creation/recreation, fetch injection, API/UI labels, README Gmail section, and shipped constants.
+    - Write the real persistence journey first and make request routing exact for profile/list/history/detail endpoints.
+    - Add source-aligned docs contracts using exported constants or narrowly scoped assertions; do not make tests pass by weakening privacy/failure checks.
+    - Update the user guide and status text, run focused journey/docs tests, then full Relay check once.
+  deliverables:
+    - Real SQLite restart Gmail full/incremental/stale/rebuild journey test.
+    - No-partial-commit and dedupe/cursor correctness regression.
+    - Source-aligned readable Gmail sync/recovery documentation.
+  modules:
+    - name: Restart journey harness
+      responsibility: Exercise real service/repository/adapter boundaries across one persisted restart with exact mocked Gmail routes.
+      consumes: [temporary SQLite database, deterministic fetch sequence, shipped sync API]
+      produces: [proof of cursor continuity, dedupe, preservation, explicit rebuild and final state]
+      boundaries: [no live credentials, separate fake persistence, broad URL matching, background retry, or product mutation]
+    - name: User and source documentation contract
+      responsibility: Keep readable instructions aligned with shipped constants, actions, scopes, limits and unsupported behaviors.
+      consumes: [README/changelog/roadmap, exported constants, API/UI source]
+      produces: [plain guide and focused drift tests]
+      boundaries: [no secret examples, internal-first copy, brittle whole-file banlist, overclaim, or hidden provider behavior]
+  callChain:
+    - First service instance completes bounded full Gmail sync and persists Items/cursor.
+    - A recreated service instance reads the same cursor and performs bounded incremental history sync.
+    - A stale normal request fails without mutation; explicit rebuild later succeeds in one transaction.
+    - Tests compare requests, persisted state and events; docs describe the same user journey and boundaries.
+  scenarios:
+    - name: Restarted incremental continuity
+      given: Full sync completed with a real cursor before Relay service recreation.
+      when: A later manual sync runs after restart.
+      then: Relay requests changes after that exact cursor and persists only new deduped Items plus the final history cursor.
+    - name: Stale then rebuild
+      given: Gmail returns 404 for the stored start point.
+      when: Normal sync fails and the user later explicitly confirms rebuild.
+      then: Old data remains through failure; one complete rebuild replaces progress without duplicating Items.
+    - name: Mid-page failure
+      given: First history page succeeds but a later page or required detail fails.
+      when: Sync ends.
+      then: No partial Item or cursor success persists before or after restart and the guide's retry path remains truthful.
+  risks:
+    - A test that mocks only application return values would not prove persistence/restart; use real repository/service boundaries.
+    - Broad URL substring matching can produce false green payloads; assert endpoint path and query parameters.
+    - Docs can drift from constants or UI labels; source-aligned narrow contracts should fail on meaningful drift without banning safe negative sentences.
+  changeBudget: { maxFiles: 7, maxDiffLines: 1300 }
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 7
+  fileLimitMode: warn
+  changedLineLimit: 1300
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - README.md
+    - CHANGELOG.md
+    - docs/ROADMAP.md
+    - src/adapters/connectors/gmail.ts
+    - src/application/connector-sync.ts
+    - src/app/connectors/page.tsx
+    - tests/connectors-and-product.test.ts
+    - tests/gmail-oauth.test.ts
+    - tests/user-chrome-copy.test.ts
+acceptance:
+  criteria:
+    - A real SQLite/service recreation journey proves full cursor persistence, exact incremental startHistoryId, complete pagination/details, dedupe, count correctness and final cursor update.
+    - Stale normal failure and mid-page/detail failure preserve prior Items/cursor/count/time/account and do not trigger automatic retry or partial success; explicit rebuild alone can replace cursor after complete success.
+    - README/status docs explain manual first/incremental/rebuild behavior and preservation in plain language and do not promise background/push/deletion mirroring or expose secrets.
+    - Narrow source contracts bind docs to shipped constants, API modes, UI labels and scopes without weakening privacy/failure tests.
+    - Focused journey/docs tests, full Relay check and diff hygiene pass with no commit or push.
+  commands:
+    - node --test --import tsx tests/connectors-and-product.test.ts tests/gmail-oauth.test.ts tests/user-chrome-copy.test.ts tests/boundary-and-mutation-path.test.ts
+    - npm run check
+    - git diff --check

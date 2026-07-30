@@ -1,0 +1,132 @@
+version: 2
+name: Add explicit Gmail cursor recovery without losing prior success
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-history-recovery-transaction
+taskFamily: relay-gmail-incremental-sync
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Relay turns stale Gmail history into an explicit, recoverable user action.
+    Normal sync never auto-loops or clears the old cursor. Main/UI may request
+    one bounded full rebuild; Relay passes a full-sync decision to the adapter
+    while preserving every previous Item and last-success fact until the full
+    result succeeds. One success transaction ingests deduped Items, replaces the
+    cursor, updates status/count/time, and records what happened. Any rebuild
+    failure preserves the old cursor and all prior success facts and returns one
+    readable next action.
+  presentation:
+    summary: Gmail 的历史游标过期时，不偷偷重试也不先清空；用户明确选择“重建同步进度”后，只有完整成功才替换进度。
+    language: zh-CN
+  context:
+    - The integrated adapter now reports stale history as a typed full-resync-required failure and can perform bounded full sync when asked through the cursor decision contract.
+    - Existing application failure transaction already preserves items, cursor, itemCount, lastSyncAt and accountLabel while recording one sync_failed event.
+    - Current API/client/store expose a single sync action with no typed normal-versus-rebuild request.
+    - Automatic retry and background sync are intentionally out of scope; recovery requires one explicit user/Main action.
+    - Preserve all dirty Relay work. Use Grok 4.5 and do not commit or push.
+  inScope:
+    - Add one closed sync request mode for normal incremental behavior versus explicit bounded cursor rebuild. Default and legacy callers remain normal.
+    - Thread the request through client, API route, application use case and ConnectorPort input without letting UI construct provider-specific cursor JSON.
+    - For rebuild, keep the persisted cursor untouched before the adapter call and pass an explicit full-sync directive or safe empty decision to Gmail only. Do not change GitHub semantics.
+    - >-
+      On complete rebuild success, perform the existing single success
+      transaction: dedupe/ingest Items, replace cursor, update connected status,
+      lastSyncAt and itemCount once, and append one bounded recovery-completed
+      activity fact.
+    - On normal stale-history failure, record one safe sync_failed event whose code/action tells the user that a manual rebuild is available. Do not start it automatically.
+    - On rebuild auth/network/provider/malformed/page/detail failure, preserve the exact old cursor, Items including undefined externalId rows, connector count/time/account label, and emit one safe failed recovery event without duplicate success/failure events.
+    - Make repeated successful rebuild idempotent for Items and counts. Cursor may advance only from the latest complete provider result.
+    - Add route/application/repository tests for normal stale failure, explicit success, explicit failure, GitHub/default compatibility, undefined external ids, event count/privacy, restart persistence, and no automatic second call.
+  outOfScope:
+    - UI controls/copy, automatic/background retry, retry schedule, push/watch, Item deletion/update from Gmail history, provider adapter pagination changes, OAuth, database schema migration, docs, commit, or push.
+  executionSteps:
+    - Trace sync client/API/use case, ConnectorPort input, repository transaction and activity emission, plus current failure-preservation fixtures.
+    - Define one connector-agnostic request shape with a Gmail-specific supported rebuild outcome; default callers need no change.
+    - Preserve old state until adapter success and reuse one canonical success/failure mutation rather than adding parallel writes.
+    - Add direct application and route tests, then run full Relay check once.
+  deliverables:
+    - Explicit normal/rebuild sync request through the real application boundary.
+    - Atomic successful rebuild and exact failure preservation.
+    - Safe recovery events and deterministic persistence/restart tests.
+  modules:
+    - name: Sync recovery request boundary
+      responsibility: Carry one explicit normal or rebuild intent from client/API to application and adapter.
+      consumes: [connector id and closed sync mode]
+      produces: [validated ConnectorPort sync request]
+      boundaries: [no provider cursor JSON from UI, implicit retry, background work, or GitHub behavior change]
+    - name: Recovery transaction
+      responsibility: Apply complete rebuild success once or preserve every prior success fact on failure.
+      consumes: [prior connector/cursor/items and typed ConnectorSyncResult]
+      produces: [deduped items, replaced cursor and one recovery event, or unchanged prior state plus one failure event]
+      boundaries: [no pre-clear, partial writes, duplicate count/event, secret text, or automatic second call]
+  callChain:
+    - User/Main requests normal sync or explicitly requests rebuild through the same API boundary.
+    - Application reads but does not mutate the prior cursor and calls the adapter with the closed intent.
+    - Adapter returns one complete success or typed failure.
+    - Application commits all success facts together, or commits only safe error status/event while preserving prior success.
+  scenarios:
+    - name: Stale normal sync
+      given: A valid persisted cursor has expired at Gmail.
+      when: Normal sync runs.
+      then: Relay keeps the cursor/items/count/time and tells the user a manual rebuild is available without making a second provider call.
+    - name: Explicit rebuild succeeds
+      given: The user confirms rebuild and Gmail returns a complete bounded snapshot with a real cursor.
+      when: Application commits the result.
+      then: New Items are deduped, cursor and success facts update once, and one recovery-completed activity is recorded.
+    - name: Explicit rebuild fails
+      given: The prior connector has successful Items and cursor but the rebuild hits auth, network, provider or malformed response.
+      when: Sync returns failure.
+      then: Every prior success fact remains byte-for-byte equivalent and one secret-free failure action is visible.
+  risks:
+    - Clearing the cursor before the provider call would destroy recoverability; old cursor stays persisted until success commit.
+    - Reusing normal failure copy may hide the rebuild action; use a closed failure code/action without raw provider text.
+    - Incrementing itemCount by fetched rather than created rows would drift on repeated rebuild; count only new persisted Items.
+  changeBudget: { maxFiles: 8, maxDiffLines: 1200 }
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 8
+  fileLimitMode: warn
+  changedLineLimit: 1200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/adapters/connectors/types.ts
+    - src/adapters/connectors/gmail.ts
+    - src/application/connector-sync.ts
+    - src/application/services.ts
+    - src/client/relay-client.ts
+    - src/lib/store.tsx
+    - src/app/api/v1/connectors/[id]/sync/route.ts
+    - src/adapters/persistence/sqlite/repository.ts
+    - tests/connectors-and-product.test.ts
+    - tests/boundary-and-mutation-path.test.ts
+acceptance:
+  criteria:
+    - Normal sync stays the default; explicit rebuild travels through client/API/application without accepting arbitrary provider cursor data or changing GitHub behavior.
+    - Stale normal sync never auto-retries or clears state; successful rebuild atomically ingests/dedupes, replaces cursor and updates count/time/status once.
+    - Failed rebuild preserves prior cursor, every Item including undefined externalId, itemCount, lastSyncAt and accountLabel and emits exactly one secret-free failure event/action.
+    - Repeated rebuild is Item/count idempotent and only a complete provider result can advance cursor.
+    - Focused application/route tests, full Relay check and diff hygiene pass with no commit or push.
+  commands:
+    - node --test --import tsx tests/connectors-and-product.test.ts tests/boundary-and-mutation-path.test.ts tests/gmail-oauth.test.ts
+    - npm run check
+    - git diff --check

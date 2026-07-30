@@ -1,0 +1,148 @@
+version: 2
+name: Materialize verifier dependencies inside isolated workspaces
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-workspace-local-dependencies
+taskFamily: forklight-workspace-isolation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    ForkLight no longer exposes excluded node_modules to Workers and verifiers as
+    a symlink pointing outside the isolated project. It creates a workspace-local,
+    copy-on-write dependency mirror that preserves safe relative internal links,
+    excludes dependencies from Candidate diffs, works for Next.js Turbopack builds,
+    and can upgrade a retained legacy Candidate before no-Worker reverification.
+  presentation:
+    summary: 修复真实项目验收环境：依赖目录留在隔离工作区内部，Next.js 构建不再因外链依赖失败，旧候选也能原地重新验收而无需重跑模型。
+    language: zh-CN
+  context:
+    - Relay Goal Task a58023d7-65be-4184-b2a7-f342de76a39d produced a useful five-file Candidate and passed focused tests, but npm run check failed only because Next.js 16 Turbopack rejected workspace/node_modules pointing outside its filesystem root.
+    - src/workspace/copy.ts currently links source node_modules into both baseline and workspace. src/core/integration-verification-copy.ts repeats the same pattern for temporary verification.
+    - node_modules is already excluded from manifests and Candidate patches; dependency materialization must remain verifier-only evidence and never become product diff.
+    - Main selected Grok 4.5 as default for 2026-07-30 and 2026-07-31. Preserve every current uncommitted change. Do not commit or push.
+  inScope:
+    - Replace external dependency-directory symlinks with a workspace-local materialization using Node copy-on-write clone mode when supported and safe fallback copying otherwise.
+    - Materialize node_modules only where commands/Workers need it; do not duplicate it into the immutable diff baseline unless a proven consumer requires that copy.
+    - Preserve safe relative symlinks whose resolved targets stay within the copied source project; reject or safely remap absolute/escaping links before exposing them in the isolated workspace.
+    - Reuse one canonical dependency materializer from ordinary workspace preparation, temporary Integration/Main-remediation verification copies, and retained Candidate reverification.
+    - Before reverify runs acceptance on an older workspace, replace a legacy external node_modules link with the local mirror without changing Candidate business files or revision digest.
+    - Keep node_modules excluded from source manifests, patch generation, affected paths, Integration, privacy projections, and Worker result accounting.
+    - Add regressions proving a real directory rather than an external link, source dependency immutability after workspace edits, safe internal relative links, escaping-link rejection, legacy reverify upgrade, and existing preparation progress semantics.
+  outOfScope:
+    - Running npm install, changing package lockfiles, inventing a package manager, adding dependencies, copying arbitrary caches, changing Relay source, retrying the Relay Worker, automatic Integration, commit, or push.
+    - A broad per-framework detector or silently falling back to an external symlink when local materialization fails.
+  executionSteps:
+    - Trace ordinary preparation, verifier path policy, candidate reverification, integration/remediation verification copies, and existing workspace tests.
+    - Define one canonical project-bound dependency materializer with safe symlink validation and copy-on-write semantics.
+    - Replace both duplicated symlink paths and add the retained-workspace upgrade before reverify.
+    - Prove dependency files remain outside manifests/patches and no source dependency is mutable through the workspace.
+    - Run focused tests, complete repository test/build, Hub syntax, and diff hygiene once.
+  deliverables:
+    - Workspace-local dependency mirror shared by all verifier paths.
+    - Legacy Candidate reverify upgrade and deterministic isolation/Turbopack regressions.
+  modules:
+    - name: Dependency materialization authority
+      responsibility: Copy excluded runtime dependencies into a destination project using local clone/copy files and only project-contained links.
+      consumes:
+        - Source project, destination project, dependency directory name, source filesystem metadata, and clone capability.
+      produces:
+        - A local destination directory, safe internal links, aggregate materialization evidence, or a fail-closed preparation error.
+      boundaries:
+        - No package installation, lockfile mutation, external symlink, Candidate diff inclusion, credential content, or provider behavior.
+    - name: Workspace and verification callers
+      responsibility: Invoke the same materializer for new Task workspaces, temporary verification copies, and legacy reverify workspaces.
+      consumes:
+        - Task spec/path, excluded dependency names, current project, and retained workspace state.
+      produces:
+        - Command-ready isolated project roots without changing business Candidate files.
+      boundaries:
+        - Baseline remains dependency-free, no automatic Worker retry, and no Candidate revision rewrite.
+    - name: Isolation regression evidence
+      responsibility: Prove local directory identity, source immutability, safe links, exclusion from patches, and reverify compatibility.
+      consumes:
+        - Temporary source projects with dependency files and internal/escaping link fixtures.
+      produces:
+        - Deterministic focused tests plus complete suite evidence.
+      boundaries:
+        - No network, real package install, huge fixture, timing assumption, or private path in user-facing projections.
+  callChain:
+    - Task preparation copies business source into baseline and workspace while excluding node_modules from manifests and patches.
+    - The canonical materializer creates workspace/node_modules locally with clone/copy semantics and validates every preserved link stays project-contained.
+    - Worker and acceptance commands resolve dependencies entirely inside the workspace project root.
+    - Candidate diff still compares dependency-free business paths only.
+    - A retained failed Candidate asks for reverify; ForkLight upgrades any legacy external dependency link, reruns the original commands without a model, and preserves the original Attempt/history.
+  scenarios:
+    - name: Next-style verifier sees local dependencies
+      given: A source project has excluded node_modules and an acceptance build that rejects external links.
+      when: ForkLight prepares the workspace.
+      then: workspace/node_modules is a real local directory, baseline has no dependency copy, and the build can traverse dependencies inside the project root.
+    - name: Worker cannot mutate source dependencies
+      given: A dependency file was clone-copied into the workspace.
+      when: The workspace file is edited.
+      then: The original project's dependency file stays byte-identical and the dependency edit never enters Candidate diff.
+    - name: Legacy failed Candidate is reverified
+      given: An existing retained Candidate has an external node_modules symlink and failed only on that verifier environment.
+      when: Main authorizes no-Worker reverify after the ForkLight upgrade.
+      then: The link is replaced locally, original acceptance reruns, no new Worker/Attempt is created, and business Candidate evidence is preserved.
+    - name: Dependency link escapes project
+      given: A dependency subtree contains an absolute or relative link resolving outside the source project.
+      when: Materialization validates it.
+      then: Preparation/reverify fails closed with bounded safe evidence instead of preserving the escape.
+  risks:
+    - Full physical dependency copies can be slow or large; COPYFILE_FICLONE should be requested and ordinary copying is only the correctness fallback.
+    - Preserving an unsafe symlink would defeat isolation, so project containment must be checked before the destination becomes command-ready.
+    - Altering the business Candidate during reverify would invalidate exact revision authority; only excluded dependency paths may change.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1500
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1500
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workspace/copy.ts
+    - src/core/integration-verification-copy.ts
+    - src/core/candidate-reverification.ts
+    - src/core/main-remediation.ts
+    - src/core/integration.ts
+    - src/core/verifier.ts
+    - tests/worker-runtime.test.ts
+    - tests/candidate-reverification.test.ts
+    - tests/integration.test.ts
+acceptance:
+  criteria:
+    - Prepared and temporary verification projects use a local node_modules directory rather than a symlink outside the isolated project, while baseline/Candidate patches exclude it.
+    - Copy-on-write or fallback files cannot mutate source dependencies, safe relative project-contained links work, and escaping/absolute links fail closed.
+    - Reverify upgrades a legacy external dependency link without a Worker, new Attempt, business Candidate mutation, revision rewrite, commit, or push.
+    - ForkLight's complete suite/build and Hub syntax remain green.
+  commands:
+    - node --test --import tsx tests/worker-runtime.test.ts tests/candidate-reverification.test.ts tests/integration.test.ts tests/main-remediation.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

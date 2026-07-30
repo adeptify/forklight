@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -223,6 +224,128 @@ test("main review accept works with legacy tasks that have no CandidateRevision 
     assert.equal(review.verificationEventSequence, fixture.verificationSequence);
     assert.equal(review.candidateRevisionId, undefined, "no revision binding for legacy");
     assert.equal(review.acceptedPatchDigest, undefined, "no digest binding for legacy");
+  } finally {
+    fixture.store.close();
+  }
+});
+
+async function seedMatchingRevision(
+  store: StateStore,
+  task: TaskRecord,
+  verificationSequence: number,
+): Promise<{ revisionId: string; digest: string }> {
+  await mkdir(path.dirname(task.paths.diff), { recursive: true });
+  const patch = "diff --git a/src/a.ts b/src/a.ts\n+export const a = 1;\n";
+  await writeFile(task.paths.diff, patch, "utf8");
+  const digest = createHash("sha256").update(patch).digest("hex");
+  const revisionId = "rev-modern-1";
+  const artifactDir = path.join(task.paths.root, "revisions");
+  await mkdir(artifactDir, { recursive: true });
+  await writeFile(path.join(artifactDir, `${revisionId}.patch`), patch, "utf8");
+  store.addEvent(
+    task.id,
+    "attempt-1",
+    "candidate.revision.captured",
+    "Revision for current verification",
+    {
+      id: revisionId,
+      taskId: task.id,
+      attemptId: "attempt-1",
+      attemptOrdinal: 1,
+      verificationEventSequence: verificationSequence,
+      patchDigest: digest,
+      affectedPaths: ["src/a.ts"],
+      filesChanged: 1,
+      changedLines: 1,
+      verificationPassed: true,
+      createdAt: new Date().toISOString(),
+      privateArtifactPath: path.join(artifactDir, `${revisionId}.patch`),
+    },
+  );
+  return { revisionId, digest };
+}
+
+test("main review revise binds exact CandidateRevision when modern history exists", async () => {
+  const fixture = await reviewFixture(true);
+  try {
+    const { revisionId, digest } = await seedMatchingRevision(
+      fixture.store,
+      fixture.task,
+      fixture.verificationSequence,
+    );
+    const review = recordMainReview(fixture.store, fixture.task.id, {
+      decision: "revise",
+      reason: "Semantic gap remains",
+      confirm: true,
+    });
+    assert.equal(review.decision, "revise");
+    assert.equal(review.candidateRevisionId, revisionId);
+    assert.equal(review.acceptedPatchDigest, digest);
+    assert.equal(review.verificationEventSequence, fixture.verificationSequence);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("main review reject binds exact CandidateRevision when modern history exists", async () => {
+  const fixture = await reviewFixture(true);
+  try {
+    const { revisionId, digest } = await seedMatchingRevision(
+      fixture.store,
+      fixture.task,
+      fixture.verificationSequence,
+    );
+    const review = recordMainReview(fixture.store, fixture.task.id, {
+      decision: "reject",
+      reason: "Wrong approach overall",
+      confirm: true,
+    });
+    assert.equal(review.decision, "reject");
+    assert.equal(review.candidateRevisionId, revisionId);
+    assert.equal(review.acceptedPatchDigest, digest);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("main review revise rejects mismatched current Diff when modern history exists", async () => {
+  const fixture = await reviewFixture(true);
+  try {
+    await seedMatchingRevision(
+      fixture.store,
+      fixture.task,
+      fixture.verificationSequence,
+    );
+    // Stale live Diff after revision capture.
+    await writeFile(fixture.task.paths.diff, "diff --git a/src/a.ts b/src/a.ts\n+export const a = 2;\n", "utf8");
+    assert.throws(
+      () => recordMainReview(fixture.store, fixture.task.id, {
+        decision: "revise",
+        reason: "Should reject mismatched Diff",
+        confirm: true,
+      }),
+      /exact CandidateRevision/,
+    );
+    assert.equal(
+      fixture.store.listEvents(fixture.task.id).filter((event) => event.type === "main-review.completed").length,
+      0,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("main review revise stays legacy-compatible without CandidateRevision events", async () => {
+  const fixture = await reviewFixture(true);
+  try {
+    const review = recordMainReview(fixture.store, fixture.task.id, {
+      decision: "revise",
+      reason: "Legacy revise without revision evidence",
+      confirm: true,
+    });
+    assert.equal(review.decision, "revise");
+    assert.equal(review.candidateRevisionId, undefined);
+    assert.equal(review.acceptedPatchDigest, undefined);
   } finally {
     fixture.store.close();
   }

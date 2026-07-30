@@ -1,0 +1,226 @@
+version: 2
+name: Let Main hand a Goal Task Candidate directly to another Worker
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-goal-native-handoff-v1
+taskFamily: forklight-main-orchestration
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    When a normal durable Goal milestone Task has a useful but incomplete exact
+    Candidate, Main can explicitly retain selected whole files, name the
+    remaining gaps, and hand that Candidate directly to one different saved
+    Worker Profile. The existing one-hop successor lifecycle is reused without
+    requiring a synthetic Competition. Goal keeps the original Plan Task as
+    history but follows the successor for machine verification, Review Graph,
+    fresh Main decision, Integration, progress, restart, and downstream gates.
+    The flow is confirmation-gated, bounded to one successor, and never
+    automatically selects, retries, reviews, accepts, integrates, commits, or
+    pushes.
+  presentation:
+    summary: 一个 Goal 里的普通 Task 如果只完成了一部分，Main 可以保留已确认文件和剩余问题，直接交给另一个 Worker；Goal 会继续跟踪接手后的结果，不需要先制造一次 Competition。
+    language: zh-CN
+  context:
+    - Existing Candidate handoff is real and safe but requires Competition retained-partial evidence.
+    - Goal atomically creates ordinary Plan Tasks, not Competition Candidate Tasks, so the current handoff entry cannot occur inside a real Goal.
+    - Goal already observes Review Graph on its original Task, while handoff creates a separate ordinary successor and preserves source history.
+    - The previous Grok Task ed995dfd-4686-4d68-a068-40932969b446 was intentionally interrupted before edits when Main found this reachability gap; do not resume or reuse its incomplete contract.
+    - CandidateRevision and CandidateGapContract already provide exact patch, path-safety, bounded-gap, Attempt, and verification evidence.
+    - Preserve the dirty owner worktree and every existing Competition handoff behavior. Do not commit or push.
+    - Grok 4.5 is the owner-selected default for 2026-07-30 and 2026-07-31. This deterministic implementation does not justify Competition or another Provider.
+  inScope:
+    - >-
+      Add one explicit Main-confirmed direct handoff request for a normal Goal
+      milestone Task: exact latest CandidateRevision, reusable whole-file paths,
+      bounded remaining gaps, different launchable saved Worker Profile,
+      bounded reason, and confirm true.
+    - >-
+      Require the source Task to belong to a non-terminal durable Goal and to be
+      in a reviewable terminal state: machine failed with a captured
+      CandidateRevision, or machine succeeded with a fresh exact Main revise.
+      Reject running/queued/no-Diff work, fresh Main accept, Main reject, already
+      integrated work, stopped/completed Goal, stale revision, unsafe path,
+      same/non-launchable Profile, or an existing source/successor handoff before
+      mutation.
+    - >-
+      Reuse the canonical CandidateGapContract validator and current one-hop
+      materialization: successor baseline is the current project snapshot;
+      import only approved complete paths and byte-match them to the exact
+      Candidate workspace; final successor Diff stays complete relative to the
+      project.
+    - >-
+      Generalize durable CandidateHandoff origin without weakening Competition:
+      keep existing Competition origin behavior and add a typed Goal-Task
+      origin. Do not fabricate Competition ids or erase source-specific retained
+      evidence. Public views show origin kind and only applicable ids.
+    - Persist direct retained-path/gap evidence and one handoff authorization plus successor Task atomically, or persist nothing. Recovery may finish preparation/queue the same successor once but never create a second handoff, successor, Attempt, or retained record.
+    - >-
+      Preserve original Goal milestone and Plan Task identity. Add one canonical
+      read-only effective-milestone lineage resolver: original Task when no
+      handoff exists; the exact durable successor once direct handoff is
+      authoritative.
+    - Evaluate machine, fresh Main-accept, successor Review Graph, exact Integration, Goal evidence digest, in-flight/no-progress, restart projection, and dependency admission against the effective successor. Failed/interrupted successor returns control to Main and cannot fall back to stale source evidence or hand off again.
+    - Count direct Goal handoff as one authoritative evidence change, but never count polling, raw Worker text, setting edits, or repeated reads as progress. Frozen Goal correction/review/no-new-evidence limits remain unchanged; handoff is not a retry or correction.
+    - Add CLI, MCP, and Hub/Task Detail and Goal Detail operations. Main sees what is retained, source and destination Worker, why work moved, current effective Task, checks/review/Integration still required, failure cause, and one next action in plain English and Chinese. Technical ids/digests are secondary.
+    - Keep all existing Competition retain-partial/handoff CLI, MCP, Hub, privacy, idempotency, restart, and Integration behavior compatible. Non-Goal Tasks cannot use direct Goal handoff.
+    - Add deterministic behavior tests covering direct Goal handoff success, failed source and Main-revise source, rejection matrix, atomicity, selected-path-only materialization, source immutability, successor gate progression, Review Graph on successor, restart/no-progress, downstream queue-once, bilingual UI, privacy, and existing Competition regression.
+  outOfScope:
+    - Automatic Worker selection, Competition creation, auto-retain, auto-handoff, multi-hop/fan-out, merging several Candidates, hunk-level reuse, dynamic Task contract rewrite, or changing source Task identity.
+    - Handoff from standalone non-Goal Tasks, Main-accepted/rejected/integrated Candidates, active Workers, reviewer Tasks, or a handoff successor.
+    - Automatic reviewer creation, voting, correction, retry, adaptation, Main accept/revise/reject, Integration, activation, commit, push, credential probing, or Provider configuration changes.
+    - Replacing Plan/Goal scheduling, exposing raw patch/prompt/log/private path, or claiming Main Token savings without an exact-pair baseline.
+  executionSteps:
+    - Trace normal Task CandidateRevision capture, latest Main Review authority, Goal membership/state, CandidateGapContract, current Competition handoff validation/persistence/materialization/recovery, Goal gate/evidence/in-flight/projection, daemon/CLI/MCP/Hub paths, and integration exactness.
+    - Define a typed handoff origin and one source-context resolver so Competition and Goal-Task validation share destination, revision, path, one-hop, materialization, successor, idempotency, and recovery logic without weakening their different admission rules.
+    - Add one atomic direct Goal retention-plus-handoff mutation and the effective Goal milestone lineage resolver; keep all read paths mutation-free.
+    - Wire confirmation and explanation through coordinator, daemon, CLI, MCP, Task Detail, and Goal Detail; reuse core projections instead of implementing policy in JavaScript.
+    - Prove a four-Task Goal fixture where Task two has a partial Candidate, Main retains one file, a different Profile successor completes one gap, a reviewer inspects the successor, Main accepts/integrates it, and Task three is queued exactly once after restart.
+    - Run focused checks once, then full repository tests/build/syntax/diff once. Stop after one Candidate and at most one same-Candidate correction.
+  deliverables:
+    - Direct Goal-Task retained Candidate handoff authority and atomic persistence.
+    - Shared one-hop successor materialization/recovery compatible with Competition.
+    - Successor-aware Goal gates, evidence, restart, no-progress, and downstream scheduling.
+    - Confirmation-gated CLI/MCP and readable bilingual Task/Goal Hub journey.
+  modules:
+    - name: Direct Goal handoff authority
+      responsibility: Validate exact Goal membership/state, CandidateRevision, Main decision, retained paths/gaps, destination Profile and explicit confirmation before atomic mutation.
+      consumes:
+        - Goal and milestone records, source Task/Attempt/verification/revision/review, CandidateGapContract, saved Worker readiness, Main request.
+      produces:
+        - Typed Goal-Task retained evidence, durable handoff origin, frozen destination identity, and exactly one successor Task.
+      boundaries:
+        - No active/accepted/rejected/integrated source, non-Goal source, automatic selection, duplicate successor, source rewrite, or private content.
+    - name: Shared successor delivery
+      responsibility: Reuse exact selected-path materialization, one-hop recovery, ordinary Worker verification, review, Main decision, and Integration for both origin kinds.
+      consumes:
+        - Typed source context, exact revision patch, approved files, current project snapshot, destination policy.
+      produces:
+        - Prepared successor whose final Diff contains retained and newly completed changes relative to the project.
+      boundaries:
+        - No whole-Candidate import, unapproved path, session reuse, inherited Main accept, retry semantics, or multi-hop.
+    - name: Goal effective milestone supervision
+      responsibility: Resolve original versus direct-handoff successor once and reuse it across gates, evidence, in-flight checks, restart, projection, and downstream admission.
+      consumes:
+        - Original milestone, durable handoff, successor Task and existing verification/review/Integration authorities.
+      produces:
+        - Truthful current milestone, evidence digest, one next action, and queue-once dependency release.
+      boundaries:
+        - Original Plan linkage remains immutable; no stale source fallback, second scheduler, polling progress, or automatic mutation.
+    - name: Main and Hub handoff journey
+      responsibility: Let Main confirm and let users understand retained work, Worker change, current authority, result, failure and next action.
+      consumes:
+        - Privacy-safe handoff/Goal lineage projections and confirmation request.
+      produces:
+        - CLI/MCP operations plus bilingual Task and Goal Detail surfaces.
+      boundaries:
+        - No raw Candidate content, prompt, transcript, credential, endpoint, private path, unbounded reason, or false Token-saving claim.
+  callChain:
+    - A Goal milestone Task reaches failed-with-Candidate or succeeded-with-fresh-Main-revise.
+    - Main selects exact reusable files, names remaining gaps, chooses a different saved Worker, and explicitly confirms direct handoff.
+    - ForkLight validates Goal/source/revision/review/path/Profile authority and atomically stores retained evidence, handoff, successor Task, and events.
+    - ForkLight snapshots the current project, imports only retained files with byte proof, and runs one ordinary successor Attempt.
+    - Goal resolves the successor as effective while preserving the original Task, waits for optional Review Graph and fresh Main accept, then exact Integration.
+    - Existing dependency scheduling admits downstream Goal work once after the effective gate; restart reconstructs the same state without duplicates.
+  scenarios:
+    - name: Failed Goal Candidate is completed by another Worker
+      given: A Goal Task failed verification but has a current two-file CandidateRevision with one file judged reusable.
+      when: Main retains that file, names the other gap, and confirms a different Worker Profile.
+      then: One successor starts with only the retained file, completes the gap, and the Goal waits for successor review, Main accept, and Integration before continuing.
+    - name: Main-revise successful Candidate is handed off
+      given: Machine checks passed but Main recorded an exact revise because one module is incomplete.
+      when: Main confirms retained files and a different Worker.
+      then: Source success remains visible but cannot satisfy the milestone; only the successor's fresh evidence can do so.
+    - name: Invalid source stops before mutation
+      given: The source is active, non-Goal, accepted, rejected, integrated, stale, or already a successor/source of handoff.
+      when: Main requests direct Goal handoff.
+      then: No retained record, successor, workspace, queue entry, Worker, or cost is created and the user receives one clear corrective action.
+    - name: Restart during successor and review
+      given: A direct Goal successor or its reviewer is running.
+      when: The Daemon restarts or no-progress reconciliation runs.
+      then: The same work remains authoritative, idle stop does not fire, bounded recovery occurs once, and no downstream duplicate starts.
+  risks:
+    - Making competitionId optional without a typed origin can silently weaken old invariants; use a discriminated origin and validate each source path independently.
+    - Persisting retained evidence before successor authorization outside one transaction can leave an unusable half-state; the mutation must be atomic.
+    - Goal helpers resolving lineage separately can disagree on status versus scheduling; one canonical resolver must feed every consumer.
+    - Letting source machine success satisfy a gate after Main revise would bypass the handoff; once authoritative, successor evidence exclusively controls the milestone.
+    - A broad UI may expose gap text or paths without bounds; reuse canonical safe fields and existing CandidateGapContract limits.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 4400
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 20
+  fileLimitMode: warn
+  changedLineLimit: 4400
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/candidate-handoff.ts
+    - src/core/candidate-revision.ts
+    - src/core/goal.ts
+    - src/core/dependency-resolver.ts
+    - src/core/main-review.ts
+    - src/core/review-graph.ts
+    - src/core/integration.ts
+    - src/core/types.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/goal.test.ts
+    - tests/competition.test.ts
+    - tests/candidate-revision.test.ts
+    - tests/daemon.test.ts
+    - tests/review-graph.test.ts
+    - tests/integration.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Main can directly retain selected paths and bounded gaps from one exact normal Goal Task Candidate and hand it to one different saved Worker without creating a Competition, rewriting the source Task, or weakening existing Competition handoff.
+    - Direct handoff admits only a non-terminal Goal source that is failed-with-revision or succeeded-with-fresh-exact-Main-revise; active, accepted, rejected, integrated, stale, unsafe, same-Profile, non-launchable, duplicate, non-Goal, terminal-Goal, and successor sources fail before mutation or Worker cost.
+    - Retained evidence, typed handoff, frozen destination and successor Task persist atomically; selected paths alone are byte-matched into a clean current-project baseline and recovery never duplicates handoff, Task, workspace, Attempt, or lineage.
+    - Goal preserves its original Plan Task but uses the exact successor for machine, Review Graph, fresh Main-accept, exact Integration, evidence digest, in-flight/no-progress, restart and downstream queue-once behavior; source evidence cannot satisfy the gate after handoff.
+    - Failed/interrupted successor returns control to Main without source fallback, automatic second handoff, retry, correction, review, decision, Integration, commit, or push.
+    - CLI, MCP, Task Detail and Goal Detail provide explicit confirmation and bilingual explanation of retained work, source/destination Worker, current authority, evidence, failure and next action without private data or internal-first copy.
+    - Existing Competition and no-handoff Goal behavior remains green; full tests, strict TypeScript, build, Hub JavaScript syntax and diff hygiene pass with no commit or push.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/goal.test.ts tests/competition.test.ts tests/candidate-revision.test.ts tests/daemon.test.ts tests/review-graph.test.ts tests/integration.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

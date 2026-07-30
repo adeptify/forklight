@@ -1,0 +1,203 @@
+version: 2
+name: Separate first-pass verified success from eventual delivery in routing evidence
+project: /Users/yijunwang/code/forklight
+taskClass: m3-first-pass-efficiency-evidence
+taskFamily: capability-statistics
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: capability-statistics
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；本任务合同由 Main 定义，Worker 只实现证据与配置链。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Let Main distinguish a Worker that passes independent behavior checks on its first
+    Attempt from one that reaches the same final delivery only after corrections. Add a
+    truthful first-pass verified-success evidence factor to task-class/family routing,
+    keep it separate from eventual accepted delivery and correction churn, expose its
+    coverage and meaning in Hub, and make its non-negative weight configurable. Missing,
+    legacy, credential, Provider, budget, workspace, or interruption evidence must stay
+    unavailable rather than becoming a first-pass failure or a synthetic zero. Routing
+    remains read-only advice, Main remains able to override it, and this change must not
+    start Competition or permanently exclude a model.
+  presentation:
+    summary: 把“第一次就通过独立验收”和“后来修好并交付”分开统计，让 Main 看出谁通常更少返工；缺失或外部失败不算模型第一次失败。
+    language: zh-CN
+  context:
+    - Current routing separates accepted delivery, verified behavior, model-quality failure, correction churn, cost, duration, and bounded-budget reliability, but it does not expose first-pass verified success.
+    - Task-level machine success is an eventual terminal outcome. It cannot answer whether a second Worker Attempt or Main correction was needed.
+    - Attempt-scoped verification.completed events already provide the exact first Attempt behavior result. Do not infer it from the final Task status or lend a later verification to Attempt one.
+    - The existing default missingEvidenceMode is flexible. A newly enabled factor may be omitted when comparable evidence is incomplete, but the omission must stay visible.
+    - A separate audit found that zero-evidence fallback for a full Worker identity compares a provider/model-only string with a four-part identity key and can return unknown/unknown. Fix this adjacent identity-preservation defect with a focused regression.
+  inScope:
+    - Extend RoutingEvidence with bounded aggregate fields for first-pass verified sample count, success count, success rate, and unavailable count.
+    - Count only the earliest Attempt by ordinal. A first pass is successful only when that Attempt has its own durable verification evidence with behaviorPassed true.
+    - Count a first-pass behavior failure only when the same Attempt has verification evidence that is attributable to model behavior. Exclude missing verification and non-model credential, Provider/connectivity, budget, workspace, interruption, policy-only, and formally amended-acceptance failures from the denominator.
+    - Never use a later Attempt's verification, final Task success, Main-repaired delivery, or final Integration as first-pass evidence.
+    - Add firstPassSuccess as a routing factor with an independently configurable non-negative weight. Use a conservative default weight of 0.5 so fewer-correction delivery matters, while flexible missing-evidence behavior prevents legacy gaps from blocking all advice.
+    - Require comparable first-pass coverage for every candidate before the factor participates. Add one stable unavailable reason and preserve strict versus flexible semantics.
+    - Add the weight to settings normalization, validation, partial update, daemon policy snapshot, Hub settings API, Advanced UI, resolved-policy display, and bilingual plain-language hints. Older saved settings without the field must load with the default.
+    - In each Hub routing candidate card, show first-pass passed/sample/rate and the number excluded because the cause or evidence was not comparable. Keep eventual delivery and correction evidence conceptually separate.
+    - Fix zero-evidence fallback so a full provider/model/runtime/effort candidate retains its real provider/model instead of unknown/unknown.
+    - Add focused executable tests for first-Attempt success, later correction success, policy-only and external failure exclusion, missing verification, amended acceptance, per-candidate comparison coverage, strict/flexible omission, settings migration, Hub localization, and full-identity zero history.
+  outOfScope:
+    - Changing sample thresholds, uncertainty threshold, Competition intent/triggers, automatic Worker selection, Task admission, Provider adapters, pricing, duration semantics, historical database backfill, Task status, remediation truth, exact-pair Token claims, unrelated Hub redesign, commit, or push.
+  executionSteps:
+    - Trace attempt-scoped verificationFrom evidence, deriveRoutingEvidence, factor planning, settings normalization, coordinator policy construction, and Hub rendering before editing.
+    - Define one canonical first-pass classification helper that uses only Attempt ordinal one and its own events; make external or unavailable evidence explicit.
+    - Add the aggregate evidence and factor without changing eventual accepted-delivery, behavior, failure, or correction arithmetic.
+    - Thread the new configurable weight through all settings boundaries with backward-compatible defaults and validation.
+    - Render a concise bilingual first-pass fact near each candidate's evidence, not only in technical score details.
+    - Add the full-identity zero-evidence regression and verify no response leaks Task ids, paths, prompts, logs, reasons, credentials, or endpoints.
+    - Run focused tests, JavaScript syntax, the full project check, and diff hygiene once.
+  deliverables:
+    - First-pass verified-success aggregates and one configurable routing factor.
+    - Plain-language Hub evidence that distinguishes first-pass success, eventual delivery, and correction effort.
+    - Backward-compatible settings migration and full-identity zero-history preservation.
+    - Deterministic tests; no Provider call, history mutation, automatic Competition, commit, or push.
+  modules:
+    - name: First-pass evidence derivation
+      responsibility: Classify only the earliest Attempt using its own verification and failure evidence.
+      consumes:
+        - Ordered Attempt records, attempt-bound events, verification result, failure impact, and amended-acceptance disposition.
+      produces:
+        - First-pass verified sample, success, and unavailable aggregate counts per Worker identity and task scope.
+      boundaries:
+        - No final-status inference, later-verification borrowing, Task-level content, or external-failure blame.
+    - name: Routing factor and settings
+      responsibility: Compare first-pass success only when every candidate has sufficient comparable evidence and let the user control its weight.
+      consumes:
+        - First-pass aggregates, sample thresholds, missing-evidence mode, and saved routing settings.
+      produces:
+        - Available or explicitly omitted firstPassSuccess factor, immutable resolved policy, and backward-compatible settings.
+      boundaries:
+        - No automatic selection, Competition, permanent exclusion, silent zero, or change to other factor arithmetic.
+    - name: Hub explanation
+      responsibility: Explain how often each Worker passed on the first independently checked Attempt and what was excluded.
+      consumes:
+        - Candidate first-pass evidence, factor availability, and locale.
+      produces:
+        - Concise English/Chinese first-pass facts and an editable Advanced preference.
+      boundaries:
+        - No raw reason codes as primary copy, no claim that first-pass rate equals final quality, and no Task-level evidence leakage.
+  callChain:
+    - StateStore supplies terminal Tasks, ordered Attempts, attempt-bound events, and remediation disposition to StatisticsService.
+    - deriveRoutingEvidence classifies Attempt one independently and emits aggregate first-pass evidence by exact task class or family and full Worker identity.
+    - provideRoutingAdvice checks candidate-wide first-pass coverage, optionally scores the factor, and keeps omission visible under flexible mode.
+    - SettingsService and coordinator freeze the configured weight into the resolved read-only routing policy.
+    - Hub shows the human evidence fact, preference, and technical calculation while Main remains the decision owner.
+  scenarios:
+    - name: First Attempt passes
+      given: Attempt one has its own verification with behaviorPassed true.
+      when: routing evidence is derived.
+      then: The sample and success counts both increase once regardless of later reviews or Integration.
+    - name: Correction eventually delivers
+      given: Attempt one has attributable behavior failure and Attempt two passes, then Main accepts delivery.
+      when: routing evidence is derived.
+      then: Accepted delivery is positive, correction churn remains visible, and first-pass success is zero of one rather than one of one.
+    - name: External first Attempt failure
+      given: Attempt one ends because of credentials, Provider connectivity, budget, workspace, or interruption and no attributable behavior verification exists.
+      when: routing evidence is derived.
+      then: The first-pass unavailable count increases; neither the denominator nor failure score blames the model.
+    - name: Main acceptance contract was wrong
+      given: A failed verification is later delivered through formally amended acceptance.
+      when: first-pass evidence is derived.
+      then: The Main-authored contradiction is excluded from first-pass model evidence.
+    - name: Comparable candidates
+      given: Every candidate meets the configured first-pass sample threshold and the weight is positive.
+      when: advice is evaluated.
+      then: Higher first-pass verified rate contributes to the recommendation without replacing delivery or Main judgment.
+    - name: Legacy evidence is incomplete
+      given: One candidate lacks attempt-bound verification history.
+      when: advice runs in flexible mode.
+      then: The factor is omitted with a visible reason and other comparable factors may still advise; strict mode remains undecided.
+    - name: New full Worker identity has no history
+      given: A provider/model/runtime/effort candidate is absent from both evidence maps.
+      when: advice is requested.
+      then: The zero-evidence row keeps that candidate's real provider and model rather than unknown/unknown.
+  risks:
+    - Final Task success can incorrectly inflate first-pass rate; bind verification to the first Attempt id only.
+    - Provider or Main-contract failures can unfairly punish a model; reuse canonical failure impact and amended-delivery truth.
+    - Adding a required settings key can break old saved profiles; normalize absence to the new default before validation and projection.
+    - First-pass rate and correction churn are correlated but not identical; show both and keep independently configurable weights.
+    - A default positive weight with sparse legacy history can surprise users; flexible mode must omit it visibly rather than treating missing as zero.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 1000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 12
+  fileLimitMode: warn
+  changedLineLimit: 1000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - src/core/model-routing.ts
+    - src/core/settings.ts
+    - src/daemon/coordinator.ts
+    - src/hub/settings-api.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/statistics.test.ts
+    - tests/model-routing.test.ts
+    - tests/settings.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - First-pass verified success uses only Attempt one and its own verification; later success or final delivery cannot rewrite it.
+    - Missing and non-model first-Attempt outcomes stay unavailable instead of synthetic failure or zero.
+    - Every candidate needs sufficient first-pass coverage before the factor scores; strict/flexible behavior remains truthful.
+    - The independently configurable weight survives settings migration, validation, partial update, daemon snapshot, Hub edit, and resolved-policy display.
+    - Hub explains first-pass success separately from eventual delivery and correction effort in English and Chinese.
+    - Full Worker identity zero-evidence rows retain the candidate provider/model and no response exposes private Task evidence.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts tests/model-routing.test.ts tests/settings.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - npm run check
+    - git diff --check

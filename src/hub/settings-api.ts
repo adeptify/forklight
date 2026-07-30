@@ -53,6 +53,7 @@ export interface HubSettingsPatch {
       verifiedBehavior?: number;
       modelQualityFailure?: number;
       correctionChurn?: number;
+      firstPassSuccess?: number;
       officialCost?: number;
       duration?: number;
       budgetReliability?: number;
@@ -76,6 +77,7 @@ export interface HubModelRoutingView {
     verifiedBehavior: number;
     modelQualityFailure: number;
     correctionChurn: number;
+    firstPassSuccess: number;
     officialCost: number;
     duration: number;
     budgetReliability: number;

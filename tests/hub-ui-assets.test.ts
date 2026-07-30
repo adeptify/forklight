@@ -32,6 +32,583 @@ test("Hub public assets exist with configure + operate chrome", async () => {
   assert.ok(css.length > 200);
 });
 
+test("Hub explains the real Competition and exposes an explicit Main decision flow", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  for (const functionName of [
+    "competitionNextActionLabel",
+    "renderTaskCompetitionContext",
+    "competitionDecisionControls",
+  ]) {
+    assert.ok(src.includes(`function ${functionName}(`), `${functionName} must exist`);
+  }
+  assert.ok(src.includes('data-fl-role", "task-competition-context"'));
+  assert.ok(src.includes('data-fl-role", "competition-main-controls"'));
+  assert.ok(src.includes('/main-decision"'));
+  assert.ok(src.includes("candidate.mainReviewDecision"), "Competition decision follows the Task-level Main review");
+  assert.ok(src.includes("if(!window.confirm(t(\"compMainConfirm\"))) return"));
+  assert.ok(src.includes("showCompetition(ctx.competitionId)"));
+  for (const phrase of [
+    "This task is one Competition candidate",
+    "Machine comparison cannot accept work or start another Worker",
+    "这个任务是一次 Competition 的候选",
+    "机器比较不能接受成果，也不能自行启动下一位 Worker",
+  ]) {
+    assert.ok(i18n.includes(phrase), phrase);
+  }
+});
+
+test("Hub explains Goal Task direct handoff with confirmation and bilingual privacy-safe story", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  assert.ok(src.includes('data-fl-role", "goal-task-handoff-controls"'));
+  assert.ok(src.includes("function renderGoalTaskHandoffControls("));
+  assert.ok(src.includes('/goal-handoff"'));
+  assert.ok(src.includes("goalHandoffConfirm"));
+  assert.ok(src.includes("goalHandoffMilestoneLine"));
+  assert.ok(i18n.includes("goalHandoffTitle"));
+  assert.ok(i18n.includes("goalHandoffHint"));
+  assert.ok(i18n.includes("把此 Goal Task 候选直接交给另一个 Worker"));
+  assert.ok(i18n.includes("Hand this Goal Task Candidate to a different Worker"));
+  assert.ok(!i18n.includes("Token savings from handoff"), "must not claim Token savings");
+});
+
+test("Hub explains cross-Worker handoff with confirmation and bilingual privacy-safe story", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  assert.ok(src.includes("function competitionHandoffControls("));
+  assert.ok(src.includes("function renderCandidateHandoffCard("));
+  assert.ok(src.includes('data-fl-role", "competition-handoff-controls"'));
+  assert.ok(src.includes('data-fl-role", "candidate-handoff"'));
+  assert.ok(src.includes('/handoff"'));
+  assert.ok(src.includes("if(!window.confirm(t(\"compHandoffConfirm\"))) return"));
+  assert.ok(src.includes("destinationWorkerProfileId"));
+  assert.ok(src.includes("candidateRevisionId"));
+  assert.ok(!src.includes("privateArtifactPath"), "Hub must not project private revision artifact paths");
+  for (const phrase of [
+    "Hand retained work to a different Worker",
+    "This is not a retry of the source Task",
+    "把保留成果交给另一位 Worker",
+    "这不是源任务的重试",
+    "跨 Worker 接力",
+  ]) {
+    assert.ok(i18n.includes(phrase), phrase);
+  }
+  assert.ok(!i18n.includes("Token savings from handoff"), "must not claim Token savings");
+});
+
+test("Hub explains the multi-judge Review Graph with explicit confirmation", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  assert.ok(src.includes("function renderJudgeReviewCard("));
+  assert.ok(src.includes('data-fl-role", "judge-review"'));
+  assert.ok(src.includes("/review-graph\""));
+  assert.ok(src.includes("reviewerWorkerProfileIds"));
+  assert.ok(src.includes("if(!window.confirm(t(\"taskJudgeConfirm\"))) return"));
+  assert.ok(src.includes("function judgeFailureLabel("));
+  assert.ok(src.includes("function judgeNextActionLabel("));
+  assert.ok(src.includes("function judgeAggregationLabel("));
+  assert.ok(src.includes("function judgeAggregationExplanation("));
+  // Chinese UI must localize from state/counts — never render server English explanation.
+  assert.ok(src.includes("judgeAggregationExplanation(agg)"));
+  assert.ok(!src.includes("agg.explanation"));
+  assert.ok(!src.includes("String(agg.explanation"));
+  assert.ok(i18n.includes("taskJudgeFailureMalformed"));
+  assert.ok(i18n.includes("这个候选已经成功合入，没有待处理的审查动作"));
+  assert.ok(i18n.includes("裁判在约定的结构化结果之外添加了说明"));
+  assert.ok(i18n.includes("nothing will retry unless Main starts new work"));
+  assert.ok(i18n.includes("taskJudgeAggDisagreement"));
+  assert.ok(i18n.includes("taskJudgeAggExplainDisagreement"));
+  assert.ok(i18n.includes("taskJudgeAggExplainPending"));
+  assert.ok(i18n.includes("仍有 {pending}/{total} 位独立裁判未完成"));
+  assert.ok(i18n.includes("可用裁判意见不一致（接受×{accept}"));
+  for (const phrase of [
+    "Assign one through three saved Workers as independent read-only judges",
+    "Main decides. Judge output is evidence",
+    "Usable judges disagree",
+    "为当前精确的候选版本指派 1 到 3 个已保存的 Worker 作为独立只读裁判",
+    "由 Main 做最终决定。裁判输出是证据",
+    "可用裁判意见不一致",
+  ]) {
+    assert.ok(i18n.includes(phrase), phrase);
+  }
+});
+
+test("Hub explains durable Goal supervision with bilingual next actions", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
+  assert.ok(html.includes('data-tab="goals"'));
+  assert.ok(src.includes("function rGoals("));
+  assert.ok(src.includes("function showGoalDetail("));
+  assert.ok(src.includes('data-fl-role", "goal-detail"'));
+  assert.ok(src.includes("/api/ops/goals/"));
+  assert.ok(src.includes("if(!window.confirm(t(\"goalAdvanceConfirm\"))) return"));
+  assert.ok(src.includes("if(!window.confirm(t(\"goalStopConfirm\"))) return"));
+  assert.ok(src.includes("function goalNextActionLabel("));
+  assert.ok(src.includes("function goalReasonLabel("), "Goal reason codes localize by reasonCode");
+  assert.ok(src.includes("function goalMilestoneDeliveryLabel("), "delivery basis has a bilingual helper");
+  assert.ok(src.includes("function goalStoryHappenedText("), "story happened uses localized cause");
+  assert.ok(src.includes("function goalStoryWaitingText("), "story waiting uses localized cause");
+  assert.ok(src.includes("function goalOverviewSummaryText("), "overview uses terminal/active summary helper");
+  assert.ok(src.includes("goalOverviewSummaryText(g)"), "rOverview wires overview summary helper");
+  assert.ok(src.includes('stopped: "statusStopped"'), "durable stopped status is a first-class badge label");
+  assert.ok(
+    src.includes("goalNextActionLabel(g.nextActionCode, g.nextAction)"),
+    "Goal list prefers known nextActionCode over stored prose",
+  );
+  assert.ok(
+    src.includes("goalNextActionLabel(goal.nextActionCode, goal.nextAction)"),
+    "Goal Detail prefers known nextActionCode over stored prose",
+  );
+  assert.ok(!src.includes("g.nextAction || goalNextActionLabel"), "overview must not prefer raw nextAction prose");
+  assert.ok(src.includes("readableDuration(policy.noProgressTimeoutMs)"), "no-progress policy uses readable duration");
+  assert.ok(src.includes('t("goalStoppedLine"'), "stopped Goals show a plain-language stop line");
+  assert.ok(
+    src.includes("goalReasonLabel(goal.reasonCode"),
+    "stopped summary localizes known reason codes instead of raw English reason",
+  );
+  assert.ok(
+    src.includes("goalStoryHappenedText(goal)"),
+    "Goal Detail story happened path uses localized helper",
+  );
+  assert.ok(
+    src.includes("goalStoryWaitingText(goal)"),
+    "Goal Detail story waiting path uses localized helper",
+  );
+  assert.ok(
+    src.includes("goalMilestoneDeliveryLabel(m.deliveryBasis"),
+    "Goal Detail milestones localize delivery basis",
+  );
+  assert.ok(
+    src.includes('data-fl-delivery-basis"'),
+    "satisfied milestones expose compact delivery basis for audit",
+  );
+  for (const phrase of [
+    "What just happened",
+    "What Main should do next",
+    "刚刚发生",
+    "Main 下一步应做",
+    "Future Task admission will be blocked",
+    "将阻止后续 Task 准入",
+    "no-progress stop after",
+    "无进展停止时限",
+    "running Workers were not killed",
+    "不会杀掉正在运行的 Worker",
+    "权威里程碑证据没有变化",
+    "Main 在无新证据时推进次数过多",
+    "已达到目标总时长上限",
+    "Main 已停止此目标",
+    "statusStopped",
+    "已停止",
+    "Main repaired the current source and rechecked it with a corrected acceptance rule",
+    "Main 已修复当前源码，并用修正后的验收规则重新检查通过",
+  ]) {
+    assert.ok(i18n.includes(phrase), phrase);
+  }
+  // Privacy: Goal milestone copy must not surface commands, private reasons, or paths.
+  assert.ok(!i18n.includes("npm run typecheck"), "Goal i18n must not hardcode commands");
+  assert.ok(!i18n.includes("contradictory-acceptance"), "Goal beginner copy omits internal reason code");
+  assert.ok(!src.includes("replacementCommand"), "Goal UI must not bind replacementCommand");
+  assert.ok(!src.includes("amendedCommands"), "Goal UI must not bind private amendedCommands");
+  assert.ok(!i18n.includes("Delivery basis: {basis}"), "Hub must not show raw basis tokens");
+  assert.ok(!i18n.includes("交付依据：{basis}"), "中文 Hub 不展示内部依据 token");
+});
+
+test("Hub Goal Detail explains amended delivery basis in English and Chinese", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18nSrc = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const wrapped = i18nSrc.replace(
+    /\(typeof window !== "undefined" \? window : globalThis\)/,
+    "(sandbox)",
+  );
+  const sandbox: {
+    ForklightI18n?: {
+      t: (key: string, vars?: Record<string, string>) => string;
+      setLang: (lang: string) => void;
+      getLang: () => string;
+    };
+    localStorage?: { getItem: (k: string) => string | null; setItem: (k: string, v: string) => void };
+    navigator?: { language: string };
+    document?: { documentElement: { lang: string; setAttribute: () => void } };
+  } = {
+    localStorage: {
+      getItem: () => null,
+      setItem: () => undefined,
+    },
+    navigator: { language: "en" },
+    document: { documentElement: { lang: "en", setAttribute: () => undefined } },
+  };
+  new Function("sandbox", wrapped)(sandbox);
+  const i18n = sandbox.ForklightI18n;
+  assert.ok(i18n, "ForklightI18n loads for Goal delivery basis checks");
+
+  const helpers = [
+    extractFunctionSource(src, "goalMilestoneDeliveryLabel"),
+  ].join("\n");
+  const api = new Function(
+    "t",
+    `${helpers}\nreturn { goalMilestoneDeliveryLabel };`,
+  )((key: string, vars?: Record<string, string>) => i18n!.t(key, vars)) as {
+    goalMilestoneDeliveryLabel: (basis?: string, fallback?: string) => string;
+  };
+
+  i18n!.setLang("en");
+  assert.equal(
+    api.goalMilestoneDeliveryLabel("amended-acceptance"),
+    "Main repaired the current source and rechecked it with a corrected acceptance rule.",
+  );
+  assert.equal(
+    api.goalMilestoneDeliveryLabel("original-acceptance"),
+    "Main repaired the current source and rechecked it with the original acceptance rule.",
+  );
+  assert.equal(
+    api.goalMilestoneDeliveryLabel("exact-candidate-integration"),
+    "The exact accepted Candidate was integrated into the project.",
+  );
+  assert.doesNotMatch(
+    api.goalMilestoneDeliveryLabel("amended-acceptance"),
+    /Candidate Integration|automatic merge|npm |typecheck|contradictory/i,
+  );
+
+  i18n!.setLang("zh");
+  const zhAmended = api.goalMilestoneDeliveryLabel("amended-acceptance");
+  assert.equal(
+    zhAmended,
+    "Main 已修复当前源码，并用修正后的验收规则重新检查通过。",
+  );
+  assert.doesNotMatch(zhAmended, /Candidate|Integration|automatic|npm |typecheck/i);
+  assert.ok(!/[A-Za-z]{4,}/.test(zhAmended.replace(/Main/g, "")),
+    "zh primary amended delivery copy must not leak English technical prose");
+  assert.equal(
+    api.goalMilestoneDeliveryLabel("original-acceptance"),
+    "Main 已修复当前源码，并用原有验收规则重新检查通过。",
+  );
+  assert.equal(
+    api.goalMilestoneDeliveryLabel("exact-candidate-integration"),
+    "已将精确接受的候选合入项目。",
+  );
+});
+
+test("Hub Goal reason labels localize known stop causes without English leakage in zh", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18nSrc = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const wrapped = i18nSrc.replace(
+    /\(typeof window !== "undefined" \? window : globalThis\)/,
+    "(sandbox)",
+  );
+  const sandbox: {
+    ForklightI18n?: {
+      t: (key: string, vars?: Record<string, string>) => string;
+      setLang: (lang: string) => void;
+      getLang: () => string;
+    };
+    localStorage?: { getItem: (k: string) => string | null; setItem: (k: string, v: string) => void };
+    navigator?: { language: string };
+    document?: { documentElement: { lang: string; setAttribute: () => void } };
+  } = {
+    localStorage: {
+      getItem: () => null,
+      setItem: () => undefined,
+    },
+    navigator: { language: "en" },
+    document: { documentElement: { lang: "en", setAttribute: () => undefined } },
+  };
+  new Function("sandbox", wrapped)(sandbox);
+  const i18n = sandbox.ForklightI18n;
+  assert.ok(i18n, "ForklightI18n loads for Goal reason behavior checks");
+
+  const helpers = [
+    extractFunctionSource(src, "goalReasonLabel"),
+    extractFunctionSource(src, "goalStoryHappenedText"),
+    extractFunctionSource(src, "goalStoryWaitingText"),
+  ].join("\n");
+  const api = new Function(
+    "t",
+    `${helpers}
+    return {
+      goalReasonLabel: goalReasonLabel,
+      goalStoryHappenedText: goalStoryHappenedText,
+      goalStoryWaitingText: goalStoryWaitingText
+    };`,
+  )((key: string, vars?: Record<string, string>) => i18n!.t(key, vars)) as {
+    goalReasonLabel: (code: string | undefined, fallback?: string) => string;
+    goalStoryHappenedText: (goal: Record<string, unknown>) => string;
+    goalStoryWaitingText: (goal: Record<string, unknown>) => string;
+  };
+
+  const englishStored = {
+    "no-progress":
+      "No authoritative milestone evidence changed within the Goal no-progress window. Future Task admission is blocked; running Workers were not killed.",
+    "no-new-evidence-cap":
+      "Main advanced without new evidence too many times. Goal stopped; no Worker was launched.",
+    "duration-exceeded":
+      "Goal total duration limit was reached. Future Task admission is blocked; running Workers were not killed.",
+    "main-stop":
+      "Main stopped this Goal. History remains readable; active Tasks use Task authority.",
+  } as const;
+
+  i18n!.setLang("en");
+  for (const [code, stored] of Object.entries(englishStored)) {
+    const label = api.goalReasonLabel(code, stored);
+    assert.equal(label, stored, `English ${code} stays accurate`);
+    const story = api.goalStoryHappenedText({
+      reasonCode: code,
+      reason: stored,
+      whatJustHappened: stored,
+      status: "stopped",
+    });
+    assert.equal(story, stored, `English story for ${code} uses localized English cause`);
+    const stoppedWaiting = api.goalStoryWaitingText({
+      reasonCode: code,
+      reason: stored,
+      whatIsWaiting: "Goal is stopped; future Task admission is blocked.",
+      status: "stopped",
+    });
+    assert.match(stoppedWaiting, /stopped|admission is blocked/i, `English stopped waiting for ${code}`);
+  }
+
+  i18n!.setLang("zh");
+  const zhExpectations: Record<keyof typeof englishStored, RegExp> = {
+    "no-progress": /无进展|权威里程碑/,
+    "no-new-evidence-cap": /无新证据/,
+    "duration-exceeded": /总时长/,
+    "main-stop": /Main 已停止|停止此目标/,
+  };
+  for (const [code, stored] of Object.entries(englishStored)) {
+    const label = api.goalReasonLabel(code, stored);
+    assert.notEqual(label, stored, `Chinese ${code} must not keep stored English reason`);
+    assert.doesNotMatch(
+      label,
+      /No authoritative milestone evidence|Main advanced without new evidence|Goal total duration limit was reached|Main stopped this Goal/,
+      `Chinese ${code} must not expose English stop prose`,
+    );
+    assert.match(label, zhExpectations[code as keyof typeof englishStored], `Chinese ${code} is plain language`);
+    const story = api.goalStoryHappenedText({
+      reasonCode: code,
+      reason: stored,
+      whatJustHappened: stored,
+      status: "stopped",
+    });
+    assert.equal(story, label, `Chinese story for ${code} uses localized cause`);
+    assert.doesNotMatch(
+      story,
+      /No authoritative milestone evidence|Main advanced without new evidence|Goal total duration limit was reached|Main stopped this Goal/,
+      `Chinese story for ${code} must not expose English reason`,
+    );
+    const stoppedLineReason = api.goalReasonLabel(code, stored);
+    const stoppedSummary = i18n!.t("goalStoppedLine", {
+      reason: stoppedLineReason,
+      at: "12:00:00",
+    });
+    assert.doesNotMatch(
+      stoppedSummary,
+      /No authoritative milestone evidence|Main advanced without new evidence|Goal total duration limit was reached|Main stopped this Goal/,
+      `Chinese stopped summary for ${code} must not interpolate English reason`,
+    );
+    assert.match(stoppedSummary, /已停止/, `Chinese stopped summary for ${code}`);
+  }
+
+  // Remaining closed codes also localize; unknown codes fall back safely.
+  i18n!.setLang("zh");
+  for (const code of [
+    "correction-cap",
+    "review-cap",
+    "milestone-failed",
+    "waiting-machine",
+    "waiting-main-accept",
+    "waiting-integration",
+    "waiting-task",
+    "goal-completed",
+    "none",
+  ]) {
+    const label = api.goalReasonLabel(code, "English fallback must not win for known codes");
+    assert.notEqual(label, "English fallback must not win for known codes", code);
+    assert.notEqual(label, code, `${code} is not shown as a raw code`);
+  }
+  assert.equal(
+    api.goalReasonLabel("legacy-unknown-code", "Stored legacy reason stays readable"),
+    "Stored legacy reason stays readable",
+    "unknown/legacy codes fall back to bounded stored reason",
+  );
+});
+
+test("Hub Goal cards localize stopped/completed status and next actions without English leakage", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18nSrc = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const wrapped = i18nSrc.replace(
+    /\(typeof window !== "undefined" \? window : globalThis\)/,
+    "(sandbox)",
+  );
+  const sandbox: {
+    ForklightI18n?: {
+      t: (key: string, vars?: Record<string, string>) => string;
+      setLang: (lang: string) => void;
+      getLang: () => string;
+    };
+    localStorage?: { getItem: (k: string) => string | null; setItem: (k: string, v: string) => void };
+    navigator?: { language: string };
+    document?: { documentElement: { lang: string; setAttribute: () => void } };
+  } = {
+    localStorage: {
+      getItem: () => null,
+      setItem: () => undefined,
+    },
+    navigator: { language: "en" },
+    document: { documentElement: { lang: "en", setAttribute: () => undefined } },
+  };
+  new Function("sandbox", wrapped)(sandbox);
+  const i18n = sandbox.ForklightI18n;
+  assert.ok(i18n, "ForklightI18n loads for Goal card presentation checks");
+
+  const helpers = [
+    extractFunctionSource(src, "statusLabel"),
+    extractFunctionSource(src, "goalNextActionLabel"),
+    extractFunctionSource(src, "goalReasonLabel"),
+    extractFunctionSource(src, "goalStoryHappenedText"),
+    extractFunctionSource(src, "goalOverviewSummaryText"),
+  ].join("\n");
+  const api = new Function(
+    "t",
+    `${helpers}
+    return {
+      statusLabel: statusLabel,
+      goalNextActionLabel: goalNextActionLabel,
+      goalReasonLabel: goalReasonLabel,
+      goalStoryHappenedText: goalStoryHappenedText,
+      goalOverviewSummaryText: goalOverviewSummaryText
+    };`,
+  )((key: string, vars?: Record<string, string>) => i18n!.t(key, vars)) as {
+    statusLabel: (status: string) => string;
+    goalNextActionLabel: (code?: string, fallback?: string) => string;
+    goalReasonLabel: (code?: string, fallback?: string) => string;
+    goalStoryHappenedText: (goal: Record<string, unknown>) => string;
+    goalOverviewSummaryText: (goal: Record<string, unknown>) => string;
+  };
+
+  // Live-shaped projections: structured codes with English-stored prose.
+  const stoppedGoal = {
+    status: "stopped",
+    reasonCode: "main-stop",
+    reason: "Main stopped this Goal. History remains readable; active Tasks use Task authority.",
+    whatJustHappened: "Main stopped this Goal. History remains readable; active Tasks use Task authority.",
+    nextActionCode: "none",
+    nextAction: "Main stopped this Goal. History remains readable; active Tasks use Task authority.",
+  };
+  const completedGoal = {
+    status: "completed",
+    reasonCode: "goal-completed",
+    reason: "Every milestone gate is satisfied.",
+    whatJustHappened: "Every milestone gate is satisfied.",
+    nextActionCode: "none",
+    nextAction: "Every milestone gate is satisfied.",
+  };
+  const activeGoal = {
+    status: "active",
+    reasonCode: "waiting-main-accept",
+    reason: "Waiting for a fresh exact Main accept on this milestone.",
+    nextActionCode: "main-accept",
+    nextAction: "Record a fresh Main accept on the exact Candidate",
+  };
+  const legacyGoal = {
+    status: "active",
+    reasonCode: "legacy-unknown-reason",
+    reason: "Stored legacy reason stays readable",
+    nextActionCode: "legacy-unknown-action",
+    nextAction: "Stored legacy next action stays readable",
+  };
+  const legacyTerminalGoal = {
+    status: "stopped",
+    reasonCode: "legacy-unknown-reason",
+    reason: "Stored legacy terminal reason stays readable",
+    whatJustHappened: "Stored legacy terminal reason stays readable",
+    nextActionCode: "none",
+    nextAction: "Main stopped this Goal. History remains readable; active Tasks use Task authority.",
+  };
+
+  i18n!.setLang("zh");
+  assert.equal(api.statusLabel("stopped"), "已停止", "Chinese stopped badge is first-class, not unknown");
+  assert.notEqual(api.statusLabel("stopped"), "状态未知");
+  assert.equal(api.statusLabel("completed"), "已完成");
+
+  const zhStoppedSummary = api.goalOverviewSummaryText(stoppedGoal);
+  assert.match(zhStoppedSummary, /Main 已停止|停止此目标/, "Chinese stopped overview explains why it stopped");
+  assert.doesNotMatch(zhStoppedSummary, /Main stopped this Goal/, "Chinese stopped overview must not leak English");
+  assert.notEqual(zhStoppedSummary, i18n!.t("goalNextNone"), "Chinese stopped overview is not generic no-action");
+  assert.equal(zhStoppedSummary, api.goalStoryHappenedText(stoppedGoal));
+
+  const zhCompletedSummary = api.goalOverviewSummaryText(completedGoal);
+  assert.match(zhCompletedSummary, /里程碑|闸门|满足/, "Chinese completed overview explains terminal cause");
+  assert.doesNotMatch(
+    zhCompletedSummary,
+    /Every milestone gate is satisfied/,
+    "Chinese completed overview must not leak English completion prose",
+  );
+  assert.notEqual(zhCompletedSummary, i18n!.t("goalNextNone"), "Chinese completed overview is not generic no-action");
+  assert.equal(zhCompletedSummary, api.goalStoryHappenedText(completedGoal));
+
+  const zhActiveSummary = api.goalOverviewSummaryText(activeGoal);
+  assert.equal(zhActiveSummary, i18n!.t("goalNextMainAccept"), "Chinese active overview shows localized next action");
+  assert.doesNotMatch(zhActiveSummary, /Record a fresh Main accept/, "Chinese active overview must not leak English next action");
+
+  assert.equal(
+    api.goalOverviewSummaryText(legacyGoal),
+    "Stored legacy next action stays readable",
+    "unknown nextActionCode preserves bounded stored text on active overview",
+  );
+  assert.equal(
+    api.goalOverviewSummaryText(legacyTerminalGoal),
+    "Stored legacy terminal reason stays readable",
+    "unknown terminal reasonCode preserves bounded stored text on overview",
+  );
+  assert.equal(
+    api.goalNextActionLabel(legacyGoal.nextActionCode, legacyGoal.nextAction),
+    "Stored legacy next action stays readable",
+    "unknown nextActionCode preserves bounded stored text in Chinese Hub",
+  );
+  assert.equal(
+    api.goalReasonLabel(legacyGoal.reasonCode, legacyGoal.reason),
+    "Stored legacy reason stays readable",
+    "unknown reasonCode preserves bounded stored text in Chinese Hub",
+  );
+
+  i18n!.setLang("en");
+  assert.equal(api.statusLabel("stopped"), "Stopped", "English stopped badge is first-class");
+  assert.notEqual(api.statusLabel("stopped"), "unknown");
+  assert.equal(api.statusLabel("completed"), "completed");
+  assert.equal(
+    api.goalOverviewSummaryText(stoppedGoal),
+    stoppedGoal.reason,
+    "English stopped overview explains main-stop cause",
+  );
+  assert.equal(
+    api.goalOverviewSummaryText(completedGoal),
+    completedGoal.reason,
+    "English completed overview explains goal-completed cause",
+  );
+  assert.equal(
+    api.goalOverviewSummaryText(activeGoal),
+    i18n!.t("goalNextMainAccept"),
+    "English active overview shows structured next action",
+  );
+  assert.equal(
+    api.goalOverviewSummaryText(legacyGoal),
+    "Stored legacy next action stays readable",
+    "unknown nextActionCode preserves bounded stored text in English Hub",
+  );
+  assert.equal(
+    api.goalNextActionLabel("advance", "Some other stored English"),
+    i18n!.t("goalNextAdvance"),
+    "known nextActionCode wins over stored English prose",
+  );
+  i18n!.setLang("zh");
+  assert.equal(
+    api.goalNextActionLabel("advance", "Explicitly advance the Goal if you believe new evidence exists"),
+    i18n!.t("goalNextAdvance"),
+    "known nextActionCode localizes in Chinese over stored English",
+  );
+});
+
 test("Hub app.js security and decision-drawer invariants", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   assert.ok(!/\.innerHTML\s*=/.test(src));
@@ -207,6 +784,7 @@ test("Hub model-routing unsaved state compares semantic values", async () => {
   assert.ok(keysStart >= 0 && keysEnd > keysStart);
   const helperSource = [
     src.slice(keysStart, keysEnd + 2),
+    extractFunctionSource(src, "mrWeightDefault"),
     extractFunctionSource(src, "mrFiniteNumber"),
     extractFunctionSource(src, "projectModelRoutingPolicy"),
     extractFunctionSource(src, "modelRoutingPoliciesEqual"),
@@ -221,7 +799,7 @@ test("Hub model-routing unsaved state compares semantic values", async () => {
     missingEvidenceMode: "flexible",
     weights: {
       acceptedDelivery: 1, verifiedBehavior: 1, modelQualityFailure: 0.5,
-      correctionChurn: 0.2, officialCost: 0, duration: 0,
+      correctionChurn: 0.2, firstPassSuccess: 0.5, officialCost: 0, duration: 0,
     },
   };
   assert.equal(isDirty({
@@ -264,6 +842,98 @@ test("Hub economics renderer keeps truthful labels", async () => {
     css,
     /@media\s*\(\s*max-width\s*:\s*768px\s*\)\s*\{\s*\.economics-grid\s*\{\s*grid-template-columns\s*:\s*1fr\s*\}/i,
   );
+});
+
+test("Hub Insights routing-evidence coverage is isolated, bilingual, and non-ranking", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+
+  // Isolated poll — must not sit inside the all-ops Promise.all
+  assert.ok(src.includes("function pollRoutingCoverage"), "isolated coverage poll helper");
+  assert.ok(src.includes("/api/ops/routing-evidence-coverage"), "bridge URL on the wire");
+  assert.ok(src.includes("S.routingCoverage"), "cached coverage state");
+  assert.ok(src.includes("S.routingCoverageError"), "isolated failure state");
+  assert.match(src, /Promise\.all\(\[hubP\.catch\([\s\S]*?opsP,\s*econP,\s*recP,\s*sueP\]/);
+
+  // Renderer + states
+  assert.ok(src.includes("function renderRoutingCoverage"), "coverage renderer");
+  assert.ok(src.includes("function renderRoutingCoverageUnavailable"), "unavailable renderer");
+  assert.ok(src.includes("function routingCoverageState"), "empty/partial/complete state helper");
+  assert.ok(src.includes('data-fl-role", "routing-evidence-coverage"'), "stable panel marker");
+  assert.ok(src.includes('return "empty"'), "empty state branch");
+  assert.ok(src.includes('return "complete"'), "complete state branch");
+  assert.ok(src.includes('return "partial"'), "partial state branch");
+
+  // rStats places coverage before economics / provider outcome cards
+  const rStatsIdx = src.indexOf("function rStats()");
+  assert.ok(rStatsIdx > 0, "rStats present");
+  const nextFn = src.indexOf("function ", rStatsIdx + 1);
+  const rStatsBlock = src.slice(rStatsIdx, nextFn > 0 ? nextFn : src.length);
+  const recIdx = rStatsBlock.indexOf("renderRoutingCoverage");
+  const econIdx = rStatsBlock.indexOf("renderPortfolioEconomics");
+  const statsSectionIdx = rStatsBlock.indexOf("statsProviderSectionTitle");
+  assert.ok(recIdx > 0, "rStats renders routing coverage");
+  assert.ok(econIdx > recIdx, "coverage appears before economics");
+  assert.ok(statsSectionIdx > recIdx, "coverage appears before provider outcome cards");
+  // Backend owns counts — browser must not recompute ratios or eligibility
+  assert.ok(!/withTaskClassCount\s*\/\s*/.test(rStatsBlock), "no browser-side class ratio");
+  assert.ok(!/eligibleTerminalTaskCount\s*-\s*/.test(rStatsBlock), "no browser-side subtraction");
+  const recRenderIdx = src.indexOf("function renderRoutingCoverage(");
+  const recRenderNext = src.indexOf("function ", recRenderIdx + 1);
+  const recRenderBlock = src.slice(recRenderIdx, recRenderNext > 0 ? recRenderNext : src.length);
+  assert.ok(!recRenderBlock.includes("progressbar") && !recRenderBlock.includes("progress-bar"),
+    "no progress bar for coverage");
+  assert.ok(!/model-rank|auto(?:matic)?\s+competition/i.test(recRenderBlock));
+
+  // Bilingual keys: meaning, four counts, caveat, next actions, unavailable
+  const recKeys = [
+    "recTitle", "recMeaning", "recTotalLabel", "recClassLabel", "recFamilyLabel",
+    "recDecisionLabel", "recDiversity", "recCaveat", "recEmpty", "recEmptyNext",
+    "recPartial", "recPartialNext", "recComplete", "recCompleteNext",
+    "recLoading", "recUnavailableBridgeHint", "recUnavailableUnknown",
+  ];
+  for (const key of recKeys) {
+    const occurrences = i18n.split(`${key}:`).length - 1;
+    assert.ok(occurrences >= 2, `${key} must exist in both locales`);
+  }
+
+  const enSection = i18n.slice(0, i18n.indexOf("zh: {"));
+  const zhSection = i18n.slice(i18n.indexOf("zh: {"));
+  const enMeaning = enSection.match(/recMeaning:\s*"([^"]+)"/)?.[1] ?? "";
+  const zhMeaning = zhSection.match(/recMeaning:\s*"([^"]+)"/)?.[1] ?? "";
+  const enCaveat = enSection.match(/recCaveat:\s*"([^"]+)"/)?.[1] ?? "";
+  const zhCaveat = zhSection.match(/recCaveat:\s*"([^"]+)"/)?.[1] ?? "";
+  const enUnavailable = enSection.match(/recUnavailableBridgeHint:\s*"([^"]+)"/)?.[1] ?? "";
+  const zhUnavailable = zhSection.match(/recUnavailableBridgeHint:\s*"([^"]+)"/)?.[1] ?? "";
+
+  assert.ok(/evidence completeness/i.test(enMeaning), "en meaning is about completeness");
+  assert.ok(!/poor model|model rank|zero-quality/i.test(enMeaning));
+  assert.ok(zhMeaning.includes("证据是否齐全"), "zh meaning is about completeness");
+  assert.ok(!zhMeaning.includes("模型排名") && !zhMeaning.includes("表现差"));
+  assert.ok(/unavailable evidence/i.test(enCaveat), "en caveat marks missing as unavailable");
+  assert.ok(/do not report a model outcome/i.test(enCaveat), "en caveat denies model-outcome claims");
+  assert.ok(!/zero-quality|poor model|model rank|model ranking|performed poorly|low model quality/i.test(enCaveat));
+  assert.ok(
+    zhCaveat.includes("缺少可用证据") || zhCaveat.includes("证据不可用"),
+    "zh caveat marks missing as unavailable",
+  );
+  assert.ok(
+    zhCaveat.includes("并不报告任何模型结果") || zhCaveat.includes("不报告任何模型结果"),
+    "zh caveat denies model-outcome claims",
+  );
+  assert.ok(!zhCaveat.includes("模型排名") && !zhCaveat.includes("表现差") && !zhCaveat.includes("模型质量差"));
+  assert.ok(enUnavailable.toLowerCase().includes("task service"), "en bridge uses task service");
+  assert.ok(!/\bdaemon\b/i.test(enUnavailable), "en bridge avoids daemon jargon");
+  assert.ok(zhUnavailable.includes("任务服务"), "zh bridge uses 任务服务");
+  assert.ok(!zhUnavailable.includes("Daemon"), "zh bridge avoids Daemon jargon");
+
+  // Privacy: user-facing copy must not expose raw internal field codes
+  for (const section of [enSection, zhSection]) {
+    const recBlock = section.slice(section.indexOf("recTitle:"), section.indexOf("econEvidenceSectionTitle:"));
+    assert.ok(!recBlock.includes("taskClass"), "no raw taskClass in coverage copy");
+    assert.ok(!recBlock.includes("routingDecision"), "no raw routingDecision in coverage copy");
+    assert.ok(!recBlock.includes("taskFamily"), "no raw taskFamily in coverage copy");
+  }
 });
 
 test("Hub Insights economics summary renderer exposes truthful evidence", async () => {
@@ -1013,6 +1683,10 @@ test("Hub renders machine outcome and verified final delivery as two named facts
     "stats reads acceptedDeliveryRate");
   assert.ok(rStatsBlock.includes("acceptedDeliveryCount"),
     "stats reads acceptedDeliveryCount");
+  assert.ok(rStatsBlock.includes("acceptedDeliverySampleCount"),
+    "stats reads acceptedDeliverySampleCount");
+  assert.ok(rStatsBlock.includes("acceptedDeliveryUnavailableCount"),
+    "stats reads acceptedDeliveryUnavailableCount");
   assert.ok(rStatsBlock.includes("mainRepairedDeliveryCount"),
     "stats reads mainRepairedDeliveryCount");
   assert.ok(rStatsBlock.includes("remediationCheckCount"),
@@ -1047,6 +1721,7 @@ test("Hub renders machine outcome and verified final delivery as two named facts
     "statsFinalDeliveryLabel",
     "statsFinalDeliveryHint",
     "statsAcceptedDeliveryLine",
+    "statsFinalDeliveryUnavailable",
     "statsProviderCaveat",
   ]) {
     assert.ok(i18n.includes(key), `i18n key ${key} present`);
@@ -1054,11 +1729,13 @@ test("Hub renders machine outcome and verified final delivery as two named facts
   assert.ok(i18n.includes("已核验交付"), "zh final-delivery badge");
   assert.ok(i18n.includes("机器执行结果"), "zh machine outcome label");
   assert.ok(i18n.includes("最终交付"), "zh final delivery label");
-  assert.ok(i18n.includes("Main 修复后的交付不会改写 Worker"),
-    "zh semantic caveat");
-  // English truthfulness: a Main-repaired delivery does not claim Worker success.
+  assert.ok(i18n.includes("绝不把机器通过单独算作接受"),
+    "zh says machine success alone is not accepted delivery");
+  // English truthfulness: final delivery never equals machine success alone.
   assert.match(i18n,
-    /statsProviderCaveat['"]?\s*:\s*"[^"]*does not rewrite/i);
+    /statsProviderCaveat['"]?\s*:\s*"[^"]*never machine success alone/i);
+  assert.match(i18n,
+    /statsAcceptedDeliveryLine['"]?\s*:\s*"[^"]*\{accepted\}[^"]*\{sample\}/i);
 });
 
 test("Hub Token usage reconciliation card renders in task detail with bilingual copy", async () => {
@@ -1471,6 +2148,176 @@ test("Hub final-delivery labels are bilingual and never claim Worker success", a
   assert.match(i18n, /taskFinalDeliveryBadge['"]?\s*:\s*"已核验交付"/);
 });
 
+test("Hub Attempt history uses closed presentationState instead of false running copy", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  // Both Attempt history surfaces share the same primary presentation helpers.
+  assert.ok(src.includes("function attemptPrimaryLabel("), "primary Attempt label helper");
+  assert.ok(src.includes("function attemptPresentationExplain("), "Attempt explanation helper");
+  assert.ok(src.includes("function attemptHasClosedPresentation("), "closed presentation guard");
+  assert.ok(src.includes("status: attemptPrimaryLabel(att)"), "collaboration journey uses primary label");
+  assert.ok(src.includes("+ attemptPrimaryLabel(att)"), "Process tab uses primary label");
+  assert.ok(src.includes("attemptPresentationExplain(att)"), "explanation is rendered");
+  assert.ok(src.includes("journeyAttemptRecordedStatus"), "recorded status is secondary only");
+
+  // Primary label never falls through to running when presentationState is closed.
+  const labelSource = [
+    extractFunctionSource(src, "attemptStateLabel"),
+    extractFunctionSource(src, "attemptPrimaryLabel"),
+    extractFunctionSource(src, "attemptPresentationExplain"),
+    extractFunctionSource(src, "attemptHasClosedPresentation"),
+  ].join("\n");
+  const dictEn: Record<string, string> = {
+    journeyAttemptQueued: "waiting",
+    journeyAttemptRunning: "running",
+    journeyAttemptSucceeded: "completed",
+    journeyAttemptFailed: "failed",
+    journeyAttemptInterrupted: "interrupted",
+    journeyAttemptUnknown: "unknown",
+    journeyAttemptEndedAfterWorkerCompletion: "ended after Worker completion",
+    journeyAttemptEndedAfterWorkerCompletionExplain:
+      "The Worker reported completion; a later result-finalizing step failed.",
+    journeyAttemptEndedUnsuccessfully: "ended unsuccessfully",
+    journeyAttemptEndedUnsuccessfullyExplain:
+      "This Attempt ended without a successful Worker completion.",
+    journeyAttemptRecordedStatus: "Recorded status: {status}",
+  };
+  const dictZh: Record<string, string> = {
+    journeyAttemptQueued: "等待中",
+    journeyAttemptRunning: "执行中",
+    journeyAttemptSucceeded: "已完成",
+    journeyAttemptFailed: "失败",
+    journeyAttemptInterrupted: "已中断",
+    journeyAttemptUnknown: "未知",
+    journeyAttemptEndedAfterWorkerCompletion: "Worker 完成后已结束",
+    journeyAttemptEndedAfterWorkerCompletionExplain:
+      "Worker 已报告完成；后续结果收尾步骤失败。",
+    journeyAttemptEndedUnsuccessfully: "已结束且未成功",
+    journeyAttemptEndedUnsuccessfullyExplain:
+      "本次尝试已结束，且没有成功的 Worker 完成记录。",
+    journeyAttemptRecordedStatus: "记录状态：{status}",
+  };
+  function makeT(dict: Record<string, string>) {
+    return (key: string, params?: Record<string, string>) => {
+      let value = dict[key] ?? key;
+      if (params) {
+        for (const [name, replacement] of Object.entries(params)) {
+          value = value.replace(`{${name}}`, replacement);
+        }
+      }
+      return value;
+    };
+  }
+  const apiFor = (dict: Record<string, string>) => new Function("t", `
+    ${labelSource}
+    return {
+      attemptPrimaryLabel: attemptPrimaryLabel,
+      attemptPresentationExplain: attemptPresentationExplain,
+      attemptHasClosedPresentation: attemptHasClosedPresentation,
+      attemptStateLabel: attemptStateLabel
+    };
+  `)(makeT(dict)) as {
+    attemptPrimaryLabel(att: unknown): string;
+    attemptPresentationExplain(att: unknown): string;
+    attemptHasClosedPresentation(att: unknown): boolean;
+    attemptStateLabel(status: string): string;
+  };
+
+  const liveAttempt = {
+    ordinal: 2,
+    status: "running",
+    presentationState: "ended-after-worker-completion",
+  };
+  for (const [locale, dict] of [["en", dictEn], ["zh", dictZh]] as const) {
+    const api = apiFor(dict);
+    const primary = api.attemptPrimaryLabel(liveAttempt);
+    const explain = api.attemptPresentationExplain(liveAttempt);
+    assert.equal(primary, dict.journeyAttemptEndedAfterWorkerCompletion, `${locale} primary closed copy`);
+    assert.equal(explain, dict.journeyAttemptEndedAfterWorkerCompletionExplain, `${locale} explain`);
+    assert.equal(api.attemptHasClosedPresentation(liveAttempt), true);
+    assert.ok(!/running|执行中/i.test(primary), `${locale} primary must not say still running`);
+    assert.ok(!/running|执行中/i.test(explain), `${locale} explain must not say still running`);
+    // Secondary technical evidence may still expose the recorded running status.
+    assert.equal(api.attemptStateLabel("running"), dict.journeyAttemptRunning);
+  }
+
+  // Genuine active Attempt without presentationState still says running / 执行中.
+  const activeAttempt = { ordinal: 1, status: "running" };
+  assert.equal(apiFor(dictEn).attemptPrimaryLabel(activeAttempt), "running");
+  assert.equal(apiFor(dictZh).attemptPrimaryLabel(activeAttempt), "执行中");
+  assert.equal(apiFor(dictEn).attemptPresentationExplain(activeAttempt), "");
+
+  // Failure without Worker completion never claims post-Worker finalization.
+  const earlyFail = { ordinal: 1, status: "running", presentationState: "ended-unsuccessfully" };
+  const earlyApi = apiFor(dictEn);
+  const earlyEn = earlyApi.attemptPrimaryLabel(earlyFail);
+  const earlyExplainEn = earlyApi.attemptPresentationExplain(earlyFail);
+  assert.equal(earlyEn, "ended unsuccessfully");
+  assert.notEqual(earlyEn, dictEn.journeyAttemptEndedAfterWorkerCompletion);
+  assert.notEqual(earlyExplainEn, dictEn.journeyAttemptEndedAfterWorkerCompletionExplain);
+  assert.ok(!/result-finalizing/i.test(earlyExplainEn));
+  assert.ok(!/reported completion/i.test(earlyExplainEn));
+  assert.ok(!/running/i.test(earlyEn));
+
+  // Story adapter treats closed presentation as ended, not active Worker work.
+  const startMarker = "/* TASK_STORY_ADAPTER_START */";
+  const endMarker = "/* TASK_STORY_ADAPTER_END */";
+  const start = src.indexOf(startMarker);
+  const end = src.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, "story adapter boundaries present");
+  const adapter = new Function(`${src.slice(start + startMarker.length, end)}\nreturn taskStoryPresentation;`)() as (
+    task: unknown,
+  ) => { steps: Array<{ id: string; state: string }> };
+  const storyTask = {
+    status: "failed",
+    journey: {
+      assignment: { contractVersion: 1, outcome: "Fix display", deliverables: [] },
+      workerExecution: {
+        provider: "xai",
+        model: "grok-4.5",
+        runtime: "grok-build",
+        attempts: [liveAttempt],
+        changedFilePaths: [],
+      },
+      independentVerification: { available: false, checks: [], conclusion: "not-run", failedCount: 0, totalCount: 0 },
+      finalDelivery: {
+        remediationDisposition: { status: "verified-repaired-delivered" },
+      },
+      cause: { what: "failed", why: "runtime failed after Worker completion", failureCategory: "runtime" },
+      nextAction: { label: "done" },
+    },
+  };
+  const story = adapter(storyTask);
+  assert.equal(story.steps.find((s) => s.id === "worker-process")?.state, "failed",
+    "closed presentation does not leave Worker process as running");
+  assert.equal(story.steps.find((s) => s.id === "final-result")?.state, "complete",
+    "Main remediation remains a separate final fact");
+  assert.equal(story.steps.find((s) => s.id === "cause")?.state, "complete",
+    "repaired delivery keeps original cause section independent");
+
+  // Bilingual i18n keys exist with the intended meaning.
+  for (const key of [
+    "journeyAttemptEndedAfterWorkerCompletion",
+    "journeyAttemptEndedAfterWorkerCompletionExplain",
+    "journeyAttemptEndedUnsuccessfully",
+    "journeyAttemptEndedUnsuccessfullyExplain",
+    "journeyAttemptRecordedStatus",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.ok(enSection.includes("ended after Worker completion"));
+  assert.ok(enSection.includes("result-finalizing step failed"));
+  assert.ok(zhSection.includes("Worker 完成后已结束"));
+  assert.ok(zhSection.includes("后续结果收尾步骤失败"));
+  assert.ok(zhSection.includes("已结束且未成功"));
+  // Primary closed copy must not reuse the active-running strings as the label value.
+  assert.ok(!/journeyAttemptEndedAfterWorkerCompletion['"]?\s*:\s*["']running["']/.test(enSection));
+  assert.ok(!/journeyAttemptEndedAfterWorkerCompletion['"]?\s*:\s*["']执行中["']/.test(zhSection));
+});
+
 test("Hub app.js renders collaboration journey with separate what and why", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   // Journey renderer exists and has all six sections.
@@ -1635,6 +2482,75 @@ test("Hub Task story executes the shared fixture as an ordered input-process-out
   assert.ok(i18n.includes("What the Worker was asked to do"), "en instruction title is plain language");
   assert.ok(i18n.includes("活动记录"), "zh timeline label is plain language");
   assert.ok(i18n.includes("任务说明") && i18n.includes("执行过程"), "zh tab labels are plain");
+});
+
+test("Hub Task Detail activity labels resume, Candidate capture, and remediation start bilingually", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const labelFn = extractFunctionSource(src, "timelineEventLabel");
+  assert.ok(labelFn.includes('"worker.resumed"'), "resume event is labeled");
+  assert.ok(labelFn.includes('"candidate.revision.captured"'), "Candidate capture is labeled");
+  assert.ok(labelFn.includes('"remediation.check.started"'), "remediation start is labeled");
+  assert.ok(labelFn.includes("tlWorkerResumed"));
+  assert.ok(labelFn.includes("tlCandidateRevisionCaptured"));
+  assert.ok(labelFn.includes("tlRemediationStarted"));
+  // Stream fragments are not promoted into the primary label map; server
+  // projection excludes them, and an unmapped type still falls to Other.
+  assert.ok(!labelFn.includes('"worker.message"'), "worker.message is not a primary activity label");
+
+  const enStart = i18n.indexOf("en: {");
+  const zhStart = i18n.indexOf("zh: {");
+  assert.ok(enStart >= 0 && zhStart > enStart);
+  const enSection = i18n.slice(enStart, zhStart);
+  const zhSection = i18n.slice(zhStart);
+  for (const key of [
+    "tlWorkerResumed",
+    "tlCandidateRevisionCaptured",
+    "tlRemediationStarted",
+    "tlRemediation",
+    "tlOther",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.match(enSection, /tlWorkerResumed:\s*"Worker resumed"/);
+  assert.match(enSection, /tlCandidateRevisionCaptured:\s*"Candidate version saved"/);
+  assert.match(enSection, /tlRemediationStarted:\s*"Main repair verification started"/);
+  assert.match(zhSection, /tlWorkerResumed:\s*"Worker 已恢复"/);
+  assert.match(zhSection, /tlCandidateRevisionCaptured:\s*"已保存候选版本"/);
+  assert.match(zhSection, /tlRemediationStarted:\s*"开始 Main 修复核验"/);
+  assert.ok(!enSection.includes("Candidate revision captured"),
+    "user-facing EN copy must not use internal revision/captured wording");
+  assert.ok(!zhSection.includes("已捕获 Candidate 修订"),
+    "user-facing ZH copy must not use internal revision/captured wording");
+
+  // Executable map behavior: known milestones get specific labels; unknown stays Other.
+  const dict: Record<string, string> = {
+    tlWorkerResumed: "Worker resumed",
+    tlCandidateRevisionCaptured: "Candidate version saved",
+    tlRemediationStarted: "Main repair verification started",
+    tlRemediation: "Main repair verification finished",
+    tlOther: "Other activity",
+  };
+  const label = new Function("t", `${labelFn}\nreturn timelineEventLabel;`)(
+    (key: string) => dict[key] ?? key,
+  ) as (type: string) => string;
+  assert.equal(label("worker.resumed"), "Worker resumed");
+  assert.equal(label("candidate.revision.captured"), "Candidate version saved");
+  assert.equal(label("remediation.check.started"), "Main repair verification started");
+  assert.equal(label("remediation.check.completed"), "Main repair verification finished");
+  assert.equal(label("worker.message"), "Other activity",
+    "fragments are not given a specific activity name even if they reach the UI");
+  assert.equal(label("future.lifecycle.event"), "Other activity");
+
+  // Visible process bound remains at most 40 recent rows of the projected timeline.
+  const workbench = extractFunctionSource(src, "renderTaskWorkbench");
+  assert.ok(
+    workbench.includes("task.timeline.slice().reverse().slice(0, 40)")
+      || src.includes("task.timeline.slice().reverse().slice(0, 40)"),
+    "process tab keeps a 40-row visible bound on the projected timeline",
+  );
+  assert.ok(src.includes("taskReportTimelineEmpty"), "empty projected activity keeps empty copy");
 });
 
 /* --- Task story adapter: fixture-driven journey coverage ---
@@ -2230,11 +3146,12 @@ test("Hub top-level pages lead with purpose and share an input-process-output-ne
   assert.ok(src.includes('data-fl-role", "page-story"') || src.includes("data-fl-role\", \"page-story\""),
     "page-story role marker");
 
-  // Eight top-level pages bind the shared renderer (not keys alone).
+  // Top-level operate/configure pages bind the shared renderer (not keys alone).
   const pageBindings: Array<{ page: string; renderer: string; denseMarker: string }> = [
     { page: "overview", renderer: "rOverview", denseMarker: "rReadiness" },
     { page: "board", renderer: "rTasks", denseMarker: "taskSubmitTitle" },
     { page: "plans", renderer: "rPlans", denseMarker: "noPlans" },
+    { page: "goals", renderer: "rGoals", denseMarker: "noGoals" },
     { page: "compete", renderer: "rCompetitions", denseMarker: "noCompetitions" },
     { page: "insights", renderer: "rStats", denseMarker: "econEvidenceSectionTitle" },
     { page: "models", renderer: "rModel", denseMarker: "modelCatalog" },
@@ -2266,7 +3183,7 @@ test("Hub top-level pages lead with purpose and share an input-process-output-ne
     assert.ok(enSection.includes(key), `en ${key}`);
     assert.ok(zhSection.includes(key), `zh ${key}`);
   }
-  const pages = ["Overview", "Board", "Plans", "Compete", "Insights", "Models", "Workers", "Main"];
+  const pages = ["Overview", "Board", "Plans", "Goals", "Compete", "Insights", "Models", "Workers", "Main"];
   const slots = ["Purpose", "Input", "Process", "Output", "Next"];
   for (const page of pages) {
     for (const slot of slots) {
@@ -2631,6 +3548,215 @@ test("Hub model routing renders bilingual explanation-first UI with safe control
   assert.ok(i18n.includes("Some evidence did not participate"));
 });
 
+test("Hub model routing explains asymmetric sample coverage without claiming history is empty", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18nSrc = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18nSrc);
+
+  // Renderer binds coverage projection and readiness helpers
+  assert.ok(src.includes("c.sampleCoverage"), "candidate cards read sampleCoverage");
+  assert.ok(src.includes('t("mrCandidateExactCoverage"'), "exact-type coverage line");
+  assert.ok(src.includes('t("mrCandidateFamilyCoverage"'), "broader-category coverage line");
+  assert.ok(src.includes("function mrCoverageNeedsMoreEvidence"), "coverage-aware next-action helper");
+  assert.ok(src.includes("function buildMrReasons"), "reasons builder present");
+  assert.ok(src.includes("buildMrReasons(cands, policy, result)"), "reasons receive full result for scope");
+  assert.ok(src.includes('t("mrIncompleteFamilyComparison"'), "incomplete family readiness copy");
+  assert.ok(src.includes('t("mrNoExactHistory"'), "no exact history copy");
+  assert.ok(src.includes("result.taskFamily"), "family line gated on supplied family");
+
+  // Next-action uses coverage, not only c.evidence sparse exact rows
+  const nextIdx = src.indexOf("/* --- Next action --- */");
+  assert.ok(nextIdx > 0, "next action section");
+  const nextBlock = src.slice(nextIdx, nextIdx + 600);
+  assert.ok(nextBlock.includes("mrCoverageNeedsMoreEvidence(cands, policy)"),
+    "next action consults coverage helper");
+  assert.ok(!/cands\.some\(function\(c\)\{\s*return \(c\.evidence && c\.evidence\.relevantSampleCount/.test(nextBlock),
+    "next action no longer keys only on c.evidence sample count");
+
+  // Bilingual coverage keys
+  for (const key of [
+    "mrCandidateExactCoverage", "mrCandidateFamilyCoverage",
+    "mrIncompleteFamilyComparison", "mrNoExactHistory", "mrNoFamilyHistory",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+
+  // English: current/required wording, not model quality or auto-Competition
+  assert.ok(enSection.includes("Exact task type: {current}/{required} usable records"));
+  assert.ok(enSection.includes("Broader category: {current}/{required} usable records"));
+  assert.ok(enSection.includes("Related history exists in this broader category"));
+  assert.ok(enSection.includes("compared fairly"));
+  assert.ok(enSection.includes("Sample counts are not model quality"));
+  assert.ok(!/mrIncompleteFamilyComparison['"]?\s*:\s*"[^"]*should compete/i.test(enSection));
+  assert.ok(!/mrCandidateExactCoverage['"]?\s*:\s*"[^"]*quality/i.test(enSection));
+
+  // Chinese: real translation for asymmetric gap, not English fallback
+  assert.ok(zhSection.includes("精确任务类型：{current}/{required} 条可用记录"));
+  assert.ok(zhSection.includes("更广泛大类：{current}/{required} 条可用记录"));
+  assert.ok(zhSection.includes("这个大类已有相关历史"));
+  assert.ok(zhSection.includes("公平比较"));
+  assert.ok(zhSection.includes("样本数量不是模型质量"));
+  assert.ok(zhSection.includes("此工作类型还没有精确任务类型的历史记录"));
+  assert.ok(zhSection.includes("尚不足以做公平比较的历史记录"));
+
+  // Executable bilingual reason helper for incomplete family vs no history
+  const wrapped = i18nSrc.replace(
+    /\(typeof window !== "undefined" \? window : globalThis\)/,
+    "(sandbox)",
+  );
+  const sandbox: {
+    ForklightI18n?: {
+      t: (key: string, vars?: Record<string, string>) => string;
+      setLang: (lang: string) => void;
+    };
+    localStorage?: { getItem: (k: string) => string | null; setItem: (k: string, v: string) => void };
+    navigator?: { language: string };
+    document?: { documentElement: { lang: string; setAttribute: () => void } };
+  } = {
+    localStorage: { getItem: () => null, setItem: () => undefined },
+    navigator: { language: "en" },
+    document: { documentElement: { lang: "en", setAttribute: () => undefined } },
+  };
+  new Function("sandbox", wrapped)(sandbox);
+  const i18n = sandbox.ForklightI18n;
+  assert.ok(i18n, "ForklightI18n loads for sample-coverage checks");
+
+  const helpers = [
+    extractFunctionSource(src, "mrCoverageNeedsMoreEvidence"),
+    extractFunctionSource(src, "buildMrReasons"),
+  ].join("\n");
+  const api = new Function(
+    "t",
+    `${helpers}\nreturn { buildMrReasons: buildMrReasons, mrCoverageNeedsMoreEvidence: mrCoverageNeedsMoreEvidence };`,
+  )((key: string, vars?: Record<string, string>) => i18n!.t(key, vars)) as {
+    buildMrReasons: (
+      cands: Array<Record<string, unknown>>,
+      policy: Record<string, unknown>,
+      result?: Record<string, unknown>,
+    ) => string[];
+    mrCoverageNeedsMoreEvidence: (
+      cands: Array<Record<string, unknown>>,
+      policy: Record<string, unknown>,
+    ) => boolean;
+  };
+
+  const asymmetricCands = [
+    {
+      provider: "xai",
+      model: "grok-4.5",
+      sampleCoverage: {
+        exactTerminalCount: 0, exactRelevantCount: 0, exactMinRelevantSamples: 5,
+        familyTerminalCount: 15, familyRelevantCount: 13, familyMinRelevantSamples: 5,
+      },
+      evidence: { relevantSampleCount: 0 },
+      uncertainty: { insufficientSamples: true, insufficientGap: false, reasons: ["insufficient-relevant-samples"] },
+    },
+    {
+      provider: "minimax",
+      model: "m2",
+      sampleCoverage: {
+        exactTerminalCount: 0, exactRelevantCount: 0, exactMinRelevantSamples: 5,
+        familyTerminalCount: 3, familyRelevantCount: 2, familyMinRelevantSamples: 5,
+      },
+      evidence: { relevantSampleCount: 0 },
+      uncertainty: { insufficientSamples: true, insufficientGap: false, reasons: ["insufficient-relevant-samples"] },
+    },
+  ];
+  const policy = { minRelevantSamples: 5, familyMinRelevantSamples: 5, uncertaintyThreshold: 0.15 };
+
+  i18n!.setLang("en");
+  const enReasons = api.buildMrReasons(asymmetricCands, policy, {
+    evidenceScope: "none",
+    taskFamily: "bounded-javascript-change",
+  });
+  assert.ok(enReasons.some((r) => /Related history exists/i.test(r)),
+    "English incomplete family explains related history exists");
+  assert.ok(enReasons.some((r) => /at least 5 usable records/i.test(r)),
+    "English incomplete family shows the required minimum");
+  assert.ok(!enReasons.some((r) => /no exact task type history/i.test(r)),
+    "English incomplete family must not pretend history is empty");
+  assert.ok(!enReasons.some((r) => /should compete|run a competition/i.test(r)),
+    "English incomplete family must not push Competition");
+  assert.equal(api.mrCoverageNeedsMoreEvidence(asymmetricCands, policy), true);
+
+  i18n!.setLang("zh");
+  const zhReasons = api.buildMrReasons(asymmetricCands, policy, {
+    evidenceScope: "none",
+    taskFamily: "bounded-javascript-change",
+  });
+  assert.ok(zhReasons.some((r) => r.includes("已有相关历史")),
+    "Chinese incomplete family explains related history exists");
+  assert.ok(zhReasons.some((r) => r.includes("至少 5 条可用记录")),
+    "Chinese incomplete family shows the required minimum");
+  assert.ok(!zhReasons.some((r) => r.includes("还没有精确任务类型的历史记录")),
+    "Chinese incomplete family must not claim exact/family history is empty");
+  assert.ok(!zhReasons.some((r) => /Competition|compete/i.test(r) && !r.includes("不会单独启动")),
+    "Chinese incomplete family must not recommend Competition as the fix");
+
+  // No family + zero exact samples → no broader-category line and honest empty history
+  const noFamilyCands = [
+    {
+      provider: "a", model: "1",
+      sampleCoverage: { exactTerminalCount: 0, exactRelevantCount: 0, exactMinRelevantSamples: 5 },
+      evidence: { relevantSampleCount: 0 },
+      uncertainty: { insufficientSamples: true, insufficientGap: false, reasons: ["insufficient-relevant-samples"] },
+    },
+    {
+      provider: "b", model: "2",
+      sampleCoverage: { exactTerminalCount: 0, exactRelevantCount: 0, exactMinRelevantSamples: 5 },
+      evidence: { relevantSampleCount: 0 },
+      uncertainty: { insufficientSamples: true, insufficientGap: false, reasons: ["insufficient-relevant-samples"] },
+    },
+  ];
+  i18n!.setLang("en");
+  const enEmpty = api.buildMrReasons(noFamilyCands, policy, { evidenceScope: "none" });
+  assert.ok(enEmpty.some((r) => /no exact task type history/i.test(r)));
+  assert.ok(!enEmpty.some((r) => /Related history exists|broader category/i.test(r)),
+    "no family must not invent broader-category readiness text");
+
+  i18n!.setLang("zh");
+  const zhEmpty = api.buildMrReasons(noFamilyCands, policy, { evidenceScope: "none" });
+  assert.ok(zhEmpty.some((r) => r.includes("还没有精确任务类型的历史记录")));
+  assert.ok(!zhEmpty.some((r) => r.includes("已有相关历史")),
+    "Chinese no-family path must not invent related family history");
+
+  // Family evidence can be ready even when exact-type history is sparse. If
+  // the family scores are tied, the explanation must describe the close result
+  // rather than incorrectly falling back to the sparse exact-type counts.
+  const familyReadyButTied = asymmetricCands.map((candidate) => ({
+    ...candidate,
+    sampleCoverage: {
+      ...(candidate.sampleCoverage as Record<string, number>),
+      familyRelevantCount: 8,
+      familyTerminalCount: 8,
+    },
+    evidence: { relevantSampleCount: 8 },
+    uncertainty: {
+      insufficientSamples: false,
+      insufficientGap: true,
+      reasons: ["score-gap-too-small"],
+    },
+  }));
+  i18n!.setLang("en");
+  const familyTieReasons = api.buildMrReasons(familyReadyButTied, policy, {
+    evidenceScope: "task-family",
+    taskFamily: "bounded-javascript-change",
+  });
+  assert.ok(familyTieReasons.some((r) => /score gap/i.test(r)),
+    "ready family tie explains the close comparison");
+  assert.ok(!familyTieReasons.some((r) => /Insufficient evidence/i.test(r)),
+    "ready family tie must not report sparse exact-type counts as insufficient");
+
+  // Privacy: coverage keys must not mention Task ids, paths, prompts, or logs
+  for (const section of [enSection, zhSection]) {
+    const blockStart = section.indexOf("mrCandidateExactCoverage");
+    const block = section.slice(blockStart, blockStart + 800);
+    assert.ok(!/taskId|sourcePath|rawLog|apiKey|endpoint|prompt/i.test(block),
+      "coverage copy stays privacy-safe");
+  }
+});
+
 test("Hub model routing budget reliability factor has bilingual plain-language copy and is not a bill", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
@@ -2672,6 +3798,85 @@ test("Hub model routing budget reliability factor has bilingual plain-language c
   assert.ok(zhSection.includes("不能混在一起计算比例"), "zh mixed-envelope reason");
   assert.ok(zhSection.includes("直接比较并不公平"), "zh mismatch reason");
   assert.ok(zhSection.includes("不会禁用或拉黑模型"), "zh soft-only model eligibility");
+});
+
+test("Hub model routing first-pass success has bilingual evidence separate from delivery", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  assert.ok(src.includes('["firstPassSuccess", "mrPolicyFirstPassSuccess"'),
+    "firstPassSuccess is part of the editable weight key list");
+  assert.ok(src.includes("mr-first-pass-evidence"),
+    "candidate cards render a first-pass evidence block");
+  assert.ok(src.includes("firstPassVerifiedSampleCount"),
+    "renders first-pass sample count");
+  assert.ok(src.includes("mrFirstPassFact"),
+    "renders first-pass passed/sample/rate fact");
+  assert.ok(src.includes("mrFirstPassExcluded"),
+    "renders excluded non-comparable count");
+  assert.ok(src.includes("mrFirstPassNotFinalQuality"),
+    "keeps first-pass separate from final quality");
+  assert.ok(src.includes("function mrWeightDefault"),
+    "missing draft weights use canonical defaults including firstPassSuccess");
+  for (const key of [
+    "mrPolicyFirstPassSuccess", "mrPolicyFirstPassSuccessHint",
+    "mrFirstPassSummary", "mrFirstPassFact", "mrFirstPassNoComparable",
+    "mrFirstPassExcluded", "mrFirstPassNotFinalQuality",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.ok(enSection.includes("first Attempt"), "en mentions first Attempt");
+  assert.ok(enSection.includes("not the same as eventual accepted delivery"),
+    "en separates first-pass from eventual delivery");
+  assert.ok(zhSection.includes("第一次独立验收通过"), "zh policy label");
+  assert.ok(zhSection.includes("最终被接受的交付"), "zh separates eventual delivery");
+  assert.ok(zhSection.includes("不会禁用模型"), "zh soft-only eligibility");
+  // Privacy: first-pass copy must not leak Task-level private evidence.
+  for (const section of [enSection, zhSection]) {
+    const blockStart = section.indexOf("mrFirstPassSummary");
+    const block = section.slice(blockStart, blockStart + 1200);
+    assert.ok(!/taskId|sourcePath|rawLog|apiKey|endpoint|prompt/i.test(block),
+      "first-pass copy stays privacy-safe");
+  }
+});
+
+test("Hub model routing accepted delivery shows Main-backed counts not machine success", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  assert.ok(src.includes("mr-accepted-delivery-evidence"),
+    "candidate cards render an accepted-delivery evidence block");
+  assert.ok(src.includes("acceptedDeliverySampleCount"),
+    "renders comparable final-delivery sample count");
+  assert.ok(src.includes("acceptedDeliveryUnavailableCount"),
+    "renders unavailable final-delivery count");
+  assert.ok(src.includes("mrAcceptedDeliveryFact"),
+    "renders accepted-of-comparable fact");
+  assert.ok(src.includes("mrAcceptedDeliveryUnavailable"),
+    "renders not-yet-knowable count");
+  assert.ok(src.includes("mrAcceptedDeliveryNotMachine"),
+    "states machine success is not final delivery");
+  for (const key of [
+    "mrAcceptedDeliverySummary", "mrAcceptedDeliveryFact",
+    "mrAcceptedDeliveryNoComparable", "mrAcceptedDeliveryUnavailable",
+    "mrAcceptedDeliveryNotMachine",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.ok(enSection.includes("Machine success without Main accept"),
+    "en separates machine success from accepted delivery");
+  assert.ok(zhSection.includes("仅有机器通过"),
+    "zh separates machine success from accepted delivery");
+  for (const section of [enSection, zhSection]) {
+    const blockStart = section.indexOf("mrAcceptedDeliverySummary");
+    const block = section.slice(blockStart, blockStart + 1500);
+    assert.ok(!/taskId|sourcePath|rawLog|apiKey|endpoint|prompt/i.test(block),
+      "accepted-delivery copy stays privacy-safe");
+  }
 });
 
 test("Hub preparation progress explains the live operation in both languages", async () => {
@@ -3726,4 +4931,128 @@ test("guided first Task UI uses opaque sample APIs and hands off to ordinary Tas
   }
   assert.doesNotMatch(enSection.match(/guidedSampleBody:\s*"([^"]+)/)?.[1] ?? "", /Daemon|MCP|Candidate|YAML/);
   assert.doesNotMatch(zhSection.match(/guidedSampleBody:\s*"([^"]+)/)?.[1] ?? "", /Daemon|MCP|Candidate|YAML/);
+});
+
+test("Hub Overview self-upgrade evidence card is bilingual, server-owned, and privacy-safe", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  assert.ok(src.includes("function pollSelfUpgradeEvidence"), "isolated poll helper");
+  assert.ok(src.includes("/api/ops/self-upgrade-evidence"), "bridge URL on the wire");
+  assert.ok(src.includes("S.selfUpgradeEvidence"), "cached projection state");
+  assert.ok(src.includes("S.selfUpgradeEvidenceError"), "isolated failure state");
+  assert.match(src, /Promise\.all\(\[hubP\.catch\([\s\S]*?opsP,\s*econP,\s*recP,\s*sueP\]/);
+
+  assert.ok(src.includes("function renderSelfUpgradeEvidenceCard"), "card renderer");
+  assert.ok(src.includes("function selfUpgradeEvidenceView"), "closed-code adapter");
+  assert.ok(src.includes('data-fl-role", "self-upgrade-evidence"'), "stable card marker");
+  assert.ok(src.includes('data-fl-role", "self-upgrade-progress"'), "progress marker");
+  assert.ok(src.includes('data-fl-role", "self-upgrade-next"'), "next-action marker");
+
+  const overviewIdx = src.indexOf("function rOverview()");
+  assert.ok(overviewIdx > 0, "rOverview present");
+  const nextFn = src.indexOf("function ", overviewIdx + 1);
+  const overviewBlock = src.slice(overviewIdx, nextFn > 0 ? nextFn : src.length);
+  assert.ok(overviewBlock.includes("renderSelfUpgradeEvidenceCard"), "Overview renders the card");
+  // Browser must not recompute consecutive streak semantics.
+  assert.ok(!/achieved\s*\+\s*1/.test(overviewBlock), "no browser-side streak increment");
+  assert.ok(!/for\s*\(.*results/.test(overviewBlock), "no browser-side result scan");
+
+  const adapter = extractFunctionSource(src, "selfUpgradeEvidenceView");
+  assert.ok(adapter.includes("STATE_KEYS"), "maps closed state codes");
+  assert.ok(adapter.includes("BREAK_KEYS"), "maps closed break codes");
+  assert.ok(adapter.includes("NEXT_KEYS"), "maps closed next-action codes");
+  assert.ok(adapter.includes("available: false"), "fail-closed unavailable branch");
+  assert.ok(adapter.includes("available: true"), "available branch for valid projections");
+  assert.ok(!adapter.includes("source-applied"), "adapter does not re-qualify stages");
+  assert.ok(!adapter.includes("listIntegration"), "adapter does not read store");
+
+  // Behavioral: malformed projections must not invent 0/3 progress.
+  const adapterFn = new Function(
+    "evidence",
+    `${adapter}\nreturn selfUpgradeEvidenceView(evidence);`,
+  ) as (evidence: unknown) => { available: boolean; achieved?: number };
+  assert.deepEqual(adapterFn(null), { available: false });
+  assert.deepEqual(adapterFn({}), { available: false });
+  assert.deepEqual(adapterFn({ achieved: 0, required: 3 }), { available: false });
+  assert.deepEqual(
+    adapterFn({
+      state: "empty",
+      breakCategory: "none",
+      nextAction: "run-first-upgrade",
+      achieved: 1,
+      required: 3,
+      remaining: 2,
+    }),
+    { available: false },
+    "inconsistent empty/progress must not invent evidence",
+  );
+  assert.deepEqual(
+    adapterFn({
+      state: "ready",
+      breakCategory: "none",
+      nextAction: "milestone-ready",
+      achieved: 2,
+      required: 3,
+      remaining: 1,
+    }),
+    { available: false },
+  );
+  const valid = adapterFn({
+    state: "in-progress",
+    breakCategory: "retained-failure",
+    nextAction: "continue-consecutive-proofs",
+    achieved: 1,
+    required: 3,
+    remaining: 2,
+    latestQualifyingAt: "2026-07-30T12:00:00.000Z",
+    latestQualifyingOperationId: "efa7d9ae-61c9-421a-a1b5-d427d9353a81",
+    breakOperationId: "/Users/private/path",
+  }) as {
+    available: boolean;
+    achieved: number;
+    required: number;
+    remaining: number;
+    latestQualifyingAt: string | null;
+    latestQualifyingOperationId: string | null;
+    breakOperationId: string | null;
+  };
+  assert.equal(valid.available, true);
+  assert.equal(valid.achieved, 1);
+  assert.equal(valid.required, 3);
+  assert.equal(valid.remaining, 2);
+  assert.equal(valid.latestQualifyingAt, "2026-07-30T12:00:00.000Z");
+  assert.equal(valid.latestQualifyingOperationId, "efa7d9ae-61c9-421a-a1b5-d427d9353a81");
+  assert.equal(valid.breakOperationId, null, "hostile break id is omitted");
+
+  const renderer = extractFunctionSource(src, "renderSelfUpgradeEvidenceCard");
+  assert.ok(renderer.includes("!view.available"), "renderer branches on unavailable");
+  assert.ok(renderer.includes("sueUnavailableMalformed"), "malformed uses unavailable copy");
+  assert.ok(!renderer.includes("stdout"), "no command stdout in card");
+  assert.ok(!renderer.includes("stderr"), "no command stderr in card");
+  assert.ok(!/\.error\b/.test(renderer.replace(/selfUpgradeEvidenceError/g, "")),
+    "no raw result.error field reads");
+  assert.ok(!renderer.includes("commands"), "no command stream access");
+  assert.ok(!renderer.includes("source-applied"), "no stage re-qualification in card");
+  assert.ok(!/—/.test(renderer), "no em dash in self-upgrade card");
+
+  for (const key of [
+    "sueCardTitle", "sueCardIntro", "sueProgress",
+    "sueStateEmpty", "sueStateInProgress", "sueStateReady",
+    "sueBreakNone", "sueBreakRetainedFailure", "sueBreakRejected",
+    "sueBreakRolledBack", "sueBreakInsufficientEvidence",
+    "sueRemaining", "sueNextLabel",
+    "sueNextRunFirst", "sueNextContinue", "sueNextReady",
+    "sueLoading", "sueUnavailableBridgeHint", "sueUnavailableMalformed",
+    "sueTechnicalTitle",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  // Plain-language capability copy, not internal Integration jargon as primary title.
+  assert.match(enSection, /sueCardTitle:\s*"Reliable self-upgrade streak"/);
+  assert.match(zhSection, /sueCardTitle:\s*"可靠自升级连续次数"/);
+  assert.match(enSection, /sueBreakRetainedFailure:\s*"[^"]*activation[^"]*"/i);
+  assert.ok(zhSection.includes("激活阶段失败"), "zh explains activation break");
 });

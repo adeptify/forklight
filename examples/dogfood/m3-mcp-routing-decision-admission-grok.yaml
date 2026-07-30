@@ -1,0 +1,192 @@
+version: 2
+name: Carry Main routing decisions through MCP Task admission
+project: /Users/yijunwang/code/forklight
+taskClass: m3-mcp-routing-decision-admission
+taskFamily: main-orchestration-metadata
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: main-orchestration-metadata
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok，以保留其他 Provider Token；本任务无需跨 Provider 验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Close the M3 admission gap that leaves every MCP-submitted Task without
+    taskClass, taskFamily, or a durable Main routing-decision snapshot. Expose
+    these optional structured fields on both ForkLight MCP validate and submit,
+    pass them unchanged through inline Task construction into the canonical
+    Task parser, and update the packaged Main skill so ordinary new Tasks record
+    a stable family, genuinely considered Workers, the selected Worker and
+    plain-language reason, Competition intent/triggers, and the evidence scope.
+    Keep legacy callers compatible, never infer or backfill old history, never
+    turn unknown evidence into Competition, and never launch extra Workers just
+    to populate statistics.
+  presentation:
+    summary: 让 Main 通过 MCP 派任务时，把“这是什么任务、为什么选这个 Worker、为什么不竞争”一起保存下来，后续 Hub 和路由才有真实依据。
+    language: zh-CN
+  context:
+    - The current Task parser and stored Task JSON already validate optional taskClass, taskFamily, and routingDecision snapshots.
+    - The current MCP taskInputSchema and inlineTask omit all three fields, so MCP callers cannot supply them even though the core and Hub can consume them.
+    - A read-only audit of 300 stored Tasks found 125 without taskClass, 242 without taskFamily, and all 300 without routingDecision.
+    - Current routing for this exact class and family returned knowledge unknown, evidenceScope none, zero relevant samples for Grok and DeepSeek, and shouldRunCompetition false because Main intent is none.
+    - The user explicitly prefers Grok 4.5 on 2026-07-30 and 2026-07-31; other Providers are reserved for Provider-specific validation.
+  inScope:
+    - Add optional taskClass, taskFamily, and a fully structured routingDecision to the MCP Task input schema used by validate and submit.
+    - Forward supplied values without inference into inlineTask so parseTaskSpec remains the single authority for trimming, bounds, identity matching, Competition rules, and legacy compatibility.
+    - Ensure MCP tool discovery describes enough of the routing snapshot for Main clients to construct it correctly.
+    - Add focused tests proving validate/submit preserve the exact snapshot, malformed snapshots fail before Worker admission, omitted fields retain legacy behavior, and selected Worker identity still matches actual resolved Task execution.
+    - Update the packaged ForkLight orchestrator skill so Main classifies new non-demo Tasks, records an honest selection snapshot, calls read-only routing only when at least two Workers were genuinely considered, and treats unknown evidence as no reason to compete.
+    - Tell Main to honor standing user authorization for Integration while still requiring explicit authorization when no standing instruction exists; commit and push remain separately prohibited without approval.
+  outOfScope:
+    - Automatic task-family inference, taxonomy generation, database migration/backfill, changing routing scores or thresholds, automatic Worker choice, automatic Competition, Provider calls, changing Competition result judgment, Hub visual redesign, commit, or push.
+  executionSteps:
+    - Trace MCP taskInputSchema through inlineTask, parseTaskSpec, daemon submission, stored Task projection, and tool discovery.
+    - Define bounded structured MCP fields that mirror the existing canonical routing-decision shape without creating a second semantic validator.
+    - Forward the fields into the YAML-shaped Task document and rely on parseTaskSpec for final authority and identity drift rejection.
+    - Add focused MCP tests for presence, round-trip preservation, invalid input rejection before submission, and omission compatibility.
+    - Update the packaged Main skill with a concise classification, routing, selection, Competition, review, and Integration workflow.
+    - Run focused tests, full build and test suite, and diff hygiene.
+  deliverables:
+    - MCP validate/submit can carry taskClass, taskFamily, and the complete Main routing-decision snapshot into stored Tasks.
+    - Packaged Main skill consistently asks future Main agents to produce truthful routing metadata without forced Competition.
+    - Regression tests for the new input path and legacy omission.
+  modules:
+    - name: MCP Task admission schema
+      responsibility: Expose bounded structured classification and routing-decision fields to every MCP Main client.
+      consumes:
+        - Main-authored exact class, stable family, frozen Worker identities, selection reason, Competition intent/triggers, and evidence snapshot.
+      produces:
+        - Tool schema inputs accepted by validate and submit.
+      boundaries:
+        - Does not infer values, call routing automatically, select a Worker, or mutate history.
+    - name: Inline Task adapter
+      responsibility: Preserve supplied routing metadata while resolving the actual Worker Profile and handing the complete document to the canonical parser.
+      consumes:
+        - MCP input, effective settings, and resolved Worker selection.
+      produces:
+        - YAML-shaped Task document with optional taskClass, taskFamily, and routingDecision.
+      boundaries:
+        - Canonical parseTaskSpec remains responsible for semantic validation and actual selected-worker identity matching.
+    - name: Packaged Main orchestration skill
+      responsibility: Make truthful classification and Worker-selection evidence part of normal Task preparation.
+      consumes:
+        - User Provider preferences, Task risk, genuinely considered Worker Profiles, read-only routing evidence, and standing Integration authority.
+      produces:
+        - A bounded Task Contract plus classification, selection explanation, and explicit no-Competition or Competition reason.
+      boundaries:
+        - Never fabricates history, forces multi-model spend, auto-accepts Worker claims, commits, or pushes.
+    - name: MCP admission tests
+      responsibility: Prove new and legacy Main clients reach the same canonical parser and stored Task truth.
+      consumes:
+        - Complete, malformed, and omitted routing metadata fixtures.
+      produces:
+        - Deterministic schema, validate, submit, and identity assertions.
+      boundaries:
+        - Uses no live Provider, credential, external network, commit, or push.
+  callChain:
+    - Main aligns the Task and names exact taskClass plus one stable taskFamily without guessing old history.
+    - Main shortlists only genuinely considered ready Workers and optionally requests read-only routing evidence when at least two are plausible.
+    - Main records selected Worker, plain reason, Competition intent/triggers, and evidence scope in the MCP validate/submit input.
+    - MCP inlineTask resolves the selected Profile and forwards metadata to parseTaskSpec, which rejects drift before Daemon admission.
+    - Daemon stores the immutable Task snapshot; Hub, statistics, and later routing consume it while old Tasks remain unchanged.
+  scenarios:
+    - name: Unknown evidence and one selected Worker
+      given: Grok and DeepSeek have zero comparable exact and family samples, the user currently prefers Grok, and Main sees no critical or multi-solution trigger.
+      when: Main submits one Grok Task with Competition intent none.
+      then: the stored Task explains the user-specified Grok choice, evidence remains unknown, and no Competition or extra Worker starts.
+    - name: Complete MCP round trip
+      given: Main supplies a valid class, family, two frozen shortlisted identities, one matching selected identity, a bounded reason, and an evidence snapshot.
+      when: MCP validate and submit build the Task document.
+      then: parseTaskSpec and the stored Task preserve the exact metadata and the actual resolved Worker matches selectedWorker.
+    - name: Identity drift rejected before execution
+      given: routingDecision selects Grok but workerProfileId resolves to DeepSeek or the selected identity is absent from the shortlist.
+      when: MCP validate or submit is called.
+      then: canonical validation rejects the Task before queueing or invoking any Provider.
+    - name: Legacy Main client
+      given: an older MCP caller omits taskClass, taskFamily, and routingDecision.
+      when: it validates or submits an otherwise valid Task.
+      then: existing behavior remains compatible and no family or decision is invented.
+    - name: Explicit high-risk Competition
+      given: Main genuinely identifies a critical, multi-solution, new-family, or user-requested reason and records consider or required intent.
+      when: routing and settings evaluate the decision.
+      then: Competition remains a separate explicit path with bounded candidates; uncertainty alone still cannot authorize extra spend.
+  risks:
+    - Duplicating semantic checks in Zod and parseTaskSpec could drift; keep MCP structure bounded but preserve parseTaskSpec as final authority.
+    - Making fields hard-required would break existing Main clients; keep schema compatibility while the packaged skill makes them the normal path for new non-demo Tasks.
+    - Auto-generating a routing decision from workerProfileId would fabricate Main reasoning and hide whether alternatives were considered; require explicit input.
+    - A skill that calls routing for every Task with every configured model would itself waste Main and Provider resources; shortlist first and use read-only evidence only for genuinely plausible alternatives.
+  changeBudget:
+    maxFiles: 6
+    maxDiffLines: 750
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 6
+  fileLimitMode: warn
+  changedLineLimit: 750
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/mcp/server.ts
+    - src/core/task.ts
+    - src/core/types.ts
+    - tests/mcp.test.ts
+    - tests/main-install-skill.test.ts
+    - plugins/forklight/skills/forklight-orchestrator/SKILL.md
+acceptance:
+  criteria:
+    - MCP validate and submit expose and preserve explicit Task classification and Main routing-decision metadata through the canonical parser.
+    - Invalid identity or Competition metadata is rejected before Task admission while omission remains backward compatible.
+    - The packaged Main skill makes stable family and honest Worker-selection reasoning the normal new-Task path without automatic Competition or fabricated history.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/mcp.test.ts tests/task.test.ts tests/main-install-skill.test.ts
+    - npm test
+    - git diff --check

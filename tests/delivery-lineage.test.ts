@@ -119,3 +119,27 @@ test("legacy verification without patch evidence is explicit, never silently zer
     "unknown final evidence must not reuse an older attempt as current delivery",
   );
 });
+
+test("Daemon restart continuation is not mislabeled as a Main correction", () => {
+  const attempts = [attempt("attempt-1", 1), attempt("attempt-2", 2)];
+  const events: EventRecord[] = [
+    {
+      id: 1,
+      taskId: "task-lineage",
+      attemptId: "attempt-1",
+      sequence: 1,
+      timestamp: TS,
+      type: "attempt.authorization.granted",
+      summary: "One handoff restart recovery authorized for ordinal 2",
+      payload: {
+        kind: "restart-recovery",
+        targetOrdinal: 2,
+      },
+    },
+    verificationEvent(2, "attempt-2", 2, 20),
+  ];
+
+  const lineage = buildDeliveryLineage(attempts, events);
+  assert.deepEqual(lineage.correctionAttemptIds, []);
+  assert.deepEqual(lineage.combinedDeliveryDiff, { filesChanged: 2, changedLines: 20 });
+});

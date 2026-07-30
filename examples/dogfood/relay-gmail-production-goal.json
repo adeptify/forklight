@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "Relay Gmail production readiness",
+  "objective": "Complete four real Relay milestones—session safety, token continuity, honest sync, and first-user onboarding—without rerunning accepted work or allowing automatic review/integration decisions.",
+  "planFile": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-production-goal-plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 1,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "session-safety", "gate": "integration" },
+    { "itemId": "token-refresh", "gate": "integration" },
+    { "itemId": "honest-sync", "gate": "integration" },
+    { "itemId": "onboarding", "gate": "integration" }
+  ]
+}

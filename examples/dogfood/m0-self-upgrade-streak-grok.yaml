@@ -1,0 +1,206 @@
+version: 2
+name: Show truthful consecutive self-upgrade evidence
+project: /Users/yijunwang/code/forklight
+taskClass: self-upgrade-readiness-visibility
+taskFamily: forklight-self-upgrade
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: forklight-self-upgrade
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-v4-pro
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；这是通用本地证据投影，不需要其他 Provider 专项验证或竞争。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      xai/grok-4.5: 0
+      deepseek/deepseek-v4-pro[1M]: 0
+
+contract:
+  outcome: >-
+    ForkLight exposes one canonical, privacy-safe answer to whether recent
+    self-upgrades form the required consecutive success streak. The default
+    milestone is three. Today the truthful value is one because the newest
+    applied four-stage upgrade follows a retained activation failure. CLI and
+    Hub show the same count, the last break category, and one next action in
+    plain language without loading command output or per-Task private content.
+  presentation:
+    summary: 让用户直接看见“可靠自升级完成了几次、为什么被打断、接下来还差什么”，不再靠翻日志或凭印象判断。
+    language: zh-CN
+  context:
+    - >-
+      The original M0 exit requires three consecutive real source-apply,
+      source-verify, artifact-build, and runtime-activation successes.
+    - >-
+      Recent durable Integration results are an applied operation
+      efa7d9ae-61c9-421a-a1b5-d427d9353a81 preceded by retained-failure
+      operation 66ba9a77-f518-4a37-836f-043e2b70c316. The current streak is 1/3.
+    - >-
+      PROJECT_STATUS previously needed manual SQLite inspection and could
+      describe M0 as reclosed after one recovery proof; the product needs
+      canonical evidence so Main and users cannot overclaim.
+    - >-
+      Full command streams, patches, prompts, errors, paths, credentials, and
+      Worker output are unnecessary for this calculation and must stay private.
+  inScope:
+    - Add a pure fail-closed streak calculator over recent durable Integration result records ordered newest first.
+    - A qualifying success must have result status applied and exactly one passed evidence entry for each of source-applied, source-verified, artifact-built, and runtime-activated. Missing, duplicate, failed, not-applicable, pending, or outcome-unknown stage evidence does not qualify.
+    - Count consecutive qualifying results from newest backward and stop at the first non-qualifying terminal result. Do not skip failures to find older successes.
+    - >-
+      Return a bounded public projection containing required count, achieved
+      count, state, latest qualifying operation timestamp, break category,
+      remaining count, and one stable next-action code. IDs may be included
+      only when useful for Main inspection; no raw error text.
+    - Add a read-only daemon method and CLI `forklight upgrade status [--required <1-20>] [--json]`; it must never start Providers, mutate state, or fetch command streams.
+    - Add one Hub read endpoint and a compact Overview card in Chinese and English explaining the streak as user capability rather than internal jargon.
+    - Hub uses required=3; CLI may choose a bounded required value for audit, without changing persisted milestone history.
+    - Add deterministic tests for 0/3, 1/3 with retained failure, exactly 3/3, more than 3 capped for display, malformed/legacy stage evidence, tie ordering, read-only behavior, CLI output, Hub API, bilingual UI, and privacy bounds.
+  outOfScope:
+    - Rewriting Integration history, auto-starting an upgrade, automatically declaring all of M0 complete, process cleanup, daemon/Hub lifecycle changes, Provider calls, routing score changes, Task retries, UI redesign outside the one card, commit, or push.
+  executionSteps:
+    - Trace Integration result persistence and define one deterministic recent-results read ordered by createdAt plus stable tie-break.
+    - Implement the pure four-stage qualification and consecutive-streak projection with closed state and reason vocabularies.
+    - Expose the same projection through daemon, CLI, and Hub without recomputing it in UI.
+    - Render plain-language progress, break explanation, and next action; keep technical IDs absent or collapsed.
+    - Prove current historical shape returns 1/3 before this Task is integrated, then run focused tests, build, full check, and diff hygiene.
+  deliverables:
+    - Canonical self-upgrade streak evidence service and bounded store read.
+    - Read-only daemon/CLI/Hub projection.
+    - One understandable bilingual Overview card.
+    - Tests proving strict consecutive semantics, privacy, and no mutation.
+  modules:
+    - name: Self-upgrade evidence calculator
+      responsibility: Decide whether each recent durable result is a complete four-stage success and calculate the unbroken newest-first streak.
+      consumes:
+        - Bounded recent Integration result records and required streak count.
+      produces:
+        - Frozen bounded progress, break category, remaining count, and next-action code.
+      boundaries:
+        - No command output, raw errors, patches, paths, Provider data, state mutation, or inference from missing legacy evidence.
+    - name: Read-only orchestration surface
+      responsibility: Retrieve the canonical projection for CLI and Hub without starting or mutating anything.
+      consumes:
+        - Optional validated required count and existing daemon connection.
+      produces:
+        - Identical privacy-safe JSON for both consumers.
+      boundaries:
+        - No Integration launch, no lifecycle ownership, no local fallback calculation, and no Provider call.
+    - name: User explanation card
+      responsibility: Explain achieved/required progress, the latest break, and the next proof needed in Chinese and English.
+      consumes:
+        - Canonical projection only.
+      produces:
+        - One compact Overview card with progressive disclosure for any optional technical identity.
+      boundaries:
+        - Does not parse command text, raw errors, or recompute streak semantics in JavaScript.
+  callChain:
+    - Integration writes an immutable terminal result with four stage evidence entries.
+    - Store returns only a bounded newest-first result window with deterministic ordering.
+    - Core calculator classifies each result and stops the streak at the first break.
+    - Daemon returns the frozen public projection.
+    - CLI and Hub render the same facts; Hub translates stable state/reason/action codes.
+  scenarios:
+    - name: Current one-of-three
+      given: The latest result is a complete four-stage applied upgrade and the preceding result is retained-failure.
+      when: CLI or Hub requests self-upgrade evidence.
+      then: It shows 1/3, says a previous upgrade broke the streak, and asks for two more consecutive proofs.
+    - name: Three consecutive successes
+      given: The newest three terminal results are applied with all four unique stages passed.
+      when: evidence is calculated with required three.
+      then: It shows 3/3 ready without requiring older history to be successful.
+    - name: Missing or legacy evidence
+      given: A result says applied but lacks one stage, duplicates a stage, or marks a stage not-applicable.
+      when: it reaches the head or interrupts the streak.
+      then: It does not qualify and returns a stable insufficient-evidence break, never guesses success.
+    - name: Privacy boundary
+      given: stored result errors and command outputs contain paths, prompts, tokens, or arbitrary text.
+      when: the public projection is serialized.
+      then: None of those values appear; only closed codes, counts, timestamps, and optional opaque IDs remain.
+    - name: Read-only repeated polling
+      given: Hub polls the card repeatedly.
+      when: the endpoint is called.
+      then: Store rows, Tasks, events, daemon lifecycle, and Provider state remain unchanged.
+  risks:
+    - Counting all historical applied results while skipping a recent failure would falsely satisfy M0; stop at the first break.
+    - Treating missing legacy stage evidence as success would overclaim; fail closed with an explicit reason.
+    - Returning full IntegrationResult records would recreate Main-token waste; project only bounded canonical fields.
+    - UI JavaScript recomputation could drift from CLI; render server-owned facts and only translate closed codes.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 1100
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 12
+  fileLimitMode: warn
+  changedLineLimit: 1100
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/integration.ts
+    - src/state/store.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/daemon/coordinator.ts
+    - src/cli.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/integration-operation.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Current pre-integration durable history is represented as exactly 1/3 because the immediately preceding retained failure breaks the streak.
+    - Only complete unique four-stage applied results qualify; no failure or missing evidence can be skipped or inferred away.
+    - CLI and Hub consume the same bounded read-only projection and Hub explains it in plain Chinese and English.
+    - Public output contains no command stream, raw error, path, patch, prompt, credential, or Worker content.
+    - This accepted Task completes the next automatic four-stage self-upgrade and the post-activation canonical projection becomes exactly 2/3.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration-operation.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm run build
+    - npm run check
+    - git diff --check

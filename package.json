@@ -19,6 +19,7 @@
     "check": "npm run build && npm test",
     "smoke": "node --disable-warning=ExperimentalWarning --test --import tsx tests/smoke.test.ts",
     "economics-snapshot": "node scripts/economics-snapshot.mjs",
+    "bundle:clean": "node --disable-warning=ExperimentalWarning --import tsx src/clean-run/build-clean-run-bundle.ts",
     "prepare": "npm run build",
     "prepack": "npm run check"
   },

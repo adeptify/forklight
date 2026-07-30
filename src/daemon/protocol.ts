@@ -31,10 +31,14 @@ export type DaemonMethod =
   | "competition_status"
   | "competition_compare"
   | "competition_list"
+  | "competition_main_decision"
+  | "competition_retained_partial"
+  | "competition_handoff"
   | "provider_status"
   | "provider_probe"
   | "task_economics"
   | "economics_summary"
+  | "routing_evidence_coverage"
   | "direct_codex_capture"
   | "direct_codex_guided_capture"
   | "direct_codex_inbox"
@@ -49,7 +53,16 @@ export type DaemonMethod =
   | "candidate_reverify_eligibility"
   | "correction_eligibility"
   | "correct"
+  | "review_graph_create"
+  | "review_graph_status"
+  | "goal_submit_file"
+  | "goal_status"
+  | "goal_list"
+  | "goal_advance"
+  | "goal_stop"
+  | "goal_task_handoff"
   | "model_routing"
+  | "self_upgrade_evidence"
   | "shutdown";
 
 export interface DaemonRequest {
@@ -93,8 +106,13 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "adaptation_preview",
   "candidate_reverify_eligibility",
   "correction_eligibility",
+  "review_graph_status",
+  "goal_status",
+  "goal_list",
   "economics_summary",
+  "routing_evidence_coverage",
   "model_routing",
+  "self_upgrade_evidence",
 ]);
 
 function isMutatingDaemonMethod(method: DaemonMethod): boolean {

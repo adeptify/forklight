@@ -1,0 +1,125 @@
+version: 2
+name: Elsewhere M0 structured intake and five acceptance journeys
+project: /Users/yijunwang/code/elsewhere
+taskClass: elsewhere-redesign-structured-intake
+taskFamily: elsewhere-experience-redesign-m0-m1
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    Elsewhere has a deterministic, bilingual structured-intake domain that produces a complete
+    maximum-seven-question result, classifies one JourneyLens, persists a resumable local draft,
+    adapts the completed result into the existing Journey workflow without per-question model calls,
+    and proves all five fixed redesign journeys without changing the visible UI yet.
+  presentation:
+    summary: 先把逐题启程的内容与数据骨架做稳，五种典型旅程都能产生可追溯的结构化输入。
+    language: zh-CN
+  context:
+    - The product direction is approved in docs/experience-redesign-v1.md.
+    - The binding implementation decisions are in docs/experience-redesign-m0-m1-contract.md sections 1–3, 6–8.
+    - Existing Journey storage, AI generation, cancellation, retry, provider settings, deletion, and export behavior are working and must remain compatible.
+    - The repository contains substantial uncommitted owner work. Preserve it. Do not commit or push.
+    - Grok implements the contract; it does not redesign screens or invent additional questions.
+  inScope:
+    - Add explicit JourneyLens and StructuredJourneyIntake types with source-preserving answers and skipped states.
+    - Implement the four common questions and deterministic 1–3 follow-up rules in Chinese and English exactly within the approved maximum of seven questions.
+    - Implement branch-safe previous/next/update behavior; changing an upstream answer removes only now-invalid conditional answers.
+    - Add a local draft storage boundary that saves after each confirmed answer, restores the current question, and clears explicitly on completion or discard.
+    - Add a workflow entry that creates one backward-compatible Journey Record from a completed structured intake and supplies traceable interview answers for existing fact-spine preparation.
+    - Add five fixed acceptance fixtures from the implementation contract with expected Lens, answers, and readable fact-spine inputs.
+    - Add domain, storage, compatibility, skip, branching, bilingual, and maximum-question tests.
+  outOfScope:
+    - App.tsx or CSS redesign, archive drawer, question UI, fact-mirror UI, historical retrieval, world facts, story direction, provider changes, dependency changes, commit, or push.
+  executionSteps:
+    - Read the approved redesign documents, domain types, repository contract, workflow start/interview/fact-review path, demo runtime, and focused tests before editing.
+    - Define one pure question engine and one versioned draft shape; keep browser persistence behind a small interface.
+    - Add a compatibility adapter/workflow method that retains old Journey reads and downstream generation behavior.
+    - Implement the five fixtures and focused tests, then run the full acceptance suite once.
+  deliverables:
+    - Structured-intake types, question engine, local draft boundary, legacy workflow adapter, and five fixtures.
+    - Focused regressions plus a green existing repository check and build.
+  modules:
+    - name: Question engine
+      responsibility: Produce the current approved question, accept one answer, determine one Lens, and finish within seven questions.
+      consumes: [locale, prior structured answers]
+      produces: [current question, answer summary, JourneyLens, completion state]
+      boundaries: [no model call, no history lookup, no story generation, no hidden facts]
+    - name: Draft storage
+      responsibility: Save and restore one versioned local intake draft after every confirmed answer.
+      consumes: [draft id, structured answers, current question]
+      produces: [recoverable draft or explicit empty result]
+      boundaries: [no precise location, model key, completed Journey body, or implicit deletion]
+    - name: Workflow adapter
+      responsibility: Turn one completed structured intake into the current Journey record shape and traceable interview answers.
+      consumes: [completed StructuredJourneyIntake, locale, journey id]
+      produces: [backward-compatible JourneyRecord ready for prepareFactReview]
+      boundaries: [no provider/storage rewrite, no per-question AI prompt, no invented answer]
+  callChain:
+    - Journey Intake asks four common questions and deterministic Lens follow-ups while Draft Storage saves each answer.
+    - A completed intake is passed once to the Workflow Adapter.
+    - The adapter creates a backward-compatible Journey Record with structured intake provenance and complete interview evidence.
+    - Existing prepareFactReview and later generation consume the record unchanged.
+  scenarios:
+    - name: Private expression skips world framing
+      given: The user selects saying something and enters the one required sentence.
+      when: The approved follow-ups finish.
+      then: The result has expression or relationship Lens, at most seven questions, and no invented place or career fact.
+    - name: Branch change clears stale detail
+      given: A career follow-up has been answered.
+      when: The user goes back and changes the fork kind to expression.
+      then: Career-only answers are removed, shared answers stay, and the expression branch becomes current.
+    - name: Old Journey remains usable
+      given: A schema-version-one Journey has no structured intake field.
+      when: It is opened or generated.
+      then: Existing behavior remains compatible and no migration is required to read it.
+  risks:
+    - Duplicating workflow truth can split old and new journeys; the adapter must end at the existing fact-review boundary.
+    - Free-form branching can exceed seven questions; rules must be explicit data with invariant tests.
+  changeBudget: { maxFiles: 12, maxDiffLines: 1800 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 12
+  fileLimitMode: warn
+  changedLineLimit: 1800
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, target]
+  generatedPaths: [dist/**, src-tauri/target/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - docs/experience-redesign-v1.md
+    - docs/experience-redesign-m0-m1-contract.md
+    - src/domain/journey/types.ts
+    - src/features/journey-intake
+    - src/services/journey-workflow/journey-workflow.ts
+    - src/demo/create-demo-runtime.ts
+    - tests/features/journey-intake
+    - tests/services/journey-workflow.test.ts
+    - tests/demo
+acceptance:
+  criteria:
+    - Four common questions plus deterministic Lens follow-ups always finish at seven or fewer, with exactly one required free-text answer and every other answer skippable.
+    - Five bilingual fixtures cover the approved strong-era, weak-era, education, private-expression, and stable-work cases without adding world claims.
+    - Every confirmed answer is draft-saveable/restorable and changing a branch clears stale conditional data only.
+    - A completed intake creates a backward-compatible Journey ready for existing fact review; old Journeys remain readable.
+    - Existing behavior remains green and no UI redesign, dependency, commit, or push occurs.
+  commands:
+    - pnpm typecheck
+    - pnpm test
+    - pnpm lint:core-boundary
+    - pnpm build
+    - git diff --check

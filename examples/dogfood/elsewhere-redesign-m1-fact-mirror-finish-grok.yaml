@@ -1,0 +1,120 @@
+version: 2
+name: Elsewhere M1 layered fact mirror and M0-M1 finish
+project: /Users/yijunwang/code/elsewhere
+taskClass: elsewhere-redesign-fact-mirror-finish
+taskFamily: elsewhere-experience-redesign-m0-m1
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    The dense editable book spread becomes the approved three-layer fact mirror and the complete
+    Now-to-confirmed-facts experience is polished, bilingual, responsive, accessible, recoverable,
+    and proven by five Demo journeys. The project status truthfully records M0 and M1 completion
+    without claiming M2 world-context or later story work.
+  presentation:
+    summary: 完成从“此刻”到“这些可以作为起点”的整条体验，并用五段旅程做最后验收。
+    language: zh-CN
+  context:
+    - Consume the integrated shell and progressive intake; do not replace their canonical state or design direction.
+    - Exact fact-mirror layers, actions, materials, motion, responsive and prohibited decisions are binding in docs/experience-redesign-m0-m1-contract.md.
+    - Preserve owner changes and existing post-mirror generation behavior. Do not commit or push.
+  inScope:
+    - Replace the two-page always-editing FactMirror with sequential facts, inferences, and unknown layers.
+    - Default facts to reading mode with explicit edit; give each inference keep/edit/move-to-unknown; keep unknowns non-demanding and removable only when irrelevant.
+    - Maintain traceable FactSpine output and pass only the user-confirmed result into existing generation.
+    - Implement exact 420ms layer movement, single-primary-action hierarchy, focus, keyboard, errors, and reduced-motion behavior.
+    - Make the browser Demo able to walk all five fixed acceptance journeys from Now through confirmed facts without a real model, with visibly different content rather than duplicate placeholders.
+    - Perform one bounded desktop and one 860x640 inspection, fix the observed batch once, then run the mandated UI detector once on changed targets.
+    - Update PRODUCT.md, V1 spec/surface brief if present, and project_status.md with honest M0/M1 results and M2 remaining scope; update DESIGN.md from the implemented visual truth only after inspection.
+    - Add tests for all layer actions, provenance, old FactSpine compatibility, bilingual copy, reduced motion, and full Demo walkthrough.
+  outOfScope:
+    - World assessment/retrieval, world page, intersections, story direction, story/letter redesign, location/weather permission, provider changes, new dependencies, commit, or push.
+  executionSteps:
+    - Trace FactSpine mutations and generation confirmation; map each old edit capability to an approved layer action.
+    - Implement the layered mirror using the existing FactSpine contract and exact visual spec.
+    - Add five Demo walkthroughs and focused tests, then inspect the complete flow at two sizes in one bounded round.
+    - Fix the observed batch once, run full checks and the detector once, then update design/status documentation from actual evidence.
+  deliverables:
+    - Three-layer fact mirror and a complete, inspectable M0-M1 experience.
+    - Five Demo walkthroughs, visual/accessibility evidence, updated DESIGN/PRODUCT/spec/status truth, and green repository checks.
+  modules:
+    - name: Layered fact mirror
+      responsibility: Let users distinguish and confirm facts, editable interpretations, and unknowns without a form spread.
+      consumes: [FactSpine, locale, user layer actions]
+      produces: [confirmed FactSpine, current layer, readable recovery state]
+      boundaries: [no inference promoted silently, no required unknown completion, no generation before confirmation]
+    - name: M0-M1 acceptance harness
+      responsibility: Prove the complete approved path with five distinct fixtures, two sizes, two languages, keyboard, and reduced motion.
+      consumes: [Demo runtime, fixed fixtures, built UI]
+      produces: [walkthrough tests, bounded visual findings, truthful project documentation]
+      boundaries: [no fake world facts, M2 claim, unbounded polish loop, commit, or push]
+  callChain:
+    - Existing fact-review preparation supplies a FactSpine to the layered mirror.
+    - User confirms or edits each semantic layer and the mirror preserves provenance.
+    - The final primary action passes one confirmed FactSpine to the unchanged generation entry.
+    - Demo fixtures and tests exercise Now, intake, mirror, pause/resume, and confirmation across the five journeys.
+  scenarios:
+    - name: Inference is not fact
+      given: The model suggests an interpretation the user does not accept.
+      when: The user moves it to unknown.
+      then: It is absent from confirmed facts and remains explicitly unknown for story generation.
+    - name: Private journey remains ordinary
+      given: The expression fixture reaches the mirror.
+      when: The user reviews it.
+      then: No city, industry, era wave, diagnosis, or invented relationship outcome appears.
+  risks:
+    - Visual layering can obscure semantics; headings, actions, and materials must each communicate the same source distinction.
+    - Documentation can overstate completion; M2 and later milestones must remain explicitly pending.
+  changeBudget: { maxFiles: 12, maxDiffLines: 2400 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 12
+  fileLimitMode: warn
+  changedLineLimit: 2400
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, target]
+  generatedPaths: [dist/**, src-tauri/target/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - PRODUCT.md
+    - DESIGN.md
+    - project_status.md
+    - docs/experience-redesign-v1.md
+    - docs/experience-redesign-m0-m1-contract.md
+    - docs/v0-spec.md
+    - .impeccable/surfaces
+    - src/App.tsx
+    - src/app/copy.ts
+    - src/styles.css
+    - src/features/fact-mirror
+    - src/demo/create-demo-runtime.ts
+    - tests/app/App.test.tsx
+    - tests/demo
+acceptance:
+  criteria:
+    - Facts, interpretations, and unknowns are sequentially and materially distinct; each action preserves provenance and only explicit confirmation reaches generation.
+    - Five distinct Demo journeys complete Now-to-confirmed-facts without a real model, and private journeys contain no fabricated world or diagnostic material.
+    - The complete flow is readable and operable in Chinese/English, 1440x900/860x640, keyboard, and reduced motion with one primary action per screen.
+    - One bounded visual pass, one batch fix, one detector run, full checks, and truthful M0/M1 documentation complete without M2 claims, dependency, commit, or push.
+  commands:
+    - pnpm typecheck
+    - pnpm test
+    - pnpm lint:core-boundary
+    - pnpm build
+    - node /Users/yijunwang/.agents/skills/impeccable/scripts/detect.mjs --json src/App.tsx src/styles.css src/app/copy.ts
+    - git diff --check

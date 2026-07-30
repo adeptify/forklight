@@ -23,6 +23,7 @@ type TaskScopedMcpOperation =
   | "forklight_correction_eligibility"
   | "forklight_remediation_verify"
   | "forklight_candidate_reverify"
+  | "forklight_review_graph_create"
   | "forklight_direct_codex_capture";
 
 interface WithMcpExchangeReceiptParams<T> {

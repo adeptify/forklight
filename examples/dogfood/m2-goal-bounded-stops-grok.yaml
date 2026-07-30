@@ -1,0 +1,164 @@
+version: 2
+name: Make unlimited Goals stop bounded idle loops truthfully
+project: /Users/yijunwang/code/forklight
+taskClass: m2-goal-bounded-stop
+taskFamily: durable-goal-supervision
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Keep Goal maxDurationMs:null truly unlimited while making finite Goal
+    noProgressTimeoutMs a durable terminal stop for an idle, evidence-stalled
+    Goal. Ordinary Worker messages and repeated status reads must not count as
+    new evidence. Work already in flight remains under existing Task authority
+    and must not be killed by Goal reconciliation. Once no Goal-owned work is
+    in flight and authoritative milestone evidence remains unchanged beyond the
+    frozen timeout, the Goal stops, future Task admission is blocked, and Hub
+    explains the cause and policy in plain English and Chinese. Preserve the
+    existing bounded explicit no-new-evidence advance behavior and prove both
+    stops survive restart without duplicate Task mutation.
+  presentation:
+    summary: 允许 Goal 不设总时长，但空转、反复点击或只输出“正在想”都不能让它无限循环。
+    language: zh-CN
+  context:
+    - Goal v1 already persists maxDurationMs:null and an explicit maxNoNewEvidenceCycles counter.
+    - Current finite noProgressTimeoutMs only changes the Goal to waiting, so future admission is not blocked.
+    - Current evidence facts include the latest arbitrary Task event sequence, so non-authoritative Worker chatter can reset the evidence clock.
+    - Task runtimes already own live Worker no-progress watchdogs; Goal supervision must not kill in-flight Workers.
+  inScope:
+    - Define one structured authoritative Goal evidence cursor using Task lifecycle, current Attempt, verification, Candidate Revision, Main Review, Review Graph, and Integration facts without raw Worker messages.
+    - Suppress Goal idle timeout while any Goal milestone Task or linked reviewer Task is queued, preparing, running, or verifying.
+    - After work is no longer in flight, stop the Goal once unchanged authoritative evidence exceeds finite noProgressTimeoutMs; set durable stoppedAt and block future admission without killing active work.
+    - Preserve maxDurationMs:null, explicit no-new-evidence advance caps, correction/review caps, idempotent reconciliation, and non-Goal Plan behavior.
+    - Ensure coordinator recovery, status reconciliation, queue pruning, CLI/Hub projection, and bilingual Goal detail communicate the terminal cause and show the no-progress policy in readable time.
+    - Add deterministic clock-driven tests plus restart tests; no real waiting sleeps in the unit suite.
+  outOfScope:
+    - A second scheduler, automatic retry, automatic review/correction/integration, killing active Workers, changing Task watchdog semantics, model routing, Provider changes, arbitrary event heuristics, commits, or pushes.
+  executionSteps:
+    - Trace Goal evidence production, reconciliation, admission, recovery, projection, and Hub rendering.
+    - Replace arbitrary latest-event evidence with explicit authoritative cursors and add an in-flight ownership check.
+    - Make finite idle no-progress terminal and ensure coordinator prunes/blocks future admission on every reconciliation path.
+    - Add plain bilingual projection and show both unlimited duration and readable no-progress policy.
+    - Prove unchanged chatter cannot reset the clock, new authoritative evidence does reset it, active work suppresses Goal timeout, idle timeout stops, and both stop modes survive restart.
+  deliverables:
+    - Durable bounded Goal idle-stop behavior with no duplicate mutation or hidden retry.
+    - Explanation-first CLI/Hub evidence and regression tests.
+  modules:
+    - name: Goal evidence cursor
+      responsibility: Identify only persisted facts that can change a milestone or Main decision.
+      consumes:
+        - Task lifecycle/current Attempt, verification, Candidate Revision, Main Review, Review Graph, and Integration records.
+      produces:
+        - Deterministic privacy-safe evidence digest and timestamp.
+      boundaries:
+        - Excludes raw result text, prompts, paths, credentials, Worker thinking/messages, polling, and Goal counters.
+    - name: Goal stop reconciler
+      responsibility: Separate active execution from idle orchestration and apply the frozen stop policy once.
+      consumes:
+        - Frozen Goal policy, evidence cursor, prior evidenceAt, current time, and Goal-owned in-flight Task state.
+      produces:
+        - Running/waiting/completed/stopped Goal with stable reason and stoppedAt.
+      boundaries:
+        - Never kills active work, launches replacements, retries, or reopens a terminal Goal.
+    - name: Admission and recovery
+      responsibility: Enforce a terminal Goal stop across queue, dependency release, daemon restart, and later reconciliation.
+      consumes:
+        - Durable Goal terminal state and Plan Task membership.
+      produces:
+        - No future Goal Task admission and no duplicate ready/stop events.
+      boundaries:
+        - Non-Goal Plans keep current behavior; existing Task authority remains intact.
+    - name: Goal user story
+      responsibility: Tell the user what stopped, why, what was preserved, and what to do next.
+      consumes:
+        - Privacy-safe Goal reason code, policy, counters, milestones, and locale.
+      produces:
+        - Readable English/Chinese Goal Detail and CLI output including no-progress duration.
+      boundaries:
+        - No raw internal codes as primary copy and no claim that a running Worker was killed.
+  callChain:
+    - Task, review, Main, and Integration authorities persist bounded state changes.
+    - Goal reconciliation builds an authoritative cursor and checks whether Goal-owned work is in flight.
+    - New authoritative evidence refreshes evidenceAt; active work defers Goal idle stop to Task authority.
+    - Idle unchanged evidence beyond the finite timeout stops the Goal and blocks later Plan admission.
+    - Daemon restart reloads the same terminal state; CLI and Hub explain it without starting work.
+  scenarios:
+    - name: Unlimited total duration with active work
+      given: maxDurationMs is null, noProgressTimeoutMs is finite, and a Goal Task or reviewer is in flight.
+      when: wall time exceeds the Goal idle timeout while the Task remains active.
+      then: Goal does not stop; Task watchdog and explicit Task authority remain responsible.
+    - name: Worker chatter is not evidence
+      given: No authoritative Task, Candidate, review, or Integration state changes.
+      when: ordinary Worker message events or repeated status reads occur.
+      then: The Goal evidence digest and evidenceAt do not change.
+    - name: Idle Goal stops
+      given: No Goal-owned work is in flight and authoritative evidence is unchanged beyond a finite timeout.
+      when: reconciliation or recovery runs.
+      then: Goal becomes durably stopped with reason no-progress, future Task admission is blocked, and no Worker is killed or launched.
+    - name: New evidence resets the idle window
+      given: The Goal is not terminal and a real verification, revision, Main review, review graph, or Integration fact changes.
+      when: reconciliation runs.
+      then: The evidence digest changes and evidenceAt resets before any idle stop decision.
+    - name: No-new-evidence cap survives restart
+      given: Main explicitly advances unchanged evidence until the frozen cycle cap is reached.
+      when: the daemon restarts and reconciles again.
+      then: The Goal remains stopped, counters are preserved, and no waiting Task is admitted twice.
+  risks:
+    - Treating arbitrary event sequence as progress lets noisy models evade the stop; explicit cursors are required.
+    - Stopping while a real Worker or reviewer is in flight would discard useful long work; in-flight suppression is required.
+    - Marking stopped without pruning/admission enforcement would leave a misleading terminal label while work still starts.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 300000
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 1000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/goal.ts
+    - src/daemon/coordinator.ts
+    - src/core/types.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/goal.test.ts
+    - tests/daemon.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Unlimited total duration remains distinct from finite idle no-progress stop.
+    - Only authoritative facts reset Goal evidence; in-flight work is preserved; terminal stops block future admission across restart.
+    - Hub and CLI explain both stop modes and visible policy without raw technical prose.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/goal.test.ts tests/daemon.test.ts tests/hub-ui-assets.test.ts tests/hub-ops-mutations.test.ts
+    - npm test
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check

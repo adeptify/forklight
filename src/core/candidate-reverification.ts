@@ -1,26 +1,36 @@
 /**
  * Candidate reverification core: one bounded Main-authorized verification-only
- * pass against a failed Task's retained candidate, WITHOUT launching a Worker
- * or creating/rewriting an Attempt.
+ * pass against a retained candidate, WITHOUT launching a Worker or creating or
+ * rewriting an Attempt.
+ *
+ * Two eligibility paths:
+ *   1. Failed Task with a behavior-only verification failure and non-empty
+ *      retained business Diff (original path).
+ *   2. Succeeded Task whose latest valid Main Review is an exact `revise` of
+ *      the current Attempt, latest verification, and (when modern revision
+ *      history exists) the exact reviewed Candidate Revision.
  *
  * Boundaries (product contract):
  *   - Never invoke a Worker, create an Attempt, rewrite the prior Attempt, or
  *     auto-run after a restart.
- *   - Reject policy/source failures, missing/empty candidate Diff, active
- *     execution, and competition candidates before running any command.
- *   - On pass: move only the Task status to "succeeded"; preserve the failed
- *     Attempt; a fresh Main Review accept bound to the new verification event
- *     is still required before Integration.
- *   - On failure or crash: leave the Task failed with the original candidate
- *     and failure history intact; nothing retries automatically.
+ *   - Reject policy/source failures (failed path), missing/empty candidate Diff,
+ *     active execution, competition candidates, Integration, and non-exact
+ *     Main revise authority before running any command.
+ *   - Failed path on pass: move only the Task status to "succeeded"; preserve
+ *     the Attempt; a fresh Main Review accept bound to the new verification
+ *     event is still required before Integration.
+ *   - Succeeded path: preserve the machine-successful Task and original Attempt
+ *     status on both pass and failure. A failed repair stays visibly unaccepted.
+ *   - On failure or crash: leave prior Task status and history intact; nothing
+ *     retries automatically.
  *
  * Crash-safety: the Task status is NEVER set to "verifying". The authorization
  * and start events are persisted before command execution, and the canonical
  * `verification.completed` event is persisted after. A daemon crash between
- * start and completion leaves the Task failed (status unchanged) and the
- * incomplete authorization evidence durable and inspectable. `recover()` only
- * recovers preparing/running/verifying Tasks, so this operation is invisible
- * to Worker-execution recovery.
+ * start and completion leaves the Task status unchanged and the incomplete
+ * authorization evidence durable and inspectable. `recover()` only recovers
+ * preparing/running/verifying Tasks, so this operation is invisible to
+ * Worker-execution recovery.
  */
 import type { StateStore } from "../state/store.js";
 import type {
@@ -30,7 +40,11 @@ import type {
   TaskRecord,
   VerificationResult,
 } from "./types.js";
-import { captureCandidateRevision } from "./candidate-revision.js";
+import {
+  captureCandidateRevision,
+  latestMainReview,
+  resolveRevisionForAttempt,
+} from "./candidate-revision.js";
 import { executeVerificationPass } from "./verifier.js";
 import { isoTimestamp as timestamp } from "./time.js";
 
@@ -53,18 +67,35 @@ export type CandidateReverificationEligibilityCategory =
   | "wrong-failure-category"
   | "missing-candidate-diff"
   | "allowance-zero"
-  | "allowance-exhausted";
+  | "allowance-exhausted"
+  | "no-main-revise"
+  | "reviewed-revision-mismatch"
+  | "already-integrated";
 
 const REJECTION_MESSAGES: Record<Exclude<CandidateReverificationEligibilityCategory, "eligible">, string> = {
-  "task-not-failed": "candidate reverification requires a failed Task",
-  "competition-candidate": "candidate reverification rejected: competition candidates cannot be reverified; use competition reevaluation or a new Task",
+  "task-not-failed":
+    "candidate reverification requires a failed Task or a succeeded Task with an exact Main revise",
+  "competition-candidate":
+    "candidate reverification rejected: competition candidates cannot be reverified; use competition reevaluation or a new Task",
   "running-attempt": "candidate reverification rejected: Task has a running Attempt",
-  "no-completed-attempt": "candidate reverification rejected: no completed Worker Attempt to reverify",
-  "no-failed-verification": "candidate reverification rejected: no latest independent verification evidence for the latest Attempt",
-  "wrong-failure-category": "candidate reverification rejected: latest verification failed policy or source compatibility (not behavior only); use Main correction, contract/policy revision, or a new Task",
-  "missing-candidate-diff": "candidate reverification rejected: retained business candidate Diff is missing or empty; use Main correction or a new Task",
-  "allowance-zero": "candidate reverification rejected: maxMainReverifications is zero; the operation is disabled",
-  "allowance-exhausted": "candidate reverification rejected: maxMainReverifications allowance is exhausted",
+  "no-completed-attempt":
+    "candidate reverification rejected: no completed Worker Attempt to reverify",
+  "no-failed-verification":
+    "candidate reverification rejected: no latest independent verification evidence for the latest Attempt",
+  "wrong-failure-category":
+    "candidate reverification rejected: latest verification failed policy or source compatibility (not behavior only); use Main correction, contract/policy revision, or a new Task",
+  "missing-candidate-diff":
+    "candidate reverification rejected: retained business candidate Diff is missing or empty; use Main correction or a new Task",
+  "allowance-zero":
+    "candidate reverification rejected: maxMainReverifications is zero; the operation is disabled",
+  "allowance-exhausted":
+    "candidate reverification rejected: maxMainReverifications allowance is exhausted",
+  "no-main-revise":
+    "candidate reverification rejected: succeeded Task requires an exact latest Main revise of the current verified Candidate Revision",
+  "reviewed-revision-mismatch":
+    "candidate reverification rejected: latest Main revise is not bound to the exact reviewed Candidate Revision",
+  "already-integrated":
+    "candidate reverification rejected: Task already has Integration results",
 };
 
 /** Stable privacy-safe message for an eligibility category. Never echoes
@@ -209,6 +240,45 @@ function resolveAllowance(
   };
 }
 
+function hasRevisionHistory(events: readonly EventRecord[]): boolean {
+  return events.some((event) => event.type === "candidate.revision.captured");
+}
+
+/**
+ * Exact Main-revise authority for the succeeded path.
+ * When modern revision history exists, the revise must bind the exact
+ * CandidateRevision for the latest Attempt + verification pair.
+ */
+function resolveSucceededReviseAuthority(
+  events: readonly EventRecord[],
+  attemptId: string,
+  verificationEventSequence: number,
+): "ok" | "no-main-revise" | "reviewed-revision-mismatch" {
+  const review = latestMainReview(events);
+  if (
+    review === undefined
+    || review.decision !== "revise"
+    || review.attemptId !== attemptId
+    || review.verificationEventSequence !== verificationEventSequence
+  ) {
+    return "no-main-revise";
+  }
+  if (!hasRevisionHistory(events)) {
+    // Legacy Tasks without revision evidence remain eligible on Attempt +
+    // verification binding alone.
+    return "ok";
+  }
+  const revision = resolveRevisionForAttempt(events, attemptId, verificationEventSequence);
+  if (
+    revision === undefined
+    || review.candidateRevisionId !== revision.id
+    || review.acceptedPatchDigest !== revision.patchDigest
+  ) {
+    return "reviewed-revision-mismatch";
+  }
+  return "ok";
+}
+
 // --- Eligibility (pure read; shared by UI projection and the operation) ---
 
 /**
@@ -225,9 +295,6 @@ export function resolveCandidateReverificationEligibility(
   const events = store.listEvents(taskId);
   const allowance = resolveAllowance(task, events, maxMainReverifications);
 
-  if (task.status !== "failed") {
-    return { eligible: false, category: "task-not-failed", allowance };
-  }
   if (store.getCompetitionByCandidateTaskId(taskId) !== undefined) {
     return { eligible: false, category: "competition-candidate", allowance };
   }
@@ -235,6 +302,38 @@ export function resolveCandidateReverificationEligibility(
   if (attempts.some((attempt) => attempt.status === "running")) {
     return { eligible: false, category: "running-attempt", allowance };
   }
+
+  if (task.status === "failed") {
+    return resolveFailedPathEligibility(
+      store,
+      taskId,
+      attempts,
+      events,
+      allowance,
+      maxMainReverifications,
+    );
+  }
+  if (task.status === "succeeded") {
+    return resolveSucceededPathEligibility(
+      store,
+      taskId,
+      attempts,
+      events,
+      allowance,
+      maxMainReverifications,
+    );
+  }
+  return { eligible: false, category: "task-not-failed", allowance };
+}
+
+function resolveFailedPathEligibility(
+  _store: StateStore,
+  _taskId: string,
+  attempts: readonly AttemptRecord[],
+  events: readonly EventRecord[],
+  allowance: CandidateReverificationAllowanceView,
+  maxMainReverifications: number,
+): CandidateReverificationEligibility {
   const latest = latestAttempt(attempts);
   if (latest === undefined || (latest.status !== "succeeded" && latest.status !== "failed")) {
     return { eligible: false, category: "no-completed-attempt", allowance };
@@ -303,6 +402,87 @@ export function resolveCandidateReverificationEligibility(
   };
 }
 
+function resolveSucceededPathEligibility(
+  store: StateStore,
+  taskId: string,
+  attempts: readonly AttemptRecord[],
+  events: readonly EventRecord[],
+  allowance: CandidateReverificationAllowanceView,
+  maxMainReverifications: number,
+): CandidateReverificationEligibility {
+  if (store.listIntegrationResults(taskId).length > 0) {
+    return { eligible: false, category: "already-integrated", allowance };
+  }
+  const latest = latestAttempt(attempts);
+  if (latest === undefined || (latest.status !== "succeeded" && latest.status !== "failed")) {
+    return { eligible: false, category: "no-completed-attempt", allowance };
+  }
+  const verificationEvent = latestVerificationEvent(events);
+  if (
+    verificationEvent === undefined
+    || verificationEvent.attemptId !== latest.id
+    || !isVerificationResult(verificationEvent.payload)
+  ) {
+    return {
+      eligible: false,
+      category: "no-failed-verification",
+      attemptId: latest.id,
+      allowance,
+    };
+  }
+  const verification = verificationEvent.payload as VerificationResult;
+  if (!businessPatchNonEmpty(verification)) {
+    return {
+      eligible: false,
+      category: "missing-candidate-diff",
+      attemptId: latest.id,
+      verificationEventSequence: verificationEvent.sequence,
+      allowance,
+    };
+  }
+  // Allowance before review proof so disabled/exhausted surfaces cleanly and
+  // never leaks revision identity on a non-correctable Task.
+  if (maxMainReverifications === 0) {
+    return {
+      eligible: false,
+      category: "allowance-zero",
+      attemptId: latest.id,
+      verificationEventSequence: verificationEvent.sequence,
+      allowance,
+    };
+  }
+  if (allowance.consumed >= maxMainReverifications) {
+    return {
+      eligible: false,
+      category: "allowance-exhausted",
+      attemptId: latest.id,
+      verificationEventSequence: verificationEvent.sequence,
+      allowance,
+    };
+  }
+  const reviseAuthority = resolveSucceededReviseAuthority(
+    events,
+    latest.id,
+    verificationEvent.sequence,
+  );
+  if (reviseAuthority !== "ok") {
+    return {
+      eligible: false,
+      category: reviseAuthority,
+      attemptId: latest.id,
+      verificationEventSequence: verificationEvent.sequence,
+      allowance,
+    };
+  }
+  return {
+    eligible: true,
+    category: "eligible",
+    attemptId: latest.id,
+    verificationEventSequence: verificationEvent.sequence,
+    allowance,
+  };
+}
+
 // --- Core operation ---
 
 /**
@@ -333,6 +513,7 @@ export async function reverifyCandidate(
 
   // 3. Load Task and resolve eligibility (throws nothing here; category checked)
   const task = store.getTask(input.taskId);
+  const inputTaskStatus = task.status;
 
   // Reuse the single-flight guard BEFORE recording any durable authorization.
   if (activeReverifications.has(input.taskId)) {
@@ -357,8 +538,8 @@ export async function reverifyCandidate(
 
   try {
     // 4. Persist durable authorization BEFORE running commands. Does not
-    //    change Task status. A crash after this point leaves the Task failed
-    //    and the authorization durable/inspectable; the allowance is consumed.
+    //    change Task status. A crash after this point leaves the prior Task
+    //    status and the authorization durable/inspectable; the allowance is consumed.
     store.addEvent(
       input.taskId,
       attemptId,
@@ -369,6 +550,7 @@ export async function reverifyCandidate(
         reasonLength: reason.length,
         priorVerificationSequence,
         allowanceBefore,
+        inputTaskStatus,
       },
     );
 
@@ -386,9 +568,11 @@ export async function reverifyCandidate(
       },
     );
 
-    // 6. Rerun every original acceptance command in the retained workspace and
-    //    recompute patch + source evidence WITHOUT invoking a Worker. The Task
-    //    status stays "failed" throughout (never set to "verifying").
+    // 6. Rerun every original acceptance command WITHOUT invoking a Worker.
+    //    The shared verification entry point upgrades any legacy external
+    //    dependency symlink before commands, so correction/resume and reverify
+    //    cannot drift. The Task status stays at its input value throughout
+    //    (never set to "verifying").
     const reloaded = store.getTask(input.taskId);
     const wallStart = Date.now();
     const pass = await executeVerificationPass(
@@ -401,8 +585,8 @@ export async function reverifyCandidate(
     const verification = pass.verification;
 
     // 7. Record the canonical verification.completed event bound to the
-    //    retained (failed) Attempt. This is the authoritative evidence Main
-    //    Review and Integration preflight bind to.
+    //    retained Attempt. This is the authoritative evidence Main Review and
+    //    Integration preflight bind to.
     const completedEvent = store.addEvent(
       input.taskId,
       attemptId,
@@ -413,8 +597,8 @@ export async function reverifyCandidate(
     const verificationEventSequence = completedEvent.sequence;
 
     // 7a. Capture exact Candidate Revision bound to this verification event
-    // before the Task can become successful. On capture failure, keep the Task
-    // failed, preserve Attempt/history, record a stable content-free failure
+    // before any status transition. On capture failure, keep the prior Task
+    // status, preserve Attempt/history, record a stable content-free failure
     // event, return failed zero-Worker facts, and never retry.
     const attempt = store.getAttempt(attemptId);
     let revisionCaptureFailed = false;
@@ -458,12 +642,18 @@ export async function reverifyCandidate(
       0,
     );
 
-    // 8. On pass AND successful revision capture: move Task to "succeeded".
-    //    Preserve the retained Attempt (never rewrite it). currentAttemptId
-    //    already points at the retained Attempt, so Main Review accept will
-    //    bind correctly.
-    //    On verification failure or capture failure: leave the Task failed.
-    if (verification.passed && !revisionCaptureFailed) {
+    // 8. Status transitions:
+    //    - Failed path on pass + successful capture: move Task to "succeeded".
+    //    - Succeeded path: never rewrite the machine-success Task status.
+    //    - Preserve the retained Attempt (never rewrite it). currentAttemptId
+    //      already points at the retained Attempt, so Main Review accept will
+    //      bind correctly.
+    //    - On verification failure or capture failure: leave the input status.
+    if (
+      verification.passed
+      && !revisionCaptureFailed
+      && inputTaskStatus === "failed"
+    ) {
       store.setTaskStatus(input.taskId, "succeeded", {
         error: null,
         finishedAt: timestamp(),
@@ -508,6 +698,7 @@ export async function reverifyCandidate(
         wallDurationMs,
         allowance: allowanceAfter,
         requiresFreshMainAccept: true,
+        inputTaskStatus,
       },
     );
 

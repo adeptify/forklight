@@ -1,0 +1,184 @@
+version: 2
+name: Add bounded multi-judge aggregation to exact-revision Review Graph
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-multi-judge-review-graph-v1
+taskFamily: forklight-main-orchestration
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    Main can assign one through three explicit saved Worker Profiles as independent,
+    read-only judges of the same immutable Candidate Revision. ForkLight registers
+    the graph, every assignment, and every reviewer Task durably before queueing;
+    waits for every judge to become terminal; preserves useful results when another
+    judge fails; and projects an explanation-first aggregation that distinguishes
+    agreement, disagreement, one usable opinion, and insufficient evidence. Judge
+    results remain evidence only: no vote, retry, correction, acceptance, winner,
+    or Integration is automatic, and Main must record a fresh final decision.
+  presentation:
+    summary: 一次可选 1–3 个只读裁判；全部结束后展示共识、分歧和不可用结果，由 Main 最终判断，不做自动投票或重试。
+    language: zh-CN
+  context:
+    - The current Review Graph is exact-revision, restart-safe, privacy-safe, and plural-ready in storage, but creation, persistence, result projection, CLI/MCP/Hub input, and copy are hard-coded to one assignment.
+    - Current reconciliation writes terminalEvidenceSequence after any assignment ends. Multi-judge safety requires terminal graph evidence only after every assignment is terminal.
+    - >-
+      Existing Goal maxReviewRounds counts graph rounds, not reviewer count. Keep that meaning:
+      one multi-judge graph consumes one review round.
+    - Today and tomorrow Main prefers Grok 4.5. Use local-grok-builder for implementation. Other providers are allowed later only as explicit independent dogfood judges, not for this coding Task.
+    - Preserve all current uncommitted Goal, Candidate, Competition, Integration, Hub, documentation, tests, and dogfood changes. Do not commit or push.
+  inScope:
+    - Change Review Graph create input to admit an ordered list of one through three unique saved Worker Profile ids while retaining the existing one-profile call as a backward-compatible alias at daemon/CLI/MCP/Hub boundaries where practical.
+    - Resolve and validate every profile and exact Candidate Revision before durable mutation. Reject duplicate profile ids, empty lists, more than three profiles, unknown profiles, stale revisions, reviewer-of-reviewer requests, and attempts to change the judge set on an existing exact revision.
+    - Atomically register one graph, all assignments, all linked read-only reviewer Tasks, and audit events before any in-memory queue operation. Return reviewerTaskIds in stable assignment order and retain reviewerTaskId as the first-item compatibility field.
+    - Freeze each assignment's actual provider, model, runtime, effort, and Worker Profile. Each reviewer remains allowEdits=false, has one attempt, no correction/adaptation/retry/Integration authority, and sees only the bounded immutable review packet.
+    - Reconcile assignments independently across normal execution and restart. Keep the graph pending/running while any assignment is non-terminal. Once all are terminal, set completed when at least one strict result is usable and failed only when none are usable. Set terminalEvidenceSequence only at that all-terminal transition.
+    - Add a privacy-safe aggregation with total, pending, usable, and unusable counts; disposition counts; a stable state of pending, single-opinion, agreement, disagreement, or insufficient-evidence; and a short plain-language explanation/next action. Agreement means at least two usable judges proposed the same disposition; disagreement means at least two usable judges proposed different dispositions. One usable result stays a single opinion even if other judges failed.
+    - Preserve every individual usable result and typed failure. Never let an unusable judge erase useful evidence or trigger replacement work. Never collapse findings into a synthetic verdict.
+    - Require a fresh Main accept/revise/reject after the complete graph terminal evidence. Pending judges block Integration. A terminal graph with partial, conflicting, or unusable evidence never auto-accepts and never bypasses the fresh Main decision.
+    - Make duplicate create with the same exact revision and same ordered unique profile set idempotent. Reject a different/reordered set for the same revision rather than silently appending or creating another round.
+    - Update daemon protocol, coordinator queue/recovery behavior, CLI, MCP, Hub backend, Task Detail, and bilingual copy to create and explain 1–3 judges, progress, identities, each opinion/failure, agreement/disagreement, and the one next Main action without technical-code-first wording.
+    - Add focused persistence, atomicity, idempotency, partial-useful, all-unusable, disagreement, restart, terminal-sequence, Integration-gate, protocol, MCP, CLI, Hub API/UI, privacy, and backward-compatibility tests.
+  outOfScope:
+    - Majority voting, weighted scoring, automatic winner selection, automatic Main decisions, automatic correction, automatic retry/reviewer replacement, automatic second review round, Worker-to-Worker chat, cross-Candidate synthesis, or Integration without explicit Main authority.
+    - Dynamically choosing judge profiles, changing the frozen judge set after creation, reviewing more than three Workers, model competition, Provider adapter changes, credential changes, pricing changes, commits, pushes, or Launch work.
+    - Treating file count, line count, elapsed time, number of votes, or one model's confidence as proof of correctness.
+    - Exposing raw patches, resultText, prompts, private packet paths, absolute paths, credentials, or command output in Hub/CLI/MCP projections.
+  executionSteps:
+    - Trace the current single-assignment create, atomic Store transaction, coordinator queue/resume path, reconciliation, Integration gates, Goal review cap, protocol, CLI, MCP, Hub API/UI, and tests before editing.
+    - Define one canonical normalized judge-set input and one canonical aggregation function. Keep old single-judge semantics as the one-item case.
+    - Generalize Store registration to arrays and create all Task/assignment records before queueing. Preserve stable ordinal ordering and frozen identities.
+    - Fix reconciliation so assignment completion is independent while graph terminal evidence is written exactly once only when all assignments are terminal.
+    - Wire plural create/status through control surfaces and render explanation-first per-judge evidence plus the aggregate state.
+    - Run focused tests once and the full test/build/Hub syntax/diff checks once. Stop after one Candidate and return remaining semantic gaps to Main instead of broad retries.
+  deliverables:
+    - One-to-three-judge exact-revision Review Graph with atomic durable registration and restart-safe completion.
+    - Deterministic aggregation and partial-result retention without automatic voting or retry.
+    - Backward-compatible daemon/CLI/MCP/Hub controls and explanation-first bilingual Task Detail.
+    - Executable regressions proving disagreement, partial usefulness, all-unusable failure, terminal evidence timing, Integration gating, and privacy.
+  modules:
+    - name: Judge-set creation and persistence
+      responsibility: Validate one ordered unique set of 1–3 saved Worker Profiles and atomically register the graph, assignments, linked read-only Tasks, and events.
+      consumes:
+        - Exact current Candidate Revision, saved Worker Profiles, reason, explicit confirmation, and current settings.
+      produces:
+        - One durable Review Graph, ordered assignments, frozen identities, reviewer Task ids, and audit events.
+      boundaries:
+        - No queue action before durable registration, no dynamic routing, no profile replacement, no edits, no retries, and no private projection.
+    - name: Independent completion and aggregation
+      responsibility: Reconcile each reviewer once, retain every useful or failed result, and close the graph only after all assignments are terminal.
+      consumes:
+        - Reviewer Task states, strict structured results, assignment records, and Candidate events.
+      produces:
+        - Per-assignment evidence, graph status, one terminal evidence sequence, aggregate counts/state, and a fresh-Main-decision requirement.
+      boundaries:
+        - No synthetic verdict, majority rule, automatic acceptance, retry, correction, reviewer replacement, or second round.
+    - name: Main and user review surfaces
+      responsibility: Let Main select 1–3 judges and let users understand who reviewed what, what each judge concluded, where they differ, and what Main must do next.
+      consumes:
+        - Privacy-safe graph projection, Worker Profiles, individual results/failures, aggregate state, and localization keys.
+      produces:
+        - Daemon/CLI/MCP/Hub create/status operations and bilingual explanation-first Task Detail.
+      boundaries:
+        - No raw/private content, technical-code-first copy, hidden mutation, or implication that judge votes decide correctness.
+  callChain:
+    - Main explicitly selects one through three saved Worker Profiles for the current exact Candidate Revision and confirms the review.
+    - ForkLight validates the complete set, freezes identities, atomically registers the graph and all read-only reviewer Tasks, then queues each through the ordinary persistent daemon.
+    - Each judge independently reads the same immutable bounded packet and returns one strict structured result without editing source.
+    - Reconciliation stores each result or typed failure while the graph remains open until every assignment is terminal.
+    - The graph projects agreement, disagreement, a single usable opinion, or insufficient evidence plus all individual evidence; nothing retries or votes automatically.
+    - Main examines the evidence and explicitly records accept, revise, or reject. Only a fresh exact Main accept can make normal Integration preflight eligible.
+  scenarios:
+    - name: Two judges disagree
+      given: Two independent judges review the same exact revision and return different proposed dispositions.
+      when: Both reviewer Tasks become terminal.
+      then: The graph is completed with disagreement, both results remain visible, Integration remains blocked until a fresh Main decision, and no vote/retry/correction starts.
+    - name: One useful result and one failed judge
+      given: One judge returns valid structured evidence and another fails or returns unusable output.
+      when: Both assignments become terminal.
+      then: The graph completes as single-opinion with one usable and one unusable result; useful evidence is retained and no replacement judge is launched.
+    - name: All judge outputs unusable
+      given: Every assignment fails or returns invalid output.
+      when: All assignments become terminal.
+      then: The graph fails as insufficient-evidence, records every typed failure, requires an explicit Main decision, and launches nothing else.
+    - name: Restart during parallel review
+      given: A multi-judge graph is durably registered and some reviewers are running or terminal.
+      when: The Daemon restarts and reconciles.
+      then: The same assignments and frozen identities resume or reconcile once, the graph does not close early, and no duplicate Task or review round is created.
+    - name: Duplicate or changed judge set
+      given: A graph already exists for an exact Candidate Revision.
+      when: Main repeats the same ordered set or requests a different/reordered set.
+      then: The same ordered set returns the existing graph idempotently; a changed set is rejected before mutation.
+  risks:
+    - Closing the graph after the first terminal judge could let stale Main evidence bypass remaining judges, so terminalEvidenceSequence must be emitted only after all assignments finish.
+    - Blind majority voting would hide correlated model errors, so aggregation describes evidence and disagreement while Main remains final authority.
+    - Sharing one mutable reviewer workspace could couple judges, so each reviewer Task must remain isolated and read-only even when derived from the same immutable packet.
+    - Partial failure can cause unnecessary cost if useful work is discarded, so valid individual evidence remains usable without restarting the entire graph.
+    - Plural controls can become a dense technical dump, so the UI must lead with what happened, where judges agree/disagree, and what Main should do next.
+  changeBudget:
+    maxFiles: 18
+    maxDiffLines: 2600
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 18
+  fileLimitMode: warn
+  changedLineLimit: 2600
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/review-graph.ts
+    - src/core/types.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/review-graph.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - One exact Candidate Revision accepts an explicit ordered set of one through three unique saved Worker Profiles and atomically registers all read-only reviewer Tasks before queueing.
+    - The graph remains non-terminal until every assignment is terminal; then it preserves all useful/failing evidence and projects pending, single-opinion, agreement, disagreement, or insufficient-evidence without automatic voting or retry.
+    - Pending review and complete terminal review evidence require the correct fresh Main decision before Integration; no judge can integrate or mutate the Candidate.
+    - Duplicate same-set create is idempotent, changed/reordered sets reject before mutation, restart is duplicate-safe, and one-item callers remain compatible.
+    - CLI, MCP, and Hub create/status and Task Detail explain plural judges, each result/failure, aggregate state, and next Main action in plain English and Chinese without exposing raw/private content.
+    - The complete repository remains green and no commit or push occurs.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/review-graph.test.ts tests/integration.test.ts tests/goal.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

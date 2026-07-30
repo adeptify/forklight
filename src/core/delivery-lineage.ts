@@ -88,6 +88,22 @@ export function buildDeliveryLineage(
     ? undefined
     : patchReport(latestVerificationByAttempt.get(finalAttempt.id));
   const firstOrdinal = orderedAttempts[0]?.ordinal;
+  const restartRecoveryOrdinals = new Set<number>();
+  for (const event of events) {
+    if (
+      event.type !== "attempt.authorization.granted"
+      || event.payload === null
+      || typeof event.payload !== "object"
+    ) continue;
+    const payload = event.payload as { kind?: unknown; targetOrdinal?: unknown };
+    if (
+      payload.kind === "restart-recovery"
+      && Number.isSafeInteger(payload.targetOrdinal)
+      && (payload.targetOrdinal as number) > 0
+    ) {
+      restartRecoveryOrdinals.add(payload.targetOrdinal as number);
+    }
+  }
 
   return {
     complete: missingAttemptIds.length === 0,
@@ -102,6 +118,7 @@ export function buildDeliveryLineage(
       ? []
       : orderedAttempts
           .filter((attempt) => attempt.ordinal > firstOrdinal)
+          .filter((attempt) => !restartRecoveryOrdinals.has(attempt.ordinal))
           .map((attempt) => attempt.id),
   };
 }

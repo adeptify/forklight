@@ -1,13 +1,120 @@
 /**
  * Best-effort normalizer for Grok Build headless streaming-json lines.
  * Heartbeat policy (MVP): any non-terminal stream object resets progress.
+ *
+ * Text deltas are accumulated by the Grok adapter (bounded). Normal EndTurn
+ * alone is not treated as useful result content — only explicit result fields
+ * or the assembled text deltas become terminal resultText.
  */
 
 import type { NormalizedWorkerEvent } from "../core/types.js";
 
+/** Hard bound for ordered Grok text-delta assembly (bytes of UTF-16 code units). */
+export const GROK_ASSEMBLED_TEXT_MAX = 32_000;
+
+/** Stop reasons that are transport/control signals, never useful result bodies. */
+const NON_CONTENT_STOP_REASONS = new Set([
+  "endturn",
+  "end_turn",
+  "stop",
+  "max_tokens",
+  "maxtokens",
+]);
+
 function asObject(value: unknown): Record<string, unknown> | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   return value as Record<string, unknown>;
+}
+
+/** Ordered, bounded accumulation of Grok streaming text deltas. */
+export interface GrokTextAssembly {
+  text: string;
+  overflow: boolean;
+}
+
+export function createGrokTextAssembly(): GrokTextAssembly {
+  return { text: "", overflow: false };
+}
+
+/**
+ * Append one text delta. Overflow fails closed: clears assembled text so a
+ * truncated suffix cannot look like a complete result.
+ */
+export function appendGrokTextDelta(
+  state: GrokTextAssembly,
+  delta: string,
+): GrokTextAssembly {
+  if (state.overflow) return state;
+  if (typeof delta !== "string" || delta.length === 0) return state;
+  if (state.text.length + delta.length > GROK_ASSEMBLED_TEXT_MAX) {
+    return { text: "", overflow: true };
+  }
+  return { text: state.text + delta, overflow: false };
+}
+
+/** Extract a text delta from a raw streaming-json line, if present. */
+export function extractGrokTextDeltaFromLine(line: string): string | undefined {
+  const trimmed = line.trim();
+  if (!trimmed) return undefined;
+  let root: unknown;
+  try {
+    root = JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+  const obj = asObject(root);
+  if (obj === undefined) return undefined;
+  const type = typeof obj.type === "string" ? obj.type.toLowerCase() : "";
+  if (type !== "text") return undefined;
+  return typeof obj.data === "string" ? obj.data : undefined;
+}
+
+/**
+ * True when explicit terminal result content is meaningful (not EndTurn noise).
+ * Empty strings and known stop-reason tokens are not useful result bodies.
+ */
+export function isMeaningfulGrokResultText(resultText: string | undefined): boolean {
+  if (resultText === undefined) return false;
+  const trimmed = resultText.trim();
+  if (trimmed.length === 0) return false;
+  if (NON_CONTENT_STOP_REASONS.has(trimmed.toLowerCase())) return false;
+  return true;
+}
+
+/**
+ * Select authoritative terminal resultText:
+ * 1. Explicit meaningful terminal content always wins.
+ * 2. On normal completion with no explicit content, use complete bounded assembly.
+ * 3. Overflow without explicit content fails closed (undefined → unusable review).
+ * 4. Errors keep explicit diagnostics only; never invent content from deltas.
+ */
+export function resolveGrokTerminalResultText(input: {
+  explicitResultText: string | undefined;
+  assembly: GrokTextAssembly;
+  isError: boolean;
+}): string | undefined {
+  if (isMeaningfulGrokResultText(input.explicitResultText)) {
+    return input.explicitResultText;
+  }
+  if (input.isError) {
+    // Preserve non-meaningful but diagnostic stop reasons (e.g. Cancelled).
+    if (input.explicitResultText !== undefined && input.explicitResultText.trim().length > 0) {
+      return input.explicitResultText;
+    }
+    return undefined;
+  }
+  if (input.assembly.overflow) return undefined;
+  if (input.assembly.text.length > 0) return input.assembly.text;
+  return undefined;
+}
+
+/** Read explicit content fields only; never treat stopReason as success content. */
+function explicitTerminalContent(obj: Record<string, unknown>): string | undefined {
+  if (typeof obj.result === "string") return obj.result;
+  if (typeof obj.message === "string") return obj.message;
+  if (typeof obj.text === "string") return obj.text;
+  if (typeof obj.data === "string") return obj.data;
+  return undefined;
 }
 
 export class GrokEventNormalizer {
@@ -45,6 +152,7 @@ export class GrokEventNormalizer {
       return [{
         type: "worker.message",
         summary: data.slice(0, 240) || "text",
+        // Full delta is not stored in events; adapter accumulates from raw lines.
         payload: { streamType: type },
       }];
     }
@@ -64,15 +172,12 @@ export class GrokEventNormalizer {
         || (typeof obj.ok === "boolean" && obj.ok === false)
         || stopReason === "Cancelled"
         || stopReason.toLowerCase() === "error";
-      const resultText = typeof obj.result === "string"
-        ? obj.result
-        : typeof obj.message === "string"
-          ? obj.message
-          : typeof obj.text === "string"
-            ? obj.text
-            : typeof obj.data === "string"
-              ? obj.data
-              : stopReason || undefined;
+      // Explicit content fields only. Normal EndTurn is not useful result text;
+      // error/cancel may fall back to stopReason for diagnostics.
+      const explicit = explicitTerminalContent(obj);
+      const resultText = explicit !== undefined
+        ? explicit
+        : (isError && stopReason ? stopReason : undefined);
       const costUsd = typeof obj.cost_usd === "number"
         ? obj.cost_usd
         : typeof obj.costUsd === "number"

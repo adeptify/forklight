@@ -44,6 +44,28 @@ Or install a downloaded release tarball:
 npm install -g ./forklight-0.2.0.tgz
 ```
 
+### Build a verified clean-user bundle (operators)
+
+After product updates, create a frozen install package plus external evidence
+with one checked-in command. The output directory must be new (no overwrite):
+
+```bash
+npm run bundle:clean -- --output /Users/Shared/ForkLight-Clean-Run.<unique-suffix>
+```
+
+The command packs the current tree (`npm pack` / prepack full check), installs
+into a private prefix, loads the installed CLI/MCP entries, starts and cleanly
+stops an isolated Hub/daemon, scans package filenames, and writes:
+
+- `forklight-0.2.0.tgz`
+- `build-identity.json`
+- `m1-clean-user-runbook.md`
+- `bundle-evidence.json` (outside the tarball; relative names only)
+
+This verifies the package on the development machine. It does **not** replace a
+clean-user journey on a new macOS user, disposable VM, or new Mac. See
+`docs/m1-clean-user-runbook.md`.
+
 ## Quick start (out of the box)
 
 ### 1. Install
@@ -261,7 +283,8 @@ forklight direct-codex publication-register \
   --task-class <class> --profile-id <id> --method <method> \
   --confidence <level> --created-at <canonical-ISO> --confirm [--json]
 
-forklight stats [--provider <n>] [--model <n>] [--json]   # outcomes + failures
+forklight stats [--provider <n>] [--model <n>] [--json] [--deep-audit]
+                                                      # aggregates by default; --deep-audit requires --json
 
 forklight settings get                                    # read effective settings
 forklight settings set <path> <value>                     # partial update
@@ -303,7 +326,7 @@ The MCP server (`src/mcp/server.ts`) exposes these tools over stdio:
 | `forklight_plan_submit` | no | Submit a multi-task Work Plan ★ |
 | `forklight_plan_inspect` | yes | Read one plan's board and task states |
 | `forklight_plan_board` | yes | List all plan summaries |
-| `forklight_statistics` | yes | Query per-provider/model outcomes |
+| `forklight_statistics` | yes | Query per-provider/model aggregates (set deepAudit for full failures) |
 | `forklight_settings_get` | yes | Read effective settings |
 | `forklight_settings_update` | no | Apply partial settings patch |
 | `forklight_settings_reset` | no | Restore built-in defaults |

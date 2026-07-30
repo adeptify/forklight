@@ -1,0 +1,215 @@
+version: 2
+name: Keep Task Detail activity readable when Workers stream text fragments
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-hub-readable-activity-timeline
+taskFamily: bounded-hub-presentation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: bounded-hub-presentation
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；这是确定性的 Hub 可读性修复，不需要竞争或跨 Provider 验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Task Detail Activity shows a bounded sequence of meaningful execution
+    milestones instead of listing Grok or Claude streaming text fragments as
+    dozens of one-word "Other activity" rows. Raw durable events remain stored
+    and available to authoritative inspect/log paths, while the ordinary Hub
+    explains starts, resumes, verification, Candidate capture, Main review,
+    remediation, failure, and delivery in readable English and Chinese.
+  presentation:
+    summary: Task Detail 的活动记录只展示用户能理解的执行里程碑，不再把模型流式文本拆成几十个单词级“其他活动”；原始事件仍保留在权威日志中。
+    language: zh-CN
+  context:
+    - >-
+      Live Relay Task 5a34afb4-21f7-4b6d-92d6-99de36ec81b7 stores 1,546
+      worker.message events and only 29 non-message milestones. The current Hub
+      takes the last 80 raw events before rendering, so token-sized text deltas
+      crowd out useful verification, failure, and remediation milestones.
+    - >-
+      The process tab currently maps unrecognized event types to Other activity. The
+      same live page showed one row per token such as "a", "visual", "check",
+      and "390", even though the stored Worker claim and verification sections
+      already carry the actual outcome evidence.
+    - >-
+      Worker narrative is not acceptance evidence. Task Detail already has
+      separate sections for Main input, Worker claim, files, independent checks,
+      Main decision, repair, and final delivery.
+    - >-
+      Do not mutate, delete, rewrite, or truncate durable events in Store or CLI
+      inspect. This is a safe public projection and bilingual presentation task.
+  inScope:
+    - >-
+      Build the ordinary Task Detail activity projection from meaningful durable
+      milestone events before applying the display bound, so thousands of
+      worker.message deltas cannot evict later or earlier lifecycle evidence.
+    - >-
+      Exclude worker.message narrative/thinking/text fragments from the ordinary
+      Hub activity list. Preserve raw stored events and authoritative inspect/log
+      output unchanged.
+    - >-
+      Add plain English and Chinese labels for meaningful live event types that
+      currently fall through to Other activity, including worker resume,
+      Candidate revision capture, and remediation verification start.
+    - >-
+      Keep the existing 80-event transport bound and 40-row visible process bound
+      or make them stricter without losing terminal verification/failure/remediation
+      landmarks. Unrecognized future event types must remain bounded and privacy-safe.
+    - >-
+      Add deterministic server projection and executable UI behavior tests shaped
+      like the live Relay event mix: more than 80 stream fragments surrounding a
+      small set of meaningful milestones.
+  outOfScope:
+    - >-
+      Changing Worker runtimes, Grok or Claude normalizers, event storage, daemon
+      protocol, CLI inspect, private logs, Worker claims, verification semantics,
+      Task status, retry/correction, routing, Integration, commit, or push.
+    - >-
+      Reconstructing a complete model answer by concatenating token deltas,
+      exposing hidden reasoning, or treating Worker narrative as proof.
+    - Broad Task Detail redesign, new tabs, analytics, or arbitrary event taxonomy work.
+  executionSteps:
+    - Trace the Task detail endpoint, event bound, process timeline, technical disclosure, and current event label map.
+    - Define one small pure/bounded public activity projection with an explicit narrative-fragment rule.
+    - Apply filtering before the last-event bound and keep the Store/inspect source untouched.
+    - Add missing bilingual labels for the observed meaningful lifecycle events.
+    - Add live-shaped positive and negative tests, then run focused checks, full tests, build, syntax, and diff hygiene once.
+  deliverables:
+    - A bounded Task Detail activity projection that cannot be flooded by worker.message fragments.
+    - Plain-language labels for resume, Candidate capture, and remediation verification start.
+    - Regression proof that raw inspect evidence remains unchanged while Hub milestones remain visible.
+  modules:
+    - name: Safe Task activity projection
+      responsibility: Select bounded lifecycle milestones for ordinary Hub consumption without changing durable history.
+      consumes:
+        - Ordered inspect events containing timestamp, type, summary, and optional payload.
+      produces:
+        - At most 80 privacy-safe milestone rows for Task Detail.
+      boundaries:
+        - Read-only, deterministic, filters before bounding, does not concatenate text deltas, and does not parse free-form summaries.
+    - name: Task Detail activity presentation
+      responsibility: Explain the projected milestones with user-readable event names in both locales.
+      consumes:
+        - Projected event type, bounded summary, and current Hub locale.
+      produces:
+        - A maximum of 40 visible recent activity rows plus existing technical disclosure behavior.
+      boundaries:
+        - Worker messages are not acceptance evidence; raw event codes and logs are not promoted into the primary UI.
+    - name: Activity regression proof
+      responsibility: Prevent stream fragments from crowding out lifecycle truth.
+      consumes:
+        - Live-shaped fixtures with over 80 worker.message fragments and known milestone events.
+      produces:
+        - Server projection assertions and executable UI/i18n assertions.
+      boundaries:
+        - No live Provider call, event mutation, giant browser snapshot, commit, or push.
+  callChain:
+    - Worker runtimes continue producing and Store continues preserving all durable events.
+    - Daemon inspect returns the unchanged ordered event history.
+    - Hub server selects meaningful activity milestones before applying its transport bound.
+    - Task Detail Process and technical disclosure render the bounded projection with bilingual labels.
+    - Worker claim, independent verification, Main review, remediation, and final delivery remain separate authoritative sections.
+  scenarios:
+    - name: Streaming fragments surround useful milestones
+      given: >-
+        A Task has more than 100 worker.message text/thinking fragments plus worker.completed,
+        verification, worker.failed, remediation start, and remediation completion events.
+      when: The Hub task detail response and Process tab are rendered.
+      then: >-
+        No fragment appears as a separate Other activity row, and all recent lifecycle
+        milestones remain visible in chronological order with readable labels.
+    - name: Worker resumes and a Candidate is captured
+      given: A recovered Task records worker.resumed and candidate.revision.captured.
+      when: Activity renders in Chinese or English.
+      then: Both have specific user-readable labels rather than Other activity.
+    - name: Raw evidence remains authoritative
+      given: The same Task is inspected through the daemon or CLI.
+      when: Its raw events are read after the Hub projection is generated.
+      then: All original worker.message events remain present and unchanged.
+    - name: Activity has only narrative fragments
+      given: A Task has worker.message events but no public lifecycle milestones.
+      when: Task Detail renders.
+      then: It shows the existing empty activity explanation rather than dozens of Other activity rows or an invented outcome.
+  risks:
+    - Filtering after the current last-80 bound would leave the crowd-out bug; filter meaningful milestones first.
+    - Concatenating deltas could expose hidden reasoning or duplicate Worker output; never reconstruct narrative here.
+    - Removing stored events would destroy audit evidence; change only the Hub projection.
+    - A broad allowlist may hide new lifecycle events; keep the exclusion rule narrow and add labels for observed meaningful types.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 600
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 600
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Streamed Worker narrative cannot crowd meaningful milestones out of Task Detail Activity.
+    - Raw durable events and CLI/daemon inspect evidence remain unchanged.
+    - English and Chinese labels explain observed meaningful milestones without Other activity fallthrough.
+    - The projection remains bounded, privacy-safe, deterministic, and does not reconstruct model reasoning.
+    - No Worker execution, event storage, verification, retry, routing, or Integration behavior changes.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - npm test
+    - npm run build
+    - git diff --check

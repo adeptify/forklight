@@ -1,0 +1,127 @@
+version: 2
+name: Keep accepted-delivery statistics task-unique
+project: /Users/yijunwang/code/forklight
+taskClass: m3-statistics-accepted-delivery-dedupe
+taskFamily: capability-statistics
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Make Provider/model delivery statistics count each terminal Task at most
+    once. A Task that first succeeded by machine verification and later also
+    received a passing Main remediation disposition must remain one accepted
+    delivery, while the separate Main-repaired counter still records that it
+    went through remediation. Keep machine success, failure distribution,
+    remediation-check counts, routing evidence, filters, and historical Task
+    records unchanged. Prove the accepted-delivery rate cannot exceed 100%
+    without hiding or rewriting any evidence.
+  presentation:
+    summary: 同一个任务即使既机器成功、又经过 Main 修复，也只能算一次已交付，统计比例不能超过 100%。
+    language: zh-CN
+  context:
+    - Current summaryFor adds successCount and mainRepairedCount, so overlapping Task sets can produce acceptedDeliveryCount greater than sampleSize.
+    - deriveRoutingEvidence already uses an OR condition for succeeded or passing-disposition Tasks and should remain behaviorally consistent.
+    - Existing history includes a real Volcengine cohort with 18 Tasks and 19 accepted deliveries, exposing the production defect.
+    - The focused statistics and remediation baseline currently passes 64 tests.
+  inScope:
+    - Count accepted deliveries as unique terminal Tasks satisfying machine success OR a passing Main remediation disposition.
+    - Keep mainRepairedDeliveryCount as the number of Tasks with a passing remediation disposition, even when those Tasks also succeeded by machine verification.
+    - Add regression coverage for overlapping succeeded-plus-remediated Tasks, mixed failed/remediated Tasks, and an acceptedDeliveryRate bounded at 1.
+    - Preserve filters, failure classifications, routing evidence, cost/timing fields, and immutable historical records.
+  outOfScope:
+    - UI redesign, wording changes, Provider routing changes, database migration, rewriting history, changing remediation authority, changing success semantics, commits, or pushes.
+  executionSteps:
+    - Trace summaryFor delivery counters and compare them with deriveRoutingEvidence task-level semantics.
+    - Replace additive overlapping counts with one task-unique accepted set or equivalent one-pass predicate.
+    - Add focused tests that would fail under the current greater-than-100-percent behavior.
+    - Run focused statistics/remediation tests, full build and full test suite, and inspect the diff for unrelated changes.
+  deliverables:
+    - Task-unique accepted-delivery count and rate in Provider/model summaries.
+    - Regression tests proving overlapping success and remediation evidence is counted once.
+  modules:
+    - name: Provider model statistics aggregation
+      responsibility: Aggregate terminal Task outcomes without double-counting one Task across machine and Main delivery paths.
+      consumes:
+        - Terminal Task status and the presence of a passing remediation disposition for each Task id.
+      produces:
+        - Machine success count, unique accepted-delivery count and bounded rate, Main-repaired count, and remediation-check count.
+      boundaries:
+        - Does not mutate Task history, remediation records, failure evidence, routing decisions, costs, or durations.
+    - name: Statistics regression tests
+      responsibility: Prove overlapping and non-overlapping delivery paths retain truthful independent counters.
+      consumes:
+        - Synthetic succeeded, failed, and passing-remediation Task evidence.
+      produces:
+        - Deterministic assertions that acceptedDeliveryCount is at most sampleSize and acceptedDeliveryRate is at most one.
+      boundaries:
+        - Uses no Provider call, real credential, database migration, commit, or push.
+  callChain:
+    - StateStore supplies terminal Task evidence and remediation lookup functions to StatisticsService.
+    - computeStatistics groups Tasks by Provider and model and passes each group to summaryFor.
+    - summaryFor evaluates machine success and passing remediation per Task, then projects distinct delivery and repair counters.
+    - CLI, Hub, and routing consumers read the same corrected summary without changing their contracts.
+  scenarios:
+    - name: Machine success later repaired by Main
+      given: One terminal Task has status succeeded and also has a passing remediation disposition.
+      when: Provider/model statistics are computed.
+      then: It contributes one accepted delivery, one machine success, and one Main-repaired Task; the accepted-delivery rate remains 100 percent rather than 200 percent.
+    - name: Failed machine result repaired by Main
+      given: One failed Task has a passing original-acceptance remediation disposition and another Task succeeds normally.
+      when: Both are summarized in one Provider/model cohort.
+      then: Both Tasks are accepted deliveries, only one is a machine success, one is Main-repaired, and the failure distribution remains visible.
+    - name: Repeated remediation checks do not multiply delivery
+      given: A Task has more than one remediation check but only one final passing disposition.
+      when: statistics are computed.
+      then: Remediation checks retain their real count while the Task contributes at most one accepted delivery and one Main-repaired Task.
+  risks:
+    - Redefining Main-repaired as only failed Tasks would hide legitimate repair work performed after a machine success; keep it independent from the unique delivery union.
+    - Clamping only the displayed rate would conceal the bad count; fix the aggregation rather than presentation.
+    - Changing routing evidence at the same time could broaden the task and alter model selection; leave its already task-unique logic unchanged.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 260
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 3
+  fileLimitMode: warn
+  changedLineLimit: 260
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - tests/statistics.test.ts
+    - tests/main-remediation.test.ts
+acceptance:
+  criteria:
+    - Each terminal Task contributes at most one accepted delivery even when machine success and Main remediation overlap.
+    - Machine success, Main-repaired, remediation-check, and failure counters remain separately truthful.
+    - Accepted-delivery count never exceeds sample size and accepted-delivery rate never exceeds one for valid history.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts tests/main-remediation.test.ts
+    - npm test
+    - git diff --check

@@ -1,0 +1,112 @@
+version: 2
+name: Let audited Main remediation satisfy a Goal integration gate
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-goal-remediation-gate
+taskFamily: forklight-self-upgrade
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    A Goal integration milestone recognizes a current Task's durable
+    verified-repaired-delivered disposition as an already delivered source
+    outcome when and only when it was verified against the original stored
+    acceptance commands. It must not demand a fresh accept/integration of the
+    older Candidate revision, and Goal evidence/progress must advance without
+    weakening the normal exact-Candidate Integration gate.
+  presentation:
+    summary: Main 基于 Worker 结果做了有记录的小修并通过原验收后，Goal 能继续，不会要求把旧补丁重新覆盖回来。
+    language: zh-CN
+  context:
+    - Relay dogfood produced a succeeded handoff Candidate, then Main found one provider-contract defect, recorded revise, repaired current Relay source, and `remediate verify` passed all original acceptance commands.
+    - The effective successor Task now has remediationDisposition.status=verified-repaired-delivered and acceptanceBasis=original-acceptance, but its Goal integration gate still asks for fresh Main accept and exact Candidate Integration.
+    - Normal machine success, Main accept, and exact Candidate Integration behavior must remain unchanged for Tasks without a qualifying remediation disposition.
+    - Preserve every existing dirty change. Use Grok 4.5. Do not commit, push, restart the daemon, or edit Relay.
+  inScope:
+    - Thread the effective Task's compact remediation disposition into Goal milestone evaluation and the authoritative evidence cursor.
+    - Treat only verified-repaired-delivered with acceptanceBasis=original-acceptance as satisfying an integration gate directly.
+    - Return truthful reason/next-action fields that say Main's repaired current source passed the original acceptance contract; do not claim the old Candidate was integrated.
+    - Ensure a qualifying disposition changes the Goal evidence digest and unblocks dependent milestones on the next reconcile/advance.
+    - Cover ordinary Tasks and direct Goal-handoff successor Tasks.
+    - Add focused tests for positive, negative, evidence-cursor, and downstream-unblock behavior.
+  outOfScope:
+    - Treating amended-acceptance as exact delivery, weakening the normal Integration gate, auto-applying patches, changing remediation verification, UI redesign, provider changes, Relay edits, commit, or push.
+  executionSteps:
+    - Trace effective Task resolution, evaluateMilestoneGate, Goal evidence facts/digest, and existing remediation state access.
+    - Add the smallest typed input needed so gate evaluation and evidence use the effective Task disposition.
+    - Keep the normal exact-integration branch authoritative when no qualifying disposition exists.
+    - Add focused tests, then run the full ForkLight check once.
+  deliverables:
+    - Qualifying audited Main remediation satisfies Goal integration gates truthfully.
+    - Goal evidence notices the disposition and downstream work can start.
+    - Regression tests preserve exact Candidate Integration semantics elsewhere.
+  modules:
+    - name: Goal evidence projection
+      responsibility: Read the effective Task's compact remediation disposition and include bounded non-secret facts in the Goal evidence cursor.
+      consumes: [effective Task id, remediation disposition]
+      produces: [milestone evaluation context and evidence digest facts]
+      boundaries: [no reason text, command output, paths, secrets, or stale original Task disposition]
+    - name: Integration gate decision
+      responsibility: Distinguish exact Candidate Integration from verified Main-repaired source delivery.
+      consumes: [task status, current evidence, remediation status and acceptance basis]
+      produces: [truthful satisfied/reason/nextAction result]
+      boundaries: [no acceptance of amended or absent verification evidence]
+  callChain:
+    - Goal resolves an original milestone Task to its effective handoff successor when present.
+    - Goal reads that effective Task's remediation disposition and builds bounded evidence facts.
+    - Integration gate accepts either successful exact Candidate Integration or qualifying original-acceptance Main remediation, with distinct copy.
+    - Reconcile marks the milestone satisfied and allows the dependent Task to run.
+  scenarios:
+    - name: Main repaired source against original acceptance
+      given: The effective Task has verified-repaired-delivered with original-acceptance.
+      when: Goal evaluates an integration milestone.
+      then: The milestone is satisfied without fresh Candidate accept/integration and copy identifies repaired source verification.
+    - name: Amended or missing evidence
+      given: The disposition is absent or uses amended-acceptance.
+      when: Goal evaluates the same milestone.
+      then: Existing fresh Main accept and exact Integration requirements remain unchanged.
+    - name: Handoff successor
+      given: The original Task failed and its one-hop successor owns the qualifying disposition.
+      when: Goal reconciles.
+      then: It follows only the successor evidence and unblocks the dependent milestone.
+  risks:
+    - Confusing repaired current source with the old Candidate would make audit text false; keep the two success reasons distinct.
+    - Excluding remediation from the evidence cursor would leave a waiting Goal asleep; include only stable compact identifiers/status/basis.
+    - Reading the original failed Task after handoff would miss or misattribute delivery; always use the effective Task id.
+  changeBudget: { maxFiles: 3, maxDiffLines: 450 }
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 600000
+  workerStopGraceMs: 10000
+  fileLimit: 3
+  fileLimitMode: warn
+  changedLineLimit: 450
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/goal.ts
+    - tests/goal.test.ts
+acceptance:
+  criteria:
+    - Only original-acceptance verified Main remediation satisfies integration directly; normal exact Integration behavior is unchanged.
+    - Effective handoff successor disposition is used, evidence digest advances, and downstream milestone unblocks.
+    - Focused Goal tests, full ForkLight check, and diff hygiene pass with no daemon restart, commit, or push.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/goal.test.ts
+    - npm run check
+    - git diff --check

@@ -13,12 +13,20 @@ import { createInterface } from "node:readline";
 import {
   buildWorkerPrompt,
   neutralToolProtocolLines,
+  workerPromptAppendicesForTask,
 } from "../core/task.js";
 import { readProviderKey } from "../core/secrets.js";
 import { cloneDefaults } from "../core/settings.js";
 import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
 import type { NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
-import { GrokEventNormalizer } from "../events/grok-normalize.js";
+import {
+  appendGrokTextDelta,
+  createGrokTextAssembly,
+  extractGrokTextDeltaFromLine,
+  GrokEventNormalizer,
+  resolveGrokTerminalResultText,
+  type GrokTextAssembly,
+} from "../events/grok-normalize.js";
 import type {
   RuntimeSpecView,
   WorkerAdapter,
@@ -432,6 +440,8 @@ export class GrokBuildAdapter implements WorkerAdapter {
     const rawLog = createWriteStream(attempt.rawLogPath, { flags: "a", mode: 0o600 });
     const stderrChunks: string[] = [];
     let terminal: NormalizedWorkerEvent["terminal"];
+    // Ordered bounded text deltas; used only when terminal has no meaningful result.
+    let textAssembly: GrokTextAssembly = createGrokTextAssembly();
 
     let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
     let escalationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -472,10 +482,15 @@ export class GrokBuildAdapter implements WorkerAdapter {
       watchdogTimer = timeout;
     };
 
-    const prompt = buildWorkerPrompt(task.spec, resuming, hooks.feedback, {
-      toolLines: this.toolProtocolAppendix(task),
-      checkpointLines: this.checkpointProtocolAppendix(task),
-    });
+    const prompt = buildWorkerPrompt(
+      task.spec,
+      resuming,
+      hooks.feedback,
+      workerPromptAppendicesForTask(task, {
+        toolLines: this.toolProtocolAppendix(task),
+        checkpointLines: this.checkpointProtocolAppendix(task),
+      }),
+    );
     await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {
       mode: 0o600,
     });
@@ -591,6 +606,11 @@ export class GrokBuildAdapter implements WorkerAdapter {
       const rl = createInterface({ input: child.stdout });
       rl.on("line", (line) => {
         rawLog.write(`${line}\n`);
+        // Accumulate full text deltas from raw lines (summary is truncated).
+        const delta = extractGrokTextDeltaFromLine(line);
+        if (delta !== undefined) {
+          textAssembly = appendGrokTextDelta(textAssembly, delta);
+        }
         for (const event of normalizer.parseLine(line)) onNormalized(event);
       });
       rl.on("close", () => resolve());
@@ -622,7 +642,36 @@ export class GrokBuildAdapter implements WorkerAdapter {
     rawLog.end();
 
     const stderr = stderrChunks.join("");
+
+    /**
+     * Authoritative terminal result: explicit meaningful content wins;
+     * otherwise complete bounded text assembly for normal EndTurn.
+     * Errors / interruption / watchdog keep their own semantics.
+     */
+    const resolveTerminal = (
+      isError: boolean,
+    ): NormalizedWorkerEvent["terminal"] | undefined => {
+      const resolved = resolveGrokTerminalResultText({
+        explicitResultText: terminal?.resultText,
+        assembly: textAssembly,
+        isError,
+      });
+      if (terminal === undefined && resolved === undefined) return undefined;
+      return {
+        isError,
+        ...(terminal?.failureReason === undefined ? {} : { failureReason: terminal.failureReason }),
+        ...(resolved === undefined ? {} : { resultText: resolved }),
+        ...(terminal?.costUsd === undefined ? {} : { costUsd: terminal.costUsd }),
+        ...(terminal?.turns === undefined ? {} : { turns: terminal.turns }),
+        ...(terminal?.runtimeCostEstimateUsd === undefined
+          ? {}
+          : { runtimeCostEstimateUsd: terminal.runtimeCostEstimateUsd }),
+        ...(terminal?.usage === undefined ? {} : { usage: terminal.usage }),
+      };
+    };
+
     if (hooks.wasInterrupted?.()) {
+      // Interruption remains authoritative; do not invent success content from deltas.
       return {
         status: "interrupted",
         exitCode: interruptedExitCode(exitCode),
@@ -648,8 +697,9 @@ export class GrokBuildAdapter implements WorkerAdapter {
       };
     }
     if (exitCode !== 0 || terminal?.isError) {
+      const failedTerminal = resolveTerminal(true);
       const haystack = [
-        terminal?.resultText,
+        failedTerminal?.resultText,
         stderr,
       ].filter((part): part is string => typeof part === "string" && part.trim().length > 0)
         .join("\n");
@@ -659,7 +709,7 @@ export class GrokBuildAdapter implements WorkerAdapter {
         return {
           status: "failed",
           exitCode,
-          ...terminalFields(terminal),
+          ...terminalFields(failedTerminal),
           error: GROK_CONNECTIVITY_SAFE_ERROR,
           failureCategory: "connectivity",
         };
@@ -667,16 +717,17 @@ export class GrokBuildAdapter implements WorkerAdapter {
       return {
         status: "failed",
         exitCode,
-        ...terminalFields(terminal),
-        error: terminal?.resultText?.trim()
+        ...terminalFields(failedTerminal),
+        error: failedTerminal?.resultText?.trim()
           || stderr.trim().slice(0, 2_000)
           || "Grok Worker exited without a successful result",
       };
     }
+    const succeededTerminal = resolveTerminal(false);
     return {
       status: "succeeded",
       exitCode,
-      ...terminalFields(terminal),
+      ...terminalFields(succeededTerminal),
     };
   }
 }

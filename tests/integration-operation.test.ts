@@ -8,11 +8,23 @@ import { taskPaths } from "../src/core/config.js";
 import { buildIntegrationOperationView, buildCompactIntegrationOperationView } from "../src/core/integration-operation.js";
 import { preflightIntegration } from "../src/core/integration.js";
 import { recordMainReview } from "../src/core/main-review.js";
+import {
+  computeSelfUpgradeEvidence,
+  isQualifyingFourStageSuccess,
+  isSafeIsoTimestamp,
+  isSafeOpaqueId,
+  parseRequiredStreakCount,
+  SELF_UPGRADE_DELIVERY_PROFILE_ID,
+  SELF_UPGRADE_RESULT_WINDOW,
+} from "../src/core/self-upgrade-evidence.js";
 import { SettingsService } from "../src/core/settings.js";
 import type {
   AttemptRecord,
+  DeliveryPlanView,
   IntegrationOperationView,
+  IntegrationReceiptRecord,
   IntegrationResultRecord,
+  IntegrationStageEvidence,
   TaskRecord,
   TaskSpec,
   VerificationResult,
@@ -24,6 +36,148 @@ import { StateStore } from "../src/state/store.js";
 import { prepareWorkspace } from "../src/workspace/copy.js";
 import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
 import { createPathPolicy } from "../src/workspace/path-policy.js";
+
+const FOUR_STAGE_PASSED: IntegrationStageEvidence[] = [
+  { stage: "source-applied", status: "passed" },
+  { stage: "source-verified", status: "passed" },
+  { stage: "artifact-built", status: "passed" },
+  { stage: "runtime-activated", status: "passed" },
+];
+
+const SOURCE_ONLY_STAGES: IntegrationStageEvidence[] = [
+  { stage: "source-applied", status: "passed" },
+  { stage: "source-verified", status: "passed" },
+  { stage: "artifact-built", status: "not-applicable" },
+  { stage: "runtime-activated", status: "not-applicable" },
+];
+
+function selfUpgradeDeliveryPlan(
+  resolutionSource: DeliveryPlanView["resolutionSource"] = "explicit",
+): DeliveryPlanView {
+  return {
+    resolutionSource,
+    profileId: SELF_UPGRADE_DELIVERY_PROFILE_ID,
+    buildCommandCount: 1,
+    activationCommandCount: 1,
+    activationCheckCommandCount: 1,
+    outcome: "activation",
+    stages: {
+      sourceApply: "required",
+      sourceVerify: "required",
+      artifactBuild: "required",
+      runtimeActivation: "required",
+    },
+  };
+}
+
+function ordinaryDeliveryPlan(): DeliveryPlanView {
+  return {
+    resolutionSource: "inline",
+    buildCommandCount: 0,
+    activationCommandCount: 0,
+    activationCheckCommandCount: 0,
+    outcome: "source-only",
+    stages: {
+      sourceApply: "required",
+      sourceVerify: "required",
+      artifactBuild: "not-configured",
+      runtimeActivation: "not-configured",
+    },
+  };
+}
+
+function minimalTask(id: string, createdAt: string): TaskRecord {
+  return {
+    id,
+    name: id,
+    status: "succeeded",
+    sourcePath: "/source",
+    taskFile: `/tasks/${id}.yaml`,
+    spec: {
+      version: 1,
+      name: id,
+      project: "/source",
+      goal: "test",
+      constraints: [],
+      provider: { name: "deepseek", model: "v4", keychainService: "fk-secret" },
+      runtime: {
+        name: "claude-code",
+        executable: "claude",
+        effort: "low",
+        maxBudgetUsd: null,
+      },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+      acceptance: { commands: ["true"] },
+    },
+    paths: {
+      root: "/x",
+      baseline: "/x",
+      workspace: "/x",
+      logs: "/x",
+      claudeConfig: "/x",
+      diff: "/x",
+    },
+    sessionId: `session-${id}`,
+    createdAt,
+    updatedAt: createdAt,
+  } as TaskRecord;
+}
+
+function seedResult(
+  store: StateStore,
+  input: {
+    id: string;
+    taskId: string;
+    status: IntegrationResultRecord["status"];
+    createdAt: string;
+    appliedAt?: string;
+    stages?: IntegrationStageEvidence[];
+    error?: string;
+    /** When set, receipt carries this plan; when omitted, no deliveryPlan. */
+    deliveryPlan?: DeliveryPlanView;
+    /** Convenience: sets deliveryPlan.profileId (and a minimal plan if needed). */
+    deliveryProfileId?: string;
+  },
+): void {
+  try {
+    store.getTask(input.taskId);
+  } catch {
+    store.createTask(minimalTask(input.taskId, input.createdAt));
+  }
+  const receiptId = `receipt-${input.id}`;
+  let deliveryPlan = input.deliveryPlan;
+  if (deliveryPlan === undefined && input.deliveryProfileId !== undefined) {
+    deliveryPlan = {
+      ...selfUpgradeDeliveryPlan(),
+      profileId: input.deliveryProfileId,
+    };
+  }
+  const receipt: IntegrationReceiptRecord = {
+    id: receiptId,
+    taskId: input.taskId,
+    patchDigest: "a".repeat(64),
+    affectedFiles: ["src/core/self-upgrade-evidence.ts"],
+    rejectionReasons: [],
+    sourceEvidence: {},
+    createdAt: input.createdAt,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    consumed: true,
+    ...(deliveryPlan === undefined ? {} : { deliveryPlan }),
+  };
+  store.saveIntegrationReceipt(receipt);
+  const result: IntegrationResultRecord = {
+    id: input.id,
+    receiptId,
+    taskId: input.taskId,
+    status: input.status,
+    createdAt: input.createdAt,
+    ...(input.appliedAt === undefined ? {} : { appliedAt: input.appliedAt }),
+    ...(input.stages === undefined ? {} : { stages: input.stages }),
+    ...(input.error === undefined ? {} : { error: input.error }),
+  };
+  store.saveIntegrationResult(result);
+}
 
 async function operationFixture(): Promise<{
   home: string;
@@ -432,4 +586,722 @@ test("compact projection handles outcome-unknown, running, and is pure", () => {
   assert.equal(JSON.stringify(view), originalJson, "view not mutated");
   assert.ok(!JSON.stringify(a).includes("test"), "compact excludes command text");
   assert.equal(JSON.stringify(view), originalJson, "full view byte-for-byte compatible");
+});
+
+// --- Consecutive self-upgrade streak evidence ---
+
+test("self-upgrade evidence: empty history is 0/3", () => {
+  const evidence = computeSelfUpgradeEvidence([], 3);
+  assert.equal(evidence.required, 3);
+  assert.equal(evidence.achieved, 0);
+  assert.equal(evidence.remaining, 3);
+  assert.equal(evidence.state, "empty");
+  assert.equal(evidence.breakCategory, "none");
+  assert.equal(evidence.nextAction, "run-first-upgrade");
+  assert.equal(evidence.inspectedCount, 0);
+});
+
+test("self-upgrade evidence: current 1/3 shape after retained-failure break", () => {
+  // Newest first: applied four-stage success, then retained-failure.
+  // Matches pre-integration durable history shape (streak = 1/3).
+  const results = [
+    {
+      id: "efa7d9ae-61c9-421a-a1b5-d427d9353a81",
+      status: "applied" as const,
+      createdAt: "2026-07-30T12:00:00.000Z",
+      appliedAt: "2026-07-30T12:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+    },
+    {
+      id: "66ba9a77-f518-4a37-836f-043e2b70c316",
+      status: "retained-failure" as const,
+      createdAt: "2026-07-30T11:00:00.000Z",
+      stages: [
+        { stage: "source-applied" as const, status: "passed" as const },
+        { stage: "source-verified" as const, status: "passed" as const },
+        { stage: "artifact-built" as const, status: "passed" as const },
+        {
+          stage: "runtime-activated" as const,
+          status: "failed" as const,
+          error: "activation failed with secret /Users/private/path and token sk-secret-xyz",
+        },
+      ],
+      error: "retained activation failure: /Users/private/path token=sk-secret-xyz",
+    },
+  ];
+  const evidence = computeSelfUpgradeEvidence(results, 3);
+  assert.equal(evidence.achieved, 1);
+  assert.equal(evidence.required, 3);
+  assert.equal(evidence.remaining, 2);
+  assert.equal(evidence.state, "in-progress");
+  assert.equal(evidence.breakCategory, "retained-failure");
+  assert.equal(evidence.nextAction, "continue-consecutive-proofs");
+  assert.equal(evidence.latestQualifyingOperationId, "efa7d9ae-61c9-421a-a1b5-d427d9353a81");
+  assert.equal(evidence.breakOperationId, "66ba9a77-f518-4a37-836f-043e2b70c316");
+  assert.equal(evidence.latestQualifyingAt, "2026-07-30T12:00:00.000Z");
+
+  const json = JSON.stringify(evidence);
+  assert.ok(!json.includes("sk-secret"));
+  assert.ok(!json.includes("/Users/private"));
+  assert.ok(!json.includes("activation failed"));
+  assert.ok(!json.includes("token="));
+});
+
+test("self-upgrade evidence: three consecutive successes are ready without older history", () => {
+  const results = [
+    { id: "s3", status: "applied", createdAt: "2026-07-30T15:00:00.000Z", stages: FOUR_STAGE_PASSED },
+    { id: "s2", status: "applied", createdAt: "2026-07-30T14:00:00.000Z", stages: FOUR_STAGE_PASSED },
+    { id: "s1", status: "applied", createdAt: "2026-07-30T13:00:00.000Z", stages: FOUR_STAGE_PASSED },
+    {
+      id: "old-fail",
+      status: "retained-failure",
+      createdAt: "2026-07-30T12:00:00.000Z",
+      stages: [{ stage: "runtime-activated", status: "failed", error: "old" }],
+    },
+  ];
+  const evidence = computeSelfUpgradeEvidence(results, 3);
+  assert.equal(evidence.achieved, 3);
+  assert.equal(evidence.remaining, 0);
+  assert.equal(evidence.state, "ready");
+  assert.equal(evidence.breakCategory, "none");
+  assert.equal(evidence.nextAction, "milestone-ready");
+  assert.equal(evidence.latestQualifyingOperationId, "s3");
+  assert.equal(evidence.breakOperationId, undefined);
+});
+
+test("self-upgrade evidence: more than required is capped for display", () => {
+  const results = Array.from({ length: 5 }, (_, i) => ({
+    id: `s${5 - i}`,
+    status: "applied" as const,
+    createdAt: `2026-07-30T1${5 - i}:00:00.000Z`,
+    stages: FOUR_STAGE_PASSED,
+  }));
+  const evidence = computeSelfUpgradeEvidence(results, 3);
+  assert.equal(evidence.achieved, 3);
+  assert.equal(evidence.remaining, 0);
+  assert.equal(evidence.state, "ready");
+  assert.equal(evidence.nextAction, "milestone-ready");
+});
+
+test("self-upgrade evidence: missing, duplicate, and not-applicable stage evidence fail closed", () => {
+  assert.equal(
+    isQualifyingFourStageSuccess({
+      id: "missing",
+      status: "applied",
+      createdAt: "t",
+      stages: [
+        { stage: "source-applied", status: "passed" },
+        { stage: "source-verified", status: "passed" },
+        { stage: "artifact-built", status: "passed" },
+        // runtime-activated missing
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    isQualifyingFourStageSuccess({
+      id: "duplicate",
+      status: "applied",
+      createdAt: "t",
+      stages: [
+        ...FOUR_STAGE_PASSED,
+        { stage: "source-applied", status: "passed" },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    isQualifyingFourStageSuccess({
+      id: "na",
+      status: "applied",
+      createdAt: "t",
+      stages: [
+        { stage: "source-applied", status: "passed" },
+        { stage: "source-verified", status: "passed" },
+        { stage: "artifact-built", status: "passed" },
+        { stage: "runtime-activated", status: "not-applicable" },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    isQualifyingFourStageSuccess({
+      id: "legacy",
+      status: "applied",
+      createdAt: "t",
+      // no stages at all
+    }),
+    false,
+  );
+  assert.equal(
+    isQualifyingFourStageSuccess({
+      id: "pending",
+      status: "applied",
+      createdAt: "t",
+      stages: [
+        { stage: "source-applied", status: "passed" },
+        { stage: "source-verified", status: "passed" },
+        { stage: "artifact-built", status: "passed" },
+        { stage: "runtime-activated", status: "pending" },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    isQualifyingFourStageSuccess({
+      id: "extra-unknown",
+      status: "applied",
+      createdAt: "t",
+      stages: [
+        ...FOUR_STAGE_PASSED,
+        { stage: "mystery-stage", status: "passed" } as unknown as IntegrationStageEvidence,
+      ],
+    }),
+    false,
+    "extra unknown stage must not qualify",
+  );
+  assert.equal(
+    isQualifyingFourStageSuccess({
+      id: "unknown-replaces-required",
+      status: "applied",
+      createdAt: "t",
+      stages: [
+        { stage: "source-applied", status: "passed" },
+        { stage: "source-verified", status: "passed" },
+        { stage: "artifact-built", status: "passed" },
+        { stage: "mystery-stage", status: "passed" } as unknown as IntegrationStageEvidence,
+      ],
+    }),
+    false,
+    "unknown stage in place of a required stage must not qualify",
+  );
+  assert.equal(
+    isQualifyingFourStageSuccess({
+      id: "ok-exact",
+      status: "applied",
+      createdAt: "t",
+      stages: FOUR_STAGE_PASSED,
+    }),
+    true,
+  );
+
+  const interrupted = computeSelfUpgradeEvidence(
+    [
+      {
+        id: "ok",
+        status: "applied",
+        createdAt: "2026-07-30T14:00:00.000Z",
+        stages: FOUR_STAGE_PASSED,
+      },
+      {
+        id: "legacy-applied",
+        status: "applied",
+        createdAt: "2026-07-30T13:00:00.000Z",
+        stages: [{ stage: "source-applied", status: "passed" }],
+        error: "partial legacy /secret/path",
+      },
+    ],
+    3,
+  );
+  assert.equal(interrupted.achieved, 1);
+  assert.equal(interrupted.breakCategory, "insufficient-evidence");
+  assert.equal(interrupted.breakOperationId, "legacy-applied");
+  assert.ok(!JSON.stringify(interrupted).includes("/secret/path"));
+});
+
+test("self-upgrade evidence: does not skip failures to find older successes", () => {
+  const results = [
+    {
+      id: "fail-newest",
+      status: "retained-failure" as const,
+      createdAt: "2026-07-30T16:00:00.000Z",
+      error: "newest fail",
+    },
+    { id: "s3", status: "applied" as const, createdAt: "2026-07-30T15:00:00.000Z", stages: FOUR_STAGE_PASSED },
+    { id: "s2", status: "applied" as const, createdAt: "2026-07-30T14:00:00.000Z", stages: FOUR_STAGE_PASSED },
+    { id: "s1", status: "applied" as const, createdAt: "2026-07-30T13:00:00.000Z", stages: FOUR_STAGE_PASSED },
+  ];
+  const evidence = computeSelfUpgradeEvidence(results, 3);
+  assert.equal(evidence.achieved, 0);
+  assert.equal(evidence.remaining, 3);
+  assert.equal(evidence.state, "in-progress");
+  assert.equal(evidence.breakCategory, "retained-failure");
+  assert.equal(evidence.breakOperationId, "fail-newest");
+  assert.equal(evidence.latestQualifyingOperationId, undefined);
+});
+
+test("self-upgrade evidence: store orders by createdAt DESC then id DESC", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sue-order-"));
+  const store = new StateStore(home);
+  try {
+    // Same createdAt — id tie-break decides newest.
+    seedResult(store, {
+      id: "op-a",
+      taskId: "task-a",
+      status: "applied",
+      createdAt: "2026-07-30T12:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+    seedResult(store, {
+      id: "op-b",
+      taskId: "task-b",
+      status: "retained-failure",
+      createdAt: "2026-07-30T12:00:00.000Z",
+      error: "tie older by id",
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+    seedResult(store, {
+      id: "op-c",
+      taskId: "task-c",
+      status: "applied",
+      createdAt: "2026-07-30T13:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+
+    const recent = store.listRecentSelfUpgradeIntegrationResults(10);
+    assert.equal(recent.map((r) => r.id).join(","), "op-c,op-b,op-a");
+
+    const evidence = computeSelfUpgradeEvidence(recent, 3);
+    // Newest is qualifying, next is retained-failure → 1/3.
+    assert.equal(evidence.achieved, 1);
+    assert.equal(evidence.breakCategory, "retained-failure");
+    assert.equal(evidence.latestQualifyingOperationId, "op-c");
+    assert.equal(evidence.breakOperationId, "op-b");
+  } finally {
+    store.close();
+  }
+});
+
+test("self-upgrade evidence: coordinator projection is read-only and privacy-safe", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sue-coord-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  try {
+    seedResult(store, {
+      id: "efa7d9ae-61c9-421a-a1b5-d427d9353a81",
+      taskId: "task-success",
+      status: "applied",
+      createdAt: "2026-07-30T12:00:00.000Z",
+      appliedAt: "2026-07-30T12:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+    seedResult(store, {
+      id: "66ba9a77-f518-4a37-836f-043e2b70c316",
+      taskId: "task-fail",
+      status: "retained-failure",
+      createdAt: "2026-07-30T11:00:00.000Z",
+      stages: [
+        { stage: "source-applied", status: "passed" },
+        { stage: "source-verified", status: "passed" },
+        { stage: "artifact-built", status: "passed" },
+        {
+          stage: "runtime-activated",
+          status: "failed",
+          error: "secret /private/path token=sk-live-abc",
+          commands: [{
+            command: "node dist/index.js --token sk-live-abc",
+            exitCode: 1,
+            stdout: "PROMPT: ignore previous",
+            stderr: "/Users/private/keychain",
+            durationMs: 10,
+            timedOut: false,
+          }],
+        },
+      ],
+      error: "retained: /Users/private/path sk-live-abc",
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+
+    const beforeTasks = store.listTasks().length;
+    const beforeResults = store.listRecentIntegrationResults(40).length;
+    const beforeScoped = store.listRecentSelfUpgradeIntegrationResults(40).length;
+    const evidence1 = coordinator.selfUpgradeEvidence(3);
+    const evidence2 = coordinator.selfUpgradeEvidence(3);
+    assert.deepEqual(evidence1, evidence2);
+    assert.equal(evidence1.achieved, 1);
+    assert.equal(evidence1.required, 3);
+    assert.equal(evidence1.breakCategory, "retained-failure");
+    assert.equal(store.listTasks().length, beforeTasks);
+    assert.equal(store.listRecentIntegrationResults(40).length, beforeResults);
+    assert.equal(store.listRecentSelfUpgradeIntegrationResults(40).length, beforeScoped);
+
+    const json = JSON.stringify(evidence1);
+    assert.ok(!json.includes("sk-live"));
+    assert.ok(!json.includes("/Users/private"));
+    assert.ok(!json.includes("/private/path"));
+    assert.ok(!json.includes("PROMPT"));
+    assert.ok(!json.includes("keychain"));
+    assert.ok(!json.includes("commands"));
+    assert.ok(!json.includes("stdout"));
+    assert.ok(!json.includes("stderr"));
+    assert.ok(!json.includes("error"));
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("self-upgrade evidence: ordinary project Integrations are neutral and do not break ready streak", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sue-scope-ready-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  try {
+    // Three consecutive self-upgrade four-stage successes.
+    for (const [id, ts] of [
+      ["sue-s1", "2026-07-29T10:00:00.000Z"],
+      ["sue-s2", "2026-07-29T11:00:00.000Z"],
+      ["sue-s3", "2026-07-29T12:00:00.000Z"],
+    ] as const) {
+      seedResult(store, {
+        id,
+        taskId: `task-${id}`,
+        status: "applied",
+        createdAt: ts,
+        appliedAt: ts,
+        stages: FOUR_STAGE_PASSED,
+        deliveryPlan: selfUpgradeDeliveryPlan("project"),
+      });
+    }
+    // Newer ordinary Elsewhere Integration: applied with artifact/runtime N/A.
+    // Shaped like 7fdbec6b-d122-4bb4-b4b4-b9263146fd65 contamination.
+    seedResult(store, {
+      id: "7fdbec6b-d122-4bb4-b4b4-b9263146fd65",
+      taskId: "task-elsewhere",
+      status: "applied",
+      createdAt: "2026-07-30T15:00:00.000Z",
+      appliedAt: "2026-07-30T15:00:00.000Z",
+      stages: SOURCE_ONLY_STAGES,
+      deliveryPlan: ordinaryDeliveryPlan(),
+    });
+    // Another ordinary without any deliveryPlan (legacy-shaped).
+    seedResult(store, {
+      id: "ordinary-legacy",
+      taskId: "task-ordinary-legacy",
+      status: "applied",
+      createdAt: "2026-07-30T16:00:00.000Z",
+      stages: SOURCE_ONLY_STAGES,
+    });
+
+    const scoped = store.listRecentSelfUpgradeIntegrationResults(40);
+    assert.equal(scoped.map((r) => r.id).join(","), "sue-s3,sue-s2,sue-s1");
+    assert.ok(!scoped.some((r) => r.id === "7fdbec6b-d122-4bb4-b4b4-b9263146fd65"));
+
+    const evidence = coordinator.selfUpgradeEvidence(3);
+    assert.equal(evidence.achieved, 3);
+    assert.equal(evidence.remaining, 0);
+    assert.equal(evidence.state, "ready");
+    assert.equal(evidence.breakCategory, "none");
+    assert.equal(evidence.breakOperationId, undefined);
+    assert.equal(evidence.latestQualifyingOperationId, "sue-s3");
+    assert.equal(evidence.nextAction, "milestone-ready");
+    assert.equal(evidence.inspectedCount, 3);
+    assert.ok(!JSON.stringify(evidence).includes("7fdbec6b"));
+    assert.ok(!JSON.stringify(evidence).includes("elsewhere"));
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("self-upgrade evidence: ordinary between self-upgrades is neutral; exact-profile failure still breaks", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sue-scope-interleave-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  try {
+    seedResult(store, {
+      id: "sue-fail-old",
+      taskId: "task-sue-fail-old",
+      status: "retained-failure",
+      createdAt: "2026-07-28T09:00:00.000Z",
+      error: "old self-upgrade fail /Users/private/path",
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+    seedResult(store, {
+      id: "sue-ok-1",
+      taskId: "task-sue-ok-1",
+      status: "applied",
+      createdAt: "2026-07-28T10:00:00.000Z",
+      appliedAt: "2026-07-28T10:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+    // Ordinary app failure interleaved — must be neutral.
+    seedResult(store, {
+      id: "ordinary-fail",
+      taskId: "task-ordinary-fail",
+      status: "retained-failure",
+      createdAt: "2026-07-28T11:00:00.000Z",
+      error: "ordinary fail secret /Users/private/elsewhere sk-live",
+      deliveryPlan: ordinaryDeliveryPlan(),
+    });
+    seedResult(store, {
+      id: "sue-ok-2",
+      taskId: "task-sue-ok-2",
+      status: "applied",
+      createdAt: "2026-07-28T12:00:00.000Z",
+      appliedAt: "2026-07-28T12:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+    // Newest exact-profile self-upgrade failure — first real break.
+    seedResult(store, {
+      id: "sue-fail-new",
+      taskId: "task-sue-fail-new",
+      status: "rejected",
+      createdAt: "2026-07-28T13:00:00.000Z",
+      error: "self-upgrade rejected /Users/private/path",
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+
+    const scoped = store.listRecentSelfUpgradeIntegrationResults(40);
+    assert.equal(
+      scoped.map((r) => r.id).join(","),
+      "sue-fail-new,sue-ok-2,sue-ok-1,sue-fail-old",
+    );
+    assert.ok(!scoped.some((r) => r.id === "ordinary-fail"));
+
+    const evidence = coordinator.selfUpgradeEvidence(3);
+    assert.equal(evidence.achieved, 0);
+    assert.equal(evidence.remaining, 3);
+    assert.equal(evidence.state, "in-progress");
+    assert.equal(evidence.breakCategory, "rejected");
+    assert.equal(evidence.breakOperationId, "sue-fail-new");
+    assert.equal(evidence.latestQualifyingOperationId, undefined);
+    const json = JSON.stringify(evidence);
+    assert.ok(!json.includes("ordinary-fail"));
+    assert.ok(!json.includes("/Users/private"));
+    assert.ok(!json.includes("sk-live"));
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("self-upgrade evidence: missing, lookalike, default-like, and foreign identity are ignored", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sue-scope-identity-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  try {
+    seedResult(store, {
+      id: "sue-only",
+      taskId: "task-sue-only",
+      status: "applied",
+      createdAt: "2026-07-27T10:00:00.000Z",
+      appliedAt: "2026-07-27T10:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+      deliveryPlan: selfUpgradeDeliveryPlan(),
+    });
+    seedResult(store, {
+      id: "lookalike",
+      taskId: "task-lookalike",
+      status: "retained-failure",
+      createdAt: "2026-07-27T11:00:00.000Z",
+      error: "lookalike fail",
+      deliveryProfileId: `${SELF_UPGRADE_DELIVERY_PROFILE_ID}-copy`,
+    });
+    seedResult(store, {
+      id: "foreign",
+      taskId: "task-foreign",
+      status: "applied",
+      createdAt: "2026-07-27T12:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+      deliveryProfileId: "relay-deploy",
+    });
+    seedResult(store, {
+      id: "default-implicit",
+      taskId: "task-default",
+      status: "applied",
+      createdAt: "2026-07-27T13:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+      deliveryPlan: {
+        resolutionSource: "default",
+        buildCommandCount: 1,
+        activationCommandCount: 1,
+        activationCheckCommandCount: 0,
+        outcome: "activation",
+        stages: {
+          sourceApply: "required",
+          sourceVerify: "required",
+          artifactBuild: "required",
+          runtimeActivation: "required",
+        },
+      },
+    });
+    // Malformed plan evidence: non-object deliveryPlan stored raw; ignore safely.
+    {
+      store.createTask(minimalTask("task-malformed", "2026-07-27T14:00:00.000Z"));
+      store.saveIntegrationReceipt({
+        id: "receipt-malformed",
+        taskId: "task-malformed",
+        patchDigest: "c".repeat(64),
+        affectedFiles: ["x.ts"],
+        rejectionReasons: [],
+        sourceEvidence: {},
+        createdAt: "2026-07-27T14:00:00.000Z",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        consumed: true,
+        deliveryPlan: "not-a-plan" as unknown as DeliveryPlanView,
+      });
+      store.saveIntegrationResult({
+        id: "malformed",
+        receiptId: "receipt-malformed",
+        taskId: "task-malformed",
+        status: "retained-failure",
+        createdAt: "2026-07-27T14:00:00.000Z",
+        error: "malformed receipt secret",
+      });
+    }
+    seedResult(store, {
+      id: "legacy-no-plan",
+      taskId: "task-legacy",
+      status: "retained-failure",
+      createdAt: "2026-07-27T15:00:00.000Z",
+      error: "legacy fail",
+    });
+
+    const scoped = store.listRecentSelfUpgradeIntegrationResults(40);
+    assert.equal(scoped.map((r) => r.id).join(","), "sue-only");
+
+    const evidence = coordinator.selfUpgradeEvidence(3);
+    assert.equal(evidence.achieved, 1);
+    assert.equal(evidence.remaining, 2);
+    assert.equal(evidence.state, "in-progress");
+    assert.equal(evidence.breakCategory, "none");
+    assert.equal(evidence.breakOperationId, undefined);
+    assert.equal(evidence.latestQualifyingOperationId, "sue-only");
+    assert.equal(evidence.inspectedCount, 1);
+    const json = JSON.stringify(evidence);
+    assert.ok(!json.includes("lookalike"));
+    assert.ok(!json.includes("forklight-self-upgrade-copy"));
+    assert.ok(!json.includes("relay-deploy"));
+    assert.ok(!json.includes("malformed"));
+    assert.ok(!json.includes("secret"));
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("self-upgrade evidence: window bounds matching self-upgrade records after scope", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sue-scope-window-"));
+  const store = new StateStore(home);
+  try {
+    // Many ordinary Integrations newer than older self-upgrades must not hide them.
+    for (let i = 0; i < SELF_UPGRADE_RESULT_WINDOW + 5; i += 1) {
+      const n = String(i).padStart(3, "0");
+      seedResult(store, {
+        id: `ordinary-${n}`,
+        taskId: `task-ordinary-${n}`,
+        status: "applied",
+        createdAt: `2026-07-30T${String(10 + Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:00.000Z`,
+        stages: SOURCE_ONLY_STAGES,
+        deliveryPlan: ordinaryDeliveryPlan(),
+      });
+    }
+    for (const [id, ts] of [
+      ["sue-w1", "2026-07-20T10:00:00.000Z"],
+      ["sue-w2", "2026-07-20T11:00:00.000Z"],
+      ["sue-w3", "2026-07-20T12:00:00.000Z"],
+    ] as const) {
+      seedResult(store, {
+        id,
+        taskId: `task-${id}`,
+        status: "applied",
+        createdAt: ts,
+        appliedAt: ts,
+        stages: FOUR_STAGE_PASSED,
+        deliveryPlan: selfUpgradeDeliveryPlan(),
+      });
+    }
+
+    const globalRecent = store.listRecentIntegrationResults(SELF_UPGRADE_RESULT_WINDOW);
+    assert.ok(
+      !globalRecent.some((r) => r.id.startsWith("sue-w")),
+      "global window alone would hide older self-upgrades under ordinary noise",
+    );
+
+    const scoped = store.listRecentSelfUpgradeIntegrationResults(SELF_UPGRADE_RESULT_WINDOW);
+    assert.equal(scoped.map((r) => r.id).join(","), "sue-w3,sue-w2,sue-w1");
+    assert.ok(scoped.length <= SELF_UPGRADE_RESULT_WINDOW);
+
+    const evidence = computeSelfUpgradeEvidence(scoped, 3);
+    assert.equal(evidence.achieved, 3);
+    assert.equal(evidence.state, "ready");
+    assert.equal(evidence.breakCategory, "none");
+  } finally {
+    store.close();
+  }
+});
+
+test("self-upgrade evidence: required count is validated and does not rewrite history", () => {
+  assert.throws(() => parseRequiredStreakCount(0), /1 to 20/);
+  assert.throws(() => parseRequiredStreakCount(21), /1 to 20/);
+  assert.throws(() => parseRequiredStreakCount(1.5), /1 to 20/);
+  assert.equal(parseRequiredStreakCount(undefined), 3);
+
+  const results = [
+    {
+      id: "s1",
+      status: "applied",
+      createdAt: "2026-07-30T10:00:00.000Z",
+      stages: FOUR_STAGE_PASSED,
+    },
+  ];
+  const forAudit = computeSelfUpgradeEvidence(results, 5);
+  assert.equal(forAudit.required, 5);
+  assert.equal(forAudit.achieved, 1);
+  assert.equal(forAudit.remaining, 4);
+  // Default milestone unchanged for separate call.
+  const defaultMilestone = computeSelfUpgradeEvidence(results, 3);
+  assert.equal(defaultMilestone.required, 3);
+  assert.equal(defaultMilestone.remaining, 2);
+});
+
+test("self-upgrade evidence: omits hostile ids and timestamps from public projection", () => {
+  assert.equal(isSafeOpaqueId("efa7d9ae-61c9-421a-a1b5-d427d9353a81"), true);
+  assert.equal(isSafeOpaqueId("/Users/private/path"), false);
+  assert.equal(isSafeOpaqueId("sk-live-abc with spaces"), false);
+  assert.equal(isSafeOpaqueId("../secret"), false);
+  assert.equal(isSafeOpaqueId("id\nwith\nnewlines"), false);
+  assert.equal(isSafeIsoTimestamp("2026-07-30T12:00:00.000Z"), true);
+  assert.equal(isSafeIsoTimestamp("not-a-timestamp"), false);
+  assert.equal(isSafeIsoTimestamp("2026-07-30 12:00:00"), false);
+  assert.equal(isSafeIsoTimestamp("/Users/private/ts"), false);
+
+  const evidence = computeSelfUpgradeEvidence(
+    [
+      {
+        id: "/Users/private/op-id?token=sk-live",
+        status: "applied",
+        createdAt: "not-iso",
+        appliedAt: "also-not-iso",
+        stages: FOUR_STAGE_PASSED,
+      },
+      {
+        id: "../../../etc/passwd",
+        status: "retained-failure",
+        createdAt: "2026-07-30T11:00:00.000Z",
+        error: "secret /Users/private/path sk-live-abc",
+      },
+    ],
+    3,
+  );
+  assert.equal(evidence.achieved, 1);
+  assert.equal(evidence.breakCategory, "retained-failure");
+  assert.equal(evidence.latestQualifyingOperationId, undefined);
+  assert.equal(evidence.latestQualifyingAt, undefined);
+  assert.equal(evidence.breakOperationId, undefined);
+  const json = JSON.stringify(evidence);
+  assert.ok(!json.includes("/Users/private"));
+  assert.ok(!json.includes("sk-live"));
+  assert.ok(!json.includes("passwd"));
+  assert.ok(!json.includes("not-iso"));
+  assert.ok(!json.includes("token="));
 });

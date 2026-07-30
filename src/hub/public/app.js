@@ -8,7 +8,7 @@ function badge(s){
   var m = {
     "succeeded":"badge-ok","completed":"badge-ok",
     "running":"badge-info","active":"badge-info","preparing":"badge-warn","verifying":"badge-warn",
-    "queued":"badge-dim","waiting":"badge-dim","pending":"badge-dim",
+    "queued":"badge-dim","waiting":"badge-dim","pending":"badge-dim","stopped":"badge-dim",
     "blocked":"badge-err","failed":"badge-err","interrupted":"badge-err"
   };
   return h("span", "badge " + (m[s] || "badge-dim"), statusLabel(s));
@@ -17,7 +17,8 @@ function statusLabel(status){
   var map = { succeeded: "statusSucceeded", completed: "statusCompleted", running: "statusRunning",
     active: "statusActive", preparing: "statusPreparing", verifying: "statusVerifying",
     queued: "statusQueued", waiting: "statusWaiting", pending: "statusPending",
-    blocked: "statusBlocked", failed: "statusFailed", interrupted: "statusInterrupted" };
+    blocked: "statusBlocked", failed: "statusFailed", interrupted: "statusInterrupted",
+    stopped: "statusStopped" };
   return t(map[status] || "statusUnknown");
 }
 function activityLabel(activity){
@@ -256,8 +257,13 @@ function applyChromeI18n(){
 
 var S = {
   settings: null, health: null, boards: null, tasks: null, competitions: null, stats: null,
+  goals: null,
   economics: null,
   economicsError: null,
+  routingCoverage: null,
+  routingCoverageError: null,
+  selfUpgradeEvidence: null,
+  selfUpgradeEvidenceError: null,
   sample: null,
   hub: null,
   lastOk: 0, connected: false, hadOk: false, tab: "overview",
@@ -276,10 +282,18 @@ var MR_WEIGHT_KEYS = [
   ["verifiedBehavior", "mrPolicyVerifiedBehavior", "mrPolicyVerifiedBehaviorHint"],
   ["modelQualityFailure", "mrPolicyModelQualityFailure", "mrPolicyModelQualityFailureHint"],
   ["correctionChurn", "mrPolicyCorrectionChurn", "mrPolicyCorrectionChurnHint"],
+  ["firstPassSuccess", "mrPolicyFirstPassSuccess", "mrPolicyFirstPassSuccessHint"],
   ["officialCost", "mrPolicyOfficialCost", "mrPolicyOfficialCostHint"],
   ["duration", "mrPolicyDuration", "mrPolicyDurationHint"],
   ["budgetReliability", "mrPolicyBudgetReliability", "mrPolicyBudgetReliabilityHint"]
 ];
+/* Default weight when a draft omits a known factor key. */
+function mrWeightDefault(keyStr){
+  if(keyStr === "officialCost" || keyStr === "duration" || keyStr === "budgetReliability") return 0;
+  if(keyStr === "firstPassSuccess" || keyStr === "modelQualityFailure") return 0.5;
+  if(keyStr === "correctionChurn") return 0.2;
+  return 1;
+}
 /* Tab-scoped only: survives same-tab refresh, never localStorage/cookies. */
 var HUB_TOKEN_SESSION_KEY = "fl-hub-session-token";
 
@@ -365,8 +379,7 @@ function projectModelRoutingPolicy(source){
     if(Object.prototype.hasOwnProperty.call(win, key)){
       weights[key] = mrFiniteNumber(win[key]);
     } else {
-      var keyStr = String(key);
-      weights[key] = (keyStr === "officialCost" || keyStr === "duration" || keyStr === "budgetReliability") ? 0 : 1;
+      weights[key] = mrWeightDefault(String(key));
     }
   });
   return {
@@ -700,6 +713,34 @@ function pollEconomics(){
     S.economicsError = (e && e.message) ? e.message : "unavailable";
   });
 }
+/** Isolated fetch for Worker-selection evidence coverage. Failure only
+ *  degrades this Insights panel; never Tasks, Settings, economics, or
+ *  the rest of the main ops poll. Backend owns every count. */
+function pollRoutingCoverage(){
+  return fetchJSON("/api/ops/routing-evidence-coverage").then(function(s){
+    S.routingCoverage = s;
+    S.routingCoverageError = null;
+    return s;
+  }).catch(function(e){
+    if(e && e.status === 401) clearHubToken();
+    S.routingCoverage = null;
+    S.routingCoverageError = (e && e.message) ? e.message : "unavailable";
+  });
+}
+/** Isolated fetch for consecutive self-upgrade streak evidence. Backend owns
+ *  every count and break code; the browser only translates closed codes.
+ *  Failure degrades only this Overview card. */
+function pollSelfUpgradeEvidence(){
+  return fetchJSON("/api/ops/self-upgrade-evidence").then(function(s){
+    S.selfUpgradeEvidence = s;
+    S.selfUpgradeEvidenceError = null;
+    return s;
+  }).catch(function(e){
+    if(e && e.status === 401) clearHubToken();
+    S.selfUpgradeEvidence = null;
+    S.selfUpgradeEvidenceError = (e && e.message) ? e.message : "unavailable";
+  });
+}
 function scheduleNext(){
   var ms = S.settings && S.settings.console && S.settings.console.refreshIntervalMs
     ? Math.max(200, S.settings.console.refreshIntervalMs) : 2000;
@@ -712,13 +753,16 @@ function refresh(){
     return hub;
   });
   var econP = pollEconomics();
+  var recP = pollRoutingCoverage();
+  var sueP = pollSelfUpgradeEvidence();
   var opsP = Promise.all([
     fetchJSON("/api/ops/health"), fetchJSON("/api/ops/board"), fetchJSON("/api/ops/tasks"),
     fetchJSON("/api/ops/competitions"), fetchJSON("/api/ops/stats"), fetchJSON("/api/ops/settings"),
-    fetchJSON("/api/ops/sample-task")
+    fetchJSON("/api/ops/sample-task"), fetchJSON("/api/ops/goals")
   ]).then(function(v){
     S.health = v[0]; S.boards = v[1]; S.tasks = v[2];
     S.competitions = v[3]; S.stats = v[4]; S.settings = v[5]; S.sample = v[6];
+    S.goals = v[7];
     S.lastOk = Date.now(); S.connected = true; S.hadOk = true;
   }).catch(function(e){
     S.connected = false;
@@ -728,11 +772,12 @@ function refresh(){
     if(!S.boards) S.boards = [];
     if(!S.competitions) S.competitions = [];
     if(!S.stats) S.stats = [];
+    if(!S.goals) S.goals = [];
   });
   Promise.all([hubP.catch(function(e){
     if(e&&e.status===401) clearHubToken();
     throw e;
-  }), opsP, econP]).then(function(){
+  }), opsP, econP, recP, sueP]).then(function(){
     if(!S.token){ showUnauthenticated(); return; }
     if(S.tab === "worker" && S.workerFormActive){
       updStatus();
@@ -1248,12 +1293,15 @@ function rOverview(){
   // Three-layer version alignment: source, built product, running service.
   // Prominent, before task metrics, so a non-technical user sees it first.
   viewEl.appendChild(renderVersionJourneyCard());
+  // Consecutive self-upgrade reliability: server-owned counts only.
+  viewEl.appendChild(renderSelfUpgradeEvidenceCard());
   viewEl.appendChild(renderGuidedSampleCard());
 
+  var goals = S.goals || [];
   var metrics = hd("div", "grid-4", [
     metric(t("ovBoard"), String(tasks.length), lanes.active + " " + t("ovWorking")),
     metric(t("ovMotion"), String(lanes.active), lanes.queued + " " + t("ovQueued")),
-    metric(t("navPlans"), String(plans.length), t("ovPlansHint")),
+    metric(t("navGoals"), String(goals.length), t("ovGoalsHint")),
     metric(t("navCompete"), String(comps.length), activeComp + " " + t("ovOpen"))
   ]);
   viewEl.appendChild(metrics);
@@ -1295,11 +1343,25 @@ function rOverview(){
   }
 
   var right = hd("div", "overview-stack");
-  right.appendChild(sec(t("navPlans")));
-  if(!plans.length){
-    right.appendChild(h("div", "summary-line", t("noPlans")));
+  right.appendChild(sec(t("navGoals")));
+  if(!goals.length){
+    right.appendChild(h("div", "summary-line", t("noGoals")));
   } else {
-    plans.slice(0, 3).forEach(function(b){
+    goals.slice(0, 3).forEach(function(g){
+      right.appendChild(card(function(){ showGoalDetail(g.goalId); }, [
+        cardHead(g.name || t("navGoals"), "", badge(g.status || "pending")),
+        h("div", "summary-line", t("goalProgressCompact", {
+          satisfied: String(g.progress ? g.progress.satisfied : 0),
+          total: String(g.progress ? g.progress.total : 0),
+          percent: String(g.progress ? g.progress.percent : 0)
+        })),
+        h("div", "summary-line dim", goalOverviewSummaryText(g))
+      ]));
+    });
+  }
+  if(plans.length){
+    right.appendChild(sec(t("navPlans")));
+    plans.slice(0, 2).forEach(function(b){
       var pct = b.progress && b.progress.percent === 100 ? "completed" : "active";
       right.appendChild(card(function(){ showPlanBoard(b.planId); }, [
         cardHead(b.name, "", badge(b.progress && b.progress.total ? pct : "pending")),
@@ -1556,6 +1618,182 @@ function versionJourneyTechnical(view){
     box.appendChild(versionJourneyTechRow(r[0], value));
   });
   return box;
+}
+
+/* --- Overview consecutive self-upgrade reliability card ---
+ * Backend owns every count, break category, and next-action code. This
+ * adapter only maps closed codes to bilingual copy. It never recomputes
+ * streaks, never parses command text, and never invents progress for
+ * malformed projections (fail closed to unavailable). */
+function selfUpgradeEvidenceView(evidence){
+  var STATE_KEYS = {
+    "empty": "sueStateEmpty",
+    "in-progress": "sueStateInProgress",
+    "ready": "sueStateReady"
+  };
+  var BREAK_KEYS = {
+    "none": "sueBreakNone",
+    "retained-failure": "sueBreakRetainedFailure",
+    "rejected": "sueBreakRejected",
+    "rolled-back": "sueBreakRolledBack",
+    "insufficient-evidence": "sueBreakInsufficientEvidence"
+  };
+  var NEXT_KEYS = {
+    "run-first-upgrade": "sueNextRunFirst",
+    "continue-consecutive-proofs": "sueNextContinue",
+    "milestone-ready": "sueNextReady"
+  };
+  if(!evidence || typeof evidence !== "object"){
+    return { available: false };
+  }
+  var e = evidence;
+  var state = e.state;
+  var breakCategory = e.breakCategory;
+  var nextAction = e.nextAction;
+  var achieved = e.achieved;
+  var required = e.required;
+  var remaining = e.remaining;
+  if(!Object.prototype.hasOwnProperty.call(STATE_KEYS, state)){
+    return { available: false };
+  }
+  if(!Object.prototype.hasOwnProperty.call(BREAK_KEYS, breakCategory)){
+    return { available: false };
+  }
+  if(!Object.prototype.hasOwnProperty.call(NEXT_KEYS, nextAction)){
+    return { available: false };
+  }
+  if(typeof achieved !== "number" || !Number.isSafeInteger(achieved) || achieved < 0){
+    return { available: false };
+  }
+  if(typeof required !== "number" || !Number.isSafeInteger(required)
+    || required < 1 || required > 20){
+    return { available: false };
+  }
+  if(typeof remaining !== "number" || !Number.isSafeInteger(remaining) || remaining < 0){
+    return { available: false };
+  }
+  if(achieved > required) return { available: false };
+  if(remaining !== required - achieved) return { available: false };
+  if(state === "empty" && (achieved !== 0 || remaining !== required
+    || breakCategory !== "none" || nextAction !== "run-first-upgrade")){
+    return { available: false };
+  }
+  if(state === "ready" && (achieved !== required || remaining !== 0
+    || breakCategory !== "none" || nextAction !== "milestone-ready")){
+    return { available: false };
+  }
+  if(state === "in-progress" && (achieved >= required
+    || nextAction !== "continue-consecutive-proofs")){
+    return { available: false };
+  }
+
+  function safeOpaqueId(value){
+    return typeof value === "string"
+      && value.length >= 1 && value.length <= 80
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(value)
+      && value.indexOf("..") < 0
+      && value.indexOf("/") < 0
+      && value.indexOf("\\") < 0
+      ? value : null;
+  }
+  function safeIso(value){
+    if(typeof value !== "string" || value.length < 20 || value.length > 40) return null;
+    if(!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(value)) return null;
+    var ms = Date.parse(value);
+    return Number.isFinite(ms) ? value : null;
+  }
+
+  return {
+    available: true,
+    state: state,
+    breakCategory: breakCategory,
+    nextAction: nextAction,
+    achieved: achieved,
+    required: required,
+    remaining: remaining,
+    stateKey: STATE_KEYS[state],
+    breakKey: BREAK_KEYS[breakCategory],
+    nextKey: NEXT_KEYS[nextAction],
+    latestQualifyingAt: safeIso(e.latestQualifyingAt),
+    latestQualifyingOperationId: safeOpaqueId(e.latestQualifyingOperationId),
+    breakOperationId: safeOpaqueId(e.breakOperationId)
+  };
+}
+function renderSelfUpgradeEvidenceCard(){
+  var cardEl = h("div", "card self-upgrade-evidence-card");
+  cardEl.setAttribute("data-fl-role", "self-upgrade-evidence");
+  cardEl.appendChild(h("div", "card-title mb-4", t("sueCardTitle")));
+  cardEl.appendChild(h("div", "summary-line dim mb-8", t("sueCardIntro")));
+
+  if(S.selfUpgradeEvidenceError && !S.selfUpgradeEvidence){
+    cardEl.appendChild(evCaveat(
+      t("sueUnavailableBridgeHint", {
+        reason: S.selfUpgradeEvidenceError || t("sueUnavailableUnknown")
+      })
+    ));
+    return cardEl;
+  }
+  if(!S.selfUpgradeEvidence){
+    cardEl.appendChild(stateMsg("loading", t("sueLoading")));
+    return cardEl;
+  }
+
+  var view = selfUpgradeEvidenceView(S.selfUpgradeEvidence);
+  if(!view.available){
+    cardEl.appendChild(evCaveat(
+      t("sueUnavailableBridgeHint", { reason: t("sueUnavailableMalformed") })
+    ));
+    return cardEl;
+  }
+
+  var progress = h("div", "summary-line");
+  progress.setAttribute("data-fl-role", "self-upgrade-progress");
+  progress.appendChild(document.createTextNode(
+    t("sueProgress", { achieved: String(view.achieved), required: String(view.required) })
+  ));
+  cardEl.appendChild(progress);
+
+  cardEl.appendChild(h("div", "summary-line mt-4", t(view.stateKey)));
+  if(view.breakCategory !== "none"){
+    var br = h("div", "summary-line dim");
+    br.setAttribute("data-fl-role", "self-upgrade-break");
+    br.appendChild(document.createTextNode(t(view.breakKey)));
+    cardEl.appendChild(br);
+  }
+  if(view.remaining > 0 && view.state !== "ready"){
+    cardEl.appendChild(h("div", "summary-line dim fs11", t("sueRemaining", {
+      remaining: String(view.remaining)
+    })));
+  }
+
+  var next = h("div", "vj-next mt-8");
+  next.setAttribute("data-fl-role", "self-upgrade-next");
+  next.appendChild(h("div", "vj-section-label", t("sueNextLabel")));
+  next.appendChild(h("div", "vj-next-text", t(view.nextKey)));
+  cardEl.appendChild(next);
+
+  /* Optional technical identities stay collapsed; never primary copy. */
+  var tech = h("div", "task-technical-body");
+  tech.appendChild(versionJourneyTechRow("sueTechState", view.state));
+  tech.appendChild(versionJourneyTechRow("sueTechBreak", view.breakCategory));
+  tech.appendChild(versionJourneyTechRow("sueTechNext", view.nextAction));
+  if(view.latestQualifyingAt){
+    tech.appendChild(versionJourneyTechRow("sueTechLatestAt", view.latestQualifyingAt));
+  }
+  if(view.latestQualifyingOperationId){
+    tech.appendChild(versionJourneyTechRow(
+      "sueTechLatestId",
+      String(view.latestQualifyingOperationId).slice(0, 12) + "..."
+    ));
+  }
+  if(view.breakOperationId){
+    tech.appendChild(versionJourneyTechRow(
+      "sueTechBreakId",
+      String(view.breakOperationId).slice(0, 12) + "..."
+    ));
+  }
+  cardEl.appendChild(collapsedSection(t("sueTechnicalTitle"), tech));
+  return cardEl;
 }
 
 /* Overview version card: explains current source, built product, and running
@@ -1943,6 +2181,106 @@ function rPlans(){
         active: String(b.progress ? b.progress.active : 0), blocked: String(b.progress ? b.progress.blocked : 0),
         failed: String(b.progress ? b.progress.failed : 0), completed: String(b.progress ? b.progress.completed : 0),
         percent: String(b.progress ? b.progress.percent : 0)
+      }))
+    ]));
+  });
+  viewEl.appendChild(grid);
+}
+
+/* --- Goals (explanation-first durable supervision) --- */
+/** Prefer known nextActionCode localization over stored English prose.
+ *  Unknown/legacy codes keep bounded stored text; never invent "none". */
+function goalNextActionLabel(code, fallback){
+  var keys = {
+    "wait-for-worker": "goalNextWaitWorker",
+    "main-accept": "goalNextMainAccept",
+    "main-review": "goalNextMainReview",
+    "integrate": "goalNextIntegrate",
+    "correct-or-decide": "goalNextCorrectOrDecide",
+    "advance": "goalNextAdvance",
+    "stop-or-decide": "goalNextStopOrDecide",
+    "resume-task": "goalNextResumeTask",
+    "none": "goalNextNone"
+  };
+  if(code && keys[code]) return t(keys[code]);
+  if(fallback != null && String(fallback).trim() !== "") return String(fallback);
+  return "";
+}
+/**
+ * Localize satisfied integration-milestone delivery provenance.
+ * Distinguishes exact Candidate Integration from Main-repaired source under
+ * original or amended acceptance without technical command text.
+ */
+function goalMilestoneDeliveryLabel(basis, fallback){
+  if(basis === "amended-acceptance") return t("goalMilestoneDeliveryAmended");
+  if(basis === "original-acceptance") return t("goalMilestoneDeliveryOriginal");
+  if(basis === "exact-candidate-integration") return t("goalMilestoneDeliveryExact");
+  return fallback || "";
+}
+/** Localize known Goal reasonCode values. Unknown/legacy codes fall back to
+ *  the bounded stored reason so history stays readable without English-only
+ *  copy leaking into Chinese Goal Detail. */
+function goalReasonLabel(code, fallback){
+  var keys = {
+    "main-stop": "goalReasonMainStop",
+    "correction-cap": "goalReasonCorrectionCap",
+    "review-cap": "goalReasonReviewCap",
+    "no-new-evidence-cap": "goalReasonNoNewEvidenceCap",
+    "duration-exceeded": "goalReasonDurationExceeded",
+    "no-progress": "goalReasonNoProgress",
+    "milestone-failed": "goalReasonMilestoneFailed",
+    "waiting-machine": "goalReasonWaitingMachine",
+    "waiting-main-accept": "goalReasonWaitingMainAccept",
+    "waiting-integration": "goalReasonWaitingIntegration",
+    "waiting-task": "goalReasonWaitingTask",
+    "goal-completed": "goalReasonGoalCompleted",
+    "none": "goalReasonNone"
+  };
+  if(code && keys[code]) return t(keys[code]);
+  if(fallback != null && String(fallback).trim() !== "") return String(fallback);
+  return t("goalStoppedDefault");
+}
+function goalStoryHappenedText(goal){
+  goal = goal || {};
+  return goalReasonLabel(goal.reasonCode, goal.whatJustHappened || goal.reason || "");
+}
+function goalStoryWaitingText(goal){
+  goal = goal || {};
+  if(goal.status === "stopped") return t("goalStoppedWaiting");
+  return goalReasonLabel(goal.reasonCode, goal.whatIsWaiting || goal.reason || "");
+}
+/** Overview card one-liner: terminal Goals explain why they ended (localized
+ *  reason); active Goals show the localized next Main action. Unknown legacy
+ *  codes keep bounded stored text via the underlying helpers. */
+function goalOverviewSummaryText(goal){
+  goal = goal || {};
+  if(goal.status === "stopped" || goal.status === "completed"){
+    return goalStoryHappenedText(goal);
+  }
+  return goalNextActionLabel(goal.nextActionCode, goal.nextAction);
+}
+function rGoals(){
+  viewEl.textContent = "";
+  if(!S.hadOk){ showDisconnected(); return; }
+  viewEl.appendChild(renderPageStory("goals"));
+  if(!S.goals || !S.goals.length){
+    viewEl.appendChild(stateMsg("empty", t("noGoals")));
+    return;
+  }
+  var grid = hd("div", "grid-2");
+  S.goals.forEach(function(g){
+    var pr = g.progress || {};
+    grid.appendChild(card(function(){ showGoalDetail(g.goalId); }, [
+      cardHead(g.name || t("navGoals"), "", badge(g.status || "pending")),
+      h("div", "card-subtitle mb-4", g.objective || ""),
+      h("div", "summary-line", t("goalProgressCompact", {
+        satisfied: String(pr.satisfied || 0),
+        total: String(pr.total || 0),
+        percent: String(pr.percent || 0)
+      })),
+      h("div", "summary-line", t("goalWaitingLine", { text: goalStoryWaitingText(g) })),
+      h("div", "summary-line dim", t("goalNextLine", {
+        text: goalNextActionLabel(g.nextActionCode, g.nextAction)
       }))
     ]));
   });
@@ -2556,10 +2894,89 @@ function renderEconomicsUnavailable(reason){
   ));
   return cardEl;
 }
+/** Honest empty / partial / complete state for routing-evidence coverage.
+ *  Backend owns every count; this only chooses explanatory copy. */
+function routingCoverageState(c){
+  var total = c && typeof c.eligibleTerminalTaskCount === "number" ? c.eligibleTerminalTaskCount : 0;
+  if(total <= 0) return "empty";
+  var withClass = c && typeof c.withTaskClassCount === "number" ? c.withTaskClassCount : 0;
+  var withFamily = c && typeof c.withTaskFamilyCount === "number" ? c.withTaskFamilyCount : 0;
+  var withDecision = c && typeof c.withCompleteRoutingDecisionCount === "number"
+    ? c.withCompleteRoutingDecisionCount : 0;
+  if(withClass === total && withFamily === total && withDecision === total) return "complete";
+  return "partial";
+}
+function nCount(value){
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
+}
+/** One explanation-first section: meaning, four named counts, limitation,
+ *  next action. No progress bar, no model-quality label, no nested grid. */
+function renderRoutingCoverage(c){
+  var panel = h("div", "card");
+  panel.setAttribute("data-fl-role", "routing-evidence-coverage");
+  panel.appendChild(h("div", "card-title mb-4", t("recTitle")));
+  panel.appendChild(h("div", "summary-line", t("recMeaning")));
+
+  var state = routingCoverageState(c);
+  var counts = h("div", "mt-4");
+  counts.setAttribute("data-fl-role", "routing-coverage-counts");
+  [
+    ["recTotalLabel", c && c.eligibleTerminalTaskCount],
+    ["recClassLabel", c && c.withTaskClassCount],
+    ["recFamilyLabel", c && c.withTaskFamilyCount],
+    ["recDecisionLabel", c && c.withCompleteRoutingDecisionCount]
+  ].forEach(function(row){
+    counts.appendChild(evRow(t(row[0]), h("span", "mono", nCount(row[1]))));
+  });
+  panel.appendChild(counts);
+
+  if(state !== "empty"){
+    panel.appendChild(h("div", "summary-line dim fs11 mt-4", t("recDiversity", {
+      classes: nCount(c && c.distinctTaskClassCount),
+      families: nCount(c && c.distinctTaskFamilyCount)
+    })));
+  }
+
+  panel.appendChild(evCaveat(t("recCaveat")));
+  if(state === "empty"){
+    panel.appendChild(stateMsg("empty", t("recEmpty")));
+    panel.appendChild(h("div", "summary-line mt-4", t("recEmptyNext")));
+  } else if(state === "complete"){
+    panel.appendChild(h("div", "summary-line mt-4", t("recComplete")));
+    panel.appendChild(h("div", "summary-line", t("recCompleteNext")));
+  } else {
+    panel.appendChild(h("div", "summary-line mt-4", t("recPartial")));
+    panel.appendChild(h("div", "summary-line", t("recPartialNext")));
+  }
+  return panel;
+}
+function renderRoutingCoverageUnavailable(reason){
+  var cardEl = h("div", "card");
+  cardEl.setAttribute("data-fl-role", "routing-evidence-coverage");
+  cardEl.appendChild(h("div", "card-title mb-4", t("recTitle")));
+  cardEl.appendChild(evCaveat(
+    t("recUnavailableBridgeHint", { reason: reason || t("recUnavailableUnknown") })
+  ));
+  return cardEl;
+}
 function rStats(){
   viewEl.textContent = "";
   if(!S.hadOk){ showDisconnected(); return; }
   viewEl.appendChild(renderPageStory("insights"));
+
+  // Worker-selection evidence coverage sits above economics / outcome cards
+  // so a non-expert can judge evidence readiness before reading costs.
+  var recPanel = h("div", "econ-panel");
+  recPanel.setAttribute("data-fl-role", "routing-coverage-panel");
+  if(S.routingCoverage){
+    recPanel.appendChild(renderRoutingCoverage(S.routingCoverage));
+  } else if(S.routingCoverageError){
+    recPanel.appendChild(renderRoutingCoverageUnavailable(S.routingCoverageError));
+  } else {
+    recPanel.appendChild(stateMsg("loading", t("recLoading")));
+  }
+  viewEl.appendChild(recPanel);
+
   viewEl.appendChild(h("div", "insights-title", t("econEvidenceSectionTitle")));
   viewEl.appendChild(evCaveat(t("econEvidenceSectionCaveat")));
   var econPanel = h("div", "econ-panel");
@@ -2599,13 +3016,17 @@ function rStats(){
         sample: String(s.sampleSize)
       });
     }
-    // Dual-outcome block: machine reliability + canonical accepted final
+    // Dual-outcome block: machine reliability + Main/delivery-backed final
     // delivery. Fields are formatted from the daemon projection only - no
     // JavaScript recomputation that could drift from canonical numbers.
     var machineRate = typeof s.successRate === "number" ? (s.successRate * 100).toFixed(0) : "-";
-    var deliveryRate = typeof s.acceptedDeliveryRate === "number"
+    var deliveryAccepted = typeof s.acceptedDeliveryCount === "number" ? s.acceptedDeliveryCount : 0;
+    var deliverySample = typeof s.acceptedDeliverySampleCount === "number"
+      ? s.acceptedDeliverySampleCount : 0;
+    var deliveryUnavailable = typeof s.acceptedDeliveryUnavailableCount === "number"
+      ? s.acceptedDeliveryUnavailableCount : 0;
+    var deliveryRate = typeof s.acceptedDeliveryRate === "number" && deliverySample > 0
       ? (s.acceptedDeliveryRate * 100).toFixed(0) : "-";
-    var deliveryCount = typeof s.acceptedDeliveryCount === "number" ? s.acceptedDeliveryCount : 0;
     var repairedCount = typeof s.mainRepairedDeliveryCount === "number" ? s.mainRepairedDeliveryCount : 0;
     var checksCount = typeof s.remediationCheckCount === "number" ? s.remediationCheckCount : 0;
     var dual = hd("div", "outcome-pair", [
@@ -2619,8 +3040,12 @@ function rStats(){
       hd("div", "outcome-cell", [
         h("div", "outcome-label", t("statsFinalDeliveryLabel")),
         h("div", "outcome-value", t("statsAcceptedDeliveryLine", {
-          rate: deliveryRate,
-          count: String(deliveryCount)
+          accepted: String(deliveryAccepted),
+          sample: String(deliverySample),
+          rate: deliveryRate
+        })),
+        h("div", "outcome-hint", t("statsFinalDeliveryUnavailable", {
+          count: String(deliveryUnavailable)
         })),
         h("div", "outcome-hint", t("statsFinalDeliveryHint", {
           repaired: String(repairedCount),
@@ -3453,8 +3878,7 @@ function renderModelRoutingSection(){
     wi.id = "fl-mr-w-" + w[0];
     var weights = mr.weights || {};
     var val = weights[w[0]];
-    var keyStr = String(w[0]);
-    wi.value = String(val != null ? val : (keyStr === "officialCost" || keyStr === "duration" || keyStr === "budgetReliability" ? "0" : "1"));
+    wi.value = String(val != null ? val : mrWeightDefault(String(w[0])));
     wl.appendChild(wi);
     wf.appendChild(wl);
     wf.appendChild(h("div", "hint-inline dim fs11", t(w[2])));
@@ -3804,9 +4228,10 @@ function renderMrResult(section, result){
       ? t("mrKnowledgeRecommendation")
       : t("mrKnowledgeUnknown");
     conc.appendChild(h("div", "mr-reason", t("mrKnowledge") + ": " + knowledgeText));
-    var reasons = buildMrReasons(cands, policy);
+    /* What is known first, then why comparison is not ready. */
+    var reasons = buildMrReasons(cands, policy, result);
     if(reasons.length){
-      reasons.slice(0, 3).forEach(function(r){
+      reasons.slice(0, 4).forEach(function(r){
         conc.appendChild(h("div", "mr-reason", r));
       });
     }
@@ -3867,11 +4292,30 @@ function renderMrResult(section, result){
 
       /* Human evidence facts; scoring arithmetic stays in technical detail. */
       var ev = c.evidence || {};
-      var sampleCount = typeof ev.relevantSampleCount === "number"
-        ? String(ev.relevantSampleCount) : t("decUnavailable");
-      var facts = h("div", "summary-line dim mb-4",
-        t("mrCandidateSamples", { count: sampleCount }));
-      cc.appendChild(facts);
+      var cov = c.sampleCoverage;
+      if(cov && typeof cov.exactRelevantCount === "number"){
+        cc.appendChild(h("div", "summary-line dim mb-2",
+          t("mrCandidateExactCoverage", {
+            current: String(cov.exactRelevantCount),
+            required: String(cov.exactMinRelevantSamples != null
+              ? cov.exactMinRelevantSamples
+              : (policy.minRelevantSamples || 5))
+          })));
+        if(result.taskFamily && typeof cov.familyRelevantCount === "number"){
+          cc.appendChild(h("div", "summary-line dim mb-4",
+            t("mrCandidateFamilyCoverage", {
+              current: String(cov.familyRelevantCount),
+              required: String(cov.familyMinRelevantSamples != null
+                ? cov.familyMinRelevantSamples
+                : (policy.familyMinRelevantSamples || 5))
+            })));
+        }
+      } else {
+        var sampleCount = typeof ev.relevantSampleCount === "number"
+          ? String(ev.relevantSampleCount) : t("decUnavailable");
+        cc.appendChild(h("div", "summary-line dim mb-4",
+          t("mrCandidateSamples", { count: sampleCount })));
+      }
 
       var fGrid = hd("div", "mr-candidate-factors");
       var budgetFactor = null;
@@ -3887,6 +4331,48 @@ function renderMrResult(section, result){
         if(f.factor === "budgetReliability") budgetFactor = f;
       });
       cc.appendChild(fGrid);
+
+      /* Main/delivery-backed final delivery; not machine success alone. */
+      var adAccepted = Number(ev.acceptedDeliveryCount || 0);
+      var adSample = Number(ev.acceptedDeliverySampleCount || 0);
+      var adUnavailable = Number(ev.acceptedDeliveryUnavailableCount || 0);
+      var adRate = typeof ev.acceptedDeliveryRate === "number" && adSample > 0
+        ? Math.round(ev.acceptedDeliveryRate * 100) : 0;
+      var adBlock = h("div", "mr-accepted-delivery-evidence mt-8");
+      adBlock.appendChild(h("div", "summary-line fs11", t("mrAcceptedDeliverySummary")));
+      if(adSample > 0){
+        adBlock.appendChild(h("div", "summary-line fs11 mt-2",
+          t("mrAcceptedDeliveryFact", {
+            accepted: String(adAccepted), sample: String(adSample), rate: String(adRate)
+          })));
+      } else {
+        adBlock.appendChild(h("div", "summary-line dim fs11 mt-2", t("mrAcceptedDeliveryNoComparable")));
+      }
+      adBlock.appendChild(h("div", "summary-line dim fs11 mt-2",
+        t("mrAcceptedDeliveryUnavailable", { count: String(adUnavailable) })));
+      adBlock.appendChild(h("div", "summary-line dim fs11 mt-2", t("mrAcceptedDeliveryNotMachine")));
+      cc.appendChild(adBlock);
+
+      /* First-pass verified success is separate from eventual delivery and churn. */
+      var fpSample = Number(ev.firstPassVerifiedSampleCount || 0);
+      var fpPassed = Number(ev.firstPassVerifiedSuccessCount || 0);
+      var fpUnavailable = Number(ev.firstPassUnavailableCount || 0);
+      var fpRate = typeof ev.firstPassVerifiedSuccessRate === "number"
+        ? Math.round(ev.firstPassVerifiedSuccessRate * 100) : 0;
+      var fpBlock = h("div", "mr-first-pass-evidence mt-8");
+      fpBlock.appendChild(h("div", "summary-line fs11", t("mrFirstPassSummary")));
+      if(fpSample > 0){
+        fpBlock.appendChild(h("div", "summary-line fs11 mt-2",
+          t("mrFirstPassFact", {
+            passed: String(fpPassed), sample: String(fpSample), rate: String(fpRate)
+          })));
+      } else {
+        fpBlock.appendChild(h("div", "summary-line dim fs11 mt-2", t("mrFirstPassNoComparable")));
+      }
+      fpBlock.appendChild(h("div", "summary-line dim fs11 mt-2",
+        t("mrFirstPassExcluded", { count: String(fpUnavailable) })));
+      fpBlock.appendChild(h("div", "summary-line dim fs11 mt-2", t("mrFirstPassNotFinalQuality")));
+      cc.appendChild(fpBlock);
 
       /* Keep the meaning, actual evidence and next implication together. */
       if(budgetFactor && Number(budgetFactor.weight) > 0){
@@ -3940,7 +4426,7 @@ function renderMrResult(section, result){
     section.appendChild(h("div", "mr-next-action", t("mrNextActionMainChooses")));
   } else if(result.shouldRunCompetition && (policy.competitionOnUncertainty)){
     section.appendChild(h("div", "mr-next-action", t("mrNextActionCompete")));
-  } else if(cands.some(function(c){ return (c.evidence && c.evidence.relevantSampleCount < (policy.minRelevantSamples || 5)); })){
+  } else if(mrCoverageNeedsMoreEvidence(cands, policy)){
     section.appendChild(h("div", "mr-next-action", t("mrNextActionMoreEvidence")));
   } else {
     section.appendChild(h("div", "mr-next-action", t("mrNextActionSavePrefs")));
@@ -4016,17 +4502,96 @@ function renderMrResult(section, result){
   section.appendChild(tech);
 }
 
+/* True when neither exact-type nor broader-category coverage is ready as a set.
+ * Incomplete family rows alone must not demand more work when exact is already ready. */
+function mrCoverageNeedsMoreEvidence(cands, policy){
+  if(!cands.length) return false;
+  var minExact = policy.minRelevantSamples || 5;
+  var minFamily = policy.familyMinRelevantSamples || 5;
+  var exactReady = cands.every(function(c){
+    var cov = c.sampleCoverage;
+    if(cov && typeof cov.exactRelevantCount === "number"){
+      var exactMin = cov.exactMinRelevantSamples != null ? cov.exactMinRelevantSamples : minExact;
+      return cov.exactRelevantCount >= exactMin;
+    }
+    return (c.evidence && c.evidence.relevantSampleCount) >= minExact;
+  });
+  if(exactReady) return false;
+  var hasFamilyCoverage = cands.every(function(c){
+    return c.sampleCoverage && typeof c.sampleCoverage.familyRelevantCount === "number";
+  });
+  if(hasFamilyCoverage){
+    var familyReady = cands.every(function(c){
+      var cov = c.sampleCoverage;
+      var familyMin = cov.familyMinRelevantSamples != null
+        ? cov.familyMinRelevantSamples : minFamily;
+      return cov.familyRelevantCount >= familyMin;
+    });
+    if(familyReady) return false;
+  }
+  return true;
+}
+
 /* Shared helper: produce human-readable reasons for no-recommendation */
-function buildMrReasons(cands, policy){
+function buildMrReasons(cands, policy, result){
   var reasons = [];
   var minS = policy.minRelevantSamples || 5;
+  var minFamily = policy.familyMinRelevantSamples || 5;
   var threshold = policy.uncertaintyThreshold != null ? policy.uncertaintyThreshold : 0.15;
-  var hasLowSamples = cands.some(function(c){
-    return (c.evidence && c.evidence.relevantSampleCount) < minS;
-  });
-  if(hasLowSamples){
-    reasons.push(t("mrInsufficientSamples", { min: String(minS) }));
+  var evidenceScope = result && result.evidenceScope ? result.evidenceScope : "none";
+  var hasFamily = !!(result && result.taskFamily);
+  var coverages = cands.map(function(c){ return c.sampleCoverage || null; });
+  var hasAnyCoverage = coverages.some(function(cov){ return !!cov; });
+
+  if(evidenceScope === "none" && hasAnyCoverage){
+    var anyExact = coverages.some(function(cov){
+      return cov && (cov.exactRelevantCount > 0 || cov.exactTerminalCount > 0);
+    });
+    var anyFamily = coverages.some(function(cov){
+      return cov && typeof cov.familyRelevantCount === "number"
+        && (cov.familyRelevantCount > 0 || (cov.familyTerminalCount || 0) > 0);
+    });
+    var familyIncomplete = hasFamily && coverages.some(function(cov){
+      return cov && typeof cov.familyRelevantCount === "number"
+        && cov.familyRelevantCount < (cov.familyMinRelevantSamples != null
+          ? cov.familyMinRelevantSamples : minFamily);
+    });
+    if(anyFamily && familyIncomplete){
+      /* Related history exists, but the set is not yet fair to compare. */
+      reasons.push(t("mrIncompleteFamilyComparison", {
+        min: String(minFamily)
+      }));
+    } else if(!anyExact && !hasFamily){
+      reasons.push(t("mrNoExactHistory"));
+    } else if(!anyExact && hasFamily && !anyFamily){
+      reasons.push(t("mrNoExactHistory"));
+      reasons.push(t("mrNoFamilyHistory"));
+    } else {
+      reasons.push(t("mrInsufficientSamples", { min: String(minS) }));
+    }
+  } else {
+    var hasLowSamples = cands.some(function(c){
+      var cov = c.sampleCoverage;
+      if(evidenceScope === "task-family" && cov
+        && typeof cov.familyRelevantCount === "number"){
+        return cov.familyRelevantCount < (cov.familyMinRelevantSamples != null
+          ? cov.familyMinRelevantSamples : minFamily);
+      }
+      if(evidenceScope === "exact-class" && cov
+        && typeof cov.exactRelevantCount === "number"){
+        return cov.exactRelevantCount < (cov.exactMinRelevantSamples != null
+          ? cov.exactMinRelevantSamples : minS);
+      }
+      var activeMinimum = evidenceScope === "task-family" ? minFamily : minS;
+      return (c.evidence && c.evidence.relevantSampleCount) < activeMinimum;
+    });
+    if(hasLowSamples){
+      reasons.push(t("mrInsufficientSamples", {
+        min: String(evidenceScope === "task-family" ? minFamily : minS)
+      }));
+    }
   }
+
   var allGap = cands.every(function(c){
     return c.uncertainty && c.uncertainty.insufficientGap;
   });
@@ -5830,6 +6395,153 @@ function showPlanBoard(id){
   });
 }
 
+function showGoalDetail(id){
+  loadingDetail(t("goalDetailLoading"));
+  fetchJSON("/api/ops/goals/" + encodeURIComponent(id)).then(function(goal){
+    var f = fr();
+    f.setAttribute("data-fl-role", "goal-detail");
+    f.appendChild(closeBtn());
+    f.appendChild(cardHead(goal.name || t("navGoals"), "", badge(goal.status || "pending")));
+    f.appendChild(h("div", "card-subtitle mb-8", goal.objective || ""));
+    var localizedCause = goalReasonLabel(goal.reasonCode, goal.reason || "");
+    f.appendChild(h("div", "summary-line mb-4", t("goalStoryHappened", {
+      text: goalStoryHappenedText(goal)
+    })));
+    f.appendChild(h("div", "summary-line mb-4", t("goalStoryWaiting", {
+      text: goalStoryWaitingText(goal)
+    })));
+    f.appendChild(h("div", "summary-line mb-8", t("goalStoryNext", {
+      text: goalNextActionLabel(goal.nextActionCode, goal.nextAction)
+    })));
+    if(goal.currentMilestone){
+      f.appendChild(h("div", "summary-line mb-8", t("goalCurrentMilestone", {
+        item: String(goal.currentMilestone.itemId || ""),
+        gate: String(goal.currentMilestone.gate || ""),
+        task: String(goal.currentMilestone.taskName || goal.currentMilestone.taskId || "")
+      })));
+    }
+    var policy = goal.policy || {};
+    f.appendChild(h("div", "fs11 dim mb-8", t("goalPolicyLine", {
+      duration: policy.maxDurationMs === null || policy.maxDurationMs === undefined
+        ? t("goalUnlimited")
+        : readableDuration(policy.maxDurationMs),
+      noProgress: policy.noProgressTimeoutMs === null || policy.noProgressTimeoutMs === undefined
+        ? t("goalUnlimited")
+        : readableDuration(policy.noProgressTimeoutMs),
+      corrections: String(policy.maxCorrectionRounds ?? 0),
+      reviews: String(policy.maxReviewRounds ?? 0),
+      evidence: String(policy.maxNoNewEvidenceCycles ?? 0)
+    })));
+    var counters = goal.counters || {};
+    f.appendChild(h("div", "fs11 dim mb-8", t("goalCountersLine", {
+      corrections: String(counters.correctionRounds || 0),
+      reviews: String(counters.reviewRounds || 0),
+      evidence: String(counters.noNewEvidenceCycles || 0)
+    })));
+    if(goal.status === "stopped"){
+      f.appendChild(h("div", "summary-line mb-8", t("goalStoppedLine", {
+        reason: localizedCause || t("goalStoppedDefault"),
+        at: goal.stoppedAt ? fmtTm(goal.stoppedAt) : "-"
+      })));
+    }
+    var pr = goal.progress || {};
+    f.appendChild(h("div", "summary-line mb-8", t("goalProgressCompact", {
+      satisfied: String(pr.satisfied || 0),
+      total: String(pr.total || 0),
+      percent: String(pr.percent || 0)
+    })));
+    var actions = h("div", "actions mb-8");
+    if(goal.status !== "stopped" && goal.status !== "completed"){
+      var advanceBtn = h("button", "btn sm", t("goalAdvance"));
+      advanceBtn.type = "button";
+      advanceBtn.setAttribute("data-fl-role", "goal-advance");
+      advanceBtn.addEventListener("click", function(){
+        if(!window.confirm(t("goalAdvanceConfirm"))) return;
+        taskAction("/api/ops/goals/" + encodeURIComponent(id) + "/advance", { confirm: true }, advanceBtn, function(){
+          showGoalDetail(id);
+          refresh();
+        });
+      });
+      actions.appendChild(advanceBtn);
+      var stopBtn = h("button", "btn sm danger", t("goalStop"));
+      stopBtn.type = "button";
+      stopBtn.setAttribute("data-fl-role", "goal-stop");
+      stopBtn.addEventListener("click", function(){
+        if(!window.confirm(t("goalStopConfirm"))) return;
+        taskAction("/api/ops/goals/" + encodeURIComponent(id) + "/stop", { confirm: true }, stopBtn, function(){
+          showGoalDetail(id);
+          refresh();
+        });
+      });
+      actions.appendChild(stopBtn);
+    }
+    f.appendChild(actions);
+    var list = h("div", "goal-milestones");
+    list.appendChild(h("div", "section-title", t("goalMilestonesTitle")));
+    (goal.milestones || []).forEach(function(m){
+      var row = h("div", "summary-card mb-8");
+      row.setAttribute("data-fl-role", "goal-milestone");
+      var displayTask = m.effectiveTaskName || m.effectiveTaskId || m.taskName || m.taskId || "";
+      row.appendChild(cardHead(
+        m.itemId + " · " + m.gate,
+        displayTask,
+        badge(m.satisfied ? "completed" : (m.effectiveTaskStatus || m.taskStatus || "waiting"))
+      ));
+      // Plain-language delivery explanation in the selected locale. Keep the
+      // canonical basis only as a non-visible audit attribute; users should not
+      // need to understand internal state tokens.
+      var milestoneReason = m.satisfied
+        ? (goalMilestoneDeliveryLabel(m.deliveryBasis, m.reason || "") || m.reason || "")
+        : (m.reason || "");
+      row.appendChild(h("div", "summary-line", milestoneReason));
+      if(m.satisfied && m.deliveryBasis){
+        row.setAttribute("data-fl-delivery-basis", String(m.deliveryBasis));
+      }
+      if(m.handoff){
+        row.appendChild(h("div", "summary-line", t("goalHandoffMilestoneLine", {
+          status: handoffStatusLabel(m.handoff.status),
+          successor: String(m.handoff.successorTaskId || ""),
+          profile: String(m.handoff.destinationWorkerProfileId || ""),
+          paths: String(m.handoff.reusablePathCount || 0),
+          gaps: String(m.handoff.remainingGapCount || 0)
+        })));
+        row.appendChild(h("div", "summary-line dim", t("compHandoffNext", {
+          action: handoffNextActionLabel(m.handoff.nextAction)
+        })));
+      }
+      if(m.candidateDigestPrefix){
+        row.appendChild(h("div", "fs11 dim mono", t("goalCandidateDigest", {
+          digest: m.candidateDigestPrefix
+        })));
+      }
+      if(m.worker && (m.worker.provider || m.worker.model)){
+        row.appendChild(h("div", "fs11 dim", t("goalWorkerIdentity", {
+          provider: String(m.worker.provider || ""),
+          model: String(m.worker.model || ""),
+          runtime: String(m.worker.runtime || "")
+        })));
+      }
+      row.appendChild(h("div", "summary-line dim", t("goalNextLine", {
+        text: goalNextActionLabel(m.nextActionCode, m.nextAction)
+      })));
+      var openId = m.effectiveTaskId || m.taskId;
+      if(openId){
+        row.setAttribute("role", "button");
+        row.tabIndex = 0;
+        row.addEventListener("click", function(){ showTask(openId); });
+        row.addEventListener("keydown", function(ev){
+          if(ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); showTask(openId); }
+        });
+      }
+      list.appendChild(row);
+    });
+    f.appendChild(list);
+    showDetail(f);
+  }).catch(function(e){
+    detailEl.replaceChildren(detailErrorFragment("goalDetailLoadFailed", e));
+  });
+}
+
 function taskAction(path, body, btn, onOk){
   if(btn) btn.disabled = true;
   flashError("");
@@ -5886,6 +6598,34 @@ function attemptStateLabel(status){
     interrupted: "journeyAttemptInterrupted" };
   return t(map[status] || "journeyAttemptUnknown");
 }
+/* Primary Attempt label prefers a closed presentationState derived from durable
+ * same-Attempt events when the parent Task is already terminal. Raw status stays
+ * secondary technical evidence and is never the primary "still running" claim. */
+function attemptPrimaryLabel(att){
+  var item = att && typeof att === "object" ? att : {};
+  if(item.presentationState === "ended-after-worker-completion"){
+    return t("journeyAttemptEndedAfterWorkerCompletion");
+  }
+  if(item.presentationState === "ended-unsuccessfully"){
+    return t("journeyAttemptEndedUnsuccessfully");
+  }
+  return attemptStateLabel(item.status);
+}
+function attemptPresentationExplain(att){
+  var item = att && typeof att === "object" ? att : {};
+  if(item.presentationState === "ended-after-worker-completion"){
+    return t("journeyAttemptEndedAfterWorkerCompletionExplain");
+  }
+  if(item.presentationState === "ended-unsuccessfully"){
+    return t("journeyAttemptEndedUnsuccessfullyExplain");
+  }
+  return "";
+}
+function attemptHasClosedPresentation(att){
+  var item = att && typeof att === "object" ? att : {};
+  return item.presentationState === "ended-after-worker-completion"
+    || item.presentationState === "ended-unsuccessfully";
+}
 function reviewDecisionLabel(decision){
   var map = { accept: "journeyReviewAccept", revise: "journeyReviewRevise", reject: "journeyReviewReject" };
   return t(map[decision] || decision || "journeyFailureUnknown");
@@ -5931,8 +6671,18 @@ function taskStoryPresentation(task){
   var taskStatus = String(source.status || "waiting");
   var taskFailed = taskStatus === "failed" || taskStatus === "interrupted" || taskStatus === "blocked";
   var taskSucceeded = taskStatus === "succeeded" || taskStatus === "completed";
-  var anyAttemptFailed = attempts.some(function(item){ return item && item.status === "failed"; });
-  var anyAttemptRunning = attempts.some(function(item){ return item && item.status === "running"; });
+  var anyAttemptFailed = attempts.some(function(item){
+    return item && (item.status === "failed"
+      || item.presentationState === "ended-after-worker-completion"
+      || item.presentationState === "ended-unsuccessfully");
+  });
+  /* A closed presentationState means durable events already proved this Attempt
+   * ended, so a leftover recorded "running" status must not look active. */
+  var anyAttemptRunning = attempts.some(function(item){
+    return item && item.status === "running"
+      && item.presentationState !== "ended-after-worker-completion"
+      && item.presentationState !== "ended-unsuccessfully";
+  });
   var workerState = amendedAcceptance ? "complete"
     : anyAttemptRunning ? (taskFailed ? "failed" : "running")
     : anyAttemptFailed ? "failed"
@@ -6273,6 +7023,492 @@ function renderRoutingDecisionCard(rd){
   return cardEl;
 }
 
+function competitionNextActionLabel(code){
+  var keys = {
+    "wait-for-candidates": "compTaskNextWaitCandidates",
+    compare: "compTaskNextCompare",
+    "main-review": "compTaskNextMainReview",
+    integration: "compTaskNextIntegration",
+    "correct-candidate": "compTaskNextCorrect",
+    stopped: "compTaskNextStopped"
+  };
+  return t(keys[code] || "compTaskNextMainReview");
+}
+
+/* Task Detail projection of the actual Competition this Candidate belongs to.
+ * This is separate from routing advice: it explains what really ran, what the
+ * machine comparison found, what Main decided, and what is allowed next. */
+function renderTaskCompetitionContext(ctx){
+  if(!ctx || !ctx.competitionId) return null;
+  var cardEl = h("div", "card form-card competition-task-context");
+  cardEl.setAttribute("data-fl-role", "task-competition-context");
+  cardEl.appendChild(h("div", "card-title mb-4", t("compTaskTitle")));
+  cardEl.appendChild(h("div", "summary-line dim mb-8", t("compTaskExplain")));
+  if(ctx.legacy === true){
+    cardEl.appendChild(h("div", "summary-line dim", t("compStoryReasonUnavailable")));
+  } else if(ctx.reason && ctx.reason.note){
+    cardEl.appendChild(h("div", "summary-line", t("compStoryReason", {
+      reason: String(ctx.reason.note)
+    })));
+  }
+  var own = ctx.candidate || {};
+  var identity = own.identity;
+  cardEl.appendChild(h("div", "summary-line", t("compTaskThisWorker", {
+    worker: String(own.providerName || "?") + "/" + String(own.modelName || "?"),
+    status: statusLabel(own.taskStatus || "unknown")
+  })));
+  if(identity){
+    cardEl.appendChild(h("div", "summary-line dim fs11", t("compTaskIdentity", {
+      runtime: String(identity.runtime || "?"), effort: String(identity.effort || "?")
+    })));
+  }
+  var all = Array.isArray(ctx.candidates) ? ctx.candidates : [];
+  if(all.length > 1){
+    cardEl.appendChild(h("div", "summary-line dim fs11", t("compTaskOtherWorkers", {
+      count: String(all.length - 1)
+    })));
+  }
+  var machine = ctx.machineComparison || {};
+  if(machine.state === "recommendation" && machine.recommendation){
+    var recommended = all.find(function(entry){
+      return entry.candidateId === machine.recommendation.candidateId;
+    });
+    cardEl.appendChild(h("div", "summary-line", t("compTaskMachineRecommendation", {
+      worker: recommended
+        ? String(recommended.providerName || "?") + "/" + String(recommended.modelName || "?")
+        : t("compCandidateUnknown")
+    })));
+  } else if(machine.state === "no-deliverable"){
+    cardEl.appendChild(h("div", "summary-line", t("compStoryMachineNoDeliverable")));
+  } else {
+    cardEl.appendChild(h("div", "summary-line dim", t("compStoryMachineWaiting")));
+  }
+  var decision = ctx.mainDecision;
+  if(decision){
+    var decisionKey = decision.decision === "accept" ? "compStoryMainAccepted"
+      : decision.decision === "revise" ? "compStoryMainRevised"
+      : "compStoryMainRejected";
+    cardEl.appendChild(h("div", "summary-line", t(decisionKey, {
+      candidate: String(decision.candidateId === own.candidateId
+        ? (own.providerName || "?") + "/" + (own.modelName || "?")
+        : t("compCandidateUnknown"))
+    })));
+    if(ctx.mainDecisionCurrent !== true){
+      cardEl.appendChild(h("div", "summary-line dim fs11", t("compTaskDecisionStale")));
+    }
+  } else {
+    cardEl.appendChild(h("div", "summary-line dim", t("compStoryMainNone")));
+  }
+  var retained = Array.isArray(ctx.retainedPartial) ? ctx.retainedPartial : [];
+  var ownRetained = retained.find(function(entry){ return entry.candidateId === own.candidateId; });
+  if(ownRetained){
+    cardEl.appendChild(h("div", "summary-line dim", t("compStoryRetained", {
+      candidate: String(own.providerName || "?") + "/" + String(own.modelName || "?"),
+      paths: String((ownRetained.reusablePaths || []).length),
+      gaps: String((ownRetained.remainingGaps || []).length)
+    })));
+  }
+  var handoffs = Array.isArray(ctx.handoffs) ? ctx.handoffs : [];
+  var ownHandoff = handoffs.find(function(entry){
+    return entry.sourceCandidateId === own.candidateId
+      || entry.successorTaskId === (task && task.id)
+      || entry.sourceTaskId === (task && task.id);
+  });
+  if(ownHandoff){
+    cardEl.appendChild(h("div", "summary-line", t("compStoryHandoff", {
+      from: String(own.providerName || "?") + "/" + String(own.modelName || "?"),
+      to: String(ownHandoff.destinationWorkerProfileId || "?"),
+      paths: String(ownHandoff.reusablePathCount || 0),
+      gaps: String(ownHandoff.remainingGapCount || 0),
+      status: handoffStatusLabel(ownHandoff.status)
+    })));
+    if(ownHandoff.failureCode){
+      cardEl.appendChild(h("div", "summary-line dim fs11", t("compHandoffFailure", {
+        code: handoffFailureLabel(ownHandoff.failureCode)
+      })));
+    }
+    cardEl.appendChild(h("div", "summary-line dim fs11", t("compHandoffNext", {
+      action: handoffNextActionLabel(ownHandoff.nextAction)
+    })));
+  }
+  cardEl.appendChild(h("div", "summary-line mt-4", t("compTaskNext", {
+    action: competitionNextActionLabel(ctx.nextAction)
+  })));
+  var open = h("button", "btn sm", t("compTaskOpenCompetition"));
+  open.type = "button";
+  open.addEventListener("click", function(){ showCompetition(ctx.competitionId); });
+  cardEl.appendChild(hd("div", "actions mt-8", [open]));
+  return cardEl;
+}
+
+function handoffStatusLabel(status){
+  var map = {
+    authorized: "compHandoffStatusAuthorized",
+    preparing: "compHandoffStatusPreparing",
+    prepared: "compHandoffStatusPrepared",
+    failed: "compHandoffStatusFailed"
+  };
+  return t(map[status] || "compHandoffStatusAuthorized");
+}
+
+function handoffFailureLabel(code){
+  var goalCodes = {
+    "not-goal-task": "goalHandoffFailNotGoal",
+    "goal-terminal": "goalHandoffFailTerminal",
+    "source-not-eligible": "goalHandoffFailSource"
+  };
+  if(goalCodes[code]) return t(goalCodes[code]);
+  var map = {
+    "stale-revision": "compHandoffFailStale",
+    "missing-retained": "compHandoffFailMissingRetained",
+    "missing-revision": "compHandoffFailMissingRevision",
+    "same-profile": "compHandoffFailSameProfile",
+    "profile-not-launchable": "compHandoffFailNotLaunchable",
+    "final-choice": "compHandoffFailFinalChoice",
+    "duplicate-handoff": "compHandoffFailDuplicate",
+    "source-is-successor": "compHandoffFailHop",
+    "materialization-failed": "compHandoffFailMaterialize",
+    "apply-mismatch": "compHandoffFailApply",
+    "profile-unknown": "compHandoffFailProfileUnknown"
+  };
+  return t(map[code] || "compHandoffFailGeneric");
+}
+
+function handoffNextActionLabel(action){
+  var map = {
+    "wait-for-successor": "compHandoffNextWait",
+    "review-successor": "compHandoffNextReview",
+    "inspect-failure": "compHandoffNextInspect",
+    "choose-different-profile": "compHandoffNextProfile",
+    "retain-fresh-candidate": "compHandoffNextRetain",
+    "none": "compHandoffNextNone"
+  };
+  return t(map[action] || "compHandoffNextInspect");
+}
+
+function competitionHandoffControls(competitionId, status, onDone){
+  var retained = Array.isArray(status && status.retainedPartial) ? status.retainedPartial : [];
+  var handoffs = Array.isArray(status && status.handoffs) ? status.handoffs : [];
+  var cands = Array.isArray(status && status.candidates) ? status.candidates : [];
+  if(!retained.length) return null;
+  var box = h("div", "card form-card competition-handoff-controls");
+  box.setAttribute("data-fl-role", "competition-handoff-controls");
+  box.appendChild(h("div", "card-title mb-4", t("compHandoffTitle")));
+  box.appendChild(h("div", "summary-line dim mb-8", t("compHandoffHint")));
+  retained.forEach(function(entry){
+    var existing = handoffs.find(function(hEntry){ return hEntry.sourceCandidateId === entry.candidateId; });
+    var cand = cands.find(function(c){ return c.candidateId === entry.candidateId; });
+    var label = cand
+      ? String(cand.providerName || "?") + "/" + String(cand.modelName || "?")
+      : String(entry.candidateId || "");
+    var row = h("div", "handoff-entry mb-8");
+    row.appendChild(h("div", "summary-line", t("compHandoffRetained", {
+      candidate: label,
+      paths: String((entry.reusablePaths || []).length),
+      gaps: String((entry.remainingGaps || []).length)
+    })));
+    if(existing){
+      row.appendChild(h("div", "summary-line", t("compStoryHandoff", {
+        from: label,
+        to: String(existing.destinationWorkerProfileId || "?"),
+        paths: String(existing.reusablePathCount || 0),
+        gaps: String(existing.remainingGapCount || 0),
+        status: handoffStatusLabel(existing.status)
+      })));
+      if(existing.successorTaskId){
+        var openSucc = h("button", "btn sm", t("compHandoffOpenSuccessor"));
+        openSucc.type = "button";
+        openSucc.addEventListener("click", function(){ showTask(existing.successorTaskId); });
+        row.appendChild(hd("div", "actions mt-4", [openSucc]));
+      }
+      if(existing.failureCode){
+        row.appendChild(h("div", "summary-line dim fs11", t("compHandoffFailure", {
+          code: handoffFailureLabel(existing.failureCode)
+        })));
+      }
+      box.appendChild(row);
+      return;
+    }
+    var revLabel = h("label", "", t("compHandoffRevisionLabel"));
+    var revInput = h("input", "");
+    revInput.type = "text";
+    revInput.placeholder = t("compHandoffRevisionPh");
+    if(entry.candidateRevisionId) revInput.value = String(entry.candidateRevisionId);
+    revLabel.appendChild(revInput);
+    row.appendChild(revLabel);
+    var profileLabel = h("label", "", t("compHandoffProfileLabel"));
+    var profileInput = h("input", "");
+    profileInput.type = "text";
+    profileInput.placeholder = t("compHandoffProfilePh");
+    profileLabel.appendChild(profileInput);
+    row.appendChild(profileLabel);
+    var reasonLabel = h("label", "", t("taskReviewReason"));
+    var reasonInput = h("input", "");
+    reasonInput.type = "text";
+    reasonInput.placeholder = t("compHandoffReasonPh");
+    reasonLabel.appendChild(reasonInput);
+    row.appendChild(reasonLabel);
+    var submit = h("button", "btn sm primary", t("compHandoffSubmit"));
+    submit.type = "button";
+    submit.addEventListener("click", function(){
+      if(!revInput.value.trim()){ flashError(t("compHandoffRevisionRequired")); return; }
+      if(!profileInput.value.trim()){ flashError(t("compHandoffProfileRequired")); return; }
+      if(!reasonInput.value.trim()){ flashError(t("taskReviewReasonRequired")); return; }
+      if(!window.confirm(t("compHandoffConfirm"))) return;
+      taskAction("/api/ops/competitions/" + encodeURIComponent(competitionId) + "/handoff", {
+        candidateId: entry.candidateId,
+        candidateRevisionId: revInput.value.trim(),
+        destinationWorkerProfileId: profileInput.value.trim(),
+        reason: reasonInput.value.trim(),
+        confirm: true
+      }, submit, onDone);
+    });
+    row.appendChild(hd("div", "actions mt-4", [submit]));
+    box.appendChild(row);
+  });
+  return box;
+}
+
+function renderCandidateHandoffCard(task){
+  var hand = task.journey && task.journey.candidateHandoff;
+  if(!hand) return null;
+  var card = h("div", "card form-card candidate-handoff-card");
+  card.setAttribute("data-fl-role", "candidate-handoff");
+  card.appendChild(h("div", "card-title mb-4", t("taskHandoffJourneyTitle")));
+  card.appendChild(h("div", "summary-line dim mb-8", t("taskHandoffJourneyIntro")));
+  if(hand.originKind === "goal-task"){
+    card.appendChild(h("div", "summary-line", t("goalHandoffOriginLabel")));
+  } else if(hand.originKind === "competition"){
+    card.appendChild(h("div", "summary-line", t("compHandoffOriginLabel")));
+  }
+  card.appendChild(h("div", "summary-line", t("taskHandoffRole", {
+    role: hand.role === "successor" ? t("taskHandoffRoleSuccessor") : t("taskHandoffRoleSource")
+  })));
+  card.appendChild(h("div", "summary-line", t("taskHandoffStatus", {
+    status: handoffStatusLabel(hand.status)
+  })));
+  if(hand.destinationWorkerProfileId){
+    card.appendChild(h("div", "summary-line", t("taskHandoffDestination", {
+      profile: String(hand.destinationWorkerProfileId),
+      worker: String(hand.destinationProvider || "?") + "/" + String(hand.destinationModel || "?")
+    })));
+  }
+  card.appendChild(h("div", "summary-line", t("taskHandoffCounts", {
+    paths: String(hand.reusablePathCount || 0),
+    gaps: String(hand.remainingGapCount || 0)
+  })));
+  if(Array.isArray(hand.reusablePaths) && hand.reusablePaths.length){
+    card.appendChild(h("div", "summary-line dim fs11", t("taskHandoffPaths", {
+      paths: hand.reusablePaths.slice(0, 8).join(", ")
+    })));
+  }
+  if(hand.sourceDigestPrefix){
+    card.appendChild(h("div", "summary-line dim fs11", t("taskHandoffDigest", {
+      digest: String(hand.sourceDigestPrefix)
+    })));
+  }
+  if(hand.failureCode){
+    card.appendChild(h("div", "summary-line", t("compHandoffFailure", {
+      code: handoffFailureLabel(hand.failureCode)
+    })));
+  }
+  card.appendChild(h("div", "summary-line", t("compHandoffNext", {
+    action: handoffNextActionLabel(hand.nextAction)
+  })));
+  card.appendChild(h("div", "summary-line dim", t("taskHandoffNotRetry")));
+  if(hand.role === "source" && hand.successorTaskId){
+    var open = h("button", "btn sm", t("compHandoffOpenSuccessor"));
+    open.type = "button";
+    open.addEventListener("click", function(){ showTask(hand.successorTaskId); });
+    card.appendChild(hd("div", "actions mt-8", [open]));
+  } else if(hand.role === "successor" && hand.sourceTaskId){
+    var openSrc = h("button", "btn sm", t("compHandoffOpenSource"));
+    openSrc.type = "button";
+    openSrc.addEventListener("click", function(){ showTask(hand.sourceTaskId); });
+    card.appendChild(hd("div", "actions mt-8", [openSrc]));
+  }
+  return card;
+}
+
+/**
+ * Direct Goal-Task handoff controls on Task Detail. Confirmation-gated;
+ * policy stays in the daemon. Surfaces only when retained Candidate paths
+ * exist and no handoff journey is already recorded on this Task.
+ */
+function renderGoalTaskHandoffControls(task){
+  if(!task || !task.id) return null;
+  if(task.journey && task.journey.candidateHandoff) return null;
+  var retained = task.journey && task.journey.retainedCandidate;
+  if(!retained || retained.status !== "available") return null;
+  if(!Array.isArray(retained.affectedPaths) || !retained.affectedPaths.length) return null;
+  if(!retained.revisionId) return null;
+  // Only terminal reviewable Task statuses are candidates for direct handoff.
+  var status = String(task.status || "");
+  if(status !== "failed" && status !== "interrupted" && status !== "succeeded") return null;
+  // Competition Candidates use the Competition handoff path.
+  if(task.competitionContext) return null;
+
+  var box = h("div", "card form-card goal-task-handoff-controls");
+  box.setAttribute("data-fl-role", "goal-task-handoff-controls");
+  box.appendChild(h("div", "card-title mb-4", t("goalHandoffTitle")));
+  box.appendChild(h("div", "summary-line dim mb-8", t("goalHandoffHint")));
+  box.appendChild(h("div", "summary-line mb-4", t("goalHandoffRetainedPaths", {
+    paths: retained.affectedPaths.slice(0, 8).join(", ")
+  })));
+
+  var revLab = h("label", "", t("compHandoffRevisionLabel"));
+  var revInput = h("input", "");
+  revInput.type = "text";
+  revInput.placeholder = t("compHandoffRevisionPh");
+  revInput.value = String(retained.revisionId || "");
+  revLab.appendChild(revInput);
+  box.appendChild(revLab);
+
+  var pathsLab = h("label", "", t("goalHandoffReusableLabel"));
+  var pathsInput = h("input", "");
+  pathsInput.type = "text";
+  pathsInput.placeholder = t("goalHandoffReusablePh");
+  pathsInput.value = retained.affectedPaths.length === 1
+    ? String(retained.affectedPaths[0])
+    : "";
+  pathsLab.appendChild(pathsInput);
+  box.appendChild(pathsLab);
+
+  var gapsLab = h("label", "", t("goalHandoffGapsLabel"));
+  var gapsInput = h("textarea", "");
+  gapsInput.rows = 3;
+  gapsInput.placeholder = t("goalHandoffGapsPh");
+  gapsLab.appendChild(gapsInput);
+  box.appendChild(gapsLab);
+
+  var profileLab = h("label", "", t("compHandoffProfileLabel"));
+  var profileInput = h("input", "");
+  profileInput.type = "text";
+  profileInput.placeholder = t("compHandoffProfilePh");
+  profileLab.appendChild(profileInput);
+  box.appendChild(profileLab);
+
+  var reasonLab = h("label", "", t("compHandoffReasonPh"));
+  var reasonInput = h("input", "");
+  reasonInput.type = "text";
+  reasonInput.placeholder = t("compHandoffReasonPh");
+  reasonLab.appendChild(reasonInput);
+  box.appendChild(reasonLab);
+
+  var submit = h("button", "btn sm", t("goalHandoffSubmit"));
+  submit.type = "button";
+  submit.addEventListener("click", function(){
+    if(!revInput.value.trim()){
+      flashError(t("compHandoffRevisionRequired"));
+      return;
+    }
+    if(!profileInput.value.trim()){
+      flashError(t("compHandoffProfileRequired"));
+      return;
+    }
+    if(!reasonInput.value.trim()){
+      flashError(t("goalHandoffReasonRequired"));
+      return;
+    }
+    var reusablePaths = pathsInput.value.split(",").map(function(p){ return p.trim(); }).filter(Boolean);
+    if(!reusablePaths.length){
+      flashError(t("goalHandoffReusableRequired"));
+      return;
+    }
+    var remainingGaps;
+    try {
+      remainingGaps = JSON.parse(gapsInput.value.trim() || "[]");
+    } catch (e) {
+      flashError(t("goalHandoffGapsInvalid"));
+      return;
+    }
+    if(!Array.isArray(remainingGaps) || !remainingGaps.length){
+      flashError(t("goalHandoffGapsRequired"));
+      return;
+    }
+    if(!window.confirm(t("goalHandoffConfirm"))) return;
+    taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/goal-handoff", {
+      candidateRevisionId: revInput.value.trim(),
+      reusablePaths: reusablePaths,
+      remainingGaps: remainingGaps,
+      destinationWorkerProfileId: profileInput.value.trim(),
+      reason: reasonInput.value.trim(),
+      confirm: true
+    }, submit, function(){ showTask(task.id); });
+  });
+  box.appendChild(hd("div", "actions mt-8", [submit]));
+  return box;
+}
+
+function competitionDecisionControls(competitionId, candidates, selectedCandidateId, onDone){
+  var list = Array.isArray(candidates) ? candidates : [];
+  var box = h("div", "card form-card competition-main-controls");
+  box.setAttribute("data-fl-role", "competition-main-controls");
+  box.appendChild(h("div", "card-title mb-4", t("compMainActionTitle")));
+  box.appendChild(h("div", "summary-line dim mb-8", t("compMainActionHint")));
+  var candidateLabel = h("label", "", t("compMainCandidateLabel"));
+  var candidateSelect = h("select", "");
+  list.forEach(function(candidate){
+    var optionEl = document.createElement("option");
+    optionEl.value = String(candidate.candidateId || "");
+    optionEl.textContent = String(candidate.providerName || "?") + "/" + String(candidate.modelName || "?")
+      + " - " + statusLabel(candidate.taskStatus || "unknown");
+    if(candidate.candidateId === selectedCandidateId) optionEl.selected = true;
+    candidateSelect.appendChild(optionEl);
+  });
+  candidateLabel.appendChild(candidateSelect);
+  box.appendChild(candidateLabel);
+  var decisionLabel = h("label", "", t("taskReviewDecision"));
+  var decisionSelect = h("select", "");
+  [["accept", t("taskAccept")], ["revise", t("taskReviewRevise")], ["reject", t("taskReject")]].forEach(function(pair){
+    var optionEl = document.createElement("option");
+    optionEl.value = pair[0]; optionEl.textContent = pair[1]; decisionSelect.appendChild(optionEl);
+  });
+  decisionLabel.appendChild(decisionSelect);
+  box.appendChild(decisionLabel);
+  var reasonLabel = h("label", "", t("taskReviewReason"));
+  var reasonInput = h("input", "");
+  reasonInput.type = "text";
+  reasonInput.placeholder = t("compMainReasonPh");
+  reasonLabel.appendChild(reasonInput);
+  box.appendChild(reasonLabel);
+  var stateLine = h("div", "summary-line dim fs11");
+  box.appendChild(stateLine);
+  var submit = h("button", "btn sm primary", t("compMainSubmit"));
+  submit.type = "button";
+  function selectedCandidate(){
+    return list.find(function(candidate){ return candidate.candidateId === candidateSelect.value; });
+  }
+  function sync(){
+    var candidate = selectedCandidate();
+    var reviewed = candidate && candidate.mainReviewDecision;
+    if(reviewed === "accept" || reviewed === "revise" || reviewed === "reject"){
+      decisionSelect.value = reviewed;
+      stateLine.textContent = t("compMainReviewedReady", { decision: reviewDecisionLabel(reviewed) });
+      submit.disabled = false;
+    } else {
+      stateLine.textContent = t("compMainReviewFirst");
+      submit.disabled = true;
+    }
+  }
+  candidateSelect.addEventListener("change", sync);
+  sync();
+  submit.addEventListener("click", function(){
+    var candidate = selectedCandidate();
+    if(!candidate){ flashError(t("compMainCandidateRequired")); return; }
+    if(!reasonInput.value.trim()){ flashError(t("taskReviewReasonRequired")); return; }
+    if(!window.confirm(t("compMainConfirm"))) return;
+    taskAction("/api/ops/competitions/" + encodeURIComponent(competitionId) + "/main-decision", {
+      candidateId: candidate.candidateId,
+      decision: decisionSelect.value,
+      reason: reasonInput.value.trim(),
+      confirm: true
+    }, submit, onDone);
+  });
+  box.appendChild(hd("div", "actions", [submit]));
+  return box;
+}
+
 function correctionStatusLabel(status){
   var key = {
     pending: "taskCorrectStatusPending",
@@ -6331,7 +7567,10 @@ function reverifyRejectionLabel(category){
     "wrong-failure-category": "taskReverifyRejectWrongCategory",
     "missing-candidate-diff": "taskReverifyRejectNoDiff",
     "allowance-zero": "taskReverifyRejectAllowanceZero",
-    "allowance-exhausted": "taskReverifyRejectAllowanceExhausted"
+    "allowance-exhausted": "taskReverifyRejectAllowanceExhausted",
+    "no-main-revise": "taskReverifyRejectNoMainRevise",
+    "reviewed-revision-mismatch": "taskReverifyRejectReviewedRevisionMismatch",
+    "already-integrated": "taskReverifyRejectAlreadyIntegrated"
   };
   return t(map[category] || "taskReverifyRejectTaskNotFailed");
 }
@@ -6340,6 +7579,7 @@ function correctionRejectionLabel(category){
   var map = {
     "not-failed-or-interrupted": "taskCorrectRejectNotFailed",
     "competition-candidate": "taskCorrectRejectCompetition",
+    "competition-main-revise-required": "taskCorrectRejectCompetitionMainRevise",
     "running-attempt": "taskCorrectRejectRunning",
     "no-revision": "taskCorrectRejectNoRevision",
     "no-latest-attempt-revision": "taskCorrectRejectNoLatestRevision",
@@ -6351,6 +7591,276 @@ function correctionRejectionLabel(category){
     "no-main-revise": "taskCorrectRejectNoMainRevise"
   };
   return t(map[category] || "taskCorrectRejectNoRevision");
+}
+
+function judgeFailureLabel(code){
+  var map = {
+    "missing-result": "taskJudgeFailureMissing",
+    "oversized": "taskJudgeFailureOversized",
+    "malformed-json": "taskJudgeFailureMalformed",
+    "stale-revision": "taskJudgeFailureStale",
+    "wrong-identity": "taskJudgeFailureIdentity",
+    "unsafe-content": "taskJudgeFailureUnsafe",
+    "schema-violation": "taskJudgeFailureSchema",
+    "extra-fields": "taskJudgeFailureExtraFields",
+    "reviewer-task-failed": "taskJudgeFailureWorker"
+  };
+  return t(map[code] || "taskJudgeFailureUnknown");
+}
+
+function judgeNextActionLabel(graph){
+  var map = {
+    "wait-for-judge": "taskJudgeNextWait",
+    "fresh-main-review-usable": "taskJudgeNextFreshUsable",
+    "fresh-main-review-unusable": "taskJudgeNextFreshUnusable",
+    "fresh-main-review-disagreement": "taskJudgeNextFreshDisagreement",
+    "integrated": "taskJudgeNextIntegrated",
+    "ready-for-integration": "taskJudgeNextIntegrate",
+    "main-decision": "taskJudgeNextMainDecision"
+  };
+  var key = map[String(graph.nextActionCode || "")];
+  return key ? t(key) : String(graph.nextAction || "");
+}
+
+function judgeAggregationLabel(state){
+  var map = {
+    "pending": "taskJudgeAggPending",
+    "single-opinion": "taskJudgeAggSingle",
+    "agreement": "taskJudgeAggAgreement",
+    "disagreement": "taskJudgeAggDisagreement",
+    "insufficient-evidence": "taskJudgeAggInsufficient"
+  };
+  var key = map[String(state || "")];
+  return key ? t(key) : String(state || "");
+}
+
+/** Localized aggregation explanation from state + counts.
+ * Never renders server English aggregation.explanation (CLI/MCP keep that field). */
+function judgeAggregationExplanation(agg){
+  if(!agg || typeof agg !== "object") return "";
+  var state = String(agg.state || "");
+  var total = Number(agg.total || 0);
+  var pending = Number(agg.pending || 0);
+  var usable = Number(agg.usable || 0);
+  var unusable = Number(agg.unusable || 0);
+  var dc = agg.dispositionCounts || {};
+  var disposition = "unknown";
+  if(Number(dc.accept || 0) > 0) disposition = "accept";
+  else if(Number(dc.revise || 0) > 0) disposition = "revise";
+  else if(Number(dc.reject || 0) > 0) disposition = "reject";
+  if(state === "pending"){
+    return total <= 1
+      ? t("taskJudgeAggExplainPendingOne")
+      : t("taskJudgeAggExplainPending", { pending: String(pending), total: String(total) });
+  }
+  if(state === "insufficient-evidence"){
+    return total <= 1
+      ? t("taskJudgeAggExplainInsufficientOne")
+      : t("taskJudgeAggExplainInsufficient", { total: String(total) });
+  }
+  if(state === "single-opinion"){
+    return unusable > 0
+      ? t("taskJudgeAggExplainSinglePartial", {
+          disposition: disposition,
+          unusable: String(unusable)
+        })
+      : t("taskJudgeAggExplainSingle", { disposition: disposition });
+  }
+  if(state === "agreement"){
+    return t("taskJudgeAggExplainAgreement", {
+      usable: String(usable),
+      disposition: disposition
+    });
+  }
+  if(state === "disagreement"){
+    return t("taskJudgeAggExplainDisagreement", {
+      accept: String(dc.accept || 0),
+      revise: String(dc.revise || 0),
+      reject: String(dc.reject || 0)
+    });
+  }
+  return "";
+}
+
+/** Explanation-first read-only multi-judge card. Never shows private packet paths,
+ * raw patch, raw resultText, credentials, or absolute paths. */
+function renderJudgeReviewCard(task){
+  var card = h("div", "card form-card judge-review-card");
+  card.setAttribute("data-fl-role", "judge-review");
+  card.appendChild(h("div", "card-title mb-4", t("taskJudgeTitle")));
+  card.appendChild(h("div", "summary-line dim mb-8", t("taskJudgeHint")));
+  card.appendChild(h("div", "summary-line dim mb-8", t("taskJudgeMainDecides")));
+
+  var graph = task.reviewGraph;
+  if(graph && typeof graph === "object"){
+    card.appendChild(h("div", "section-title", t("taskJudgeInput")));
+    card.appendChild(h("div", "summary-line", t("taskJudgeRevision", {
+      id: String(graph.candidateRevisionId || "").slice(0, 8),
+      digest: String(graph.digestPrefix || "")
+    })));
+    card.appendChild(h("div", "summary-line dim", t("taskJudgeAttempt", {
+      ordinal: String(graph.attemptOrdinal || ""),
+      seq: String(graph.verificationEventSequence || "")
+    })));
+    card.appendChild(h("div", "summary-line", t("taskJudgeProgress", {
+      status: String(graph.status || "unknown")
+    })));
+    var agg = graph.aggregation && typeof graph.aggregation === "object" ? graph.aggregation : null;
+    if(agg){
+      card.appendChild(h("div", "section-title mt-8", t("taskJudgeAggregateTitle")));
+      card.appendChild(h("div", "summary-line", t("taskJudgeAggregateState", {
+        state: judgeAggregationLabel(agg.state)
+      })));
+      card.appendChild(h("div", "summary-line dim", t("taskJudgeAggregateCounts", {
+        total: String(agg.total || 0),
+        usable: String(agg.usable || 0),
+        unusable: String(agg.unusable || 0),
+        pending: String(agg.pending || 0)
+      })));
+      var aggExplain = judgeAggregationExplanation(agg);
+      if(aggExplain){
+        card.appendChild(h("div", "summary-line", aggExplain));
+      }
+      var dc = agg.dispositionCounts || {};
+      if((agg.usable || 0) > 0){
+        card.appendChild(h("div", "summary-line dim", t("taskJudgeDispositionCounts", {
+          accept: String(dc.accept || 0),
+          revise: String(dc.revise || 0),
+          reject: String(dc.reject || 0)
+        })));
+      }
+    }
+    if(graph.blocksIntegration){
+      card.appendChild(h("div", "summary-line dim", t("taskJudgeBlocks")));
+    }
+    if(graph.requiresFreshMainReview){
+      card.appendChild(h("div", "summary-line dim", t("taskJudgeFreshRequired")));
+    }
+    card.appendChild(h("div", "summary-line", t("taskJudgeNext", {
+      action: judgeNextActionLabel(graph)
+    })));
+
+    var assignments = Array.isArray(graph.assignments) ? graph.assignments : [];
+    assignments.forEach(function(a){
+      if(!a || typeof a !== "object") return;
+      card.appendChild(h("div", "section-title mt-8", t("taskJudgeWhoOrdinal", {
+        ordinal: String(a.ordinal || ""),
+        total: String((agg && agg.total) || assignments.length || 1)
+      })));
+      card.appendChild(h("div", "summary-line", t("taskJudgeProfile", {
+        id: String(a.reviewerWorkerProfileId || "")
+      })));
+      var id = a.frozenIdentity || {};
+      card.appendChild(h("div", "summary-line dim", t("taskJudgeIdentity", {
+        provider: String(id.provider || ""),
+        model: String(id.model || ""),
+        runtime: String(id.runtime || ""),
+        effort: String(id.effort || "")
+      })));
+      if(task.provider && id.provider && String(task.provider) === String(id.provider)
+        && task.model && id.model && String(task.model) === String(id.model)){
+        card.appendChild(h("div", "summary-line dim", t("taskJudgeSameProfileNote")));
+      }
+      card.appendChild(h("div", "summary-line dim",
+        t("taskJudgeReviewerStatus", {
+          taskId: String(a.reviewerTaskId || ""),
+          status: String(a.status || "")
+        })
+      ));
+      if(a.resultUsable && a.result){
+        card.appendChild(h("div", "summary-line", t("taskJudgeUsable")));
+        card.appendChild(h("div", "summary-line", t("taskJudgeSuggestion", {
+          disposition: String(a.result.proposedDisposition || "")
+        })));
+        if(a.result.summary){
+          card.appendChild(h("div", "summary-line", t("taskJudgeSummary") + ": " + String(a.result.summary)));
+        }
+        var findings = Array.isArray(a.result.findings) ? a.result.findings : [];
+        card.appendChild(h("div", "summary-line", t("taskJudgeFindings", {
+          count: String(findings.length)
+        })));
+        if(findings.length === 0){
+          card.appendChild(h("div", "summary-line dim", t("taskJudgeNoFindings")));
+        } else {
+          findings.forEach(function(f){
+            card.appendChild(h("div", "summary-line dim", t("taskJudgeFindingLine", {
+              severity: String(f.severity || ""),
+              path: String(f.evidencePath || ""),
+              behavior: String(f.affectedBehavior || ""),
+              recommendation: String(f.recommendation || "")
+            })));
+          });
+        }
+      } else if(a.failureCode){
+        card.appendChild(h("div", "summary-line", t("taskJudgeUnusable")));
+        card.appendChild(h("div", "summary-line", judgeFailureLabel(String(a.failureCode))));
+        card.appendChild(h("div", "summary-line dim", t("taskJudgeFailureSafe")));
+        card.appendChild(h("div", "summary-line dim", t("taskJudgeFailureCode", {
+          code: String(a.failureCode)
+        })));
+      }
+    });
+    return card;
+  }
+
+  // No graph yet: offer explicit multi-select create controls when Worker Profiles exist.
+  card.appendChild(h("div", "summary-line dim mb-8", t("taskJudgeNone")));
+  var profiles = (S.hub && S.hub.workerProfiles && S.hub.workerProfiles.profiles) || [];
+  if(profiles.length === 0){
+    return card;
+  }
+  card.appendChild(h("div", "summary-line dim mb-8", t("taskJudgeSelectHint")));
+  var profileBox = h("div", "judge-profile-list");
+  profileBox.setAttribute("data-fl-role", "judge-profile-list");
+  var profileChecks = [];
+  profiles.forEach(function(p){
+    if(!p || !p.id) return;
+    var row = h("label", "summary-line");
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = String(p.id);
+    cb.setAttribute("data-fl-role", "judge-profile");
+    cb.setAttribute("data-profile-id", String(p.id));
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(
+      " " + String(p.label || p.id) + " (" + String(p.id) + ")"
+    ));
+    profileBox.appendChild(row);
+    profileChecks.push(cb);
+  });
+  card.appendChild(profileBox);
+  var reasonLab = h("label", "", t("taskJudgeReason"));
+  var reasonIn = h("input", "");
+  reasonIn.type = "text";
+  reasonIn.setAttribute("data-fl-role", "judge-reason");
+  reasonIn.placeholder = t("taskJudgeReasonPh");
+  reasonLab.appendChild(reasonIn);
+  card.appendChild(reasonLab);
+  var assignBtn = h("button", "btn sm", t("taskJudgeAssign"));
+  assignBtn.type = "button";
+  assignBtn.setAttribute("data-fl-role", "judge-assign");
+  assignBtn.addEventListener("click", function(){
+    if(!reasonIn.value.trim()){ flashError(t("taskJudgeReasonRequired")); return; }
+    var selected = profileChecks
+      .filter(function(cb){ return cb.checked; })
+      .map(function(cb){ return cb.value; });
+    if(selected.length < 1 || selected.length > 3){
+      flashError(t("taskJudgeSelectCount"));
+      return;
+    }
+    if(!window.confirm(t("taskJudgeConfirm"))) return;
+    var body = {
+      reviewerWorkerProfileIds: selected,
+      reason: reasonIn.value.trim(),
+      confirm: true
+    };
+    if(selected.length === 1){
+      body.reviewerWorkerProfileId = selected[0];
+    }
+    taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/review-graph", body, assignBtn, function(){ showTask(task.id); });
+  });
+  card.appendChild(hd("div", "actions", [assignBtn]));
+  return card;
 }
 
 /* Candidate reverification journey: a verification-only rerun of the retained
@@ -6535,7 +8045,16 @@ function renderTaskJourney(task){
         var exit = att.exitCode === undefined || att.exitCode === 0
           ? "" : t("journeyExitCode", { code: String(att.exitCode) });
         attempt.appendChild(h("div", "summary-line",
-          t("journeyAttemptFacts", { status: attemptStateLabel(att.status), turns: turns, exit: exit })));
+          t("journeyAttemptFacts", { status: attemptPrimaryLabel(att), turns: turns, exit: exit })));
+        var attemptExplain = attemptPresentationExplain(att);
+        if(attemptExplain){
+          attempt.appendChild(h("div", "summary-line dim", attemptExplain));
+        }
+        if(attemptHasClosedPresentation(att)){
+          attempt.appendChild(h("div", "dim fs11", t("journeyAttemptRecordedStatus", {
+            status: attemptStateLabel(att.status)
+          })));
+        }
         if(att.startedAt) attempt.appendChild(h("div", "dim fs11", t("journeyStartedAt", { time: fmtTm(att.startedAt) })));
         if(att.finishedAt) attempt.appendChild(h("div", "dim fs11", t("journeyFinishedAt", { time: fmtTm(att.finishedAt) })));
         weBody.appendChild(attempt);
@@ -7468,6 +8987,7 @@ function timelineEventLabel(type){
     "attempt.started": "tlAttemptStarted",
     "attempt.completed": "tlAttemptCompleted",
     "worker.started": "tlWorkerStarted",
+    "worker.resumed": "tlWorkerResumed",
     "worker.completed": "tlWorkerCompleted",
     "worker.failed": "tlWorkerFailed",
     "worker.tool.completed": "tlWorkerTool",
@@ -7475,12 +8995,22 @@ function timelineEventLabel(type){
     "verification.completed": "tlVerifCompleted",
     "verification.command.completed": "tlVerifCommand",
     "main-review.completed": "tlMainReview",
+    "competition.main-decision.completed": "tlCompetitionMainDecision",
+    "competition.retained-partial.completed": "tlCompetitionRetainedPartial",
+    "candidate.handoff.authorized": "tlCandidateHandoffAuthorized",
+    "candidate.handoff.prepared": "tlCandidateHandoffPrepared",
+    "candidate.handoff.failed": "tlCandidateHandoffFailed",
+    "candidate.revision.captured": "tlCandidateRevisionCaptured",
     "checkpoint.completed": "tlCheckpoint",
     "checkpoint.skipped": "tlCheckpointSkip",
     "integration.preflight.completed": "tlPreflight",
     "integration.apply.completed": "tlIntegrate",
     "attempt.authorization.granted": "tlAuthGrant",
     "candidate.reverification.completed": "tlReverify",
+    "review.assignment.created": "tlJudgeAssigned",
+    "review.assignment.completed": "tlJudgeCompleted",
+    "review.assignment.failed": "tlJudgeFailed",
+    "remediation.check.started": "tlRemediationStarted",
     "remediation.check.completed": "tlRemediation"
   };
   var key = map[String(type || "")];
@@ -7637,10 +9167,12 @@ function renderTaskWorkbench(task, extraTabs){
   if(overviewRetained) overviewBody.appendChild(overviewRetained);
 
   // Render routingDecision if present in the task spec
-  var rd = task && task.spec && task.spec.routingDecision;
+  var rd = task && task.routingDecision;
   if(rd){
     overviewBody.appendChild(renderRoutingDecisionCard(rd));
   }
+  var competitionContextCard = renderTaskCompetitionContext(task && task.competitionContext);
+  if(competitionContextCard) overviewBody.appendChild(competitionContextCard);
 
   // 1) Instruction
   var instrNodes = [];
@@ -7698,9 +9230,18 @@ function renderTaskWorkbench(task, extraTabs){
       var exit = att.exitCode === undefined || att.exitCode === 0
         ? "" : t("journeyExitCode", { code: String(att.exitCode) });
       line.appendChild(h("div", "", t("journeyAttemptLabel", { ordinal: String(att.ordinal) })
-        + " · " + attemptStateLabel(att.status)
+        + " · " + attemptPrimaryLabel(att)
         + (turns ? " · " + turns : "")
         + (exit ? " · " + exit : "")));
+      var processExplain = attemptPresentationExplain(att);
+      if(processExplain){
+        line.appendChild(h("div", "summary-line dim", processExplain));
+      }
+      if(attemptHasClosedPresentation(att)){
+        line.appendChild(h("div", "dim fs11", t("journeyAttemptRecordedStatus", {
+          status: attemptStateLabel(att.status)
+        })));
+      }
       if(att.startedAt || att.finishedAt){
         line.appendChild(h("div", "dim fs11",
           (att.startedAt ? t("journeyStartedAt", { time: fmtTm(att.startedAt) }) : "")
@@ -7766,6 +9307,11 @@ function renderTaskWorkbench(task, extraTabs){
   ));
   var resultRetained = renderRetainedCandidate(task);
   if(resultRetained) resultBody.appendChild(resultRetained);
+  // Explain an independent judge review when one exists (evidence only).
+  if(task.reviewGraph && typeof task.reviewGraph === "object"){
+    var judgeStatusCard = renderJudgeReviewCard(task);
+    if(judgeStatusCard) resultBody.appendChild(judgeStatusCard);
+  }
 
   // 4) Checks + final handling
   var checkNodes = [];
@@ -8070,6 +9616,11 @@ function showTask(id){
     });
     sup.appendChild(hd("div", "actions", [reverifyBtn]));
 
+    // Read-only judge: create controls or status near Main decision.
+    // Judge output is evidence only; Main still records accept/revise/reject.
+    var judgeCard = renderJudgeReviewCard(task);
+    if(judgeCard) manualActionsBody.appendChild(judgeCard);
+
     var revLab = h("label", "", t("taskReviewDecision"));
     var revSel = h("select", "");
     [["accept", t("taskAccept")], ["revise", t("taskReviewRevise")], ["reject", t("taskReject")]].forEach(function(pair){
@@ -8096,6 +9647,17 @@ function showTask(id){
     });
     sup.appendChild(hd("div", "actions", [reviewBtn]));
     manualActionsBody.appendChild(sup);
+
+    if(task.competitionContext && task.competitionContext.competitionId){
+      var taskCompetitionCandidates = task.competitionContext.candidates || [];
+      var taskCompetitionCandidate = task.competitionContext.candidate || {};
+      manualActionsBody.appendChild(competitionDecisionControls(
+        task.competitionContext.competitionId,
+        taskCompetitionCandidates,
+        taskCompetitionCandidate.candidateId,
+        function(){ showTask(task.id); }
+      ));
+    }
 
     // Integration panel
     var integ = h("div", "card form-card");
@@ -8146,6 +9708,10 @@ function showTask(id){
     manualActionsBody.appendChild(renderAdaptationPanel(task));
     var reuseJourney = renderCandidateReuse(task);
     if(reuseJourney) manualActionsBody.appendChild(reuseJourney);
+    var handoffJourney = renderCandidateHandoffCard(task);
+    if(handoffJourney) manualActionsBody.appendChild(handoffJourney);
+    var goalHandoffControls = renderGoalTaskHandoffControls(task);
+    if(goalHandoffControls) manualActionsBody.appendChild(goalHandoffControls);
     var reverifyJourney = renderCandidateReverification(task);
     if(reverifyJourney) manualActionsBody.appendChild(reverifyJourney);
     manualActionsBody.appendChild(renderTaskDeliveryPlan(task));
@@ -8484,11 +10050,58 @@ function showCompetition(cid){
     var f = fr();
     f.appendChild(closeBtn());
     var comp = c.competition || {}, cands = c.candidates || [], prog = c.progress || {};
+    var ev = c.evaluation;
     f.appendChild(cardHead(comp.name, "", badge(comp.status)));
     f.appendChild(h("div", "summary-line mb-8", t("compDetailProgress", {
       terminal: String(prog.terminal || 0), total: String(prog.total || 0), candidates: String(cands.length)
     })));
     f.appendChild(h("div", "summary-line dim mb-8", t("compDetailExplain")));
+    // Explanation-first story: reason -> machine comparison -> Main decision ->
+    // retained work -> next action. Leads before any candidate table.
+    function candidateName(cid){
+      var found = cands.find(function(x){ return x.candidateId === cid; });
+      return found ? (String(found.providerName || "") + "/" + String(found.modelName || "")) : t("compCandidateUnknown");
+    }
+    var story = hd("div", "competition-story mb-8");
+    story.appendChild(h("div", "card-subtitle", t("compStoryTitle")));
+    if (comp.legacy === true) {
+      story.appendChild(h("div", "summary-line dim", t("compStoryReasonUnavailable")));
+      story.appendChild(h("div", "summary-line dim", t("compStoryIdentityUnavailable")));
+    } else if (comp.reason && comp.reason.note) {
+      story.appendChild(h("div", "summary-line", t("compStoryReason", { reason: String(comp.reason.note) })));
+    }
+    var mc = c.machineComparison || {};
+    if (mc.recommendation) {
+      story.appendChild(h("div", "summary-line", t("compStoryMachineRecommendation", {
+        candidate: candidateName(mc.recommendation.candidateId),
+        pct: (Number(mc.recommendation.confidence || 0) * 100).toFixed(0)
+      })));
+    } else if (ev) {
+      story.appendChild(h("div", "summary-line", t("compStoryMachineNoDeliverable")));
+    } else {
+      story.appendChild(h("div", "summary-line", t("compStoryMachineWaiting")));
+    }
+    var md = c.mainDecision;
+    if (md) {
+      var mdKey = md.decision === "accept" ? "compStoryMainAccepted"
+        : md.decision === "revise" ? "compStoryMainRevised"
+        : "compStoryMainRejected";
+      story.appendChild(h("div", "summary-line", t(mdKey, { candidate: candidateName(md.candidateId) })));
+    } else {
+      story.appendChild(h("div", "summary-line dim", t("compStoryMainNone")));
+    }
+    var retained = c.retainedPartial || [];
+    retained.forEach(function(entry){
+      story.appendChild(h("div", "summary-line dim", t("compStoryRetained", {
+        candidate: candidateName(entry.candidateId),
+        paths: String((entry.reusablePaths || []).length),
+        gaps: String((entry.remainingGaps || []).length)
+      })));
+    });
+    story.appendChild(h("div", "summary-line", t("compTaskNext", {
+      action: competitionNextActionLabel(c.nextAction)
+    })));
+    f.appendChild(story);
     var compareBtn = h("button", "btn sm primary", t("compCompare"));
     compareBtn.type = "button";
     compareBtn.addEventListener("click", function(){
@@ -8507,20 +10120,46 @@ function showCompetition(cid){
     });
     f.appendChild(hd("div", "actions mb-8", [compareBtn]));
     if(cands.length){
+      f.appendChild(competitionDecisionControls(cid, cands, cands[0].candidateId, function(){
+        showCompetition(cid);
+      }));
+    }
+    var handoffControls = competitionHandoffControls(cid, c, function(){
+      showCompetition(cid);
+    });
+    if(handoffControls) f.appendChild(handoffControls);
+    var handoffList = Array.isArray(c.handoffs) ? c.handoffs : [];
+    handoffList.forEach(function(entry){
+      f.appendChild(h("div", "summary-line", t("compStoryHandoff", {
+        from: candidateName(entry.sourceCandidateId),
+        to: String(entry.destinationWorkerProfileId || "?"),
+        paths: String(entry.reusablePathCount || 0),
+        gaps: String(entry.remainingGapCount || 0),
+        status: handoffStatusLabel(entry.status)
+      })));
+    });
+    if(cands.length){
       var tbl = h("table", ""), thd = h("thead", "");
       thd.appendChild(theadRow([
         t("compColProvider"), t("compColModel"), t("compColStatus"),
-        t("compColStarted"), t("compColFinished")
+        t("compColStarted"), t("compColFinished"), t("compColOpen")
       ]));
       tbl.appendChild(thd);
       var tbd = document.createElement("tbody");
       cands.forEach(function(cd){
+        var modelCell = cd.identity
+          ? (String(cd.modelName || "") + " (" + t("compIdentityRuntime") + ": " + String(cd.identity.runtime) + "/" + String(cd.identity.effort) + ")")
+          : String(cd.modelName || "");
+        var openCandidate = h("button", "btn sm", t("compOpenCandidate"));
+        openCandidate.type = "button";
+        openCandidate.addEventListener("click", function(){ showTask(cd.taskId); });
         tbd.appendChild(row([
           h("td", "", cd.providerName),
-          h("td", "", cd.modelName),
+          h("td", "", modelCell),
           badgeTd(cd.taskStatus),
           h("td", "", fmtTm(cd.taskStartedAt)),
-          h("td", "", fmtTm(cd.taskFinishedAt))
+          h("td", "", fmtTm(cd.taskFinishedAt)),
+          hd("td", "", [openCandidate])
         ]));
       });
       tbl.appendChild(tbd);
@@ -8528,7 +10167,6 @@ function showCompetition(cid){
     } else {
       f.appendChild(stateMsg("empty", t("compNoCandidates")));
     }
-    var ev = c.evaluation;
     f.appendChild(h("div", "fs12 mt-8", t("compRecommendationTitle")));
     if(ev && ev.recommendation){
       var recommended = cands.find(function(candidate){
@@ -8674,6 +10312,7 @@ function render(){
   switch(S.tab){
     case "overview": rOverview(); break;
     case "plans": rPlans(); break;
+    case "goals": rGoals(); break;
     case "tasks": rTasks(); break;
     case "competitions": rCompetitions(); break;
     case "stats": rStats(); break;

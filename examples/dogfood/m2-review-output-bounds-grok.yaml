@@ -1,0 +1,119 @@
+version: 2
+name: Tell judges the exact bounded review output contract
+project: /Users/yijunwang/code/forklight
+taskClass: m2-review-output-contract
+taskFamily: bounded-review-graph-reliability
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Make the existing Review Graph output bounds visible to every judge before
+    it writes JSON, so a semantically valid opinion is not discarded merely
+    because vague wording such as "short summary" hides the parser's numeric
+    limits. Keep parsing strict and fail closed; do not truncate, coerce, retry,
+    replace a judge, mutate historical graphs, or change aggregation semantics.
+  presentation:
+    summary: 把裁判输出的字数边界提前讲清楚，减少“内容正确但超长几字”造成的无效交付。
+    language: zh-CN
+  context:
+    - A live MiniMax judge returned valid single-object JSON, but its 509-character summary exceeded the existing 500-character parser limit by nine characters.
+    - The prompt only said short summary and the packet schema did not expose numeric string bounds.
+    - Grok judge transport is now working and no historical review may be retried or rewritten.
+  inScope:
+    - Add exact existing summary, finding text, evidence-path, and finding-count bounds to reviewer terminal instructions.
+    - Add the same existing limits to the immutable review packet output contract in a machine-readable or plainly readable bounded form.
+    - Add focused tests proving ordinary Worker prompts remain unchanged and reviewer prompts and packets expose consistent limits.
+  outOfScope:
+    - Parser relaxation, truncation, coercion, automatic retries, replacement judges, historical state mutation, aggregation changes, UI redesign, provider changes, commits, or pushes.
+  executionSteps:
+    - Inspect the current constants, reviewer prompt builder, review packet builder, and focused tests.
+    - Reuse the parser constants as the single source of truth when exposing output limits.
+    - Add focused regression tests for prompt and packet consistency.
+  deliverables:
+    - Judges see exact output limits before generation.
+    - Parser behavior and all existing fail-closed boundaries remain unchanged.
+  modules:
+    - name: Reviewer output instructions
+      responsibility: Explain the exact existing JSON field limits before a judge responds.
+      consumes:
+        - Existing Review Graph parser constants and durable reviewer Task identity.
+      produces:
+        - Reviewer-only terminal instructions with numeric bounds.
+      boundaries:
+        - Ordinary Worker prompts remain byte-for-byte behaviorally unchanged; no parser weakening.
+    - name: Immutable review packet
+      responsibility: Carry the same field limits alongside the required output schema.
+      consumes:
+        - Existing Review Graph parser constants and candidate revision facts.
+      produces:
+        - A bounded judge contract with no private source or credentials.
+      boundaries:
+        - No historical mutation and no new provider-specific branch.
+  callChain:
+    - Review Graph creates an isolated reviewer Task and immutable packet.
+    - The runtime prompt and packet expose the same numeric JSON limits.
+    - The judge produces one bounded object and the unchanged parser validates it.
+  scenarios:
+    - name: Reviewer sees exact limits
+      given: A durable Review Graph reviewer Task is prepared.
+      when: Its runtime prompt and packet are produced.
+      then: Both state the existing numeric bounds for summary, findings, paths, and finding text.
+    - name: Ordinary Worker unchanged
+      given: A normal implementation Task is prepared.
+      when: Its prompt is built.
+      then: It keeps the generic coding summary and receives no reviewer JSON instructions.
+    - name: Oversized output still fails closed
+      given: A judge ignores the advertised bound.
+      when: The existing parser validates the reply.
+      then: The reply remains unusable without truncation, retry, or historical mutation.
+  risks:
+    - Duplicating numeric literals would drift from parser behavior, so instructions and packets must reuse exported constants.
+    - More prompt text can become noisy, so keep the wording compact and reviewer-only.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 180
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 300000
+  workerStopGraceMs: 10000
+  fileLimit: 3
+  fileLimitMode: warn
+  changedLineLimit: 180
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/review-graph.ts
+    - src/core/task.ts
+    - tests/review-graph.test.ts
+    - tests/task.test.ts
+acceptance:
+  criteria:
+    - Reviewer prompts and packets expose consistent numeric output bounds from the existing parser constants.
+    - Ordinary Worker prompts and strict parser behavior remain unchanged.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/review-graph.test.ts tests/task.test.ts
+    - npm test
+    - git diff --check

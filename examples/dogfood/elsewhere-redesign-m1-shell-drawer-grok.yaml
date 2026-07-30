@@ -1,0 +1,111 @@
+version: 2
+name: Elsewhere M1 living desk shell and archive drawer
+project: /Users/yijunwang/code/elsewhere
+taskClass: elsewhere-redesign-shell-drawer
+taskFamily: elsewhere-experience-redesign-m0-m1
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    The fixed archive rail and full-page paper dashboard are replaced by the approved living
+    correspondence desk, a quiet Now page, and an accessible overlay archive drawer while every
+    existing Journey destination and setting remains reachable. Grok implements exact Codex design
+    decisions and does not invent a visual direction.
+  presentation:
+    summary: 把首页从档案管理工具变成“此刻出发”的私人桌面，档案只在需要时覆盖打开。
+    language: zh-CN
+  context:
+    - Read docs/experience-redesign-v1.md sections 6.1, 6.2, 7, 8, 12–14 and the complete docs/experience-redesign-m0-m1-contract.md.
+    - The exact shell, Now page, drawer, material, type, color, motion, and prohibited-pattern decisions in the implementation contract are binding.
+    - Preserve all current owner changes and the integrated structured-intake milestone. Do not commit or push.
+    - Do not use gradients, glass, blur, particles, decorative SVGs, a card wall, or a permanent sidebar.
+  inScope:
+    - "Add the required five-block design intent comment at the start of App.tsx: THESIS, OWN-WORLD, STORY, FIRST VIEWPORT, FORM + FINISH with the exact finish sentence from the project design workflow."
+    - Replace ArchiveRail with a semantic overlay ArchiveDrawer and one compact archive trigger.
+    - Replace Threshold with the approved Now page using available local time only; do not request location or claim weather in this milestone.
+    - Keep new journey, resume/open, settings, locale, model, privacy, delete/export/revisit entry paths reachable through the drawer or existing surfaces.
+    - Implement Escape close, focus entry/return, background inertness or equivalent protected focus, preserved underlying state, and reduced motion.
+    - Implement exact responsive behavior at 1440x900 and 860x640 using existing dependencies and fonts.
+    - Add user-facing and accessibility tests for empty/archive/resume/drawer/settings states and prohibited permanent-rail behavior.
+  outOfScope:
+    - Progressive intake UI, fact mirror redesign, historical context, current location/weather permission, story/letter redesign, provider changes, new dependencies, commit, or push.
+  executionSteps:
+    - Inspect the current app at 1440x900 and 860x640, trace every ArchiveRail action, and map each to the drawer before editing.
+    - Implement the exact shell structure and Now page copy/materials from the contract with existing icons and typography.
+    - Add focus and Escape behavior, then update tests and run one focused plus one full acceptance pass.
+  deliverables:
+    - Living desk shell, Now page, archive trigger/drawer, responsive and reduced-motion behavior.
+    - Regression evidence that all previous archive/settings destinations remain reachable.
+  modules:
+    - name: Journey shell
+      responsibility: Render one ambient Now stage and host the active Journey surface without permanent archive chrome.
+      consumes: [active surface, locale, last incomplete journey, save notice]
+      produces: [Now page, archive trigger, main focus target]
+      boundaries: [no domain generation, false city/weather, gradient, or fixed sidebar]
+    - name: Archive drawer
+      responsibility: Temporarily expose journey navigation and settings without changing the underlying page state.
+      consumes: [journey library, due states, active journey, model and locale controls]
+      produces: [overlay navigation, explicit close, restored focus]
+      boundaries: [no content compression, background blur, hidden data mutation, or lost input]
+  callChain:
+    - App loads the library and renders the Now page with one primary Walk action.
+    - The archive trigger opens an overlay drawer while the main stage stays in place.
+    - A drawer action opens/resumes a Journey or settings through existing App handlers, then closes the drawer.
+    - Escape or explicit close returns focus to the trigger without changing the active Journey.
+  scenarios:
+    - name: First opening feels like a beginning
+      given: No saved Journey exists.
+      when: Elsewhere opens.
+      then: The user sees one quiet Now prompt and one Walk action, not a blank archive dashboard.
+    - name: Existing archive stays usable
+      given: Complete and unfinished Journeys exist.
+      when: The archive drawer opens.
+      then: The user can resume, open settings, or close without losing the current surface.
+  risks:
+    - Removing the rail can orphan secondary actions; tests must map every current action before replacement.
+    - CSS-only atmosphere can become decorative noise; use only the approved solid material and one light-settling moment.
+  changeBudget: { maxFiles: 9, maxDiffLines: 1900 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, target]
+  generatedPaths: [dist/**, src-tauri/target/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - docs/experience-redesign-m0-m1-contract.md
+    - src/App.tsx
+    - src/app/copy.ts
+    - src/styles.css
+    - src/features/archive-drawer
+    - src/features/journey-shell
+    - tests/app/App.test.tsx
+acceptance:
+  criteria:
+    - No permanent archive rail or full-stage paper card remains; the Now page has one primary action and makes no unauthorized city/weather claim.
+    - The overlay drawer preserves every previous archive and settings destination, never compresses the main stage, and closes with Escape plus restored focus.
+    - The exact approved materials, type scale, one coral action, solid-color atmosphere, no-gradient rule, 320ms drawer, and reduced-motion behavior are implemented.
+    - 1440x900 and 860x640 remain readable and keyboard-operable, existing App behavior remains green, and no dependency, commit, or push occurs.
+  commands:
+    - pnpm typecheck
+    - pnpm test
+    - pnpm lint:core-boundary
+    - pnpm build
+    - git diff --check

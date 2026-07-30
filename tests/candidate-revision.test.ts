@@ -546,7 +546,7 @@ test("correction eligibility: running-attempt rejected", async () => {
   }
 });
 
-test("correction eligibility: competition-candidate rejected", async () => {
+test("correction eligibility: Competition candidate requires exact Main revise", async () => {
   const built = await buildTaskWithWorkspace("elig-7");
   try {
     await captureCandidateRevision(
@@ -576,7 +576,7 @@ test("correction eligibility: competition-candidate rejected", async () => {
       ],
     );
     const elig = resolveCorrectionEligibility(built.store, built.task.id);
-    assert.equal(elig.category, "competition-candidate");
+    assert.equal(elig.category, "competition-main-revise-required");
   } finally {
     built.store.close();
     await rm(built.home, { recursive: true, force: true });
@@ -589,6 +589,7 @@ test("describeCorrectionRejection returns stable non-echoing messages", async ()
   for (const category of [
     "not-failed-or-interrupted",
     "competition-candidate",
+    "competition-main-revise-required",
     "running-attempt",
     "no-revision",
     "allowance-zero",

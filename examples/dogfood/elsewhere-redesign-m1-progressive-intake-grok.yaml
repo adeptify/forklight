@@ -1,0 +1,114 @@
+version: 2
+name: Elsewhere M1 progressive intake experience
+project: /Users/yijunwang/code/elsewhere
+taskClass: elsewhere-redesign-progressive-intake-ui
+taskFamily: elsewhere-experience-redesign-m0-m1
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    Starting from the Now page opens the exact approved one-question-at-a-time intake,
+    restores saved drafts, supports point-first and keyboard interaction, completes within seven
+    questions, and passes one structured result into the existing fact-review chain without model
+    calls between questions. Grok implements the specified UI and motion; it does not redesign them.
+  presentation:
+    summary: 把三个输入框和四段自由文本替换成真正轻松、可点选、可返回的逐题启程。
+    language: zh-CN
+  context:
+    - Use the integrated structured-intake engine and draft boundary; do not create a second question truth inside App.tsx.
+    - Exact layout, wording, controls, motion, keyboard, error, and visual decisions are binding in docs/experience-redesign-m0-m1-contract.md sections 3–5 and 7–8.
+    - Preserve old Journey resume behavior and all current owner work. Do not commit or push.
+  inScope:
+    - Replace ForkEntry and the old four-free-text Interview path for new Journeys with a one-question ProgressiveIntake surface.
+    - Render four common questions plus the engine-provided 1–3 follow-ups, selected answer bar, previous/skip actions, and the one sentence-slot text field.
+    - Save after each confirmation, restore an unfinished intake, offer explicit resume/discard behavior, and clear only after successful Journey creation.
+    - Support numeric keys 1–8, Enter for text, focus movement, branch changes, rapid input without queued stale transitions, and reduced motion.
+    - On completion call the structured workflow entry once, then prepare the fact mirror using the existing AI failure/retry/abort protections.
+    - "Explain save and model failures in plain bilingual copy: what failed, what remains safe, and the next action."
+    - Update Demo and App tests for all five journeys, English/Chinese, skips, back/edit, recovery, old Journey resume, cancellation isolation, and no per-question AI calls.
+  outOfScope:
+    - New question design, more than seven questions, more required text, archive shell redesign, fact-mirror redesign, world facts, story/letter redesign, provider changes, dependencies, commit, or push.
+  executionSteps:
+    - Trace the integrated question engine and current App operation-epoch/abort recovery before editing.
+    - Implement a focused ProgressiveIntake component that consumes engine state and emits answer/navigation intents only.
+    - Connect completion to the existing fact-review boundary and retain late-result isolation.
+    - Add keyboard, persistence, bilingual, old-Journey, and five-fixture tests; run the full suite once.
+  deliverables:
+    - Progressive intake UI, draft recovery, keyboard and reduced motion, structured completion adapter wiring.
+    - Regression evidence that new questions do not call the model and old Journeys still resume.
+  modules:
+    - name: Progressive intake view
+      responsibility: Present exactly one engine-provided question and emit one explicit user intent.
+      consumes: [question, options, sentence slot, answer summary, progress, locale]
+      produces: [select, text confirm, skip, previous, pause intents]
+      boundaries: [no branching logic, model call, extra question, or dashboard UI]
+    - name: Intake controller
+      responsibility: Coordinate engine state, draft persistence, page transition, and final workflow handoff.
+      consumes: [view intents, question engine, draft storage, workflow entry]
+      produces: [saved next state, restored state, fact-review preparation, readable failure state]
+      boundaries: [no story generation, provider rewrite, stale animation queue, or draft deletion before durable creation]
+  callChain:
+    - Walk creates or resumes a local intake draft and shows the current engine question.
+    - Each user intent updates the pure engine and durably saves the resulting draft.
+    - The view animates to the newest stable question and moves focus.
+    - Completion calls the structured workflow entry once, clears the draft only after success, then prepares the existing fact mirror.
+  scenarios:
+    - name: Point-first journey completes
+      given: A user chooses time, action, sentence, feeling, and career follow-ups.
+      when: The final answer is confirmed.
+      then: No question-time AI call occurred and one saved Journey proceeds to fact review.
+    - name: Interruption resumes safely
+      given: Three answers are saved and the app closes.
+      when: The user returns.
+      then: The Now page offers the natural resume point and no answer must be re-entered.
+  risks:
+    - App-level duplicate state can diverge from the engine; the view must remain a consumer of one canonical engine state.
+    - Clearing the draft too early can lose input; clear only after durable Journey creation.
+  changeBudget: { maxFiles: 10, maxDiffLines: 2200 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 2200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, target]
+  generatedPaths: [dist/**, src-tauri/target/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - docs/experience-redesign-m0-m1-contract.md
+    - src/App.tsx
+    - src/app/copy.ts
+    - src/styles.css
+    - src/features/journey-intake
+    - src/services/journey-workflow/journey-workflow.ts
+    - src/demo/create-demo-runtime.ts
+    - tests/app/App.test.tsx
+    - tests/features/journey-intake
+    - tests/services/journey-workflow.test.ts
+acceptance:
+  criteria:
+    - New Journeys use one question at a time, four common plus one-to-three conditional questions, exactly one required text answer, and no more than seven questions.
+    - Every answer persists, resume/back/branch/skip behavior is correct, numeric keys and Enter work, focus moves, and reduced motion avoids displacement.
+    - Completion performs one durable Journey creation and existing fact-review preparation without per-question model calls; failures retain all user input and offer one next action.
+    - Five fixtures, both languages, 1440x900/860x640 structure, old Journey resume, and late-result isolation are covered; no dependency, commit, or push occurs.
+  commands:
+    - pnpm typecheck
+    - pnpm test
+    - pnpm lint:core-boundary
+    - pnpm build
+    - git diff --check

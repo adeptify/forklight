@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "Relay Gmail production-readiness final continuation",
+  "objective": "Finish four bounded capabilities after preserving two integrated foundations and learning from two non-integrated false-test Candidates.",
+  "items": [
+    {
+      "id": "honest-adapter-final",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-03c-honest-adapter-grok.yaml",
+      "dependsOn": []
+    },
+    {
+      "id": "failure-preservation-final",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-03d-preservation-grok.yaml",
+      "dependsOn": ["honest-adapter-final"]
+    },
+    {
+      "id": "onboarding-ui-final",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-04b-onboarding-ui-grok.yaml",
+      "dependsOn": ["failure-preservation-final"]
+    },
+    {
+      "id": "setup-docs-final",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-04c-setup-docs-grok.yaml",
+      "dependsOn": ["onboarding-ui-final"]
+    }
+  ]
+}

@@ -1,10 +1,17 @@
 import type { StateStore } from "../state/store.js";
+import {
+  latestMainReview,
+  latestVerificationEvent,
+  resolveLatestRevision,
+} from "./candidate-revision.js";
 import { isTerminalTaskStatus } from "./task-progress.js";
+import { isReviewGraphReviewerTaskFile } from "./task.js";
 import { failureCategoryFromEvents } from "./worker-failure.js";
 import type {
   AttemptRecord,
   AttemptStatus,
   EventRecord,
+  MainReviewDecisionKind,
   RemediationDisposition,
   TaskRecord,
   TaskStatus,
@@ -68,7 +75,13 @@ export interface FailureEvidence extends FailureClassification {
   attemptId?: string;
 }
 
-export interface ProviderModelSummary {
+/** Transport detail for Provider/model statistics. compact is the default for
+ *  routine Main supervision; full is local deep audit only. */
+export type StatisticsDetail = "compact" | "full";
+
+/** Aggregate-only Provider/model summary for routine supervision.
+ *  Omits per-Task failure ids, attempt ids, and diagnostics. */
+export interface CompactProviderModelSummary {
   provider: string;
   model: string;
   sampleSize: number;
@@ -94,12 +107,79 @@ export interface ProviderModelSummary {
   totalTurns?: number;
   avgTurns?: number;
   failureDistribution: Partial<Record<FailureCategory, number>>;
-  failures: FailureEvidence[];
-  /** Main-remediated delivery counts — parallel to machine success, never replacing it. */
+  /**
+   * Main/delivery-backed final delivery — parallel to machine success.
+   * acceptedDeliveryCount is accepted outcomes only; the rate uses comparable
+   * samples (accepted + not-accepted), never machine success alone.
+   */
   acceptedDeliveryCount: number;
+  acceptedDeliverySampleCount: number;
+  acceptedDeliveryNotAcceptedCount: number;
+  acceptedDeliveryUnavailableCount: number;
   acceptedDeliveryRate: number;
   mainRepairedDeliveryCount: number;
   remediationCheckCount: number;
+}
+
+/** Full Provider/model summary including per-Task failure evidence. */
+export interface ProviderModelSummary extends CompactProviderModelSummary {
+  failures: FailureEvidence[];
+}
+
+/**
+ * Detached allowlisted projection: every aggregate value is copied unchanged;
+ * the per-Task `failures` array is omitted. Never recalculates rates or
+ * categories. Safe for routine CLI/MCP/Hub supervision.
+ */
+export function projectCompactProviderModelSummary(
+  summary: ProviderModelSummary,
+): CompactProviderModelSummary {
+  return {
+    provider: summary.provider,
+    model: summary.model,
+    sampleSize: summary.sampleSize,
+    successCount: summary.successCount,
+    verifiedSuccessCount: summary.verifiedSuccessCount,
+    successRate: summary.successRate,
+    verifiedSuccessRate: summary.verifiedSuccessRate,
+    retryCount: summary.retryCount,
+    avgRetries: summary.avgRetries,
+    durationSampleSize: summary.durationSampleSize,
+    ...(summary.totalDurationMs === undefined ? {} : { totalDurationMs: summary.totalDurationMs }),
+    ...(summary.avgDurationMs === undefined ? {} : { avgDurationMs: summary.avgDurationMs }),
+    firstEffectiveActionSampleSize: summary.firstEffectiveActionSampleSize,
+    ...(summary.avgTimeToFirstEffectiveActionMs === undefined
+      ? {}
+      : { avgTimeToFirstEffectiveActionMs: summary.avgTimeToFirstEffectiveActionMs }),
+    costSampleSize: summary.costSampleSize,
+    ...(summary.totalCostUsd === undefined ? {} : { totalCostUsd: summary.totalCostUsd }),
+    ...(summary.avgCostUsd === undefined ? {} : { avgCostUsd: summary.avgCostUsd }),
+    runtimeEstimateTaskSampleSize: summary.runtimeEstimateTaskSampleSize,
+    ...(summary.totalRuntimeEstimateUsd === undefined
+      ? {}
+      : { totalRuntimeEstimateUsd: summary.totalRuntimeEstimateUsd }),
+    ...(summary.avgRuntimeEstimatePerTaskUsd === undefined
+      ? {}
+      : { avgRuntimeEstimatePerTaskUsd: summary.avgRuntimeEstimatePerTaskUsd }),
+    turnsSampleSize: summary.turnsSampleSize,
+    ...(summary.totalTurns === undefined ? {} : { totalTurns: summary.totalTurns }),
+    ...(summary.avgTurns === undefined ? {} : { avgTurns: summary.avgTurns }),
+    failureDistribution: { ...summary.failureDistribution },
+    acceptedDeliveryCount: summary.acceptedDeliveryCount,
+    acceptedDeliverySampleCount: summary.acceptedDeliverySampleCount,
+    acceptedDeliveryNotAcceptedCount: summary.acceptedDeliveryNotAcceptedCount,
+    acceptedDeliveryUnavailableCount: summary.acceptedDeliveryUnavailableCount,
+    acceptedDeliveryRate: summary.acceptedDeliveryRate,
+    mainRepairedDeliveryCount: summary.mainRepairedDeliveryCount,
+    remediationCheckCount: summary.remediationCheckCount,
+  };
+}
+
+/** Project a list of full summaries to detached compact aggregates. */
+export function projectCompactProviderModelSummaries(
+  summaries: ProviderModelSummary[],
+): CompactProviderModelSummary[] {
+  return summaries.map(projectCompactProviderModelSummary);
 }
 
 /** Map a FailureCategory to its routing evidence impact.
@@ -299,12 +379,198 @@ function average(values: number[]): number | undefined {
     : values.reduce((total, value) => total + value, 0) / values.length;
 }
 
+/** Privacy-safe final-delivery outcome for one terminal Task. */
+export type FinalDeliveryOutcome = "accepted" | "not-accepted" | "unavailable";
+
+export interface FinalDeliveryEvidenceInput {
+  hasPassingDisposition?: (taskId: string) => boolean;
+  getDisposition?: (taskId: string) => RemediationDisposition | undefined;
+  hasAppliedIntegration?: (taskId: string) => boolean;
+}
+
+/**
+ * True when the latest Main decision is bound to the current latest Attempt,
+ * latest verification event, and — for acceptance authority — the current
+ * Candidate Revision id and patch digest when revision history exists.
+ *
+ * Negative decisions (reject/revise) may remain current without revision id
+ * or digest when both fields are absent: that is legacy non-acceptance
+ * evidence only. Partial or mismatched revision bindings stay unavailable.
+ * Accept never uses the legacy unbound path.
+ */
+export function resolveCurrentMainDecision(
+  item: TaskEvidence,
+): MainReviewDecisionKind | undefined {
+  const review = latestMainReview(item.events);
+  if (review === undefined) return undefined;
+
+  const attempt = latestAttempt(item.attempts);
+  if (attempt === undefined) return undefined;
+  if (review.attemptId !== attempt.id) return undefined;
+  if (
+    item.task.currentAttemptId !== undefined
+    && review.attemptId !== item.task.currentAttemptId
+  ) {
+    return undefined;
+  }
+
+  const verificationEvent = latestVerificationEvent(item.events);
+  if (verificationEvent === undefined) return undefined;
+  if (review.verificationEventSequence !== verificationEvent.sequence) return undefined;
+  if (
+    verificationEvent.attemptId !== undefined
+    && review.attemptId !== verificationEvent.attemptId
+  ) {
+    return undefined;
+  }
+
+  // When revision history exists, binding is decision-sensitive:
+  // - accept: exact current revision id + digest (fail-closed; never unbound)
+  // - reject/revise: exact match when both fields are present; both absent is
+  //   legacy non-acceptance only; partial or mismatched stays unavailable
+  // Legacy Tasks without revision capture still use attempt+verification only.
+  const latestRevision = resolveLatestRevision(item.events);
+  if (latestRevision !== undefined) {
+    const hasRevisionId = review.candidateRevisionId !== undefined;
+    const hasDigest = review.acceptedPatchDigest !== undefined;
+    if (review.decision === "accept") {
+      if (review.candidateRevisionId !== latestRevision.id) return undefined;
+      // Modern revision history is content-addressed. The revision id alone is
+      // not enough evidence because a malformed/imported review could name the
+      // right revision while omitting the exact patch bytes Main reviewed.
+      if (review.acceptedPatchDigest !== latestRevision.patchDigest) return undefined;
+    } else if (!hasRevisionId && !hasDigest) {
+      // Legacy negative decision predating stored revision-binding fields.
+      // Attempt + verification already matched above; never acceptance authority.
+    } else if (hasRevisionId && hasDigest) {
+      if (review.candidateRevisionId !== latestRevision.id) return undefined;
+      if (review.acceptedPatchDigest !== latestRevision.patchDigest) return undefined;
+    } else {
+      // Only one of id/digest present — malformed partial binding.
+      return undefined;
+    }
+  }
+
+  return review.decision;
+}
+
+function classifyTerminalFailure(
+  item: TaskEvidence,
+  getDisposition?: (taskId: string) => RemediationDisposition | undefined,
+): FailureClassification | undefined {
+  if (item.task.status === "succeeded") return undefined;
+  const attempt = latestAttempt(item.attempts);
+  let classification: FailureClassification = failureCategoryFromEvents(item.events) === "connectivity"
+    ? {
+        category: "provider",
+        reason: "Provider connectivity or transport failure",
+        diagnostic: item.task.error ?? "",
+        impact: "non-model",
+      }
+    : classifyFailure({
+        taskStatus: item.task.status,
+        ...(attempt === undefined ? {} : { attemptStatus: attempt.status }),
+        ...(attempt?.exitCode === undefined ? {} : { attemptExitCode: attempt.exitCode }),
+        ...(item.verification === undefined ? {} : { verification: item.verification }),
+        ...(item.task.error === undefined ? {} : { error: item.task.error }),
+      });
+  // Main-authored acceptance mistakes after verified amended delivery are
+  // contract-infeasible non-model evidence — never model-quality blame.
+  if (
+    getDisposition?.(item.task.id)?.acceptanceBasis === "amended-acceptance"
+    && classification.impact === "model-quality"
+  ) {
+    classification = {
+      category: "contract-infeasible",
+      reason: "Main amended acceptance after verified amended delivery",
+      diagnostic: classification.diagnostic,
+      impact: "non-model",
+    };
+  }
+  return classification;
+}
+
+/**
+ * Canonical final-delivery outcome resolver.
+ * Machine success alone is never accepted. Precedence is explicit and
+ * task-unique: verified remediation, current Main decision, durable applied
+ * Integration, model-quality non-acceptance, otherwise unavailable.
+ */
+export function classifyFinalDeliveryOutcome(
+  item: TaskEvidence,
+  input: FinalDeliveryEvidenceInput = {},
+): FinalDeliveryOutcome {
+  const taskId = item.task.id;
+  const hasRemediation = input.getDisposition?.(taskId) !== undefined
+    || (input.hasPassingDisposition?.(taskId) ?? false);
+  // Verified Main remediation is durable accepted delivery regardless of the
+  // original machine status. Overlapping accept/Integration do not double-count.
+  if (hasRemediation) return "accepted";
+
+  const currentMain = resolveCurrentMainDecision(item);
+  if (currentMain === "accept") return "accepted";
+  // A current reject or revise is comparable non-acceptance even when the
+  // machine checks previously passed.
+  if (currentMain === "reject" || currentMain === "revise") return "not-accepted";
+
+  // Legacy applied Integration is durable delivery when no fresher contradictory
+  // Main decision is bound to the current Candidate/verification.
+  if (input.hasAppliedIntegration?.(taskId) === true) return "accepted";
+
+  if (item.task.status !== "succeeded") {
+    const classification = classifyTerminalFailure(item, input.getDisposition);
+    // Relevant model-quality machine failure without later accepted delivery is
+    // a comparable non-acceptance. External/policy/ambiguous stay unavailable.
+    if (classification?.impact === "model-quality") return "not-accepted";
+    return "unavailable";
+  }
+
+  // Machine-successful Task with no current Main or delivery evidence.
+  return "unavailable";
+}
+
+function emptyFinalDeliveryCounts(): {
+  acceptedDeliveryCount: number;
+  acceptedDeliverySampleCount: number;
+  acceptedDeliveryNotAcceptedCount: number;
+  acceptedDeliveryUnavailableCount: number;
+  acceptedDeliveryRate: number;
+} {
+  return {
+    acceptedDeliveryCount: 0,
+    acceptedDeliverySampleCount: 0,
+    acceptedDeliveryNotAcceptedCount: 0,
+    acceptedDeliveryUnavailableCount: 0,
+    acceptedDeliveryRate: 0,
+  };
+}
+
+function accumulateFinalDelivery(
+  counts: {
+    acceptedDeliveryCount: number;
+    acceptedDeliverySampleCount: number;
+    acceptedDeliveryNotAcceptedCount: number;
+    acceptedDeliveryUnavailableCount: number;
+  },
+  outcome: FinalDeliveryOutcome,
+): void {
+  if (outcome === "accepted") {
+    counts.acceptedDeliveryCount += 1;
+    counts.acceptedDeliverySampleCount += 1;
+  } else if (outcome === "not-accepted") {
+    counts.acceptedDeliveryNotAcceptedCount += 1;
+    counts.acceptedDeliverySampleCount += 1;
+  } else {
+    counts.acceptedDeliveryUnavailableCount += 1;
+  }
+}
+
 function summaryFor(
   provider: string,
   model: string,
   evidence: TaskEvidence[],
   remediationChecksCount: (taskId: string) => number,
-  hasPassingDisposition: (taskId: string) => boolean,
+  deliveryInput: FinalDeliveryEvidenceInput,
 ): ProviderModelSummary {
   const successCount = evidence.filter(({ task }) => task.status === "succeeded").length;
   const verifiedSuccessCount = evidence.filter(({ verification }) => verification?.passed).length;
@@ -332,14 +598,8 @@ function summaryFor(
   for (const item of evidence) {
     if (item.task.status === "succeeded") continue;
     const attempt = latestAttempt(item.attempts);
-    const classification = failureCategoryFromEvents(item.events) === "connectivity"
-      ? {
-          category: "provider" as const,
-          reason: "Provider connectivity or transport failure",
-          diagnostic: item.task.error ?? "",
-          impact: "non-model" as const,
-        }
-      : classifyFailure({
+    const classification = classifyTerminalFailure(item, deliveryInput.getDisposition)
+      ?? classifyFailure({
           taskStatus: item.task.status,
           ...(attempt === undefined ? {} : { attemptStatus: attempt.status }),
           ...(attempt?.exitCode === undefined ? {} : { attemptExitCode: attempt.exitCode }),
@@ -362,10 +622,20 @@ function summaryFor(
     failureDistribution[failure.category] = (failureDistribution[failure.category] ?? 0) + 1;
   }
 
-  // Remediation delivery counts: parallel to machine success, never mutating it.
+  // Final delivery is Main/delivery-backed and task-unique. Machine success is
+  // never a shortcut into the accepted set.
   const mainRepairedCount = evidence.filter(
-    ({ task }) => hasPassingDisposition(task.id),
+    ({ task }) =>
+      deliveryInput.getDisposition?.(task.id) !== undefined
+      || (deliveryInput.hasPassingDisposition?.(task.id) ?? false),
   ).length;
+  const deliveryCounts = emptyFinalDeliveryCounts();
+  for (const item of evidence) {
+    accumulateFinalDelivery(deliveryCounts, classifyFinalDeliveryOutcome(item, deliveryInput));
+  }
+  deliveryCounts.acceptedDeliveryRate = deliveryCounts.acceptedDeliverySampleCount > 0
+    ? deliveryCounts.acceptedDeliveryCount / deliveryCounts.acceptedDeliverySampleCount
+    : 0;
   const totalChecks = evidence.reduce(
     (sum, { task }) => sum + remediationChecksCount(task.id),
     0,
@@ -403,10 +673,11 @@ function summaryFor(
     ...(turns.length === 0 ? {} : { totalTurns, avgTurns: totalTurns / turns.length }),
     failureDistribution,
     failures,
-    acceptedDeliveryCount: successCount + mainRepairedCount,
-    acceptedDeliveryRate: evidence.length > 0
-      ? (successCount + mainRepairedCount) / evidence.length
-      : 0,
+    acceptedDeliveryCount: deliveryCounts.acceptedDeliveryCount,
+    acceptedDeliverySampleCount: deliveryCounts.acceptedDeliverySampleCount,
+    acceptedDeliveryNotAcceptedCount: deliveryCounts.acceptedDeliveryNotAcceptedCount,
+    acceptedDeliveryUnavailableCount: deliveryCounts.acceptedDeliveryUnavailableCount,
+    acceptedDeliveryRate: deliveryCounts.acceptedDeliveryRate,
     mainRepairedDeliveryCount: mainRepairedCount,
     remediationCheckCount: totalChecks,
   };
@@ -418,6 +689,8 @@ export function computeStatistics(
   remediationData?: {
     checksCount: (taskId: string) => number;
     hasPassingDisposition: (taskId: string) => boolean;
+    hasAppliedIntegration?: (taskId: string) => boolean;
+    getDisposition?: (taskId: string) => RemediationDisposition | undefined;
   },
 ): ProviderModelSummary[] {
   const since = filter.since === undefined ? undefined : Date.parse(filter.since);
@@ -438,23 +711,29 @@ export function computeStatistics(
   }
 
   const noopChecksCount = (): number => 0;
-  const noopPassingDisposition = (): boolean => false;
+  const deliveryInput: FinalDeliveryEvidenceInput = {
+    hasPassingDisposition: remediationData?.hasPassingDisposition ?? ((): boolean => false),
+    ...(remediationData?.getDisposition === undefined
+      ? {}
+      : { getDisposition: remediationData.getDisposition }),
+    ...(remediationData?.hasAppliedIntegration === undefined
+      ? {}
+      : { hasAppliedIntegration: remediationData.hasAppliedIntegration }),
+  };
   const checksCount = remediationData?.checksCount ?? noopChecksCount;
-  const hasPassing = remediationData?.hasPassingDisposition ?? noopPassingDisposition;
 
   return [...groups.entries()]
     .map(([key, items]) => {
       const [provider = "", model = ""] = key.split("\0");
-      return summaryFor(provider, model, items, checksCount, hasPassing);
+      return summaryFor(provider, model, items, checksCount, deliveryInput);
     })
     .sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
 }
 
-export function verificationFrom(events: EventRecord[]): VerificationResult | undefined {
-  const event = [...events]
-    .reverse()
-    .find((candidate) => candidate.type === "verification.completed");
-  if (!event || typeof event.payload !== "object" || event.payload === null) return undefined;
+/** Normalize one verification.completed payload; undefined when the shape is invalid. */
+function verificationResultFromEvent(event: EventRecord): VerificationResult | undefined {
+  if (event.type !== "verification.completed") return undefined;
+  if (typeof event.payload !== "object" || event.payload === null) return undefined;
   const payload = event.payload as Partial<VerificationResult>;
   if (typeof payload.passed !== "boolean" || !Array.isArray(payload.commands)) return undefined;
   // Legacy payloads only had `passed` + `sourceUnchanged`; fill dimensional fields.
@@ -483,6 +762,29 @@ export function verificationFrom(events: EventRecord[]): VerificationResult | un
     diffPath: typeof payload.diffPath === "string" ? payload.diffPath : "",
     sourceUnchanged: typeof payload.sourceUnchanged === "boolean" ? payload.sourceUnchanged : true,
   } as VerificationResult;
+}
+
+/** Latest valid verification.completed — final machine/delivery projection. */
+export function verificationFrom(events: EventRecord[]): VerificationResult | undefined {
+  const event = [...events]
+    .reverse()
+    .find((candidate) => candidate.type === "verification.completed");
+  return event === undefined ? undefined : verificationResultFromEvent(event);
+}
+
+/**
+ * Earliest valid verification.completed by durable event sequence.
+ * First-pass routing evidence only — never used for final delivery truth.
+ * A later Main zero-Worker reverification on the same Attempt must not replace
+ * the original Worker independent check.
+ */
+function earliestVerificationFrom(events: EventRecord[]): VerificationResult | undefined {
+  const ordered = [...events].sort((a, b) => a.sequence - b.sequence || a.id - b.id);
+  for (const candidate of ordered) {
+    const result = verificationResultFromEvent(candidate);
+    if (result !== undefined) return result;
+  }
+  return undefined;
 }
 
 // --- Routing evidence -------------------------------------------------------
@@ -548,11 +850,28 @@ export interface RoutingEvidence {
   /** Explicit Main-requested Worker revisions plus Main repair deliveries. */
   correctionChurn: number;
   correctionChurnRate: number;
+  /**
+   * Main/delivery-backed final delivery only. Sample count is accepted +
+   * not-accepted; unavailable stays visible and never becomes a synthetic zero.
+   */
   acceptedDeliveryCount: number;
+  acceptedDeliverySampleCount: number;
+  acceptedDeliveryNotAcceptedCount: number;
+  acceptedDeliveryUnavailableCount: number;
   acceptedDeliveryRate: number;
   verifiedBehaviorSampleCount: number;
   verifiedBehaviorCount: number;
   verifiedBehaviorRate: number;
+  /**
+   * First-Attempt independent verification only. Sample/success count Tasks
+   * where Attempt one has comparable model behavior evidence; unavailable
+   * covers missing verification and non-model external causes. Never rewritten
+   * by later Attempts, final delivery, or Main repair.
+   */
+  firstPassVerifiedSampleCount: number;
+  firstPassVerifiedSuccessCount: number;
+  firstPassVerifiedSuccessRate: number;
+  firstPassUnavailableCount: number;
   /** Every Attempt on every relevant Task contributes either one exact quote
    * or one typed unavailable reason. Missing records are never zero. */
   officialCostAttemptCount: number;
@@ -605,6 +924,85 @@ function attemptEvents(item: TaskEvidence, attemptId: string): EventRecord[] {
   return item.events.filter((event) => event.attemptId === attemptId);
 }
 
+function earliestAttempt(attempts: AttemptRecord[]): AttemptRecord | undefined {
+  return [...attempts].sort((a, b) => a.ordinal - b.ordinal)[0];
+}
+
+/** First-pass outcome for the earliest Attempt only.
+ *  success / failure enter the comparable denominator; unavailable stays visible
+ *  but never becomes a synthetic zero or model failure. */
+export type FirstPassOutcome = "success" | "failure" | "unavailable";
+
+/**
+ * Classify only the earliest Attempt using its own attempt-bound verification
+ * and failure evidence. Later Attempts, final Task status, Main-repaired
+ * delivery, and final Integration never rewrite this outcome.
+ */
+export function classifyFirstPassOutcome(
+  item: TaskEvidence,
+  getDisposition?: (taskId: string) => RemediationDisposition | undefined,
+): FirstPassOutcome {
+  const first = earliestAttempt(item.attempts);
+  if (first === undefined) return "unavailable";
+
+  // Bind verification to this Attempt id only — never borrow a later run.
+  // Use the earliest valid verification on Attempt one so a later Main
+  // reverification of the same Candidate cannot rewrite Worker first-pass truth.
+  const ownEvents = attemptEvents(item, first.id);
+  const verification = earliestVerificationFrom(ownEvents);
+
+  // Durable Provider/connectivity and budget evidence wins over a coincidental
+  // passing behavior check. These runs are operationally inconclusive for
+  // first-pass model quality and must not inflate the success rate.
+  const durableFailureCategory = failureCategoryFromEvents(ownEvents);
+  if (
+    durableFailureCategory === "connectivity"
+    || durableFailureCategory === "budget"
+    || ownEvents.some((event) => event.type === "policy.token.exceeded")
+  ) {
+    return "unavailable";
+  }
+
+  if (first.status !== "succeeded") {
+    const attemptFailure = classifyAttemptFailure(first, ownEvents);
+    if (
+      attemptFailure?.impact === "non-model"
+      && attemptFailure.category !== "verification"
+    ) {
+      return "unavailable";
+    }
+  }
+
+  // Behavior passed on Attempt one is first-pass success even when policy-only
+  // gates fail overall. Final delivery and Integration are not consulted.
+  if (verification?.behaviorPassed === true) {
+    return "success";
+  }
+
+  // Main-authored acceptance contradiction after formally amended delivery is
+  // not model first-pass evidence.
+  if (getDisposition?.(item.task.id)?.acceptanceBasis === "amended-acceptance") {
+    return "unavailable";
+  }
+
+  // First-pass failure requires own durable verification attributable to model
+  // behavior. Missing verification and non-model external causes stay unavailable.
+  if (verification !== undefined && verification.behaviorPassed === false) {
+    const classification = classifyFailure({
+      taskStatus: "failed",
+      attemptStatus: first.status,
+      ...(first.exitCode === undefined ? {} : { attemptExitCode: first.exitCode }),
+      verification,
+      ...(first.error === undefined ? {} : { error: first.error }),
+    });
+    if (classification.impact === "model-quality") {
+      return "failure";
+    }
+  }
+
+  return "unavailable";
+}
+
 /** Classify one Attempt from its own durable evidence. A later correction must
  * not hide an earlier budget exhaustion or lend its verification to that run. */
 function classifyAttemptFailure(
@@ -654,6 +1052,8 @@ export interface DeriveRoutingEvidenceInput {
    * exists, model-quality blame is suppressed while machine failure stays visible.
    */
   getDisposition?: (taskId: string) => RemediationDisposition | undefined;
+  /** Durable applied Integration presence — legacy delivery evidence. */
+  hasAppliedIntegration?: (taskId: string) => boolean;
   /** New decisions compare the complete frozen Worker identity. Legacy callers
    * may explicitly aggregate by provider/model. */
   identityMode?: "provider-model" | "full-worker";
@@ -705,10 +1105,17 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
       correctionChurn: 0,
       correctionChurnRate: 0,
       acceptedDeliveryCount: 0,
+      acceptedDeliverySampleCount: 0,
+      acceptedDeliveryNotAcceptedCount: 0,
+      acceptedDeliveryUnavailableCount: 0,
       acceptedDeliveryRate: 0,
       verifiedBehaviorSampleCount: 0,
       verifiedBehaviorCount: 0,
       verifiedBehaviorRate: 0,
+      firstPassVerifiedSampleCount: 0,
+      firstPassVerifiedSuccessCount: 0,
+      firstPassVerifiedSuccessRate: 0,
+      firstPassUnavailableCount: 0,
       officialCostAttemptCount: 0,
       officialCostQuotedAttemptCount: 0,
       officialCostUnavailableCount: 0,
@@ -731,6 +1138,16 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
     let candidateEnvelope: RoutingBudgetEnvelope | null = null;
     let candidateEnvelopeMixed = false;
 
+    const deliveryInput: FinalDeliveryEvidenceInput = {
+      ...(input.hasPassingDisposition === undefined
+        ? {}
+        : { hasPassingDisposition: input.hasPassingDisposition }),
+      ...(input.getDisposition === undefined ? {} : { getDisposition: input.getDisposition }),
+      ...(input.hasAppliedIntegration === undefined
+        ? {}
+        : { hasAppliedIntegration: input.hasAppliedIntegration }),
+    };
+
     for (const item of items) {
       const disposition = input.getDisposition?.(item.task.id);
       const passingDisposition =
@@ -740,39 +1157,35 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
       // after a verified amended-acceptance delivery. Machine failure stays
       // visible via terminal Task status and failure listings elsewhere.
       const amendedAcceptance = disposition?.acceptanceBasis === "amended-acceptance";
+
+      // First-pass verified success is independent of eventual delivery and of
+      // the relevant-sample gate below. Every terminal Task contributes exactly
+      // one first-pass classification for Attempt one.
+      const firstPass = classifyFirstPassOutcome(item, input.getDisposition);
+      if (firstPass === "success") {
+        evidence.firstPassVerifiedSampleCount += 1;
+        evidence.firstPassVerifiedSuccessCount += 1;
+      } else if (firstPass === "failure") {
+        evidence.firstPassVerifiedSampleCount += 1;
+      } else {
+        evidence.firstPassUnavailableCount += 1;
+      }
+
+      // Final delivery is independent of the relevant-sample gate and of
+      // machine success. Every terminal Task contributes exactly one outcome.
+      accumulateFinalDelivery(evidence, classifyFinalDeliveryOutcome(item, deliveryInput));
+
       let classification: FailureClassification | undefined;
       if (item.task.status !== "succeeded") {
-        const attempt = latestAttempt(item.attempts);
-        classification = failureCategoryFromEvents(item.events) === "connectivity"
-          ? {
-              category: "provider",
-              reason: "Provider connectivity or transport failure",
-              diagnostic: item.task.error ?? "",
-              impact: "non-model",
-            }
-          : classifyFailure({
-              taskStatus: item.task.status,
-              ...(attempt === undefined ? {} : { attemptStatus: attempt.status }),
-              ...(attempt?.exitCode === undefined ? {} : { attemptExitCode: attempt.exitCode }),
-              ...(item.verification === undefined ? {} : { verification: item.verification }),
-              ...(item.task.error === undefined ? {} : { error: item.task.error }),
-            });
-        if (amendedAcceptance && classification.impact === "model-quality") {
-          // Main-authored acceptance mistakes are contract-infeasible non-model
-          // evidence after verified amended delivery — never model-quality.
-          classification = {
-            category: "contract-infeasible",
-            reason: "Main amended acceptance after verified amended delivery",
-            diagnostic: classification.diagnostic,
-            impact: "non-model",
-          };
-        }
-        if (classification.impact === "non-model") {
-          evidence.ignoredNonModelTaskCount += 1;
-          evidence.ignoredNonModelFailures[classification.category] =
-            (evidence.ignoredNonModelFailures[classification.category] ?? 0) + 1;
-        } else if (classification.impact === "ambiguous") {
-          evidence.ambiguousFailureCount += 1;
+        classification = classifyTerminalFailure(item, input.getDisposition);
+        if (classification !== undefined) {
+          if (classification.impact === "non-model") {
+            evidence.ignoredNonModelTaskCount += 1;
+            evidence.ignoredNonModelFailures[classification.category] =
+              (evidence.ignoredNonModelFailures[classification.category] ?? 0) + 1;
+          } else if (classification.impact === "ambiguous") {
+            evidence.ambiguousFailureCount += 1;
+          }
         }
       }
 
@@ -844,7 +1257,6 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
       if (classification?.impact === "model-quality" && !amendedAcceptance) {
         evidence.modelQualityFailureCount += 1;
       }
-      if (item.task.status === "succeeded" || passingDisposition) evidence.acceptedDeliveryCount += 1;
       if (item.verification !== undefined) {
         evidence.verifiedBehaviorSampleCount += 1;
         if (behaviorPassed) evidence.verifiedBehaviorCount += 1;
@@ -885,13 +1297,19 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
     if (evidence.relevantSampleCount > 0) {
       evidence.modelQualityFailureRate =
         evidence.modelQualityFailureCount / evidence.relevantSampleCount;
-      evidence.acceptedDeliveryRate =
-        evidence.acceptedDeliveryCount / evidence.relevantSampleCount;
       evidence.correctionChurnRate = evidence.correctionChurn / evidence.relevantSampleCount;
+    }
+    if (evidence.acceptedDeliverySampleCount > 0) {
+      evidence.acceptedDeliveryRate =
+        evidence.acceptedDeliveryCount / evidence.acceptedDeliverySampleCount;
     }
     if (evidence.verifiedBehaviorSampleCount > 0) {
       evidence.verifiedBehaviorRate =
         evidence.verifiedBehaviorCount / evidence.verifiedBehaviorSampleCount;
+    }
+    if (evidence.firstPassVerifiedSampleCount > 0) {
+      evidence.firstPassVerifiedSuccessRate =
+        evidence.firstPassVerifiedSuccessCount / evidence.firstPassVerifiedSampleCount;
     }
     evidence.durationSampleCount = durations.length;
     if (durations.length > 0) {
@@ -919,6 +1337,91 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
   return result;
 }
 
+// --- Routing-evidence coverage (portfolio readiness, not model quality) ------
+
+/**
+ * Privacy-safe aggregate describing how many finished ordinary Tasks carry the
+ * classification and Main-authored Worker-selection facts needed for later
+ * learning. Counts are explicit presence only; never inferred, never scored.
+ */
+export interface RoutingEvidenceCoverage {
+  /** Terminal ordinary (non-reviewer) Tasks in the eligible cohort. */
+  eligibleTerminalTaskCount: number;
+  /** Eligible Tasks with an explicit non-empty taskClass. Never inferred. */
+  withTaskClassCount: number;
+  /** Eligible Tasks with an explicit non-empty taskFamily. Never inferred. */
+  withTaskFamilyCount: number;
+  /**
+   * Eligible Tasks that simultaneously carry non-empty taskClass, non-empty
+   * taskFamily, and a stored routingDecision. Presence only: TaskSpec storage
+   * already validates routingDecision shape; this projection does not re-parse
+   * decision fields or read private reasons.
+   */
+  withCompleteRoutingDecisionCount: number;
+  /** Distinct non-empty taskClass values among eligible Tasks (diversity only). */
+  distinctTaskClassCount: number;
+  /** Distinct non-empty taskFamily values among eligible Tasks (diversity only). */
+  distinctTaskFamilyCount: number;
+}
+
+function hasExplicitLabel(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/** True when a Task stores a routingDecision object. Shape is not re-validated. */
+function hasStoredRoutingDecision(raw: unknown): boolean {
+  return raw !== null && raw !== undefined && typeof raw === "object" && !Array.isArray(raw);
+}
+
+/**
+ * Canonical read-only coverage projection over durable Task records.
+ * Excludes Review Graph reviewer Tasks. Never infers missing metadata,
+ * never scores models, and never returns Task content.
+ */
+export function computeRoutingEvidenceCoverage(
+  tasks: readonly TaskRecord[],
+): RoutingEvidenceCoverage {
+  let eligibleTerminalTaskCount = 0;
+  let withTaskClassCount = 0;
+  let withTaskFamilyCount = 0;
+  let withCompleteRoutingDecisionCount = 0;
+  const distinctClasses = new Set<string>();
+  const distinctFamilies = new Set<string>();
+
+  for (const task of tasks) {
+    if (!isTerminalTaskStatus(task.status)) continue;
+    if (isReviewGraphReviewerTaskFile(task.taskFile)) continue;
+
+    eligibleTerminalTaskCount += 1;
+    const taskClass = task.spec?.taskClass;
+    const hasClass = hasExplicitLabel(taskClass);
+    if (hasClass) {
+      withTaskClassCount += 1;
+      distinctClasses.add((taskClass as string).trim());
+    }
+    const taskFamily = task.spec?.taskFamily;
+    const hasFamily = hasExplicitLabel(taskFamily);
+    if (hasFamily) {
+      withTaskFamilyCount += 1;
+      distinctFamilies.add((taskFamily as string).trim());
+    }
+    // Complete selection evidence requires all three facts on the same Task.
+    // A stored routingDecision alone is incomplete without class and family.
+    if (hasClass && hasFamily && hasStoredRoutingDecision(task.spec?.routingDecision)) {
+      withCompleteRoutingDecisionCount += 1;
+    }
+  }
+
+  return {
+    eligibleTerminalTaskCount,
+    withTaskClassCount,
+    withTaskFamilyCount,
+    withCompleteRoutingDecisionCount,
+    distinctTaskClassCount: distinctClasses.size,
+    distinctTaskFamilyCount: distinctFamilies.size,
+  };
+}
+
 export class StatisticsService {
   constructor(private readonly store: StateStore) {}
 
@@ -941,6 +1444,9 @@ export class StatisticsService {
         const d = this.store.getRemediationDisposition(taskId);
         return d !== undefined;
       },
+      getDisposition: (taskId) => this.store.getRemediationDisposition(taskId),
+      hasAppliedIntegration: (taskId) =>
+        this.store.listIntegrationResults(taskId).some((result) => result.status === "applied"),
     });
   }
 
@@ -969,6 +1475,8 @@ export class StatisticsService {
       hasPassingDisposition: (taskId) =>
         this.store.getRemediationDisposition(taskId) !== undefined,
       getDisposition: (taskId) => this.store.getRemediationDisposition(taskId),
+      hasAppliedIntegration: (taskId) =>
+        this.store.listIntegrationResults(taskId).some((result) => result.status === "applied"),
     });
   }
 
@@ -1002,6 +1510,17 @@ export class StatisticsService {
       hasPassingDisposition: (taskId) =>
         this.store.getRemediationDisposition(taskId) !== undefined,
       getDisposition: (taskId) => this.store.getRemediationDisposition(taskId),
+      hasAppliedIntegration: (taskId) =>
+        this.store.listIntegrationResults(taskId).some((result) => result.status === "applied"),
     });
+  }
+
+  /**
+   * Portfolio coverage of classification + Main-authored Worker-selection
+   * evidence. Read-only — never mutates state, never calls a Provider, never
+   * scores a model. Review Graph reviewer Tasks are excluded.
+   */
+  routingEvidenceCoverage(): RoutingEvidenceCoverage {
+    return computeRoutingEvidenceCoverage(this.store.listTasks());
   }
 }

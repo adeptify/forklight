@@ -1,0 +1,122 @@
+version: 2
+name: Finish truthful Gmail sync with exact provider-route regressions
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-honest-adapter-continuation
+taskFamily: relay-gmail-production-readiness-continuation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    Gmail sync has one truthful result boundary: live success, explicit no-credential
+    fixture success, or a typed secret-free live failure. A configured account can
+    never receive fixture mail after authentication, network, or provider failure.
+  presentation:
+    summary: 先消除连接器里的假成功，让真实 Gmail 失败和演示模式明确分开。
+    language: zh-CN
+  context:
+    - Session safety and token refresh are already integrated; preserve them.
+    - Current Gmail sync catches live-list failures and returns fixtures, while GitHub uses the same result interface.
+    - Two prior isolated Candidates established the useful implementation direction but were not integrated because their tests contained false assumptions; preserve the lessons, not their failed assertions.
+    - Existing Gmail Items may have undefined externalId. Whole-set tests must compare stable Item ids or complete normalized snapshots, never a set that filters those rows out.
+    - In mocked Gmail fetch routing, match the specific message-detail URL before the generic messages-list URL (or compare exact URL shapes). A generic url.includes("messages") branch otherwise returns list JSON to the detail parser and creates a false malformed-response failure.
+    - Explicit fixture success must persist connector status mock, never connected merely because fixture health has ok=true.
+    - Detail 404/410 may be skipped as a provider race; detail 401/403 is needs-auth; other non-ok or malformed detail JSON is a typed provider failure; network exceptions are typed network failure.
+    - This Task owns the truthful connector/application boundary, not the complete persistence proof handled by the next milestone.
+    - Use Grok 4.5. Do not commit or push.
+  inScope:
+    - Add the smallest discriminated sync success/failure result compatible with Gmail and GitHub.
+    - Return fixture success only when no usable Gmail credential exists.
+    - Return closed needs-auth, network, or provider failures in live mode with one bounded recovery action.
+    - Make the application path consume failure without ingesting items or advancing cursor, and return a safe DomainError.
+    - Sanitize health and sync failures so raw exception text, provider body, stack, and secrets are absent.
+    - "Make application success status authoritative from result.mode: fixture remains mock and live success becomes connected."
+    - Add adapter/application tests for live success, three failure classes, fixture mode, detail 503/malformed/404/410, GitHub compatibility, and privacy.
+  outOfScope:
+    - Detailed connector status/event preservation proof, retry schedules, UI, docs, token lifecycle changes, dependencies, commit, or push.
+  executionSteps:
+    - Trace result types, Gmail/GitHub adapters, application sync, DomainError mapping, and current tests.
+    - Implement one closed result contract and route every Gmail sync branch through it.
+    - Add a minimal application failure branch that performs no success mutations and use result.mode for fixture/live status.
+    - Route message-detail mock responses specifically before generic list responses so tests exercise the intended payload.
+    - Run focused and full acceptance once.
+  deliverables:
+    - Truthful connector result boundary with no live-to-fixture fallback.
+    - Secret-free regression tests and green Relay build.
+  modules:
+    - name: Connector result contract
+      responsibility: Represent live success, fixture success, or closed live failure.
+      consumes: [credential mode, token result, provider response]
+      produces: [typed success or secret-free failure with recovery]
+      boundaries: [no fixture substitution in live mode, no provider payload or stack]
+    - name: Application failure gate
+      responsibility: Stop before item/cursor success mutations when connector reports failure.
+      consumes: [typed connector result and prior cursor]
+      produces: [safe DomainError or normal success flow]
+      boundaries: [no retry, UI wording system, or persistence redesign]
+  callChain:
+    - Application asks Gmail to sync with the prior cursor.
+    - Gmail resolves whether the user is in fixture or live mode.
+    - Live mode returns real items or a closed failure; fixture mode alone returns demo items.
+    - Application mutates success data only for an explicit success result.
+  scenarios:
+    - name: Configured live failure
+      given: A usable credential and a failed Gmail request.
+      when: Sync runs.
+      then: No fixture items are returned or ingested and a readable safe failure is produced.
+    - name: Message detail fails honestly
+      given: The list succeeds but a detail request returns 503 or malformed JSON.
+      when: Sync runs.
+      then: The whole live sync returns provider failure; 404/410 alone may be skipped.
+    - name: No credential demo
+      given: No usable Gmail credential.
+      when: Sync runs.
+      then: Fixture items return in explicit fixture mode and remain distinguishable from live success.
+  risks:
+    - The shared type can break GitHub or application callers; keep compatibility tests green.
+    - Exception text can contain secrets; emit only closed messages and status codes.
+    - Broad substring mock routing can feed list JSON to detail parsing; match specific detail URLs first.
+  changeBudget: { maxFiles: 9, maxDiffLines: 1100 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1100
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 2
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/adapters/connectors/types.ts
+    - src/adapters/connectors/gmail.ts
+    - src/adapters/connectors/github.ts
+    - src/application/connector-sync.ts
+    - src/domain/types.ts
+    - src/server/http.ts
+    - tests/connectors-and-product.test.ts
+    - tests/gmail-oauth.test.ts
+acceptance:
+  criteria:
+    - Credentialed Gmail failures never produce or ingest fixtures and never advance cursor through the success branch.
+    - Fixture mode remains usable only without credentials and persists mock status; Gmail live and GitHub success remain compatible.
+    - Detail 503/malformed responses fail honestly, 404/410 may skip, and tests route detail payloads before generic list payloads.
+    - Failure results and public errors contain no access/refresh token, client secret, raw body, or stack.
+    - Full Relay lint, tests, and production build pass without commit or push.
+  commands:
+    - node --test --import tsx tests/gmail-oauth.test.ts tests/connectors-and-product.test.ts
+    - npm run check
+    - git diff --check

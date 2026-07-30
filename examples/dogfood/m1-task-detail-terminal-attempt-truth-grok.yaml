@@ -1,0 +1,245 @@
+version: 2
+name: Explain terminal Task attempts that still carry a running record
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-hub-terminal-attempt-truth
+taskFamily: bounded-hub-presentation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: bounded-hub-presentation
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；本任务只修正 Hub 的证据展示，不需要跨 Provider 验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Task Detail never tells a user that a Worker attempt is still running after
+    the parent Task has already reached a terminal failure. When durable events
+    prove that the Worker reported completion before a later attempt-scoped
+    failure, the Hub explains that execution ended and the later result-finalizing
+    step failed, while preserving the recorded Attempt status and keeping any
+    Main remediation or final delivery as separate evidence.
+  presentation:
+    summary: 任务已经结束时，不再把遗留的 Attempt running 记录展示成“Worker 还在执行”；要根据已有事件解释执行何时结束、后续哪个阶段失败，以及 Main 是否已完成修复交付。
+    language: zh-CN
+  context:
+    - >-
+      Live Task 5a34afb4-21f7-4b6d-92d6-99de36ec81b7 is terminal failed and has
+      a verified Main remediation, but Attempt 2 remains recorded as running.
+      Its durable event sequence contains worker.completed, verification.started,
+      five passing verification.command.completed events, then worker.failed.
+    - >-
+      The raw Attempt record is historical evidence and must not be rewritten by
+      a read-only Hub projection. The product problem is user interpretation, not
+      database migration or recovery.
+    - >-
+      buildSafeTaskJourney already receives bounded Attempt records and full
+      internal event evidence. Task Detail already separates Worker execution,
+      independent checks, Main review, remediation, and Integration.
+    - >-
+      Event summaries and payloads may contain commands, paths, logs, or errors.
+      Derive only from closed event types, Attempt identity, order, and terminal
+      Task state; never expose or parse free-form summary text.
+  inScope:
+    - >-
+      Add one bounded locale-neutral presentation fact to an Attempt when its raw
+      status is non-terminal but the parent Task is terminal and durable events
+      prove that the same Attempt later ended.
+    - >-
+      Distinguish at least the evidence-backed case where worker.completed occurs
+      before a later worker.failed for the same Attempt, describing it as ended
+      after Worker completion while ForkLight finalized the result.
+    - >-
+      Keep the original recorded status available only as secondary technical
+      evidence if useful; primary English and Chinese copy must never say running
+      for an Attempt proven ended.
+    - >-
+      Apply the same presentation in every Task Detail surface that renders
+      Attempt history, including the collaboration journey and Process tab.
+    - >-
+      Keep verified Main remediation, original machine failure, and final delivery
+      as separate named facts; a remediation pass must not relabel the Worker
+      Attempt as succeeded.
+    - >-
+      Add deterministic backend and executable UI behavior tests using a fixture
+      shaped like the live Relay Board failure, plus negative cases for genuinely
+      running Tasks and unrelated Attempt events.
+  outOfScope:
+    - >-
+      Updating Attempt or Task records, recovery, retry, correction, verification,
+      patch capture, candidate creation, Integration, routing, Provider behavior,
+      board lanes, daemon protocol, schema migration, commit, or push.
+    - >-
+      Parsing raw error messages to classify exact filesystem causes, displaying
+      event summaries or payloads, or claiming that passing commands created a
+      CandidateRevision when candidate capture did not complete.
+    - >-
+      Treating every terminal parent as proof that every running Attempt completed;
+      evidence must bind to the exact Attempt and fail closed when ambiguous.
+    - Broad Task Detail redesign or new lifecycle authority.
+  executionSteps:
+    - >-
+      Trace buildSafeTaskJourney, bounded Attempt projection, Task story adapter,
+      both Attempt renderers, remediation presentation, and existing Hub tests.
+    - >-
+      Define the smallest closed presentation enum/fact that can express an ended
+      post-Worker failure without overwriting the stored status.
+    - >-
+      Derive that fact only from exact Attempt ids and ordered durable event types
+      under a terminal parent Task; fail closed for missing or conflicting evidence.
+    - >-
+      Render matched English and Chinese primary copy in both Attempt history
+      surfaces, retaining technical recorded-state detail only when it helps audit.
+    - >-
+      Add behavior tests for the live event sequence, a truly running Task, wrong
+      Attempt ids, missing worker.completed, remediation separation, privacy, and
+      the absence of false running copy.
+    - Run focused checks, full tests, build, JavaScript syntax, and diff hygiene once.
+  deliverables:
+    - A privacy-safe terminal-Attempt presentation fact derived from durable events.
+    - Plain-language English and Chinese Attempt history that cannot falsely imply ongoing work.
+    - Regression proof for live-shaped post-completion failure and negative cases.
+  modules:
+    - name: Safe Task journey Attempt projection
+      responsibility: Reconcile raw Attempt state with exact ordered event evidence for display without mutating history.
+      consumes:
+        - Parent Task status, bounded Attempt records, and durable events containing type, sequence, and Attempt id.
+      produces:
+        - Raw recorded status plus an optional closed presentation state for an Attempt proven to have ended.
+      boundaries:
+        - Read-only, Attempt-id exact, order-aware, summary/payload blind, bounded, and fail-closed.
+    - name: Task Detail Attempt explanation
+      responsibility: Show what happened to each Attempt in user language across both existing Task Detail renderers.
+      consumes:
+        - Safe Attempt projection and current Hub locale.
+      produces:
+        - One primary state label and optional short explanation per Attempt.
+      boundaries:
+        - Does not infer Candidate creation, acceptance, repair, delivery, or exact filesystem cause.
+    - name: Terminal Attempt regression
+      responsibility: Prevent terminal Tasks from appearing active and prevent unrelated evidence from closing a real running Attempt.
+      consumes:
+        - Live-shaped and adversarial Task/Attempt/event fixtures in both locales.
+      produces:
+        - Backend data assertions and executable UI meaning assertions.
+      boundaries:
+        - No daemon mutation, live Provider call, giant snapshot, commit, or push.
+  callChain:
+    - Daemon inspection supplies the stored Task, Attempt rows, and durable events without rewriting any record.
+    - Hub journey projection binds events to the exact Attempt and derives an optional closed presentation state.
+    - Task Detail collaboration journey and Process tab consume the same projected fact and localized copy.
+    - Final delivery continues to consume Main remediation and Integration evidence separately.
+  scenarios:
+    - name: Worker completed before result finalization failed
+      given: >-
+        A parent Task is failed; Attempt 2 is recorded running; the same Attempt has
+        ordered worker.completed, verification.started, passing command events,
+        then worker.failed; Main remediation later passed.
+      when: Task Detail renders in Chinese or English.
+      then: >-
+        Attempt 2 is described as ended after the Worker reported completion, not
+        as still running. Final delivery separately says Main repaired and verified
+        the result, while the original Task failure remains visible.
+    - name: Genuine active execution
+      given: A parent Task is running and its Attempt is running with no terminal Attempt event.
+      when: Task Detail renders.
+      then: It still says the Worker is executing and offers the wait guidance.
+    - name: Unrelated terminal event
+      given: A terminal parent has a running Attempt, but worker.failed belongs to a different Attempt id.
+      when: The journey projection is built.
+      then: It does not use that unrelated event to invent a closed presentation state.
+    - name: Failure before Worker completion
+      given: The exact Attempt has worker.failed but no earlier worker.completed event.
+      when: Task Detail renders.
+      then: It may say the Attempt ended unsuccessfully but must not claim the Worker completed or that result finalization was the failure stage.
+  risks:
+    - Rewriting the Attempt status would destroy forensic truth; add display evidence instead.
+    - Parent terminal state alone is insufficient; exact Attempt-bound events are required.
+    - Free-form event text can leak private paths or misclassify causes; use only closed event types and order.
+    - Remediation success is a later Main outcome, not proof of Worker success; keep the sections independent.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 650
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 650
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - >-
+      Terminal parent Tasks never present an exact Attempt as still running when
+      ordered same-Attempt durable events prove it ended.
+    - >-
+      The post-Worker finalization case is derived without raw summary parsing;
+      genuine active and unrelated-Attempt cases remain fail-closed.
+    - >-
+      English and Chinese Task Detail renderers share the same evidence meaning,
+      and remediation remains separate from original Worker/Task status.
+    - No execution, persistence, retry, verification, Integration, or routing behavior changes.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - npm test
+    - npm run build
+    - git diff --check

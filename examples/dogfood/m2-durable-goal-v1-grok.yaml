@@ -1,0 +1,205 @@
+version: 2
+name: Add durable Goal supervision over four-to-eight Task Plans
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-durable-goal-v1
+taskFamily: forklight-main-orchestration
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    Main can submit one durable Goal that supervises an existing four-to-eight
+    Task Work Plan without creating a second scheduler. The Goal persists its
+    objective, frozen orchestration policy, milestone gates, evidence cursor,
+    current Candidate/Review/Integration facts, progress, and explicit stop or
+    wait reason. Plan Tasks continue through the ordinary persistent daemon and
+    dependency queue across restart, but a downstream Task cannot cross a
+    milestone gate until its configured machine, fresh Main-accept, or applied
+    Integration evidence exists. Unlimited total duration is supported without
+    permitting unlimited corrections, reviews, identical-evidence cycles, or
+    automatic Main decisions and Integration. Hub, CLI, and MCP explain what is
+    happening and what Main must do next in plain English and Chinese.
+  presentation:
+    summary: Goal 复用现有 Plan 调度，跨重启持续推进 4–8 个 Task；关键里程碑必须等 Main 或安全合入，不会因为“不限时”进入无限修复。
+    language: zh-CN
+  context:
+    - Plan version 1 already validates dependency DAGs, atomically registers Tasks and dependency records, queues ready work, persists waiting/blocked evidence, and recovers queued/interrupted Tasks after Daemon restart.
+    - Plan readiness currently treats machine Task status succeeded as sufficient for every dependency, so a downstream coding Task may start before Main accepts or integrates the upstream Candidate and therefore consume stale source.
+    - CandidateRevision, Main Review, Review Graph, Integration results, correction grants, and Task effective policy already provide authoritative immutable evidence; Goal must reference these authorities rather than duplicate their logic or copy private content.
+    - Task-level maxDurationMs null already means unlimited Worker wall duration. Goal needs a separate total-duration preference and explicit stop semantics across many Tasks; null must remain unlimited after persistence and restart.
+    - No exact task-class/family routing samples exist. Main explicitly selected local Grok 4.5 because the owner requested Grok as the default on 2026-07-30 and 2026-07-31. Competition intent is none.
+    - Preserve all current uncommitted M2 Candidate, Competition, Review Graph, tests, task contracts, and project-status changes. Do not commit or push.
+  inScope:
+    - Add a versioned Goal file format that references one version-1 Work Plan, requires four through eight items, and declares a milestone gate for every Plan item as machine, main-accept, or integration.
+    - Add a frozen Goal policy with maxDurationMs as null or a positive integer, noProgressTimeoutMs as null or a positive integer, maximum correction rounds, maximum review rounds, and maximum no-new-evidence cycles. Preserve explicit null through validation, persistence, projection, and restart.
+    - Persist Goal, milestone, Task/Plan linkage, status, latest evidence digest/time, bounded counters, and a closed privacy-safe stop/wait reason. Create the Plan Tasks, dependency graph, Goal, and milestones atomically before any in-memory queue action.
+    - "Reuse the existing Plan scheduler. For each dependency, combine ordinary Task readiness with the upstream Goal milestone gate: machine requires machine success; main-accept requires a fresh exact Main accept; integration requires a successful Integration apply for that exact accepted Candidate. Non-Goal Plans remain byte-for-byte behavior compatible."
+    - Reconcile Goal state after Task terminal transitions, fresh Main Review, Review Graph terminal evidence, Integration completion, Daemon recovery, and read-only status. Queue an eligible dependent exactly once when its gate becomes satisfied.
+    - Project each milestone with Task identity/status, configured gate, whether it is satisfied, a plain-language wait/failure reason, latest Candidate digest prefix, Review Graph status/result usability, fresh Main decision, Integration state, and the next Main action. Never project raw patch, resultText, command output, prompts, absolute paths, credentials, or private artifact paths.
+    - Keep Main authority explicit. Goal may automatically queue only Tasks whose already-declared dependencies and gates are satisfied. It never creates a correction, review, competition, adaptation, Main decision, Integration receipt/apply, commit, or push.
+    - Enforce Goal correction/review caps when an existing Goal Task requests those operations. At the cap, reject before mutation and move/project the Goal as waiting for Main with an explicit reason; do not start replacement work.
+    - Treat repeated reconciliation with the same evidence as idempotent, not a new cycle. Increment no-new-evidence only for an explicit Goal continue/advance request that cannot identify a newer Task event, Candidate Revision, terminal review, Main decision, or Integration result; stop at the frozen cap without launching a Worker.
+    - Add explicit Main operations to submit, inspect/status, continue/advance, and stop a Goal. Stop is durable, confirmation-gated, prevents future Goal Task admission, and does not delete history or silently kill unrelated Tasks.
+    - Add daemon, CLI, MCP, Hub backend, Goal overview/detail, and bilingual explanation-first UI. The primary story is objective, current milestone, what just happened, what is waiting, why it stopped, and the one next action; internal ids/counters remain secondary.
+    - Add executable parser, atomicity, gate, idempotency, cap, unlimited-duration, no-new-evidence, stop, restart, protocol, CLI/MCP, Hub privacy, and UI regressions.
+  outOfScope:
+    - A second task scheduler, arbitrary dynamic Task generation, automatic decomposition from free text, multiple simultaneous judge aggregation, majority voting, reviewer replacement, Worker-to-Worker messaging, or cross-Candidate patch synthesis.
+    - Automatically correcting, reviewing, competing, adapting, accepting, integrating, committing, pushing, or selecting a different model when evidence is missing or a limit is reached.
+    - Killing a currently running Worker merely because Main stops the Goal; this slice prevents further admissions and records the active Task that must be handled through existing Task authority.
+    - Rewriting historical Plans/Tasks, loosening authentication/source isolation/confirmation gates, Provider/runtime adapter changes, migrations that discard old records, or claims of Main Token savings without exact-pair evidence.
+    - Treating elapsed time, file count, line count, model score, or judge vote as a substitute for verified behavior and Main judgment.
+  executionSteps:
+    - Trace Plan parsing/registration, dependency readiness, queue/recovery, Task terminal reconciliation, Main Review, Review Graph, Integration completion, correction/review admission, daemon protocol, MCP, Hub Plan board, and privacy projections before editing.
+    - Define one canonical Goal parser, types, state projection, evidence cursor, milestone gate resolver, stop/cap resolver, and Store authority.
+    - Make Goal plus Plan/Tasks registration atomic, then integrate Goal gating into the existing dependency decision and recovery path without changing standalone Plan behavior.
+    - Wire Goal reconciliation to Task completion, Main Review, Review terminal evidence, Integration completion, explicit advance/stop, and Daemon restart.
+    - Add CLI/MCP/Hub operations and an explanation-first Goal view with actual frozen Worker identities inherited from Tasks and localized next-action codes.
+    - Prove a real temporary four-Task chain with at least two dependency waves, one integration milestone gate, one Daemon restart, maxDurationMs null preservation, duplicate recovery/advance idempotency, a no-new-evidence stop fixture, and no duplicate Task mutation.
+    - Run focused tests once and the complete suite/build/syntax/diff checks once. Stop after one Candidate; return semantic gaps to Main rather than broadening or retrying.
+  deliverables:
+    - Durable versioned Goal record and four-to-eight milestone supervision over existing Plan Tasks.
+    - Exact machine/Main/Integration dependency gates and restart-safe reconciliation.
+    - Frozen unlimited-duration and bounded correction/review/no-new-evidence policy with explicit stop reasons.
+    - CLI, MCP, and bilingual Hub Goal overview/detail that explain process, evidence, and next action.
+  modules:
+    - name: Goal contract, persistence, and evidence
+      responsibility: Freeze one Goal over one validated four-to-eight Task Plan and persist its milestones, policy, evidence cursor, status, and stop/wait reason atomically with Plan Tasks.
+      consumes:
+        - Goal YAML, Work Plan, Task Contracts, frozen orchestration policy, Plan dependencies, and current timestamp.
+      produces:
+        - Goal record, milestone records, Goal-to-Plan/Task linkage, evidence digest/time, and safe status projection.
+      boundaries:
+        - No second scheduler, private Candidate content, automatic model selection, Worker launch outside the Plan, or mutation before complete validation.
+    - name: Milestone gate and durable reconciliation
+      responsibility: Combine Plan dependency readiness with exact machine, Main-accept, or Integration evidence and resume eligible work once across normal execution and restart.
+      consumes:
+        - Plan/Task status, CandidateRevision, Main Review, Review Graph, Integration results/events, Goal policy/counters, and daemon recovery state.
+      produces:
+        - Satisfied/waiting/failed milestone states, one queued dependent, updated Goal evidence/status, or an explicit stop/wait reason.
+      boundaries:
+        - No automatic correction, review, acceptance, Integration, retry, adaptation, duplicate enqueue, or identical-evidence cycle.
+    - name: Main and user Goal surfaces
+      responsibility: Let Main submit, inspect, explicitly advance, and stop a Goal while users understand the objective, current milestone, evidence, blockers, and next action.
+      consumes:
+        - Privacy-safe Goal projection, frozen policy, milestone state, Worker identities from linked Tasks, and explicit confirmation.
+      produces:
+        - Daemon/CLI/MCP operations, Hub overview/detail, bilingual status/error/next-action copy, and audit events.
+      boundaries:
+        - No raw logs, patches, prompts, absolute paths, credentials, technical-code-first errors, hidden mutation, or false completion.
+  callChain:
+    - Main validates and confirms one Goal file that references a valid four-to-eight Task Work Plan and explicit milestone gates.
+    - ForkLight atomically freezes Goal policy, Plan Tasks, dependencies, milestones, and their links, then queues only dependency-ready work through the existing daemon.
+    - A Task runs in its ordinary isolated workspace and produces independent verification plus immutable Candidate evidence.
+    - Goal reconciliation evaluates the configured milestone gate. Machine gates may unlock automatically; Main-accept and Integration gates wait for exact authoritative evidence and show one Main action.
+    - Main reviews or integrates through existing guarded operations; the new evidence reconciles the Goal and queues each newly eligible dependent once.
+    - Daemon restart reconstructs active/queued Task work and Goal supervision from the same durable records without duplicating Tasks, reviews, decisions, or Integration.
+    - Goal reaches completed only when every milestone gate is satisfied, or reaches an explicit waiting/stopped state with a stable reason; elapsed unlimited duration alone never stops it.
+  scenarios:
+    - name: Four-Task Goal crosses a restart
+      given: A four-item Plan has two dependency waves and maxDurationMs null.
+      when: The Daemon restarts while one Goal Task is active or waiting on a milestone gate.
+      then: The same Goal, Tasks, attempts, dependencies, policy null, evidence, and gates recover; eligible work resumes once and no item is duplicated.
+    - name: Integration milestone protects downstream source
+      given: An upstream coding Task is machine-green but its milestone gate is integration.
+      when: The scheduler reconciles before and after Main exact acceptance and successful Integration.
+      then: The dependent remains waiting before applied Integration, then queues exactly once and prepares from the updated source afterward.
+    - name: Unlimited time remains bounded work
+      given: Goal maxDurationMs is null but correction, review, and no-new-evidence limits are finite.
+      when: Time passes or Main explicitly advances without new evidence.
+      then: Elapsed time alone never stops the Goal; identical evidence does not launch work, the bounded counter reaches its cap, and the Goal stops or waits for Main with a visible reason.
+    - name: Correction or review cap is reached
+      given: Linked Goal Tasks have consumed the frozen correction or review allowance.
+      when: Another such mutation is requested.
+      then: ForkLight rejects before mutation, launches nothing, retains all Candidate evidence, and tells Main which limit was reached and what decision remains.
+    - name: Main stops a Goal
+      given: A Goal has pending or waiting milestones.
+      when: Main confirms stop.
+      then: The stop is durable, future Goal Task admission is blocked across restart, history remains readable, and no unrelated Task is changed.
+    - name: Existing Plan stays compatible
+      given: A Plan was submitted without a Goal.
+      when: Its prerequisite Task succeeds and the daemon reconciles.
+      then: Existing machine-status dependency behavior remains unchanged and no Goal record or gate is invented.
+  risks:
+    - Building a second scheduler would create contradictory queue truth, so Goal must only constrain and explain the existing Plan scheduler.
+    - Machine success before Integration can feed stale source to dependents, so integration gates must bind the exact current accepted Candidate and applied result.
+    - Treating read-only status polling as new evidence would manufacture progress and prevent stop conditions, so evidence digests change only from authoritative persisted events/records.
+    - Unlimited duration can be mistaken for unlimited repair; independent correction/review/no-new-evidence caps and explicit Main stop remain hard orchestration boundaries.
+    - A broad Goal UI can become another technical dump; explanation-first bilingual copy and privacy-safe projections must lead with current outcome and next action.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 4400
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 20
+  fileLimitMode: warn
+  changedLineLimit: 4400
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/plan.ts
+    - src/core/board.ts
+    - src/core/dependency-resolver.ts
+    - src/core/candidate-revision.ts
+    - src/core/main-review.ts
+    - src/core/review-graph.ts
+    - src/core/integration.ts
+    - src/core/types.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/plan.test.ts
+    - tests/board.test.ts
+    - tests/daemon.test.ts
+    - tests/integration.test.ts
+    - tests/review-graph.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - One Goal atomically supervises exactly four through eight existing Plan Tasks with frozen policy, explicit milestone gates, durable evidence/status, and no duplicate scheduler or pre-validation mutation.
+    - Goal dependency readiness supports machine, fresh exact Main accept, and successful exact Integration gates; downstream work starts once only after its configured evidence and existing non-Goal Plans keep their current behavior.
+    - maxDurationMs null stays unlimited across persistence/restart while correction, review, and explicit no-new-evidence cycles remain finitely bounded and stop or wait without automatic replacement work.
+    - Daemon restart preserves the exact Goal/Plan/Task/milestone/evidence state and resumes eligible ordinary Task work without duplicate Task, Attempt, review, decision, or Integration mutation.
+    - CLI, MCP, and Hub support submit/status/advance/stop with explicit confirmation for mutations, and Goal Detail explains objective, current milestone, actual Worker, evidence, blocker/stop cause, and next Main action in plain English and Chinese.
+    - Goal never edits a Candidate, makes a Main decision, launches undeclared work, corrects/reviews/integrates automatically, commits, pushes, or exposes raw/private content.
+    - The complete existing repository remains green and no commit or push occurs.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/goal.test.ts tests/plan.test.ts tests/board.test.ts tests/daemon.test.ts tests/integration.test.ts tests/review-graph.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

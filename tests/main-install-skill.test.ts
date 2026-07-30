@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   installMainFull,
@@ -109,4 +110,40 @@ test("installMainSkill for claude creates parent dirs atomically", async () => {
   const st = await statusMainSkill("claude-code", { home, skillPath });
   assert.equal(st.installed, true);
   assert.equal(st.path, skillPath);
+});
+
+test("packaged orchestrator skill requires truthful routing metadata without forced Competition", async () => {
+  const skillPath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "plugins",
+    "forklight",
+    "skills",
+    "forklight-orchestrator",
+    "SKILL.md",
+  );
+  const body = await readFile(skillPath, "utf8");
+  assert.match(body, /taskClass/);
+  assert.match(body, /taskFamily/);
+  assert.match(body, /routingDecision/);
+  assert.match(body, /forklight_model_routing/);
+  assert.match(body, /genuinely considered/i);
+  assert.match(body, /at least two/i);
+  assert.match(body, /Competition is never automatic/i);
+  assert.match(body, /unknown/i);
+  assert.match(body, /standing/i);
+  assert.match(body, /commit and push/i);
+  // Gap 1: reuse existing stable families on genuine contract match; no lexical-only grouping.
+  assert.match(body, /Reuse/i);
+  assert.match(body, /genuinely match/i);
+  assert.match(body, /lexical/i);
+  assert.match(body, /unnecessary new famil/i);
+  assert.match(body, /backfill/i);
+  // Gap 2: unqueried/unavailable evidence is empty map + unavailable, never fabricated zeros.
+  assert.match(body, /empty/i);
+  assert.match(body, /unavailable/i);
+  assert.match(body, /never.*zero|not.*zero|Never.*zero/i);
+  assert.doesNotMatch(body, /honest zeros/i);
+  assert.doesNotMatch(body, /never guess from name, prompt, or prior Tasks/);
+  assert.doesNotMatch(body, /sk-[a-zA-Z0-9]{8,}/);
 });

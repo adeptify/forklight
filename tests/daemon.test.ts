@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -13,13 +13,19 @@ import type {
 } from "../src/core/types.js";
 import type { PlanBoard, PlanBoardSummary } from "../src/core/board.js";
 import {
+  DAEMON_STARTUP_CHILD_EXITED_MESSAGE,
+  DAEMON_STARTUP_TIMEOUT_MESSAGE,
+  DEFAULT_DAEMON_STARTUP_TIMEOUT_MS,
   daemonExchange,
   daemonLaunchArguments,
   daemonRequest,
   daemonRequestTimeoutMs,
+  ensureDaemon,
+  resolveDaemonStartupTimeoutMs,
   routeMutation,
   stopDaemon,
   stopDaemonForHandoff,
+  type DaemonChildHandle,
 } from "../src/daemon/client.js";
 import { requiresMatchingBuildIdentity } from "../src/daemon/protocol.js";
 import { daemonSocketPath } from "../src/core/config.js";
@@ -80,6 +86,149 @@ test("Integration wait socket deadline covers the requested wait interval", () =
     daemonRequestTimeoutMs("integration_wait", { timeoutMs: 60_000 }),
     65_000,
   );
+});
+
+test("resolveDaemonStartupTimeoutMs accepts the bounded range and rejects garbage", () => {
+  assert.equal(resolveDaemonStartupTimeoutMs(), DEFAULT_DAEMON_STARTUP_TIMEOUT_MS);
+  assert.equal(resolveDaemonStartupTimeoutMs(1_000), 1_000);
+  assert.equal(resolveDaemonStartupTimeoutMs(600_000), 600_000);
+  assert.throws(() => resolveDaemonStartupTimeoutMs(999), /Daemon startup timeout must be an integer/);
+  assert.throws(() => resolveDaemonStartupTimeoutMs(600_001), /Daemon startup timeout must be an integer/);
+  assert.throws(() => resolveDaemonStartupTimeoutMs(1.5), /Daemon startup timeout must be an integer/);
+  assert.throws(() => resolveDaemonStartupTimeoutMs("30000"), /Daemon startup timeout must be an integer/);
+});
+
+function fakeChild(overrides: Partial<DaemonChildHandle> = {}): DaemonChildHandle {
+  return {
+    pid: 42_001,
+    exited: false,
+    exitCode: null,
+    signalCode: null,
+    ...overrides,
+  };
+}
+
+test("ensureDaemon returns an already-healthy daemon without launching", async () => {
+  let launches = 0;
+  const health = { ok: true, pid: 77, status: "ready" };
+  const result = await ensureDaemon("/tmp/forklight-ensure-already-running", {
+    launch: () => {
+      launches += 1;
+      return fakeChild();
+    },
+    probeHealth: async () => health,
+  });
+  assert.deepEqual(result, health);
+  assert.equal(launches, 0, "already-healthy path must not spawn");
+});
+
+test("ensureDaemon waits past the old five-second boundary for slow recovery", async () => {
+  let now = 0;
+  let launches = 0;
+  let postLaunchProbes = 0;
+  const health = { ok: true, pid: 88, status: "ready-after-slow-recovery" };
+  const result = await ensureDaemon("/tmp/forklight-ensure-slow-ready", {
+    startupTimeoutMs: 10_000,
+    pollIntervalMs: 100,
+    nowMs: () => now,
+    sleepMs: async (ms) => {
+      now += ms;
+    },
+    launch: () => {
+      launches += 1;
+      return fakeChild({ pid: 88 });
+    },
+    probeHealth: async () => {
+      // First call is the existing-daemon fast path; fail so we launch once.
+      if (launches === 0) throw new Error("connect ENOENT");
+      postLaunchProbes += 1;
+      // Become ready only after the historical fixed 5s window.
+      if (now < 5_500) throw new Error("connect ENOENT");
+      return health;
+    },
+  });
+  assert.deepEqual(result, health);
+  assert.equal(launches, 1, "slow recovery must launch exactly once");
+  assert.ok(now >= 5_500, `readiness must cross the old 5s boundary (now=${now})`);
+  assert.ok(postLaunchProbes > 1, "must poll health after launch");
+});
+
+test("ensureDaemon fails immediately when the launched child exits", async () => {
+  let now = 0;
+  let launches = 0;
+  const child = fakeChild({ pid: 99 });
+  let childExited = false;
+  await assert.rejects(
+    () => ensureDaemon("/tmp/forklight-ensure-child-exit", {
+      startupTimeoutMs: 10_000,
+      pollIntervalMs: 100,
+      nowMs: () => now,
+      sleepMs: async (ms) => {
+        now += ms;
+        childExited = true;
+      },
+      launch: () => {
+        launches += 1;
+        return {
+          get pid() {
+            return child.pid;
+          },
+          get exited() {
+            return childExited;
+          },
+          get exitCode() {
+            return childExited ? 1 : null;
+          },
+          get signalCode() {
+            return null;
+          },
+        };
+      },
+      probeHealth: async () => {
+        if (launches === 0) throw new Error("connect ENOENT");
+        throw new Error("connect ECONNREFUSED");
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, DAEMON_STARTUP_CHILD_EXITED_MESSAGE);
+      assert.doesNotMatch(error.message, /ENOENT|ECONNREFUSED|\/tmp|sock/i);
+      return true;
+    },
+  );
+  assert.equal(launches, 1, "child-exit path must not relaunch");
+  assert.ok(now < 5_000, "child exit must fail before the full readiness window");
+});
+
+test("ensureDaemon reports a truthful timeout without relaunching", async () => {
+  let now = 0;
+  let launches = 0;
+  await assert.rejects(
+    () => ensureDaemon("/tmp/forklight-ensure-timeout", {
+      startupTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+      nowMs: () => now,
+      sleepMs: async (ms) => {
+        now += ms;
+      },
+      launch: () => {
+        launches += 1;
+        return fakeChild({ pid: 101 });
+      },
+      probeHealth: async () => {
+        throw new Error("connect ENOENT /private/tmp/secret-home/forklight.sock");
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, new RegExp(DAEMON_STARTUP_TIMEOUT_MESSAGE));
+      assert.match(error.message, /1000ms/);
+      assert.doesNotMatch(error.message, /secret-home|forklight\.sock|ENOENT/i);
+      return true;
+    },
+  );
+  assert.equal(launches, 1, "timeout path must launch exactly once");
+  assert.ok(now >= 1_000, `deadline must be exhausted (now=${now})`);
 });
 
 test("Main remediation transport does not expire before configured verification", () => {
@@ -390,6 +539,99 @@ test("daemon serves health and task-list requests over its local socket", async 
   }
 });
 
+test("daemon statistics default to compact detail and reject invalid detail", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-daemon-stats-"));
+  const store = new StateStore(home);
+  const timestamp = new Date().toISOString();
+  const failed: TaskRecord = {
+    id: "stats-failed",
+    name: "stats failed",
+    status: "failed",
+    sourcePath: "/source",
+    taskFile: "/task.yaml",
+    spec: { provider: { name: "deepseek", model: "v4" } } as TaskRecord["spec"],
+    paths: {} as TaskRecord["paths"],
+    sessionId: "stats-session",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    error: "HTTP 401: bad key for deep audit",
+  };
+  store.createTask(failed);
+  store.createAttempt({
+    id: "stats-attempt-1",
+    taskId: failed.id,
+    ordinal: 1,
+    status: "failed",
+    sessionId: failed.sessionId,
+    rawLogPath: "/log",
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    exitCode: 1,
+    costUsd: 0.2,
+    turns: 3,
+  });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const defaultCompact = await daemonRequest<Array<Record<string, unknown>>>(
+      "statistics",
+      {},
+      home,
+    );
+    assert.equal(defaultCompact.length, 1);
+    assert.equal(defaultCompact[0]!.provider, "deepseek");
+    assert.equal(defaultCompact[0]!.model, "v4");
+    assert.equal(defaultCompact[0]!.sampleSize, 1);
+    assert.equal(defaultCompact[0]!.successCount, 0);
+    assert.deepEqual(defaultCompact[0]!.failureDistribution, { credential: 1 });
+    assert.equal("failures" in defaultCompact[0]!, false);
+    const compactJson = JSON.stringify(defaultCompact);
+    assert.doesNotMatch(compactJson, /"taskId"|"attemptId"|"diagnostic"|HTTP 401|stats-failed|stats-attempt/);
+
+    const explicitCompact = await daemonRequest<Array<Record<string, unknown>>>(
+      "statistics",
+      { detail: "compact" },
+      home,
+    );
+    assert.equal("failures" in explicitCompact[0]!, false);
+    assert.equal(explicitCompact[0]!.sampleSize, defaultCompact[0]!.sampleSize);
+    assert.deepEqual(
+      explicitCompact[0]!.failureDistribution,
+      defaultCompact[0]!.failureDistribution,
+    );
+
+    const full = await daemonRequest<Array<Record<string, unknown>>>(
+      "statistics",
+      { detail: "full" },
+      home,
+    );
+    assert.equal(full[0]!.sampleSize, defaultCompact[0]!.sampleSize);
+    assert.equal(full[0]!.successRate, defaultCompact[0]!.successRate);
+    assert.deepEqual(full[0]!.failureDistribution, defaultCompact[0]!.failureDistribution);
+    const failures = full[0]!.failures as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(failures));
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]!.taskId, "stats-failed");
+    assert.equal(failures[0]!.attemptId, "stats-attempt-1");
+    assert.equal(failures[0]!.diagnostic, "HTTP 401: bad key for deep audit");
+
+    await assert.rejects(
+      () => daemonRequest("statistics", { detail: "verbose" }, home),
+      /statistics detail must be "compact" or "full"/,
+    );
+    await assert.rejects(
+      () => daemonRequest("statistics", { detail: true }, home),
+      /statistics detail must be "compact" or "full"/,
+    );
+  } finally {
+    await daemon.close();
+  }
+});
+
 test("daemon exposes identity, warns on read mismatch, and blocks stale mutations", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-daemon-identity-"));
   const daemon = new ForkLightDaemon(home, 0);
@@ -451,6 +693,48 @@ test("daemon exposes checkpoint_run with bounded command-id input", async () => 
     );
   } finally {
     await daemon.close();
+  }
+});
+
+test("daemon Competition protocol preserves Profile-only candidates through parsing", async () => {
+  // Keep the macOS Unix-domain socket path below its platform length limit.
+  const home = await mkdtemp(path.join(tmpdir(), "fl-dcp-"));
+  const taskFile = await writeAdmissionTaskFile("default", {
+    name: "Profile Competition protocol",
+  });
+  const daemon = new ForkLightDaemon(home, 0, TEST_PROVIDER_AUTH_READY);
+  await daemon.start();
+  try {
+    await assert.rejects(
+      () => daemonRequest(
+        "competition_submit_file",
+        {
+          taskFile,
+          candidates: [
+            { workerProfileId: "default" },
+            { workerProfileId: "missing-profile" },
+          ],
+          reason: {
+            intent: "required",
+            triggers: ["user-requested"],
+            note: "Exercise the real Profile-based daemon admission path.",
+          },
+        },
+        home,
+      ),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /Unknown worker profile|unknown Worker Profile/);
+        assert.doesNotMatch(message, /not both|provider\/model/);
+        return true;
+      },
+    );
+    assert.deepEqual(await daemonRequest<unknown[]>("list", {}, home), []);
+    assert.deepEqual(await daemonRequest<unknown[]>("competition_list", {}, home), []);
+  } finally {
+    await daemon.close();
+    await rm(home, { recursive: true, force: true });
+    await rm(path.dirname(taskFile), { recursive: true, force: true });
   }
 });
 
@@ -1966,6 +2250,329 @@ test("economics_summary empty store returns nonEmpty false with zero denominator
   }
 });
 
+// --- routing_evidence_coverage daemon integration ---
+
+test("routing_evidence_coverage returns privacy-safe aggregate via the daemon", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-rec-coverage-daemon-"));
+  {
+    const store = new StateStore(home);
+    const TS = "2026-07-30T12:00:00.000Z";
+    const worker = {
+      provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high",
+      workerProfileId: "local-grok-builder",
+    };
+    const routingDecision = {
+      taskFamily: "hub-explainability",
+      shortlist: [worker],
+      selectedWorker: worker,
+      selectedBecause: {
+        code: "user-specified",
+        note: "private Main reason must not leave the daemon aggregate",
+      },
+      competition: { intent: "none" as const, triggers: [] as [] },
+      evidenceSnapshot: { scope: "none" as const, exactSampleCounts: {} },
+    };
+    const baseSpec = {
+      version: 2 as const,
+      name: "rec",
+      project: "/tmp/proj",
+      provider: {
+        name: "xai", model: "grok-4.5",
+        endpoint: "https://api.x.ai", keychainService: "fk-secret",
+      },
+      runtime: {
+        name: "grok-build" as const, executable: "grok",
+        effort: "high" as const, maxBudgetUsd: 2,
+      },
+      workspace: { exclude: [] as string[] },
+      worker: {
+        allowEdits: true, allowedCommands: [] as string[], focusPaths: [] as string[],
+      },
+      contract: {
+        outcome: "o", context: [] as string[], inScope: [] as string[],
+        outOfScope: [] as string[], executionSteps: [] as string[],
+        deliverables: [] as string[], modules: [], callChain: [] as string[],
+        scenarios: [], risks: [] as string[],
+        changeBudget: { maxFiles: 1, maxDiffLines: 10 },
+      },
+      acceptance: { criteria: [] as string[], commands: ["true"] },
+    };
+    store.createTask({
+      id: "rec-legacy", name: "rec-legacy", status: "succeeded",
+      sourcePath: "/tmp/src/private", taskFile: "/tmp/rec-legacy.yaml",
+      spec: { ...baseSpec, name: "rec-legacy" },
+      paths: {
+        root: "/x", baseline: "/x", workspace: "/x",
+        logs: "/x", claudeConfig: "/x", diff: "/x",
+      },
+      sessionId: "s-rec-legacy", createdAt: TS, updatedAt: TS,
+    } as TaskRecord);
+    store.createTask({
+      id: "rec-complete", name: "rec-complete", status: "succeeded",
+      sourcePath: "/tmp/src/private", taskFile: "/tmp/rec-complete.yaml",
+      spec: {
+        ...baseSpec,
+        name: "rec-complete",
+        taskClass: "hub-routing-evidence-coverage",
+        taskFamily: "hub-explainability",
+        routingDecision,
+      },
+      paths: {
+        root: "/x", baseline: "/x", workspace: "/x",
+        logs: "/x", claudeConfig: "/x", diff: "/x",
+      },
+      sessionId: "s-rec-complete", createdAt: TS, updatedAt: TS,
+    } as TaskRecord);
+    store.createTask({
+      id: "rec-reviewer", name: "rec-reviewer", status: "succeeded",
+      sourcePath: "/tmp/src/private",
+      taskFile: "forklight://review-graph/g1/a1",
+      spec: {
+        ...baseSpec,
+        name: "rec-reviewer",
+        taskClass: "review-graph-reviewer",
+        taskFamily: "review-graph",
+        routingDecision: {
+          ...routingDecision,
+          taskFamily: "review-graph",
+        },
+      },
+      paths: {
+        root: "/x", baseline: "/x", workspace: "/x",
+        logs: "/x", claudeConfig: "/x", diff: "/x",
+      },
+      sessionId: "s-rec-reviewer", createdAt: TS, updatedAt: TS,
+    } as TaskRecord);
+    store.close();
+  }
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const coverage = await daemonRequest<Record<string, unknown>>(
+      "routing_evidence_coverage", {}, home,
+    );
+    assert.equal(coverage.eligibleTerminalTaskCount, 2);
+    assert.equal(coverage.withTaskClassCount, 1);
+    assert.equal(coverage.withTaskFamilyCount, 1);
+    assert.equal(coverage.withCompleteRoutingDecisionCount, 1);
+    assert.equal(coverage.distinctTaskClassCount, 1);
+    assert.equal(coverage.distinctTaskFamilyCount, 1);
+
+    const json = JSON.stringify(coverage);
+    assert.ok(!json.includes("private Main reason"));
+    assert.ok(!json.includes("/tmp/src/private"));
+    assert.ok(!json.includes("fk-secret"));
+    assert.ok(!json.includes("keychainService"));
+    assert.ok(!json.includes("hub-routing-evidence-coverage"));
+    assert.ok(!json.includes("local-grok-builder"));
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("routing_evidence_coverage empty store returns zero denominators", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-rec-coverage-empty-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const coverage = await daemonRequest<Record<string, unknown>>(
+      "routing_evidence_coverage", {}, home,
+    );
+    assert.equal(coverage.eligibleTerminalTaskCount, 0);
+    assert.equal(coverage.withTaskClassCount, 0);
+    assert.equal(coverage.withTaskFamilyCount, 0);
+    assert.equal(coverage.withCompleteRoutingDecisionCount, 0);
+    assert.equal(coverage.distinctTaskClassCount, 0);
+    assert.equal(coverage.distinctTaskFamilyCount, 0);
+  } finally {
+    await daemon.close();
+  }
+});
+
+// --- self_upgrade_evidence daemon integration ---
+
+test("self_upgrade_evidence returns 1/3 for success after retained-failure via daemon", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sue-daemon-"));
+  {
+    const store = new StateStore(home);
+    const TS_OK = "2026-07-30T12:00:00.000Z";
+    const TS_FAIL = "2026-07-30T11:00:00.000Z";
+    const four = [
+      { stage: "source-applied" as const, status: "passed" as const },
+      { stage: "source-verified" as const, status: "passed" as const },
+      { stage: "artifact-built" as const, status: "passed" as const },
+      { stage: "runtime-activated" as const, status: "passed" as const },
+    ];
+    const baseTask = (id: string, createdAt: string): TaskRecord => ({
+      id,
+      name: id,
+      status: "succeeded",
+      sourcePath: "/tmp/src/private",
+      taskFile: `/tmp/${id}.yaml`,
+      spec: {
+        version: 1,
+        name: id,
+        project: "/tmp/proj",
+        goal: "g",
+        constraints: [],
+        provider: {
+          name: "xai", model: "grok-4.5",
+          endpoint: "https://api.x.ai", keychainService: "fk-secret",
+        },
+        runtime: {
+          name: "grok-build", executable: "grok",
+          effort: "high", maxBudgetUsd: 2,
+        },
+        workspace: { exclude: [] },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+        acceptance: { commands: ["true"] },
+      },
+      paths: {
+        root: "/x", baseline: "/x", workspace: "/x",
+        logs: "/x", claudeConfig: "/x", diff: "/x",
+      },
+      sessionId: `s-${id}`,
+      createdAt,
+      updatedAt: createdAt,
+    } as TaskRecord);
+
+    store.createTask(baseTask("task-sue-ok", TS_OK));
+    store.createTask(baseTask("task-sue-fail", TS_FAIL));
+    const selfUpgradePlan = {
+      resolutionSource: "explicit" as const,
+      profileId: "forklight-self-upgrade",
+      buildCommandCount: 1,
+      activationCommandCount: 1,
+      activationCheckCommandCount: 1,
+      outcome: "activation" as const,
+      stages: {
+        sourceApply: "required" as const,
+        sourceVerify: "required" as const,
+        artifactBuild: "required" as const,
+        runtimeActivation: "required" as const,
+      },
+    };
+    store.saveIntegrationReceipt({
+      id: "receipt-sue-ok",
+      taskId: "task-sue-ok",
+      patchDigest: "a".repeat(64),
+      affectedFiles: ["src/a.ts"],
+      rejectionReasons: [],
+      sourceEvidence: {},
+      createdAt: TS_OK,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      consumed: true,
+      deliveryPlan: selfUpgradePlan,
+    });
+    store.saveIntegrationResult({
+      id: "efa7d9ae-61c9-421a-a1b5-d427d9353a81",
+      receiptId: "receipt-sue-ok",
+      taskId: "task-sue-ok",
+      status: "applied",
+      appliedAt: TS_OK,
+      createdAt: TS_OK,
+      stages: four,
+    });
+    store.saveIntegrationReceipt({
+      id: "receipt-sue-fail",
+      taskId: "task-sue-fail",
+      patchDigest: "b".repeat(64),
+      affectedFiles: ["src/b.ts"],
+      rejectionReasons: [],
+      sourceEvidence: {},
+      createdAt: TS_FAIL,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      consumed: true,
+      deliveryPlan: selfUpgradePlan,
+    });
+    store.saveIntegrationResult({
+      id: "66ba9a77-f518-4a37-836f-043e2b70c316",
+      receiptId: "receipt-sue-fail",
+      taskId: "task-sue-fail",
+      status: "retained-failure",
+      createdAt: TS_FAIL,
+      error: "activation retained: /Users/private/path token=sk-live-abc",
+      stages: [
+        { stage: "source-applied", status: "passed" },
+        { stage: "source-verified", status: "passed" },
+        { stage: "artifact-built", status: "passed" },
+        {
+          stage: "runtime-activated",
+          status: "failed",
+          error: "secret /Users/private/path",
+        },
+      ],
+    });
+    store.close();
+  }
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const evidence = await daemonRequest<Record<string, unknown>>(
+      "self_upgrade_evidence",
+      { required: 3 },
+      home,
+    );
+    assert.equal(evidence.achieved, 1);
+    assert.equal(evidence.required, 3);
+    assert.equal(evidence.remaining, 2);
+    assert.equal(evidence.state, "in-progress");
+    assert.equal(evidence.breakCategory, "retained-failure");
+    assert.equal(evidence.nextAction, "continue-consecutive-proofs");
+    assert.equal(
+      evidence.latestQualifyingOperationId,
+      "efa7d9ae-61c9-421a-a1b5-d427d9353a81",
+    );
+
+    const again = await daemonRequest<Record<string, unknown>>(
+      "self_upgrade_evidence",
+      { required: 3 },
+      home,
+    );
+    assert.deepEqual(again, evidence);
+
+    const json = JSON.stringify(evidence);
+    assert.ok(!json.includes("sk-live"));
+    assert.ok(!json.includes("/Users/private"));
+    assert.ok(!json.includes("activation retained"));
+    assert.ok(!json.includes("fk-secret"));
+    assert.ok(!json.includes("keychainService"));
+
+    await assert.rejects(
+      () => daemonRequest("self_upgrade_evidence", { required: 0 }, home),
+      /1 to 20/,
+    );
+    await assert.rejects(
+      () => daemonRequest("self_upgrade_evidence", { required: 21 }, home),
+      /1 to 20/,
+    );
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("self_upgrade_evidence empty store is 0/3 ready for first upgrade", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sue-empty-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const evidence = await daemonRequest<Record<string, unknown>>(
+      "self_upgrade_evidence",
+      {},
+      home,
+    );
+    assert.equal(evidence.achieved, 0);
+    assert.equal(evidence.required, 3);
+    assert.equal(evidence.state, "empty");
+    assert.equal(evidence.nextAction, "run-first-upgrade");
+    assert.equal(evidence.breakCategory, "none");
+  } finally {
+    await daemon.close();
+  }
+});
+
 test("daemon plan submission works with spaces in directory path", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight spaced path test-"));
   const planFile = path.join(home, "two wave plan.yaml");
@@ -3300,6 +3907,113 @@ async function seededIntegrationOperation(
   await coordinator.recover();
   return context;
 }
+
+test("abandoned async client disconnect does not crash the daemon or cancel dispatch", async () => {
+  // Real-socket regression: a client disappears while integration_wait is still
+  // pending. The server-side wait must finish once, the undeliverable response
+  // must not escape as EPIPE/readline noise, and the same daemon must stay
+  // healthy and closable afterward.
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-daemon-disconnect-"));
+  const seedStore = new StateStore(home);
+  const seedSettings = new SettingsService(seedStore);
+  const seedCoord = new DaemonCoordinator(seedStore, seedSettings, 0);
+  const ids = await seededIntegrationOperation(seedStore, seedCoord, "disconnect");
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+
+  const transportErrors: unknown[] = [];
+  const onUncaught = (error: unknown): void => {
+    transportErrors.push(error);
+  };
+  const onUnhandled = (reason: unknown): void => {
+    transportErrors.push(reason);
+  };
+  process.on("uncaughtException", onUncaught);
+  process.on("unhandledRejection", onUnhandled);
+
+  try {
+    const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    const pid = health.pid as number;
+    assert.equal(health.ok, true);
+    assert.ok(Number.isSafeInteger(pid) && pid > 0);
+
+    const waitTimeoutMs = 300;
+    const abandoned = net.createConnection(daemonSocketPath(home));
+    abandoned.on("error", () => {
+      // Intentional peer teardown may surface ECONNRESET/EPIPE on this client.
+    });
+    await new Promise<void>((resolve, reject) => {
+      abandoned.once("connect", () => resolve());
+      abandoned.once("error", reject);
+    });
+    const request = {
+      id: "abandoned-wait-1",
+      method: "integration_wait",
+      params: { operationId: ids.operationId, timeoutMs: waitTimeoutMs },
+      clientIdentity: currentBuildIdentity(),
+    };
+    await new Promise<void>((resolve, reject) => {
+      abandoned.write(`${JSON.stringify(request)}\n`, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+    // Allow the daemon to accept the line and enter waitIntegration before the
+    // peer disappears, so the later response write exercises delivery loss.
+    await sleep(30);
+    abandoned.destroy();
+
+    // Daemon must remain reachable while the abandoned wait is still pending.
+    const during = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    assert.equal(during.ok, true);
+    assert.equal(during.pid, pid, "same daemon PID while abandoned wait is pending");
+
+    // Wait past the server-side timeout so the undeliverable response write is
+    // attempted (and discarded) before we assert post-resolution health.
+    await sleep(waitTimeoutMs + 200);
+
+    assert.deepEqual(
+      transportErrors,
+      [],
+      "peer disconnect must not emit uncaught socket/readline errors",
+    );
+
+    const later = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    assert.equal(later.ok, true);
+    assert.equal(later.pid, pid, "same daemon process remains reachable after abandoned response");
+
+    // Later clients can still inspect the operation by id.
+    const status = await daemonRequest<{ operationId: string; status: string }>(
+      "integration_status",
+      { operationId: ids.operationId },
+      home,
+    );
+    assert.equal(status.operationId, ids.operationId);
+
+    // Application rejections still deliver when the client stays connected.
+    await assert.rejects(
+      () => daemonRequest(
+        "integration_wait",
+        { operationId: "missing-op", timeoutMs: 50 },
+        home,
+      ),
+      /Unknown Integration operation/,
+    );
+
+    // Ordinary success still returns exactly one protocol response.
+    const ok = await daemonExchange("health", {}, home);
+    assert.equal(ok.ok, true);
+    assert.equal(typeof ok.id, "string");
+  } finally {
+    process.off("uncaughtException", onUncaught);
+    process.off("unhandledRejection", onUnhandled);
+    // Shutdown after disconnect must remain bounded (no hung readline/socket).
+    await daemon.close();
+    await seedCoord.shutdown();
+    seedStore.close();
+  }
+});
 
 test("authorizeActivationHandoffShutdown validates, authorizes once with durable event and targetPid, rejects replay/mismatch/unknown", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-authz-"));

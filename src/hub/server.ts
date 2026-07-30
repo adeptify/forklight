@@ -330,6 +330,32 @@ export interface SafeTaskJourney {
   candidateReuse?: CandidateReuseSection;
   candidateReverification?: CandidateReverificationSection;
   retainedCandidate: RetainedCandidateSection;
+  /** Privacy-safe cross-Worker handoff story when this Task is source or successor. */
+  candidateHandoff?: CandidateHandoffSection;
+}
+
+interface CandidateHandoffSection {
+  role: "source" | "successor";
+  status: string;
+  originKind?: string;
+  competitionId?: string;
+  sourceCandidateId?: string;
+  goalId?: string;
+  itemId?: string;
+  sourceTaskId?: string;
+  successorTaskId?: string;
+  destinationWorkerProfileId?: string;
+  destinationProvider?: string;
+  destinationModel?: string;
+  reusablePathCount: number;
+  remainingGapCount: number;
+  reusablePaths: string[];
+  remainingGaps: Array<{ description: string; acceptanceExpectation: string }>;
+  sourceDigestPrefix?: string;
+  failureCode?: string;
+  nextAction: string;
+  /** Explicit: this is not a retry of the source Task. */
+  notARetry: true;
 }
 
 interface CandidateReverificationSection {
@@ -378,6 +404,8 @@ type RetainedCandidateSection =
   | { status: "evidence-unavailable" }
   | {
       status: "available";
+      /** Exact CandidateRevision id for confirmation-gated handoff/correct. */
+      revisionId: string;
       attemptOrdinal: number;
       verificationPassed: boolean;
       filesChanged: number;
@@ -412,6 +440,15 @@ interface AssignmentSection {
   goal?: string;
 }
 
+/**
+ * Closed presentation state for an Attempt whose raw status is still
+ * non-terminal while durable same-Attempt events prove it already ended.
+ * Never overwrites the recorded status; display-only evidence.
+ */
+type AttemptPresentationState =
+  | "ended-after-worker-completion"
+  | "ended-unsuccessfully";
+
 interface WorkerExecutionSection {
   provider: string;
   model: string;
@@ -420,6 +457,12 @@ interface WorkerExecutionSection {
   attempts: Array<{
     ordinal: number;
     status: string;
+    /**
+     * Optional closed presentation when the parent Task is terminal and
+     * ordered same-Attempt events prove this Attempt ended. Raw `status`
+     * remains the forensic recorded value.
+     */
+    presentationState?: AttemptPresentationState;
     startedAt?: string;
     finishedAt?: string;
     exitCode?: number;
@@ -583,14 +626,17 @@ export function buildSafeTaskJourney(
     .filter(safeRelativePath)
     .slice(0, 40);
 
-  const attempts = buildBoundedAttempts(inspectAttempts);
+  // Durable events bind presentation evidence to exact Attempt ids. Summary
+  // and payload text are never read for this projection.
+  const inspectEvents = Array.isArray(inspect.events)
+    ? inspect.events as Array<Record<string, unknown>>
+    : [];
+  const parentTaskStatus = String(rawTask.status ?? "unknown");
+  const attempts = buildBoundedAttempts(inspectAttempts, inspectEvents, parentTaskStatus);
 
   // Latest explicit Main correction: this is the bounded Main -> Worker input
   // and its factual incremental outcome. It never estimates a hypothetical
   // from-scratch retry or claims unmeasured savings.
-  const inspectEvents = Array.isArray(inspect.events)
-    ? inspect.events as Array<Record<string, unknown>>
-    : [];
   const correctionGrants = inspectEvents.filter((event) => {
     if (event.type !== "attempt.authorization.granted") return false;
     const payload = event.payload;
@@ -813,7 +859,7 @@ export function buildSafeTaskJourney(
   };
 
   // --- Cause (what happened + why, always separate) ---
-  const taskStatus = String(rawTask.status ?? "unknown");
+  const taskStatus = parentTaskStatus;
   const failureCategory = typeof d.failureCategory === "string" ? d.failureCategory : undefined;
   const { what, why, category } = resolveCause(taskStatus, failureCategory, verifAvail, verifPassed);
 
@@ -840,6 +886,83 @@ export function buildSafeTaskJourney(
 
   const retainedCandidate = buildRetainedCandidateSection(rawTask, inspectEvents);
 
+  // Cross-Worker handoff projection from durable events only (no private paths).
+  let candidateHandoff: CandidateHandoffSection | undefined;
+  const handoffAuthorized = inspectEvents
+    .filter((event) => event.type === "candidate.handoff.authorized")
+    .at(-1);
+  const handoffPrepared = inspectEvents
+    .filter((event) => event.type === "candidate.handoff.prepared")
+    .at(-1);
+  const handoffFailed = inspectEvents
+    .filter((event) => event.type === "candidate.handoff.failed")
+    .at(-1);
+  const handoffEvent = handoffFailed ?? handoffPrepared ?? handoffAuthorized;
+  if (handoffEvent !== undefined) {
+    const payload = (handoffEvent.payload ?? {}) as Record<string, unknown>;
+    const identity = (payload.destinationIdentity ?? {}) as Record<string, unknown>;
+    const isSuccessor = payload.isSuccessor === true;
+    const status = handoffFailed !== undefined
+      ? "failed"
+      : handoffPrepared !== undefined
+        ? "prepared"
+        : "authorized";
+    const reusablePaths = Array.isArray(payload.reusablePaths)
+      ? (payload.reusablePaths as unknown[])
+          .filter((p): p is string => typeof p === "string")
+          .slice(0, 20)
+      : [];
+    const remainingGaps = Array.isArray(payload.remainingGaps)
+      ? (payload.remainingGaps as unknown[])
+          .filter((g): g is Record<string, unknown> => g !== null && typeof g === "object")
+          .slice(0, 8)
+          .map((g) => ({
+            description: truncate(String(g.description ?? ""), 500),
+            acceptanceExpectation: truncate(String(g.acceptanceExpectation ?? ""), 500),
+          }))
+      : [];
+    candidateHandoff = {
+      role: isSuccessor ? "successor" : "source",
+      status,
+      ...(typeof payload.originKind === "string" ? { originKind: payload.originKind } : {}),
+      ...(typeof payload.competitionId === "string"
+        ? { competitionId: payload.competitionId }
+        : {}),
+      ...(typeof payload.sourceCandidateId === "string"
+        ? { sourceCandidateId: payload.sourceCandidateId }
+        : {}),
+      ...(typeof payload.goalId === "string" ? { goalId: payload.goalId } : {}),
+      ...(typeof payload.itemId === "string" ? { itemId: payload.itemId } : {}),
+      ...(typeof payload.sourceTaskId === "string" ? { sourceTaskId: payload.sourceTaskId } : {}),
+      ...(typeof payload.successorTaskId === "string"
+        ? { successorTaskId: payload.successorTaskId }
+        : {}),
+      ...(typeof payload.destinationWorkerProfileId === "string"
+        ? { destinationWorkerProfileId: payload.destinationWorkerProfileId }
+        : {}),
+      ...(typeof identity.provider === "string" ? { destinationProvider: identity.provider } : {}),
+      ...(typeof identity.model === "string" ? { destinationModel: identity.model } : {}),
+      reusablePathCount: typeof payload.reusablePathCount === "number"
+        ? payload.reusablePathCount
+        : reusablePaths.length,
+      remainingGapCount: typeof payload.remainingGapCount === "number"
+        ? payload.remainingGapCount
+        : remainingGaps.length,
+      reusablePaths,
+      remainingGaps,
+      ...(typeof payload.sourceDigestPrefix === "string"
+        ? { sourceDigestPrefix: payload.sourceDigestPrefix }
+        : {}),
+      ...(typeof payload.failureCode === "string" ? { failureCode: payload.failureCode } : {}),
+      nextAction: typeof payload.nextAction === "string"
+        ? payload.nextAction
+        : status === "failed"
+          ? "inspect-failure"
+          : "wait-for-successor",
+      notARetry: true,
+    };
+  }
+
   return {
     assignment,
     workerExecution,
@@ -850,6 +973,7 @@ export function buildSafeTaskJourney(
     retainedCandidate,
     ...(candidateReuse === undefined ? {} : { candidateReuse }),
     ...(candidateReverification === undefined ? {} : { candidateReverification }),
+    ...(candidateHandoff === undefined ? {} : { candidateHandoff }),
   };
 }
 
@@ -984,6 +1108,54 @@ function truncate(s: string, max: number): string {
   return s.slice(0, max - 3) + "...";
 }
 
+/** Transport bound for ordinary Task Detail activity rows. */
+export const TASK_ACTIVITY_TRANSPORT_BOUND = 80;
+
+/**
+ * One privacy-safe activity row for ordinary Hub Task Detail consumption.
+ * Payload is never included; raw inspect remains the authoritative event path.
+ */
+export interface SafeActivityEvent {
+  timestamp: string;
+  type: string;
+  summary: string;
+}
+
+/**
+ * Project bounded lifecycle milestones for ordinary Task Detail activity.
+ *
+ * Filters Worker narrative/thinking text fragments (`worker.message`) before
+ * applying the last-N transport bound so token-sized stream deltas cannot
+ * crowd out verification, failure, resume, Candidate capture, or remediation
+ * landmarks. Deterministic and read-only: does not mutate the source array,
+ * does not concatenate text deltas, and does not parse free-form summaries.
+ */
+export function projectTaskActivityTimeline(
+  events: ReadonlyArray<{ timestamp?: unknown; type?: unknown; summary?: unknown }>,
+  bound: number = TASK_ACTIVITY_TRANSPORT_BOUND,
+): SafeActivityEvent[] {
+  if (!Array.isArray(events)) return [];
+  const limit = Number.isFinite(bound) ? Math.min(Math.max(0, Math.floor(bound)), TASK_ACTIVITY_TRANSPORT_BOUND) : 0;
+  if (limit === 0) return [];
+
+  // Narrow exclusion: only streaming narrative fragments. Future lifecycle
+  // types stay visible (possibly as "Other activity") rather than hidden by a
+  // broad allowlist.
+  const milestones: SafeActivityEvent[] = [];
+  for (const event of events) {
+    const type = typeof event?.type === "string" ? event.type : "";
+    if (!type || type === "worker.message") continue;
+    // Fail closed for non-string timestamp/summary: never String() or
+    // toString coercion that could execute hostile object methods.
+    milestones.push({
+      timestamp: typeof event.timestamp === "string" ? event.timestamp : "",
+      type,
+      summary: typeof event.summary === "string" ? event.summary : "",
+    });
+  }
+  return milestones.slice(-limit);
+}
+
 function readablePreview(value: string, max: number): string {
   const normalized = value
     .replace(/\0/g, "")
@@ -1029,6 +1201,7 @@ function buildRetainedCandidateSection(
   }
   return {
     status: "available",
+    revisionId: revision.id,
     attemptOrdinal: revision.attemptOrdinal,
     verificationPassed: revision.verificationPassed,
     filesChanged: revision.filesChanged,
@@ -1042,8 +1215,61 @@ function optionalString(record: Record<string, unknown>, key: string): string | 
   return typeof record[key] === "string" ? record[key] as string : undefined;
 }
 
+function isTerminalTaskStatus(status: string): boolean {
+  return status === "succeeded" || status === "failed" || status === "interrupted";
+}
+
+function isTerminalAttemptStatus(status: string): boolean {
+  return status === "succeeded" || status === "failed" || status === "interrupted";
+}
+
+/**
+ * Derive a closed display-only presentation for an Attempt whose raw status is
+ * still non-terminal. Requires a terminal parent Task and ordered same-Attempt
+ * durable event types. Summary/payload text is never inspected.
+ */
+function deriveAttemptPresentationState(
+  attemptId: unknown,
+  rawStatus: string,
+  parentStatus: string,
+  events: Array<Record<string, unknown>>,
+): AttemptPresentationState | undefined {
+  if (!isTerminalTaskStatus(parentStatus)) return undefined;
+  if (isTerminalAttemptStatus(rawStatus)) return undefined;
+  if (typeof attemptId !== "string" || attemptId.length === 0) return undefined;
+
+  const ordered = events
+    .filter((event) => {
+      if (event.attemptId !== attemptId) return false;
+      if (event.type !== "worker.completed" && event.type !== "worker.failed") return false;
+      return typeof event.sequence === "number" && Number.isSafeInteger(event.sequence);
+    })
+    .map((event) => ({
+      type: event.type as "worker.completed" | "worker.failed",
+      sequence: event.sequence as number,
+    }))
+    .sort((a, b) => a.sequence - b.sequence);
+
+  let sawCompleted = false;
+  let sawFailed = false;
+  let failedAfterCompleted = false;
+  for (const event of ordered) {
+    if (event.type === "worker.completed") sawCompleted = true;
+    if (event.type === "worker.failed") {
+      sawFailed = true;
+      if (sawCompleted) failedAfterCompleted = true;
+    }
+  }
+  if (!sawFailed) return undefined;
+  return failedAfterCompleted
+    ? "ended-after-worker-completion"
+    : "ended-unsuccessfully";
+}
+
 function buildBoundedAttempts(
   records: Array<Record<string, unknown>>,
+  events: Array<Record<string, unknown>>,
+  parentStatus: string,
 ): WorkerExecutionSection["attempts"] {
   return records
     .slice(-5)
@@ -1051,9 +1277,17 @@ function buildBoundedAttempts(
     .map((attempt) => {
       const startedAt = optionalString(attempt, "startedAt");
       const finishedAt = optionalString(attempt, "finishedAt");
+      const status = truncate(String(attempt.status ?? "unknown"), 24);
+      const presentationState = deriveAttemptPresentationState(
+        attempt.id,
+        status,
+        parentStatus,
+        events,
+      );
       return {
         ordinal: Number.isSafeInteger(attempt.ordinal) ? attempt.ordinal as number : 0,
-        status: truncate(String(attempt.status ?? "unknown"), 24),
+        status,
+        ...(presentationState === undefined ? {} : { presentationState }),
         ...(startedAt === undefined ? {} : { startedAt }),
         ...(finishedAt === undefined ? {} : { finishedAt }),
         ...(Number.isSafeInteger(attempt.exitCode) ? { exitCode: attempt.exitCode as number } : {}),
@@ -2174,6 +2408,12 @@ export class HubServer {
         this.sendJson(req, res, 200, Array.isArray(boards) ? boards : []);
         return;
       }
+      if (opsRoute === "/goals") {
+        const goals = await this.daemonCall<unknown[]>("goal_list", { limit: 50 });
+        // Privacy-safe Goal projections from the daemon; never re-enrich with private content.
+        this.sendJson(req, res, 200, Array.isArray(goals) ? goals : []);
+        return;
+      }
       if (opsRoute === "/tasks") {
         const surfaces = await this.daemonCall<Array<Record<string, unknown>>>("list_summaries", {
           limit: 50,
@@ -2251,7 +2491,8 @@ export class HubServer {
         return;
       }
       if (opsRoute === "/stats") {
-        const stats = await this.daemonCall<unknown[]>("statistics", {});
+        // Insights cards use aggregate counts only; never poll per-Task failure rows.
+        const stats = await this.daemonCall<unknown[]>("statistics", { detail: "compact" });
         this.sendJson(req, res, 200, Array.isArray(stats) ? stats.slice(0, 50) : []);
         return;
       }
@@ -2265,6 +2506,28 @@ export class HubServer {
           {},
         );
         this.sendJson(req, res, 200, summary);
+        return;
+      }
+      if (opsRoute === "/routing-evidence-coverage") {
+        // Read-only bridge to daemon routing_evidence_coverage. Forwards the
+        // canonical aggregate only — never recomputes counts, never calls a
+        // Provider, never exposes Task content, paths, prompts, or reasons.
+        const coverage = await this.daemonCall<Record<string, unknown>>(
+          "routing_evidence_coverage",
+          {},
+        );
+        this.sendJson(req, res, 200, coverage);
+        return;
+      }
+      if (opsRoute === "/self-upgrade-evidence") {
+        // Read-only bridge to daemon self_upgrade_evidence. Hub always uses
+        // the default milestone (required=3). Never recomputes streak
+        // semantics, never starts Integration, never exposes command streams.
+        const evidence = await this.daemonCall<Record<string, unknown>>(
+          "self_upgrade_evidence",
+          { required: 3 },
+        );
+        this.sendJson(req, res, 200, evidence);
         return;
       }
 
@@ -2304,6 +2567,14 @@ export class HubServer {
         return;
       }
 
+      const goalDetail = opsRoute.match(/^\/goals\/(.+)$/);
+      if (goalDetail) {
+        const goalId = decodeURIComponent(goalDetail[1]!);
+        const goal = await this.daemonCall<unknown>("goal_status", { goalId });
+        this.sendJson(req, res, 200, goal);
+        return;
+      }
+
       const calibration = opsRoute.match(/^\/tasks\/([^/]+)\/calibration$/);
       if (calibration) {
         const taskId = decodeURIComponent(calibration[1]!);
@@ -2335,6 +2606,7 @@ export class HubServer {
         // Read-only: safe to query even for Tasks where the operation does not apply.
         let candidateReverificationEligibility: unknown = undefined;
         let correctionEligibility: unknown = undefined;
+        let reviewGraph: unknown = undefined;
         try {
           candidateReverificationEligibility = await this.daemonCall<unknown>(
             "candidate_reverify_eligibility",
@@ -2352,21 +2624,28 @@ export class HubServer {
         } catch {
           // Eligibility is best-effort; a daemon error must not prevent rendering.
         }
+        try {
+          reviewGraph = await this.daemonCall<unknown>("review_graph_status", { taskId });
+        } catch {
+          // Review Graph is best-effort; absence must not break Task Detail.
+        }
         const inspect = await this.daemonCall<{
           events?: Array<{ timestamp: string; type: string; summary: string; payload?: unknown }>;
           attempts?: Array<Record<string, unknown>>;
           diff?: string;
           mainReview?: Record<string, unknown>;
+          competitionContext?: Record<string, unknown>;
+          reviewGraph?: Record<string, unknown>;
         }>("inspect", { taskId });
         const events = Array.isArray(inspect.events) ? inspect.events : [];
-        const timeline = events.slice(-80).map((ev) => ({
-          timestamp: ev.timestamp,
-          type: ev.type,
-          summary: ev.summary,
-        }));
+        // Filter narrative fragments before the transport bound so stream
+        // deltas cannot evict lifecycle milestones from ordinary Hub activity.
+        // Store/inspect raw events are unchanged; this is a read-only projection.
+        const timeline = projectTaskActivityTimeline(events);
         const spec = task.spec as {
           provider?: { name?: string; model?: string };
           runtime?: { name?: string };
+          routingDecision?: unknown;
           delivery?: { buildCommands?: unknown[]; activationCommands?: unknown[]; activationCheckCommands?: unknown[] };
           deliveryResolution?: { source?: string; profileId?: string };
         } | undefined;
@@ -2401,6 +2680,10 @@ export class HubServer {
             ? { decisionStage: (decision as Record<string, unknown>).stage } : {}),
           progress: (decision as { progress?: unknown }).progress,
           journey,
+          ...(spec?.routingDecision === undefined ? {} : { routingDecision: spec.routingDecision }),
+          ...(inspect.competitionContext === undefined
+            ? {}
+            : { competitionContext: inspect.competitionContext }),
           timeline,
           economics,
           deliveryPlan,
@@ -2411,6 +2694,10 @@ export class HubServer {
           ...(correctionEligibility === undefined
             ? {}
             : { correctionEligibility }),
+          ...((reviewGraph ?? inspect.reviewGraph) === undefined
+            || (reviewGraph ?? inspect.reviewGraph) === null
+            ? {}
+            : { reviewGraph: reviewGraph ?? inspect.reviewGraph }),
         });
         return;
       }
@@ -2591,6 +2878,72 @@ export class HubServer {
           confirm: true,
         });
         this.sendJson(req, res, 200, { ok: true, action: "main_review", taskId, result });
+        return;
+      }
+
+      // POST /api/ops/tasks/:id/review-graph
+      // { reviewerWorkerProfileIds?: string[], reviewerWorkerProfileId?: string, reason, confirm: true }
+      // Explicit 1–3 independent read-only judges for the current exact Candidate Revision.
+      const reviewGraphCreate = opsRoute.match(/^\/tasks\/([^/]+)\/review-graph$/);
+      if (reviewGraphCreate) {
+        const taskId = decodeURIComponent(reviewGraphCreate[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "review_graph_create requires confirm: true" });
+          return;
+        }
+        let reviewerWorkerProfileIds: string[] | undefined;
+        if (Array.isArray(body.reviewerWorkerProfileIds)) {
+          reviewerWorkerProfileIds = [];
+          for (const entry of body.reviewerWorkerProfileIds) {
+            if (typeof entry !== "string" || entry.trim().length === 0 || entry.trim().length > 64) {
+              this.sendJson(req, res, 422, {
+                error: "each reviewerWorkerProfileId must be 1–64 characters",
+              });
+              return;
+            }
+            reviewerWorkerProfileIds.push(entry.trim());
+          }
+          if (reviewerWorkerProfileIds.length < 1 || reviewerWorkerProfileIds.length > 3) {
+            this.sendJson(req, res, 422, {
+              error: "reviewerWorkerProfileIds must contain 1–3 unique profile ids",
+            });
+            return;
+          }
+        }
+        const reviewerWorkerProfileId = typeof body.reviewerWorkerProfileId === "string"
+          ? body.reviewerWorkerProfileId.trim()
+          : "";
+        if (
+          (reviewerWorkerProfileIds === undefined || reviewerWorkerProfileIds.length === 0)
+          && (!reviewerWorkerProfileId || reviewerWorkerProfileId.length > 64)
+        ) {
+          this.sendJson(req, res, 422, {
+            error: "reviewerWorkerProfileIds (1–3) or reviewerWorkerProfileId is required",
+          });
+          return;
+        }
+        const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+        if (!reason || reason.length > 1000) {
+          this.sendJson(req, res, 422, { error: "reason is required (max 1000 chars)" });
+          return;
+        }
+        const result = await this.daemonCall<unknown>("review_graph_create", {
+          taskId,
+          ...(reviewerWorkerProfileIds === undefined
+            ? {}
+            : { reviewerWorkerProfileIds }),
+          ...(reviewerWorkerProfileId
+            ? { reviewerWorkerProfileId }
+            : {}),
+          reason,
+          confirm: true,
+        });
+        this.sendJson(req, res, 200, {
+          ok: true,
+          action: "review_graph_create",
+          taskId,
+          result,
+        });
         return;
       }
 
@@ -2852,6 +3205,77 @@ export class HubServer {
         return;
       }
 
+      // POST /api/ops/goals/:id/advance  { confirm: true }
+      const goalAdvance = opsRoute.match(/^\/goals\/([^/]+)\/advance$/);
+      if (goalAdvance) {
+        const goalId = decodeURIComponent(goalAdvance[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "goal advance requires confirm: true" });
+          return;
+        }
+        const result = await this.daemonCall<unknown>("goal_advance", { goalId, confirm: true });
+        this.sendJson(req, res, 200, { ok: true, action: "goal_advance", goalId, result });
+        return;
+      }
+
+      // POST /api/ops/goals/:id/stop  { confirm: true }
+      const goalStop = opsRoute.match(/^\/goals\/([^/]+)\/stop$/);
+      if (goalStop) {
+        const goalId = decodeURIComponent(goalStop[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "goal stop requires confirm: true" });
+          return;
+        }
+        const result = await this.daemonCall<unknown>("goal_stop", { goalId, confirm: true });
+        this.sendJson(req, res, 200, { ok: true, action: "goal_stop", goalId, result });
+        return;
+      }
+
+      // POST /api/ops/tasks/:id/goal-handoff
+      // { candidateRevisionId, reusablePaths, remainingGaps, destinationWorkerProfileId, reason, confirm: true }
+      const goalHandoff = opsRoute.match(/^\/tasks\/([^/]+)\/goal-handoff$/);
+      if (goalHandoff) {
+        const taskId = decodeURIComponent(goalHandoff[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "Goal Task handoff requires explicit confirm: true" });
+          return;
+        }
+        if (typeof body.candidateRevisionId !== "string" || body.candidateRevisionId.length === 0) {
+          this.sendJson(req, res, 422, { error: "candidateRevisionId is required" });
+          return;
+        }
+        if (
+          typeof body.destinationWorkerProfileId !== "string"
+          || body.destinationWorkerProfileId.length === 0
+        ) {
+          this.sendJson(req, res, 422, { error: "destinationWorkerProfileId is required" });
+          return;
+        }
+        if (typeof body.reason !== "string" || body.reason.trim().length === 0) {
+          this.sendJson(req, res, 422, { error: "reason is required" });
+          return;
+        }
+        if (!Array.isArray(body.reusablePaths) || body.reusablePaths.length === 0) {
+          this.sendJson(req, res, 422, { error: "reusablePaths must be a non-empty array" });
+          return;
+        }
+        if (!Array.isArray(body.remainingGaps) || body.remainingGaps.length === 0) {
+          this.sendJson(req, res, 422, { error: "remainingGaps must be a non-empty array" });
+          return;
+        }
+        const result = await this.daemonCall<unknown>("goal_task_handoff", {
+          taskId,
+          candidateRevisionId: body.candidateRevisionId,
+          reusablePaths: body.reusablePaths,
+          remainingGaps: body.remainingGaps,
+          destinationWorkerProfileId: body.destinationWorkerProfileId,
+          reason: body.reason.trim(),
+          confirm: true,
+        });
+        this.sendJson(req, res, 200, { ok: true, action: "goal_task_handoff", taskId, result });
+        return;
+      }
+
       // POST /api/ops/providers/status  optional provider filter
       if (opsRoute === "/providers/status") {
         const provider = typeof body.provider === "string" && body.provider.trim()
@@ -2874,6 +3298,102 @@ export class HubServer {
         }
         const result = await this.daemonCall<unknown>("competition_compare", params);
         this.sendJson(req, res, 200, { ok: true, action: "competition_compare", competitionId, result });
+        return;
+      }
+
+      // POST /api/ops/competitions/:id/main-decision  { candidateId, decision, reason, confirm }
+      const mainDecision = opsRoute.match(/^\/competitions\/([^/]+)\/main-decision$/);
+      if (mainDecision) {
+        const competitionId = decodeURIComponent(mainDecision[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "Competition Main decision requires explicit confirm: true" });
+          return;
+        }
+        const decision = typeof body.decision === "string" ? body.decision : "";
+        if (decision !== "accept" && decision !== "revise" && decision !== "reject") {
+          this.sendJson(req, res, 422, { error: "decision must be accept, revise, or reject" });
+          return;
+        }
+        const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+        if (reason.length === 0 || reason.length > 1000) {
+          this.sendJson(req, res, 422, { error: "reason must be 1-1000 characters" });
+          return;
+        }
+        if (typeof body.candidateId !== "string" || body.candidateId.length === 0) {
+          this.sendJson(req, res, 422, { error: "candidateId is required" });
+          return;
+        }
+        const result = await this.daemonCall<unknown>("competition_main_decision", {
+          competitionId,
+          candidateId: body.candidateId,
+          decision,
+          reason,
+          confirm: true,
+        });
+        this.sendJson(req, res, 200, { ok: true, action: "competition_main_decision", competitionId, result });
+        return;
+      }
+
+      // POST /api/ops/competitions/:id/retained-partial  { candidateId, reusablePaths, remainingGaps, confirm }
+      const retained = opsRoute.match(/^\/competitions\/([^/]+)\/retained-partial$/);
+      if (retained) {
+        const competitionId = decodeURIComponent(retained[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "Retained-partial requires explicit confirm: true" });
+          return;
+        }
+        if (typeof body.candidateId !== "string" || body.candidateId.length === 0) {
+          this.sendJson(req, res, 422, { error: "candidateId is required" });
+          return;
+        }
+        const result = await this.daemonCall<unknown>("competition_retained_partial", {
+          competitionId,
+          candidateId: body.candidateId,
+          reusablePaths: body.reusablePaths,
+          remainingGaps: body.remainingGaps,
+          confirm: true,
+        });
+        this.sendJson(req, res, 200, { ok: true, action: "competition_retained_partial", competitionId, result });
+        return;
+      }
+
+      // POST /api/ops/competitions/:id/handoff
+      // { candidateId, candidateRevisionId, destinationWorkerProfileId, reason, confirm: true }
+      const handoff = opsRoute.match(/^\/competitions\/([^/]+)\/handoff$/);
+      if (handoff) {
+        const competitionId = decodeURIComponent(handoff[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "Handoff requires explicit confirm: true" });
+          return;
+        }
+        if (typeof body.candidateId !== "string" || body.candidateId.length === 0) {
+          this.sendJson(req, res, 422, { error: "candidateId is required" });
+          return;
+        }
+        if (typeof body.candidateRevisionId !== "string" || body.candidateRevisionId.length === 0) {
+          this.sendJson(req, res, 422, { error: "candidateRevisionId is required" });
+          return;
+        }
+        if (
+          typeof body.destinationWorkerProfileId !== "string"
+          || body.destinationWorkerProfileId.length === 0
+        ) {
+          this.sendJson(req, res, 422, { error: "destinationWorkerProfileId is required" });
+          return;
+        }
+        if (typeof body.reason !== "string" || body.reason.trim().length === 0) {
+          this.sendJson(req, res, 422, { error: "reason is required" });
+          return;
+        }
+        const result = await this.daemonCall<unknown>("competition_handoff", {
+          competitionId,
+          candidateId: body.candidateId,
+          candidateRevisionId: body.candidateRevisionId,
+          destinationWorkerProfileId: body.destinationWorkerProfileId,
+          reason: body.reason.trim(),
+          confirm: true,
+        });
+        this.sendJson(req, res, 200, { ok: true, action: "competition_handoff", competitionId, result });
         return;
       }
 

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "Elsewhere approved experience redesign M0-M1 Goal",
+  "objective": "Replace Elsewhere's archive-dashboard and form journey with the approved living desk, overlay archive, progressive structured intake, and layered fact mirror, preserving the working private Journey foundation.",
+  "planFile": "/Users/yijunwang/code/forklight/examples/dogfood/elsewhere-redesign-m0-m1-plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 1,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "structured-intake", "gate": "integration" },
+    { "itemId": "shell-drawer", "gate": "integration" },
+    { "itemId": "progressive-intake", "gate": "integration" },
+    { "itemId": "fact-mirror-finish", "gate": "integration" }
+  ]
+}

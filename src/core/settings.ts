@@ -108,6 +108,9 @@ export interface ModelRoutingWeightSettings {
   verifiedBehavior: number;
   modelQualityFailure: number;
   correctionChurn: number;
+  /** Default 0.5 — first-Attempt independent verification success rate.
+   *  Omitted when comparable first-pass coverage is incomplete. */
+  firstPassSuccess: number;
   /** 0 by default — scores only when all candidates have comparable exact
    *  official-cost evidence in the same native currency. */
   officialCost: number;
@@ -410,6 +413,7 @@ const DEFAULTS: ForkLightSettings = {
       verifiedBehavior: 1,
       modelQualityFailure: 0.5,
       correctionChurn: 0.2,
+      firstPassSuccess: 0.5,
       officialCost: 0,
       duration: 0,
       budgetReliability: 0,
@@ -454,7 +458,8 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
 
 const MODEL_ROUTING_WEIGHT_FIELDS: readonly string[] = [
   "acceptedDelivery", "verifiedBehavior", "modelQualityFailure",
-  "correctionChurn", "officialCost", "duration", "budgetReliability",
+  "correctionChurn", "firstPassSuccess", "officialCost", "duration",
+  "budgetReliability",
 ];
 
 const TOP_LEVEL_KEYS = Object.keys(KNOWN_SECTIONS);

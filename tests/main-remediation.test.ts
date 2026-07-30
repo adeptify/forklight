@@ -444,8 +444,12 @@ test("statistics add accepted-delivery fields while preserving failure distribut
     assert.equal(summary.sampleSize, 2);
     assert.equal(summary.successCount, 1, "machine success is 1");
     assert.equal(summary.successRate, 0.5, "machine successRate is 0.5");
-    assert.equal(summary.acceptedDeliveryCount, 2, "accepted delivery counts both");
-    assert.equal(summary.acceptedDeliveryRate, 1.0, "both tasks have accepted delivery");
+    // Machine success without Main review is unavailable final delivery.
+    // Only the Main-repaired Task is accepted.
+    assert.equal(summary.acceptedDeliveryCount, 1, "only Main-repaired delivery is accepted");
+    assert.equal(summary.acceptedDeliverySampleCount, 1);
+    assert.equal(summary.acceptedDeliveryUnavailableCount, 1);
+    assert.equal(summary.acceptedDeliveryRate, 1.0, "rate uses comparable delivery outcomes only");
     assert.equal(summary.mainRepairedDeliveryCount, 1, "one task was main-repaired");
     assert.equal(summary.remediationCheckCount, 1);
     // Failure distribution still has the runtime failure

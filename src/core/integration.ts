@@ -22,6 +22,11 @@ import { verifierProcessEnvironment } from "../workspace/verifier-git.js";
 import { createPathPolicy, PATH_CATEGORIES, PATH_PROVENANCES } from "../workspace/path-policy.js";
 import { latestMainReview } from "./main-review.js";
 import { copyForVerification } from "./integration-verification-copy.js";
+import {
+  isReviewerTask,
+  REVIEWER_TASK_NOT_INTEGRATABLE,
+  reviewGraphIntegrationReasons,
+} from "./review-graph.js";
 
 // --- Public type aliases ---
 
@@ -532,6 +537,23 @@ export async function preflightIntegration(
     task.spec.deliveryResolution,
   );
 
+  // Reviewer Tasks are permanently non-integratable evidence, not product code.
+  if (isReviewerTask(store, taskId)) {
+    reasons.push(REVIEWER_TASK_NOT_INTEGRATABLE);
+    const receipt = buildReceipt(
+      task.id, "", [], {}, reasons, settings.reviewReceiptTtlMs, deliveryPlan,
+    );
+    store.saveIntegrationReceipt(receipt);
+    storePreflightEvent(store, task.id, receipt);
+    return stripConsumed(receipt);
+  }
+
+  // Explicit pending/running judge review, or terminal review without a fresher
+  // Main decision, blocks Candidate Integration. Judge disposition never decides.
+  for (const reason of reviewGraphIntegrationReasons(store, taskId)) {
+    reasons.push(reason);
+  }
+
   // 1. Task must be succeeded
   if (task.status !== "succeeded") {
     reasons.push(`Task status is "${task.status}", must be "succeeded"`);
@@ -568,6 +590,36 @@ export async function preflightIntegration(
           "the patch has changed since Main acceptance",
         );
       }
+    }
+  }
+
+  // Competition candidate delivery gate: a Competition candidate becomes
+  // integrable only after a Competition-level Main accept of the exact
+  // Candidate Revision. Task-level Main accept or machine ranking alone cannot
+  // pass preflight for a Competition candidate. The Competition decision must
+  // match the candidate Task, Attempt, verification sequence, revision id, and
+  // patch digest exactly (so a stale decision cannot authorize a newer patch).
+  const competitionId = store.getCompetitionByCandidateTaskId(taskId);
+  if (competitionId !== undefined) {
+    const competitionDecision = store.getCompetition(competitionId).mainDecision;
+    const candidate = store
+      .getCompetitionCandidates(competitionId)
+      .find((c) => c.taskId === taskId);
+    const exactCompetitionAccept =
+      competitionDecision !== undefined
+      && competitionDecision.decision === "accept"
+      && competitionDecision.taskId === taskId
+      && candidate !== undefined
+      && competitionDecision.candidateId === candidate.id
+      && review !== undefined
+      && competitionDecision.attemptId === review.attemptId
+      && competitionDecision.verificationEventSequence === review.verificationEventSequence
+      && competitionDecision.candidateRevisionId === review.candidateRevisionId
+      && competitionDecision.acceptedPatchDigest === review.acceptedPatchDigest;
+    if (!exactCompetitionAccept) {
+      reasons.push(
+        "Competition Main accept of this exact Candidate Revision is required before Integration",
+      );
     }
   }
 
@@ -1061,26 +1113,31 @@ export async function applyIntegration(
     },
   );
 
-  // 9. Copy patched source to isolated temp dir and verify there.  Any
-  // infrastructure failure is a verification failure, not an uncaught state
-  // that can leave the source mutated without durable evidence.
-  let verifyDir: string | undefined;
+  // 9. Copy patched source to an isolated temp container (project cwd + any
+  // declared sibling package mirrors) and verify there. Any infrastructure
+  // failure is a verification failure, not an uncaught state that can leave
+  // the source mutated without durable evidence. Always delete the full
+  // owned cleanup root so sibling mirrors are never leaked beside /tmp.
+  let verifyEnv: Awaited<ReturnType<typeof copyForVerification>> | undefined;
   const verificationCommands: VerificationCommandResult[] = [];
   let verificationPassed = true;
   let verificationError: string | undefined;
 
   try {
-    verifyDir = await copyForVerification(
+    verifyEnv = await copyForVerification(
       task.sourcePath,
       task.spec.workspace.exclude,
     );
-    const { env: verificationEnvironment, shellGitPrefix } = await verifierProcessEnvironment(task, verifyDir);
+    const { env: verificationEnvironment, shellGitPrefix } = await verifierProcessEnvironment(
+      task,
+      verifyEnv.projectCwd,
+    );
     for (const command of task.spec.acceptance.commands) {
       const result = await runCaptured(
         "/bin/zsh",
         ["-lc", shellGitPrefix + command],
         {
-          cwd: verifyDir,
+          cwd: verifyEnv.projectCwd,
           env: verificationEnvironment,
           timeoutMs: settings.verificationTimeoutMs,
         },
@@ -1103,8 +1160,8 @@ export async function applyIntegration(
       err instanceof Error ? err.message : String(err)
     }`;
   } finally {
-    if (verifyDir !== undefined) {
-      await rm(verifyDir, { recursive: true, force: true });
+    if (verifyEnv !== undefined) {
+      await rm(verifyEnv.cleanupRoot, { recursive: true, force: true });
     }
   }
 

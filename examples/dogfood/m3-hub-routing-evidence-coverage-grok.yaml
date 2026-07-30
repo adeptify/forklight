@@ -1,0 +1,194 @@
+version: 2
+name: Explain Worker-selection evidence coverage in Hub Insights
+project: /Users/yijunwang/code/forklight
+taskClass: hub-routing-evidence-coverage
+taskFamily: hub-explainability
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: hub-explainability
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 普通实现默认使用 Grok；本任务不需要其他 Provider 的专项验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Add one read-only, privacy-safe routing-evidence coverage summary to Hub
+    Insights so a non-expert can tell how much historical work is actually
+    classified and carries a complete Main-authored Worker-selection decision.
+    The summary must distinguish total terminal Tasks, exact task-class coverage,
+    stable task-family coverage, and complete routing-decision coverage; explain
+    that old or missing records are not zero-quality model evidence; and avoid
+    turning coverage counts into an automatic routing, competition, or model-rank decision.
+  presentation:
+    summary: 让用户在洞察页一眼看懂：历史任务很多，但真正留下“任务类型、稳定分类、为什么选这个 Worker”完整证据的有多少，以及还缺什么。
+    language: zh-CN
+  context:
+    - Current storage has hundreds of Tasks but only the newest few carry complete taskClass, taskFamily, and routingDecision snapshots.
+    - Hub already explains per-Task routing decisions and per-model outcomes, but does not show whether the overall evidence set is classified enough to support later recommendations.
+    - The M3 goal needs real classified samples; running extra Workers merely to increase a count is forbidden.
+    - Review Graph reviewer Tasks are internal evidence work and must not inflate ordinary implementation-selection coverage.
+  inScope:
+    - Add a canonical StatisticsService coverage projection over terminal non-reviewer Tasks.
+    - Count total eligible Tasks, Tasks with exact taskClass, Tasks with stable taskFamily, and Tasks with a structurally complete routingDecision.
+    - Include bounded class/family diversity counts or a similarly compact breakdown only when it helps explain coverage without exposing names, paths, prompts, or private reasons.
+    - Expose the same read-only summary through the daemon and Hub Ops bridge without Provider calls or mutation.
+    - Render one bilingual explanation-first section near the top of Insights before provider/model outcome cards.
+    - Provide honest empty, partial, and complete-coverage states; never label coverage as model quality, savings, or permission to compete.
+    - Add focused core, daemon/Hub bridge, and executable UI behavior tests.
+  outOfScope:
+    - Changing model-routing scores, thresholds, settings, Task admission, Task history, automatic competition, automatic Worker selection, backfill, database migration, pricing, token arithmetic, visual redesign, commit, or push.
+  executionSteps:
+    - Trace StatisticsService, daemon statistics dispatch, Hub Ops reads, polling state, and Insights rendering.
+    - Define the smallest explicit allowlisted coverage response and exclude durable Review Graph reviewer Tasks from the eligible cohort.
+    - Thread the read-only response through coordinator, daemon, and Hub with isolated failure handling so one unavailable panel does not disconnect the rest of Hub.
+    - "Add concise English and Chinese copy in the existing visual system: first say what the coverage means, then show the four counts, then say the next useful action."
+    - Test zero history, legacy/partial metadata, complete metadata, reviewer exclusion, bilingual rendering, privacy boundaries, and read-only behavior.
+    - Run focused tests, JavaScript syntax, full project check, and diff hygiene.
+  deliverables:
+    - A canonical routing-evidence coverage result derived from current durable Task records.
+    - A Hub Insights section that explains evidence readiness without technical jargon or false model conclusions.
+    - Tests proving reviewer Tasks and missing legacy metadata cannot inflate complete coverage.
+    - No mutation, Provider request, competition, retry, commit, or push.
+  modules:
+    - name: Routing coverage projection
+      responsibility: Summarize whether terminal ordinary Tasks contain the classification and Main-selection facts required for later learning.
+      consumes:
+        - Durable terminal Task records and the existing reviewer Task namespace or relationship.
+      produces:
+        - Bounded aggregate counts with explicit coverage semantics and no raw Task content.
+      boundaries:
+        - Must not infer missing class/family/reason data, score a model, mutate history, or count reviewer Tasks as implementation samples.
+    - name: Read-only service bridge
+      responsibility: Carry the canonical coverage projection from daemon to Hub without recomputation or lifecycle side effects.
+      consumes:
+        - The aggregate coverage object.
+      produces:
+        - A privacy-safe Hub Ops response and isolated availability state.
+      boundaries:
+        - Must not call Providers, create Tasks, fail the whole Hub poll, or expose paths, prompts, raw reasons, or credentials.
+    - name: Insights explanation
+      responsibility: Tell a non-expert what historical evidence is usable now and what future Tasks should record.
+      consumes:
+        - Four aggregate coverage counts and current Hub language.
+      produces:
+        - One scan-friendly bilingual section with a truthful next action.
+      boundaries:
+        - Must preserve the incumbent visual system, avoid nested metric-card grids, and never imply that a count authorizes routing or competition.
+    - name: Executable evidence tests
+      responsibility: Prove aggregation, transport, privacy, localization, and user-facing meaning across normal and boundary states.
+      consumes:
+        - Synthetic terminal ordinary, legacy, complete, and reviewer Task records plus both locales.
+      produces:
+        - Deterministic focused tests that fail on inflated counts or raw technical copy.
+      boundaries:
+        - No real Provider request, runtime launch, source mutation, commit, or push.
+  callChain:
+    - StateStore supplies terminal Task records to the canonical read-only coverage projection.
+    - The projection excludes reviewer Tasks and counts only explicitly present taskClass, taskFamily, and routingDecision facts.
+    - Daemon exposes the aggregate object; Hub Ops forwards only that object.
+    - Hub polls the panel independently and renders meaning, counts, evidence limitation, and next action in the selected language.
+    - Focused tests execute the projection and UI renderer for empty, partial, complete, reviewer, and bilingual cases.
+  scenarios:
+    - name: Mostly legacy history
+      given: Many terminal ordinary Tasks exist but most omit one or more routing metadata fields.
+      when: The user opens Insights.
+      then: The panel shows the large total and the smaller complete-decision count, explaining that missing history is unavailable evidence rather than poor model performance.
+    - name: Complete new Task
+      given: A terminal ordinary Task has explicit taskClass, taskFamily, and a structurally complete routingDecision.
+      when: Coverage is recomputed.
+      then: It increments every applicable count exactly once.
+    - name: Reviewer exclusion
+      given: A terminal Review Graph reviewer Task has routing-like Worker identity metadata.
+      when: Coverage is computed.
+      then: It does not increase the ordinary implementation cohort or complete-decision count.
+    - name: Empty history
+      given: No eligible terminal ordinary Tasks exist.
+      when: Insights renders coverage.
+      then: It explains that evidence will appear after real Tasks complete and does not show false zero-quality conclusions.
+    - name: Panel unavailable
+      given: The routing-coverage bridge is temporarily unavailable while other Hub APIs work.
+      when: Hub refreshes.
+      then: Only this section shows an actionable unavailable state; Tasks, settings, economics, and other Insights content remain usable.
+    - name: Chinese and English comprehension
+      given: The same aggregate facts are viewed in either supported language.
+      when: The panel renders.
+      then: Both languages explain what happened, what the counts mean, what they cannot prove, and the next useful action without raw internal codes.
+  risks:
+    - Counting all Tasks including internal reviewers would inflate learning readiness; use an authoritative reviewer discriminator.
+    - Recomputing ratios or eligibility in the browser could drift from backend semantics; the backend owns counts and Hub only presents them.
+    - A new endpoint inside the all-or-nothing main poll could make unrelated Hub surfaces appear disconnected; isolate panel failure like economics.
+    - A percentage or progress bar could imply a hard target or model quality; prefer named counts and explanatory copy without a baked-in milestone threshold.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 900
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/statistics.test.ts
+    - tests/daemon.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Coverage counts are canonical, privacy-safe, read-only, and exclude Review Graph reviewer Tasks.
+    - Hub explains total, classified, family-classified, and complete routing-decision evidence without implying model quality or automatic competition.
+    - An unavailable coverage panel never disconnects unrelated Hub surfaces.
+    - Both supported languages and empty, partial, complete, and reviewer boundary states have executable coverage.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts tests/daemon.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - npm run check
+    - git diff --check

@@ -1,0 +1,225 @@
+version: 2
+name: Explain what a live Worker is doing without guessing
+project: /Users/yijunwang/code/forklight
+taskClass: worker-live-stage-truth
+taskFamily: worker-runtime-observability
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: worker-runtime-observability
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-v4-pro
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏允许 Grok、DeepSeek、Codex 与 GLM 作为 Worker，并要求暂不使用 MiniMax；本切片由 Grok 实现，DeepSeek只做独立审查，不做竞争重跑。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    ForkLight gives every active Task one canonical, privacy-safe explanation
+    of what the Worker is doing now: preparing the isolated workspace, waiting
+    for the model, receiving model output, using a tool, independently checking
+    the result, quietly alive with no new evidence, or stopped with explicit
+    failure evidence. CLI, daemon projections, the board, and Task Detail use
+    the same durable truth. Silence alone is never called a failure and never
+    starts an automatic retry.
+  presentation:
+    summary: 让用户一眼看懂 Worker 此刻是在准备、等模型、输出内容、调用工具、独立验收，还是只是暂时安静；只有出现明确失败证据才说“卡住了”。
+    language: zh-CN
+  context:
+    - Current progress exposes only active, quiet, or terminal from the latest event age; users cannot tell normal waiting from tool work or independent verification.
+    - The Hub currently converts a long quiet period into a presentation-only stalled label, but elapsed silence is not proof that a provider, process, or task has failed.
+    - Durable runtime events already identify Worker start, tool start/completion, messages, verification, policy no-progress failure, and terminal outcomes across Claude-compatible and Grok runtimes.
+    - Claude-compatible and Grok streams differ, so the core projection must consume a small normalized vocabulary rather than provider-specific raw payloads or message text.
+    - The explanation must survive daemon restart by rebuilding from stored events and must not trigger a Provider request, retry, cancellation, or state mutation.
+  inScope:
+    - Define one bounded canonical live-stage projection shared by Task list/status and Task Decision View, with a stable closed stage vocabulary and explicit evidence source.
+    - Cover workspace preparation, waiting for the first or next model response, model response activity, active tool use, independent verification, quiet-without-new-evidence, and explicit terminal failure/completion.
+    - Normalize only the minimum safe model-activity signal needed across Claude-compatible and Grok streams; never classify stages by searching arbitrary model prose.
+    - Keep an active tool stage until corresponding completion or stronger lifecycle evidence, and let verification/terminal evidence take precedence.
+    - Treat quiet as an observation about event age, not proof of a dead process; reserve stopped/failed wording for durable policy, runtime, interruption, or terminal evidence.
+    - Preserve readable fallback for legacy Tasks whose historical events lack the new normalized evidence.
+    - Show one compact bilingual now/meaning/next explanation on board cards and a fuller plain-language explanation in Task Detail without exposing raw prompts, model output, tool arguments, command text, paths, endpoints, credentials, or errors.
+    - Add behavior tests across both runtime normalizers, pure progress projection, server surface, and English/Chinese UI helpers.
+  outOfScope:
+    - Automatic retry, cancellation, timeout-policy changes, process supervision redesign, new Provider calls, Competition, Worker selection changes, archive/history grouping, broad Hub visual redesign, changes outside ForkLight, commit, or push.
+    - Claiming exact provider network state, percent complete, ETA, process health, or genuine deadlock when no structured evidence proves it.
+    - Translating user-authored Task names, Worker messages, command output, or historical arbitrary text.
+  executionSteps:
+    - Trace event production, persistence, progress projection, list/detail API responses, and all Hub progress renderers before changing the contract.
+    - Introduce the smallest normalized model-activity evidence and one pure canonical live-stage reducer with explicit precedence and legacy fallback.
+    - Thread the canonical projection through existing safe Task surfaces without duplicating lifecycle logic in the Hub.
+    - Add concise English and Chinese copy that answers what is happening, whether the state is normal, and what evidence will move it forward.
+    - Prove the same staged histories produce the same result after replay, and that quiet/stalled presentation never mutates or retries a Task.
+    - Run focused normalizer, progress, server, and UI tests, then the full check, build, syntax, and diff validation once.
+  deliverables:
+    - Canonical privacy-safe live-stage type and replayable projection.
+    - Consistent normalized evidence from Claude-compatible and Grok Worker runtimes.
+    - Task list/status, board, and Task Detail explanations in English and Chinese.
+    - Regression tests for stage precedence, legacy fallback, quiet semantics, privacy, and no side effects.
+  modules:
+    - name: Runtime activity normalization
+      responsibility: Convert provider-specific structured stream records into a minimal safe model/tool lifecycle vocabulary.
+      consumes:
+        - Claude-compatible JSON stream records and Grok structured stream records.
+      produces:
+        - Durable normalized Worker events with no raw content required for stage classification.
+      boundaries:
+        - Never parse arbitrary prose for state, expose credentials or prompts, or claim provider network state that the runtime did not report.
+    - name: Canonical live-stage reducer
+      responsibility: Rebuild the current user-facing stage from Task status, event order, activity age, and existing preparation evidence.
+      consumes:
+        - Safe Task status plus ordered durable event metadata.
+      produces:
+        - Closed stage code, observation time, evidence kind, normal/attention meaning, and stable next-step code.
+      boundaries:
+        - No state mutation, retry, Provider call, ETA, percentage, process-health guess, or free-text inference.
+    - name: Safe Task projections
+      responsibility: Put the canonical stage on existing CLI, daemon, list, and Task Detail response paths.
+      consumes:
+        - Canonical reducer output.
+      produces:
+        - The same bounded live-stage object for every consumer.
+      boundaries:
+        - UI may translate closed codes but may not recompute lifecycle semantics.
+    - name: User explanation UI
+      responsibility: Explain what is happening now, whether it is normal, and what happens next in the selected language.
+      consumes:
+        - Canonical live-stage projection and existing Task identity.
+      produces:
+        - Compact board status and expanded Task Detail explanation.
+      boundaries:
+        - No raw model text, prompt, tool arguments, paths, command output, credentials, or invented diagnosis.
+  callChain:
+    - Worker runtime receives structured stream records and stores normalized lifecycle evidence.
+    - Store and Task Decision View replay ordered safe evidence through the canonical live-stage reducer.
+    - Daemon and Hub return the bounded stage object unchanged with Task summary/detail data.
+    - Board and Task Detail translate only stable codes and explain the present observation plus next expected evidence.
+    - Explicit verification or terminal evidence replaces Worker-running stages; silence alone only changes the observation to quiet.
+  scenarios:
+    - name: Worker launched and waiting for model
+      given: A running Task has durable Worker-start evidence but no model, tool, verification, or terminal evidence yet.
+      when: Progress is projected immediately or after daemon restart.
+      then: It says the Worker has started and is waiting for the model, without claiming a network request is definitely in flight.
+    - name: Model starts responding
+      given: A runtime emits a structured thought or text response signal.
+      when: The normalizer and reducer process it.
+      then: The current stage says the model is responding without storing response content for classification.
+    - name: Tool lifecycle
+      given: A tool-start event follows model activity and later receives its matching completion event.
+      when: Progress is projected before and after completion.
+      then: It first says the Worker is using a tool, then returns to waiting for the next model step; unrelated narration cannot incorrectly close the tool.
+    - name: Independent verification wins
+      given: Worker execution has ended and ForkLight starts acceptance verification.
+      when: verification-started is the strongest current evidence.
+      then: Every surface says ForkLight is independently checking the result rather than implying the model is still working.
+    - name: Quiet but not proven stuck
+      given: A non-terminal Task has no new durable event beyond the configured quiet window.
+      when: Board and Task Detail render it.
+      then: They say there is temporarily no new evidence, keep the last known stage visible, and do not mark failure, retry, cancel, or spend Worker Tokens.
+    - name: Explicit no-progress failure
+      given: The configured no-progress watchdog or runtime terminal failure produces durable failure evidence.
+      when: The Task becomes terminal.
+      then: The UI clearly says execution stopped and points to the existing failure explanation; it no longer uses quiet wording.
+    - name: Legacy event history
+      given: A historical running Task contains only older Worker message events without new activity metadata.
+      when: Progress is replayed.
+      then: It falls back to a truthful generic active/quiet explanation and never invents a precise stage.
+  risks:
+    - Mapping worker.started directly to an exact HTTP request would overclaim; describe only that the Worker is waiting for its model unless explicit runtime evidence exists.
+    - Letting each Hub component interpret raw event names would drift across surfaces; core owns precedence and UI translates only closed codes.
+    - Using elapsed silence as failure would cause needless retries and Token spend; silence is quiet evidence only.
+    - A latest-event-only reducer can lose an open tool lifecycle; use enough ordered metadata or a persisted cursor to preserve start/completion truth across replay.
+    - Persisting model prose or tool inputs for convenience would expand the privacy surface; stage classification must need no arbitrary content.
+  changeBudget:
+    maxFiles: 18
+    maxDiffLines: 1800
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 18
+  fileLimitMode: warn
+  changedLineLimit: 1800
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/task-progress.ts
+    - src/core/task-summary.ts
+    - src/core/task-decision-view.ts
+    - src/events/normalize.ts
+    - src/events/grok-normalize.ts
+    - src/workers/claude.ts
+    - src/workers/grok.ts
+    - src/state/store.ts
+    - src/daemon/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/task-surface.test.ts
+    - tests/task-decision-view.test.ts
+    - tests/worker-runtime.test.ts
+    - tests/grok-worker-runtime.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - The canonical stage distinguishes preparation, waiting for model, model response, tool use, verification, quiet observation, and explicit terminal evidence without prose inference.
+    - Claude-compatible and Grok histories project equivalent meanings from normalized structured evidence.
+    - Quiet never means failed or starts a retry; stopped wording requires durable terminal or policy evidence.
+    - CLI/daemon/list/Task Detail/board consume the same bounded projection, with honest bilingual copy and legacy fallback.
+    - Public stage data contains no prompt, response content, tool arguments, paths, endpoints, credentials, command text/output, raw error, ETA, or invented percentage.
+    - Focused tests, full check, build, JavaScript syntax, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-surface.test.ts tests/task-decision-view.test.ts tests/worker-runtime.test.ts tests/grok-worker-runtime.test.ts tests/hub-ui-assets.test.ts
+    - npm run check
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check

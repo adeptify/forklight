@@ -1,0 +1,187 @@
+version: 2
+name: Reverify a Main-repaired machine-successful Candidate without another Worker
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-candidate-reverification-main-repair
+taskFamily: forklight-main-adjudication
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    After a Candidate passes machine verification but Main records `revise`,
+    Main can repair the retained Candidate and use one zero-Worker
+    reverification to create verification evidence and a fresh immutable
+    Candidate Revision. A later Main accept binds that exact repaired revision,
+    while the original Worker Attempt, machine verification, Main revise, and
+    history remain visible and nothing retries or integrates automatically.
+  presentation:
+    summary: 机器检查通过后，Main 仍可要求修正；修好后只重新验收并生成新版本，不必为了刷新证据再调用模型。
+    language: zh-CN
+  context:
+    - "Task 5e5ad6a1-0cfb-4e64-814b-cd3e9faa8ff4 exposed the exact gap: its machine verification passed, Main rejected the semantic result, repaired the retained workspace, and `forklight reverify` stopped with `candidate reverification requires a failed Task`."
+    - The current zero-Worker operation works only for failed behavior-verification Candidates, captures a fresh CandidateRevision after verification, consumes a frozen allowance, and requires a fresh Main accept before Integration.
+    - Standalone succeeded Candidate correction already requires a typed Main revise bound to the latest Attempt and verification, but candidate reverification still rejects every succeeded Task before checking that authority.
+    - Main Review accept currently binds an exact Candidate Revision; revise and reject bind Attempt and verification sequence but do not preserve an exact reviewed revision when revision evidence exists.
+    - Model routing has no comparable exact-class or family samples for this work. Main explicitly selected the saved local Grok 4.5 Worker because the owner requested Grok as the default for 2026-07-30 and 2026-07-31. Competition intent is none.
+    - Preserve every existing uncommitted source and documentation change. Do not commit or push.
+  inScope:
+    - Keep the existing failed behavior-only reverification path compatible.
+    - Add one succeeded path that is eligible only when the latest valid Task-level Main Review is `revise` for the current Attempt, latest machine verification event, and exact reviewed Candidate Revision when revision history exists.
+    - Fail closed for succeeded Tasks with no review, accept, reject, malformed review evidence, stale Attempt, stale verification sequence, missing or mismatched reviewed revision, prior Integration, active execution, Competition membership, empty Candidate, disabled allowance, or exhausted allowance.
+    - Bind new Main revise/reject records to the exact current Candidate Revision and digest whenever modern revision evidence exists; preserve legacy Tasks without revision history.
+    - Run the original acceptance suite in the retained workspace without a Worker or new Attempt, recompute current patches/source compatibility, record canonical verification evidence, and capture a new Candidate Revision before reporting pass.
+    - Preserve the machine-successful Task and original Attempt status on both reverify pass and failure. A failed repaired Candidate must remain visibly unaccepted and must never make Integration eligible.
+    - Require a fresh Main accept bound to the new verification sequence, Candidate Revision, and digest before existing Integration preflight can pass.
+    - Update Task Detail eligibility explanations in English and Chinese so users understand whether reverify is available, why it is blocked, and that local checks have time even when Worker/model delta is zero.
+    - Add executable core, Main Review, Integration, daemon/coordinator, and Hub regressions for the full succeeded-revise-repair-reverify-accept chain plus every fail-closed boundary.
+  outOfScope:
+    - Allowing Main `reject` to revive a Candidate; reject remains a stop decision and requires a new Task or explicit future handoff design.
+    - Competition Candidate reevaluation, reviewer/judge Workers, cross-Worker handoff, Goal execution, automatic Main acceptance, automatic Integration, Provider changes, runtime adapter changes, Store schema migration, retry, adaptation, commit, or push.
+    - Replacing zero-Worker Candidate reverification with current-source Main remediation, changing acceptance commands, or inferring authority from free-text review reasons.
+    - Claiming Main Token savings, Worker savings, Provider cost savings, or zero total time without an exact paired baseline.
+  executionSteps:
+    - Trace Main Review revision binding, candidate-reverification eligibility/operation, CandidateRevision capture, Integration preflight, daemon projection, and Task Detail before editing.
+    - Define one canonical eligibility split for failed behavior-only Candidates and succeeded exact-Main-revise Candidates; keep rejection categories fixed and privacy-safe.
+    - Bind modern revise/reject decisions to the reviewed revision without changing legacy compatibility or accept authority.
+    - Reuse the existing zero-Worker verifier and revision-capture path; preserve Task/Attempt status and all prior events when the input Task was already succeeded.
+    - "Prove the complete ordered chain with a real temporary retained workspace: machine pass and revision A, Main revise A, Main repair, zero-Worker pass and revision B, fresh Main accept B, Integration preflight allowed."
+    - Add table-driven rejection and privacy tests, then run the focused suite once and the complete suite/build/diff hygiene once. Stop after one Candidate and return unresolved semantic gaps to Main.
+  deliverables:
+    - Exact succeeded+Main-revise Candidate reverification eligibility and operation.
+    - Exact revision binding for modern Main revise/reject decisions.
+    - Bilingual Task Detail explanations and end-to-end regression evidence.
+  modules:
+    - name: Main Review evidence binding
+      responsibility: Preserve which exact verified Candidate Revision Main accepted, revised, or rejected when modern revision evidence exists.
+      consumes:
+        - Current Task, latest Attempt, latest verification event, current Candidate Revision, current Diff, and typed Main decision.
+      produces:
+        - One immutable MainReviewDecision bound to Attempt, verification sequence, optional revision id, and patch digest.
+      boundaries:
+        - Legacy no-revision Tasks remain readable; no review inference, Candidate mutation, Worker launch, or Integration.
+    - name: Candidate reverification eligibility and execution
+      responsibility: Run one bounded local verification pass for either the existing failed behavior-only case or the new succeeded exact-revise case.
+      consumes:
+        - Task/Attempt status, latest verification, latest Main Review, reviewed revision, frozen allowance, retained workspace, reason, and confirm.
+      produces:
+        - Durable authorization, canonical verification, fresh Candidate Revision, exact zero-Worker facts, and a pass/fail result requiring fresh Main accept.
+      boundaries:
+        - No Worker, new Attempt, automatic retry, Task-history rewrite, automatic accept, or automatic Integration.
+    - name: Decision surfaces and regression suite
+      responsibility: Explain and prove the state transition from machine success through Main revise and repaired revision acceptance.
+      consumes:
+        - Canonical eligibility/result projection and temporary end-to-end fixtures.
+      produces:
+        - Bilingual Task Detail guidance and deterministic core/daemon/Integration tests.
+      boundaries:
+        - No private reason, command output, local path, prompt, patch content, or fabricated savings on public surfaces.
+  callChain:
+    - Worker finishes one Candidate; independent verification passes and Candidate Revision A is captured.
+    - Main reviews Revision A and records an exact `revise`, not accept or reject.
+    - Main repairs the retained Candidate without launching another Worker and explicitly confirms one reverification.
+    - Eligibility proves current Attempt, latest verification, exact reviewed Revision A, no Integration/Competition, and remaining allowance.
+    - ForkLight reruns every original acceptance command locally, records the new verification, and captures repaired Candidate Revision B without creating an Attempt.
+    - Main records a fresh accept bound to Revision B; only then may the existing explicit Integration preflight/apply path proceed.
+  scenarios:
+    - name: Machine success is repaired without another Worker
+      given: Revision A passed machine verification and the latest Main review is an exact revise of A.
+      when: Main repairs the retained workspace and confirms one reverification.
+      then: No Worker or Attempt is created, all commands run once, Revision B is captured, Task/Attempt stay succeeded, and fresh Main accept is required.
+    - name: Main already accepted or rejected
+      given: The latest Main decision is accept, reject, absent, malformed, or bound to older evidence.
+      when: Reverification is requested for a succeeded Task.
+      then: It rejects before commands or mutation with a fixed content-free reason.
+    - name: Repaired Candidate still fails
+      given: Succeeded Revision A was revised but Main's retained-workspace repair still fails an original acceptance command.
+      when: Reverification completes.
+      then: The failed check and consumed allowance are visible, original Task/Attempt status is preserved, no fresh accept or Integration is possible, and nothing retries.
+    - name: Existing failed Candidate remains compatible
+      given: A failed non-Competition Candidate has a behavior-only verification failure and retained business Diff.
+      when: Main confirms reverification.
+      then: Existing eligibility, failure/pass status transition, zero-Worker facts, and revision capture remain unchanged.
+    - name: Modern review binds exact revision
+      given: Candidate Revision evidence exists for the latest verification.
+      when: Main records revise or reject.
+      then: The decision stores that revision id and digest; a stale or mismatched current Diff is rejected rather than reviewed ambiguously.
+    - name: Restart and duplicate safety
+      given: One reverification authorization was consumed or execution was interrupted.
+      when: Daemon recovery or another request occurs.
+      then: No Worker or reverification starts automatically, duplicate authority is rejected, and stored history remains inspectable.
+  risks:
+    - Treating any succeeded Task as eligible would turn reverify into an alternate review path, so exact latest Main revise and reviewed-revision binding are mandatory.
+    - Changing Task status on a failed repair could rewrite the original machine-success fact; the new reverification result must remain separate and Main accept must stay stale until a pass captures Revision B.
+    - Binding revise/reject more strictly can break legacy Tasks; the implementation must fail closed only when modern revision history exists and remain compatible when it does not.
+    - Grok may produce a broad rewrite for a narrow state-machine change; focus paths, one Attempt, no automatic extra Attempt, and Main semantic review bound the risk.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1500
+
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 1500
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/candidate-reverification.ts
+    - src/core/main-review.ts
+    - src/core/candidate-revision.ts
+    - src/daemon/coordinator.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/candidate-reverification.test.ts
+    - tests/main-review.test.ts
+    - tests/integration.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Failed Candidate reverification remains compatible, while a succeeded Task is eligible only for the latest exact Main revise of the current verified Candidate Revision.
+    - Reverify creates no Worker or Attempt, preserves original machine-success Task/Attempt history, captures a fresh repaired revision on pass, and still requires a fresh exact Main accept before Integration.
+    - Accept/reject/no-review/malformed/stale/mismatched/integrated/Competition/active/empty/disabled/exhausted cases reject before commands or authorization mutation.
+    - A failed repaired Candidate preserves prior status and history, consumes only its explicit allowance, cannot be accepted or integrated, and never retries automatically.
+    - Modern Main accept/revise/reject decisions bind exact revision evidence; legacy no-revision Tasks remain compatible.
+    - Task Detail explains the available action, blocked reason, local verification time, and zero Worker/model delta in plain English and Chinese without private content or savings claims.
+    - The complete existing repository remains green and no commit or push occurs.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/candidate-reverification.test.ts tests/main-review.test.ts tests/integration.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

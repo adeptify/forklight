@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "Relay Gmail production-readiness chain",
+  "objective": "Turn the current green Gmail OAuth implementation into a safe, durable, honest, and first-user-readable local connector through four reviewed integration milestones.",
+  "items": [
+    {
+      "id": "session-safety",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-01-session-safety-grok.yaml",
+      "dependsOn": []
+    },
+    {
+      "id": "token-refresh",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-02-token-refresh-grok.yaml",
+      "dependsOn": ["session-safety"]
+    },
+    {
+      "id": "honest-sync",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-03-honest-sync-grok.yaml",
+      "dependsOn": ["token-refresh"]
+    },
+    {
+      "id": "onboarding",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-04-onboarding-grok.yaml",
+      "dependsOn": ["honest-sync"]
+    }
+  ]
+}

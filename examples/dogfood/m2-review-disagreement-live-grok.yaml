@@ -1,0 +1,99 @@
+version: 2
+name: Clamp percentages for one-shot disagreement review
+project: /tmp/forklight-review-disagreement
+taskClass: review-graph-disagreement-proof
+taskFamily: bounded-javascript-change
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: Clamp every finite numeric percentage to the inclusive 0 through 100 range while preserving fractional in-range values.
+  presentation:
+    summary: 用一个边界清楚但允许审查者形成不同风险判断的小改动，一次性验证多裁判分歧是否交回 Main。
+    language: zh-CN
+  context:
+    - This is an isolated temporary project for a one-shot multi-judge disagreement proof.
+    - Inputs are already guaranteed to be finite JavaScript numbers by the caller.
+    - Reviewer findings must be judged against this finite-number boundary rather than inventing a coercion contract.
+  inScope:
+    - Update math.js so values below zero become zero and values above one hundred become one hundred.
+    - Preserve integers and fractional values already inside the inclusive range.
+    - Add focused tests for boundaries, out-of-range values, and fractional values.
+  outOfScope:
+    - Runtime validation, string coercion, NaN or Infinity policy, dependencies, API redesign, unrelated files, commit, or push.
+  executionSteps:
+    - Inspect the existing function and test.
+    - Make the smallest readable implementation change.
+    - Add boundary-focused tests and run npm test.
+  deliverables:
+    - Correct clampPercentage behavior for every finite number.
+    - Focused executable tests.
+  modules:
+    - name: Percentage clamp
+      responsibility: Keep a finite numeric percentage inside the inclusive product range.
+      consumes:
+        - A finite JavaScript number from a validated caller.
+      produces:
+        - Zero, one hundred, or the unchanged in-range number.
+      boundaries:
+        - No input coercion or validation contract is introduced.
+  callChain:
+    - A validated caller supplies a finite number.
+    - clampPercentage applies lower and upper numeric bounds.
+    - Tests and callers consume the bounded number.
+  scenarios:
+    - name: lower side
+      given: A finite number below zero.
+      when: It is clamped.
+      then: The result is zero.
+    - name: upper side
+      given: A finite number above one hundred.
+      when: It is clamped.
+      then: The result is one hundred.
+    - name: fractional value
+      given: A fractional finite number within the range.
+      when: It is clamped.
+      then: The exact fractional value is preserved.
+  risks:
+    - A reviewer may incorrectly expand scope into non-finite input validation; the frozen caller boundary must remain authoritative.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 80
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 300000
+  workerStopGraceMs: 10000
+  fileLimit: 2
+  fileLimitMode: warn
+  changedLineLimit: 80
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - math.js
+    - math.test.js
+acceptance:
+  criteria:
+    - Every finite value below zero returns zero, above one hundred returns one hundred, and inclusive in-range integer or fractional values remain unchanged.
+    - Only math.js and math.test.js change.
+  commands:
+    - npm test
+    - node --input-type=module -e "import('./math.js').then(({clampPercentage:c}) => { if (c(-1.5) !== 0 || c(0) !== 0 || c(42.5) !== 42.5 || c(100) !== 100 || c(101.5) !== 100) process.exit(1); })"

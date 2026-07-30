@@ -1,0 +1,176 @@
+version: 2
+name: Count legacy current Main reject and revise as comparable outcomes
+project: /Users/yijunwang/code/forklight
+taskClass: m3-legacy-negative-main-decision
+taskFamily: capability-statistics
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: capability-statistics
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求今天与明天默认使用 Grok；这是已合入能力经真实历史验证后发现的单一兼容边界，无需 Competition。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Preserve exact Candidate binding for accepted final delivery while recognizing
+    an older, otherwise-current Main reject or revise as a comparable non-accepted
+    outcome when it matches the latest Attempt and verification but predates stored
+    Candidate Revision id/digest fields. A legacy negative decision must never
+    become acceptance authority; malformed or stale partial bindings stay unavailable.
+  presentation:
+    summary: 旧任务里明确绑定当前执行和验证结果的拒绝或修订，也应算一次未接受；但它永远不能授权接受或合入。
+    language: zh-CN
+  context:
+    - >-
+      The reviewed-final-delivery feature is already integrated and correctly
+      prevents machine success from becoming accepted delivery by itself.
+    - >-
+      Production Task 5e5ad6a1-0cfb-4e64-814b-cd3e9faa8ff4 is machine-succeeded,
+      has latest Main reject bound to current Attempt 2 and verification sequence
+      550, and has no Integration/remediation. Its historical review predates
+      candidateRevisionId/acceptedPatchDigest fields even though revision capture
+      exists. It currently becomes unavailable instead of 0 accepted of 1.
+    - >-
+      Modern Main accept must still require exact current Candidate Revision id and
+      patch digest. This compatibility rule applies only to negative decisions.
+  inScope:
+    - >-
+      Refine current Main-decision resolution so accept remains fail-closed on exact
+      current revision id and digest whenever revision history exists.
+    - >-
+      Allow reject or revise with both revision-binding fields absent to remain
+      current when Attempt and verification bindings are exact; this is legacy
+      non-acceptance evidence only.
+    - >-
+      If a negative decision contains only one revision-binding field, or contains
+      mismatched revision id/digest, keep it unavailable as malformed or stale.
+    - >-
+      Add deterministic regressions for legacy unbound reject and revise, modern
+      accept missing digest, and partial/mismatched negative bindings.
+    - >-
+      Prove the real production event shape is 0 accepted of 1 comparable outcome
+      without changing machine success, Integration, or remediation evidence.
+  outOfScope:
+    - >-
+      New statistics fields, routing weights, sample thresholds, UI changes,
+      historical database mutation/backfill, Main Review recording changes,
+      Integration authority, Competition, Worker selection, pricing, Token claims,
+      commit, or push.
+  executionSteps:
+    - Trace the current decision resolver and the production event shape before editing.
+    - Implement one decision-sensitive binding rule with no reason-text inference.
+    - Add focused regressions that distinguish legacy negative evidence from acceptance authority.
+    - Run focused tests, the full project check, and diff hygiene once.
+  deliverables:
+    - Current legacy reject/revise contributes a comparable non-accepted outcome.
+    - Accept remains exact-revision and exact-digest bound.
+    - Partial or mismatched negative bindings remain unavailable.
+    - Deterministic tests with no Provider request beyond this Worker execution.
+  modules:
+    - name: Current Main decision resolver
+      responsibility: Distinguish acceptance authority from legacy negative evidence using typed Attempt, verification, revision id, and digest bindings.
+      consumes:
+        - Latest Main Review, latest Attempt, latest verification event, and latest Candidate Revision.
+      produces:
+        - Current accept, reject, revise, or unavailable.
+      boundaries:
+        - No free-text inference, no stale Attempt reuse, and no unbound accept.
+    - name: Final-delivery regression
+      responsibility: Lock the historical negative-decision compatibility without changing the three-state aggregate model.
+      consumes:
+        - Synthetic events matching the real persisted legacy shape.
+      produces:
+        - Zero accepted of one comparable outcome for current legacy reject/revise.
+      boundaries:
+        - No historical database write and no new scoring policy.
+  callChain:
+    - StatisticsService reads durable Task, Attempt, verification, revision, Main Review, remediation, and Integration evidence.
+    - resolveCurrentMainDecision validates current Attempt and verification first.
+    - Decision-sensitive revision binding authorizes exact accept or legacy negative evidence.
+    - classifyFinalDeliveryOutcome returns not-accepted for current reject/revise.
+    - Provider statistics and routing evidence aggregate the shared outcome.
+  scenarios:
+    - name: Legacy current reject
+      given: Reject matches current Attempt and latest verification while both revision-binding fields are absent.
+      when: final delivery is classified.
+      then: It is not-accepted and can never authorize Integration.
+    - name: Legacy current revise
+      given: Revise matches current Attempt and latest verification while both revision-binding fields are absent.
+      when: final delivery is classified.
+      then: It is not-accepted and remains correction evidence only.
+    - name: Modern accept missing digest
+      given: Accept names a current revision but omits or mismatches its patch digest.
+      when: final delivery is classified.
+      then: It remains unavailable and never accepted.
+    - name: Malformed negative partial binding
+      given: Reject or revise provides only revision id or only digest, or mismatches either field.
+      when: final delivery is classified.
+      then: It remains unavailable rather than comparable.
+  risks:
+    - Legacy compatibility could accidentally weaken acceptance authority; branch explicitly by decision and keep accept exact.
+    - Treating any unbound review as current could reuse stale evidence; Attempt and verification matching remain mandatory.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 260
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 2
+  fileLimitMode: warn
+  changedLineLimit: 260
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - tests/statistics.test.ts
+acceptance:
+  criteria:
+    - Current legacy reject/revise is comparable non-acceptance, never acceptance authority.
+    - Modern accept still requires exact current Candidate Revision id and digest.
+    - Partial, mismatched, stale, or wrong-Attempt negative bindings stay unavailable.
+    - Shared provider statistics and routing evidence preserve the same final-delivery meaning.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts
+    - npm run check
+    - git diff --check

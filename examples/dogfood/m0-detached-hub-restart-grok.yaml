@@ -1,0 +1,181 @@
+version: 2
+name: Restart Hub safely without occupying the caller
+project: /Users/yijunwang/code/forklight
+taskClass: detached-hub-restart
+taskFamily: forklight-self-upgrade
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: forklight-self-upgrade
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；这是 ForkLight 本地生命周期能力，不需要其他 Provider 专项验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      xai/grok-4.5: 0
+
+contract:
+  outcome: >-
+    A user or automation can explicitly replace a stale ForkLight Hub with the
+    current build in detached mode. The command proves the exact old owner,
+    launches one replacement, waits a bounded time for authenticated current-build
+    readiness, then returns. It neither occupies the caller forever nor prints the
+    Hub token in JSON. Existing foreground Hub behavior remains available.
+  presentation:
+    summary: 让控制台可以安全地在后台换成新版本，调用它的终端或自动化流程能明确知道成功、失败和下一步。
+    language: zh-CN
+  context:
+    - >-
+      After Integration ae49145f-544b-437c-a6c2-ac45cc97ba52, `forklight hub
+      restart --confirm --json` correctly replaced the stale Hub but the same CLI
+      process became the long-running Hub owner and never returned JSON.
+    - >-
+      The currently proven lifecycle primitives are discoverOrClaimHub,
+      inspectHubStatus, replaceHubOwner, authenticated owner descriptors, and
+      exact build identity. Reuse them instead of adding broad process killing.
+    - >-
+      The active foreground behavior is useful for a human-owned terminal and
+      must not silently change. Detached mode must be explicit.
+  inScope:
+    - Add `forklight hub restart --confirm --detach [--no-open] [--port <port>] [--startup-timeout-ms <1000-60000>] [--json]`.
+    - Keep existing foreground `forklight hub`, `hub restart --confirm`, and `hub status` behavior compatible.
+    - After exact-owner replacement, launch exactly one detached current CLI child to serve Hub; do not use shell command strings.
+    - Preserve the prior Hub port by default when replacing an owner, unless an explicit port is supplied.
+    - Wait only by read-only authenticated status probes until the Hub is current, the child exits, ownership changes, or the bounded timeout expires.
+    - Return a bounded result containing state, pid, port, replacement outcome, and next action. JSON must never contain the Hub token, descriptor nonce, paths, environment values, or raw child output.
+    - In non-JSON mode explain what happened and whether the browser was opened. `--no-open` must never open a browser.
+    - Add deterministic tests for current-build no-op, stale-owner replacement, clean-home start, port preservation/override, one-child launch, timeout, early exit, ownership race, JSON privacy, and foreground compatibility.
+  outOfScope:
+    - Automatically restarting Hub after every Integration, changing daemon activation, changing Hub authentication/token format, killing unproven processes, MCP lifecycle changes, Provider calls, retries, settings redesign, commit, or push.
+  executionSteps:
+    - Trace the current foreground Hub branch and owner proof lifecycle; isolate the smallest reusable detached-launch coordinator.
+    - Define a closed detached restart result and bounded startup timeout parser.
+    - Launch one exact Node/CLI child with argv arrays and inherited ForkLight home only; detach and unref it without capturing private output.
+    - Poll the existing authenticated status authority and fail closed on early exit, timeout, or ownership change.
+    - Wire CLI JSON and human output, then prove foreground behavior is unchanged.
+    - Run focused lifecycle/CLI tests, build, full check, and diff hygiene.
+  deliverables:
+    - Explicit detached Hub restart command with bounded readiness proof.
+    - Privacy-safe human and JSON results.
+    - Regression tests for lifecycle ownership and foreground compatibility.
+  modules:
+    - name: Detached Hub launcher
+      responsibility: Start exactly one background Hub child using the current built CLI and a validated port.
+      consumes:
+        - Current executable identity, ForkLight home, optional port, and explicit detached authorization.
+      produces:
+        - Child PID plus an exit observation handle used only during bounded readiness waiting.
+      boundaries:
+        - No shell, no credentials in argv, no repeated launches, no broad process signals, and no daemon restart.
+    - name: Restart readiness coordinator
+      responsibility: Replace only the previously proven owner and decide whether the replacement became the authenticated current Hub.
+      consumes:
+        - Discovery evidence, replacement result, child state, current build identity, and deadline.
+      produces:
+        - Closed success/failure result with state, pid, port, and next action.
+      boundaries:
+        - Read-only polling after launch; no parameter adaptation, infinite waits, or success inferred from PID existence alone.
+    - name: CLI explanation
+      responsibility: Parse explicit flags and render one bounded result for humans or automation.
+      consumes:
+        - Closed coordinator result and browser-open preference.
+      produces:
+        - Plain-language output or privacy-safe JSON.
+      boundaries:
+        - No token/nonce/path/raw output; foreground mode remains compatible.
+  callChain:
+    - CLI validates confirm, detach, timeout, port, JSON, and no-open flags.
+    - Existing discovery proves whether the Hub is current, stale, legacy, or absent.
+    - Current is a no-op; stale or legacy is stopped only through exact authenticated replacement proof.
+    - One detached current CLI child starts the Hub, preferably on the previous port.
+    - Parent polls authenticated Hub status until current, early exit, ownership race, or deadline, then returns.
+  scenarios:
+    - name: Stale Hub becomes current
+      given: A proven stale-build Hub owns one port.
+      when: restart detach is explicitly confirmed.
+      then: The old owner exits, one child starts on the same port, authenticated status is current, and the caller returns.
+    - name: Already current
+      given: The active Hub already matches this build.
+      when: restart detach is requested.
+      then: No child is launched or signalled and the result clearly says no replacement was needed.
+    - name: Replacement fails to become ready
+      given: The child exits or the deadline expires before authenticated current status.
+      when: readiness is evaluated.
+      then: The command fails with one closed reason and next action, without launching again.
+    - name: Machine-readable privacy
+      given: detached restart is invoked with JSON.
+      when: output is serialized.
+      then: It is one finite JSON document with no token, nonce, path, environment, or raw child output.
+  risks:
+    - Starting before the old owner releases its port can create duplicate Hubs; await exact replacement completion before one launch.
+    - Treating PID existence as readiness can report a broken UI as healthy; require authenticated current-build status.
+    - A second owner can race the child; detect ownership change and fail closed rather than signalling the new owner.
+    - Capturing child stdout can keep pipes alive or leak the token; detached child stdio must not be returned.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 1000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - src/hub/instance.ts
+    - tests/hub-cli.test.ts
+    - tests/hub-instance.test.ts
+    - tests/hub-settings.test.ts
+    - tests/daemon-cli.test.ts
+acceptance:
+  criteria:
+    - Explicit detached restart returns after one authenticated current-build Hub is ready and preserves the old port by default.
+    - Current-build no-op, early exit, timeout, and ownership race never signal or launch an unproven extra process.
+    - JSON is finite and privacy-safe; no-open never opens a browser; foreground behavior remains compatible.
+    - This accepted Task completes the next automatic four-stage self-upgrade and the canonical post-activation streak becomes exactly 3/3.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-cli.test.ts tests/hub-instance.test.ts tests/hub-settings.test.ts tests/daemon-cli.test.ts
+    - npm run build
+    - npm run check
+    - git diff --check

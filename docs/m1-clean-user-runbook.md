@@ -1,6 +1,6 @@
 # M1 全新用户开箱验收手册
 
-更新时间：2026-07-28
+更新时间：2026-07-30
 
 这份手册只用于证明 ForkLight 是否真的能被一个全新本地用户使用。操作者按 Hub
 页面完成配置，不编辑 ForkLight 数据库、状态文件、Main JSON、Task YAML 或项目源码。
@@ -24,17 +24,43 @@ Codex 配置。创建系统用户需要一骏单独授权，本手册本身不�
 由现有开发用户完成，不能在新用户环境里临时修改产品：
 
 - 冻结本次验收所用的 ForkLight 源码和 build identity；
-- 从同一源码生成一个 `forklight-0.2.0.tgz`，记录文件 SHA-256；
-- 把 tarball 放在新用户只读可访问的位置；
+- 用一条已检入命令生成冻结 clean-user bundle（见下一节），不要手工复制 tarball 或手写证据；
+- 把冻结目录放在新用户只读可访问的位置；
 - 准备一个专用于本次验收的 Provider Key，但不提前写入新用户 Keychain；
 - 选择一个 Main。M1 首次退出验收默认使用 Codex；其他 Main 留作后续兼容性样本。
 
 如果打包后源码、build identity 或 tarball 变化，本次记录作废并重新开始，不能混用两次构建。
 
+### 生成冻结 clean-user bundle（开发用户 / release 操作者）
+
+在当前产品源码根目录执行一条命令，并给出**尚不存在**的新输出目录：
+
+```bash
+npm run bundle:clean -- --output /Users/Shared/ForkLight-Clean-Run.<unique-suffix>
+```
+
+该命令会：
+
+1. 在目标旁创建私有 staging，拒绝覆盖已存在目录；
+2. 运行真实 `npm pack`（其 `prepack` 执行权威全量 check），解析通过的 tests passed/total；
+3. 对 tarball 做 SHA-256，扫描条目中的绝对路径、路径穿越和敏感文件名（不扫描凭据内容）；
+4. 在隔离 npm prefix 与隔离 `FORKLIGHT_HOME` 中安装并验证 CLI/MCP/build identity；
+5. 以 detached `--no-open` 启动安装后的 Hub/daemon，核对身份后只停止本 run 拥有的进程；
+6. 仅在全部通过后，把 tarball、`build-identity.json`、本手册副本和外部 `bundle-evidence.json`
+   原子 rename 到输出目录。
+
+`prepack` 全量测试会保留 release 操作者的系统 `HOME`，因为现有权威测试会通过 macOS
+Keychain 判断本地 Worker 是否可用；它不会把 Provider/API 环境变量传给子进程。npm 的 cache、
+user config 和 prefix 仍全部指向 staging。打包后的 CLI、MCP、Hub 与 daemon 验证则使用另一套
+空白私有 `HOME`，不会继承操作者的 ForkLight 状态。
+
+**边界：** 这条命令只证明“当前开发机上的安装包可被独立验证”。它**不是** clean-user journey，
+不能代替新 macOS 用户 / 一次性 VM / 新 Mac 上的首次 Keychain、Main 安装、理解问答和 15 分钟计时。
+
 每个冻结验收目录必须只把同目录的 `bundle-evidence.json` 当作本次构建的权威索引。该文件在
 tarball 生成后写入，至少包含 tarball 文件名、SHA-256、包内 build identity、source digest、
-生成时间，以及 prepack、独立安装、CLI/MCP 加载、身份对照和敏感文件名扫描结果。操作者先核对
-JSON 中的 SHA，再使用它指向的 tarball。
+生成时间，以及 prepack、独立安装、CLI/MCP 加载、身份对照、Hub/daemon 生命周期和敏感文件名扫描
+结果。操作者先核对 JSON 中的 SHA，再使用它指向的 tarball。
 
 不要在这份会被打进 tarball 的文档里硬编码“当前 tarball SHA”。否则更新 SHA 后重新打包会再次
 改变 tarball，形成自引用。`bundle-evidence.json` 必须放在 tarball 外、与 tarball 和本手册副本

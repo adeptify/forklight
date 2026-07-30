@@ -1,0 +1,182 @@
+version: 2
+name: Explain incomplete routing samples without pretending history is empty
+project: /Users/yijunwang/code/forklight
+taskClass: m3-routing-sample-gap-explainability
+taskFamily: capability-statistics
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: capability-statistics
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；Codex 已定义展示和交互合同，Worker 只按合同实现。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Keep the existing conservative routing decision unchanged, but make its missing-evidence
+    explanation truthful. When exact task-type evidence is insufficient and a supplied task
+    family has some history but not enough comparable samples for every candidate, the daemon
+    response and Hub must show each candidate's real exact-type and broader-category sample
+    coverage. A user should understand "history exists but this comparison is not ready" instead
+    of seeing misleading zero samples. This is an explainability change only: it must not score
+    incomplete evidence, recommend a Worker, start Competition, launch work, or mutate history.
+  presentation:
+    summary: 当某些 Worker 已有同类经验、另一些还不够时，明确显示各自有几条可用记录、还差多少；不能把“暂时不能公平比较”说成“完全没有历史”。
+    language: zh-CN
+  context:
+    - The current routing response exposes only the evidence selected for scoring. When neither exact nor family scope meets the all-candidate threshold, evidenceScope is none and candidate evidence falls back to sparse exact-class rows.
+    - A live read-only audit found bounded-javascript-change history split across Grok and MiniMax, yet the current Hub can display both candidates as zero for a new exact task class because family evidence is incomplete as a set.
+    - "The existing decision rule is correct: incomplete evidence must not produce a recommendation. The problem is only that the rejected family evidence and its gap are invisible."
+    - Payload growth matters. Expose a compact numeric coverage projection, not duplicate full RoutingEvidence objects, Task ids, paths, prompts, reasons, logs, or diagnostics.
+  inScope:
+    - Add a compact per-candidate sample-coverage projection to RoutingCandidateResult containing exact-type terminal/relevant counts, optional family terminal/relevant counts, and the applicable exact/family thresholds.
+    - Populate the projection before evidence-scope resolution discards incomplete family evidence; preserve it after candidate sorting.
+    - Keep the existing candidate evidence field and every scoring, uncertainty, recommendation, and Competition result backward compatible.
+    - In Hub model routing, replace the single ambiguous sample line with plain-language exact-type and broader-category coverage lines when a family was supplied.
+    - For an incomplete family comparison, explicitly say that related history exists but every candidate needs the configured minimum before it can be compared fairly.
+    - Show the number as current/required without framing it as model quality, a hard product milestone, or permission to run Competition.
+    - Add English and Chinese copy and executable tests for asymmetric family history, no family, exact evidence winning, family fallback winning, and privacy-safe serialization.
+  outOfScope:
+    - Changing thresholds, weights, factor arithmetic, recommendation eligibility, uncertainty semantics, model ranking, Worker choice, Competition intent or triggers, settings, Task admission, backfill, database records, Provider calls, token or cost calculations, unrelated Hub redesign, commit, or push.
+  executionSteps:
+    - Trace provideRoutingAdvice from exact and family evidence maps through sorted RoutingCandidateResult objects and Hub renderMrResult.
+    - Define the smallest additive typed coverage object with bounded numbers only; do not expose duplicate full evidence structures.
+    - Populate exact and optional family coverage by stable candidate identity and prove sorting cannot attach one model's counts to another model.
+    - Update the Hub candidate card and undecided conclusion so the primary wording first says what is known, then why it cannot yet decide, then that Competition remains a separate Main decision.
+    - Add focused core and executable UI asset tests for both locales and all evidence-scope branches.
+    - Run focused tests, JavaScript syntax, the full project check, and diff hygiene.
+  deliverables:
+    - An additive privacy-safe per-candidate routing sample-coverage response.
+    - Hub wording that distinguishes no history from some-but-insufficient exact/family history.
+    - Tests proving incomplete evidence remains non-scoring and never changes Competition advice.
+    - No Provider call, history mutation, automatic retry, Competition, commit, or push.
+  modules:
+    - name: Routing sample coverage projection
+      responsibility: Preserve the small set of sample counts needed to explain why a candidate comparison is or is not ready.
+      consumes:
+        - Exact-class evidence, optional task-family evidence, resolved routing policy, and stable candidate identities.
+      produces:
+        - Per-candidate exact and optional family terminal/relevant counts plus applicable thresholds.
+      boundaries:
+        - Must not expose Task-level content, duplicate complete evidence objects, change scoring inputs, or infer missing classifications.
+    - name: Hub explanation
+      responsibility: Turn sample coverage into concise bilingual wording a non-expert can understand.
+      consumes:
+        - Candidate sample coverage, evidenceScope, knowledge, and taskFamily presence.
+      produces:
+        - Exact-type and broader-category current/required lines plus one honest comparison-readiness explanation.
+      boundaries:
+        - Must not say a model is good or bad from sample quantity, imply automatic selection, or suggest Competition solely because evidence is incomplete.
+    - name: Regression evidence
+      responsibility: Prove the additive response remains identity-safe, privacy-safe, conservative, and backward compatible.
+      consumes:
+        - Synthetic asymmetric family maps and existing Hub asset behavior.
+      produces:
+        - Deterministic focused tests for scope selection, sorting, localization, and no-decision behavior.
+      boundaries:
+        - No real Provider, Daemon lifecycle mutation, Task creation, source integration, commit, or push.
+  callChain:
+    - StatisticsService supplies exact and optional task-family aggregate evidence maps to the coordinator.
+    - provideRoutingAdvice resolves candidate identities, snapshots compact exact/family coverage, and independently resolves which complete scope may participate in scoring.
+    - The daemon and Hub bridge pass the additive response through without recomputation.
+    - renderMrResult explains per-candidate coverage and keeps recommendation and Competition decisions separate.
+    - Focused tests exercise asymmetric evidence, selected-scope behavior, sorting identity, bilingual copy, and serialized privacy boundaries.
+  scenarios:
+    - name: Related history exists but comparison is not ready
+      given: Grok has thirteen relevant family samples and MiniMax has two while the configured family threshold is five for every candidate.
+      when: Main evaluates a new exact task class in that family.
+      then: ForkLight stays undecided with no recommendation, shows Grok 13/5 and MiniMax 2/5 for the broader category, and explains that the set is not yet comparable.
+    - name: Exact history is absent
+      given: Both candidates have zero exact-type samples and no task family was supplied.
+      when: Main evaluates routing.
+      then: The Hub says there is no exact-type history and does not invent a broader-category line.
+    - name: Exact evidence wins
+      given: Every candidate meets the exact-type threshold and family history also exists.
+      when: Routing is evaluated.
+      then: Existing exact-class scoring and recommendation stay unchanged while coverage still reports correctly attached counts.
+    - name: Family fallback wins
+      given: Exact evidence is sparse but every candidate meets the family threshold.
+      when: Routing is evaluated.
+      then: Existing task-family scoring and recommendation stay unchanged and the Hub says the broader category supplied the comparison.
+    - name: Competition stays independent
+      given: Sample coverage is incomplete and Main intent is none with no enabled trigger.
+      when: Routing is evaluated.
+      then: No Competition is advised; the coverage explanation never tells the user to compete merely to fill the gap.
+    - name: Candidate order changes
+      given: Candidate scoring or alphabetical tie-breaking changes rendered order.
+      when: Results are sorted.
+      then: Each provider/model keeps its own exact and family counts.
+  risks:
+    - Reusing array indexes after sorting could attach the wrong sample counts to a model; bind coverage while constructing each identity-specific result.
+    - Returning both complete exact and family evidence would inflate Main/Hub exchange; expose counts and thresholds only.
+    - Current Hub next-action logic may still tell users to run more exact Tasks based only on c.evidence; update it to use the new coverage without turning data collection into an automatic Competition recommendation.
+    - New primary copy can become technical; use "exact task type", "broader category", "usable records", and "fair comparison" rather than internal reason codes.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 550
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 550
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/model-routing.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/model-routing.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Incomplete exact/family evidence remains non-scoring and cannot produce a recommendation or Competition by itself.
+    - Each candidate exposes compact, correctly bound exact and optional family sample coverage with applicable thresholds.
+    - Hub explains asymmetric sample history in English and Chinese without saying that history is empty or that sample quantity is model quality.
+    - Existing exact-class and task-family recommendation behavior remains unchanged.
+    - The additive response exposes no Task ids, paths, prompts, private Main reasons, logs, diagnostics, credentials, or endpoints.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/model-routing.test.ts tests/hub-ui-assets.test.ts
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - npm run check
+    - git diff --check

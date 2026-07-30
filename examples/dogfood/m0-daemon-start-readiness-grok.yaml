@@ -1,0 +1,174 @@
+version: 2
+name: Make daemon startup readiness truthful during self-upgrade
+project: /Users/yijunwang/code/forklight
+taskClass: daemon-start-readiness
+taskFamily: forklight-self-upgrade
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: forklight-self-upgrade
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-v4-pro
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；本任务是通用 daemon 启动链路，不需要其他 Provider 专项验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      xai/grok-4.5: 0
+      deepseek/deepseek-v4-pro[1M]: 0
+
+contract:
+  outcome: >-
+    A daemon process that has been launched once but needs more than five seconds
+    to finish durable recovery must not be reported as a failed start while it is
+    still progressing and later becomes healthy. Startup waits for one bounded,
+    configurable readiness window, never launches duplicate replacement daemons,
+    returns the matching health result when ready, and gives a truthful bounded
+    failure when the child exits or the deadline expires.
+  presentation:
+    summary: daemon 已经在启动时，ForkLight 应该耐心等到可用或明确超时，不能五秒后先报失败、几秒后又实际成功。
+    language: zh-CN
+  context:
+    - Integration operation 66ba9a77-f518-4a37-836f-043e2b70c316 passed source apply, source verification, and artifact build.
+    - Its activation command launched the replacement daemon, but daemon start exhausted the current fixed 50 by 100 ms health probes and returned ENOENT after 6.2 seconds.
+    - The same replacement became healthy shortly afterward as PID 95170 with the new build, so Integration retained a false runtime-activation failure.
+    - Integration status, wait, and history are now observation-only and did not start a competing daemon; this Task must preserve that fix.
+  inScope:
+    - Replace the fixed implicit five-second startup readiness assumption with one bounded configurable option at the daemon client and CLI lifecycle boundary.
+    - Keep one launch attempt per start call. Poll only health/readiness after launch; never spawn another child merely because readiness is slow.
+    - Distinguish child exit before readiness from readiness deadline expiry using bounded privacy-safe errors.
+    - Preserve the fast path when a matching daemon is already healthy and preserve explicit restart semantics.
+    - Add deterministic tests where readiness occurs after the old five-second boundary, where the child exits, where the deadline expires, and where an existing daemon is immediately returned.
+    - Update operator documentation and the checked-in self-upgrade delivery settings so its bounded readiness behavior is understandable.
+  outOfScope:
+    - Unbounded waiting, automatic repeated process launch, changing Integration stage definitions, killed-process operation recovery, Provider behavior, task retry/adaptation, UI redesign, commit, or push.
+  executionSteps:
+    - Trace daemon start CLI, ensureDaemon, process launch, handoff activation, and delivery-profile call chain.
+    - Introduce one validated readiness deadline/option with a safe default and a test seam; do not scatter retry constants.
+    - Observe the exact launched child while polling the endpoint so an early child exit can fail immediately without exposing paths.
+    - Keep observation-only Integration commands free of lifecycle mutation.
+    - Run focused daemon and Integration tests, strict build, full check, and diff hygiene.
+  deliverables:
+    - Truthful bounded daemon startup readiness behavior with one launch only.
+    - CLI/config surface for the readiness deadline where appropriate.
+    - Deterministic slow-ready, child-exit, timeout, already-running, and no-duplicate tests.
+    - Concise operator documentation and a self-upgrade profile aligned with the implementation.
+  modules:
+    - name: Daemon startup supervisor
+      responsibility: Launch at most one daemon, observe that child and endpoint until a bounded deadline, and return only confirmed health.
+      consumes:
+        - ForkLight home, launch result, readiness deadline, and health probes.
+      produces:
+        - Matching daemon health or one typed bounded startup failure.
+      boundaries:
+        - No duplicate launch, no infinite retry, no Integration state mutation, and no private path in public errors.
+    - name: CLI lifecycle configuration
+      responsibility: Validate an optional startup timeout and pass it only to explicit daemon start/restart lifecycle operations.
+      consumes:
+        - CLI arguments or the safe default.
+      produces:
+        - One bounded startup-supervisor invocation.
+      boundaries:
+        - Integration observers remain read-only and other command timeouts remain unchanged.
+  callChain:
+    - Main or an authorized activation command invokes daemon start.
+    - CLI validates the optional readiness timeout before lifecycle mutation.
+    - Startup supervisor first returns an already-healthy matching daemon when present; otherwise it launches exactly one child.
+    - The supervisor polls child state and daemon health until ready, child exit, or deadline.
+    - Integration activation check then independently confirms the new build identity.
+  scenarios:
+    - name: Slow recovery becomes ready
+      given: One launched daemon needs longer than five seconds but less than the configured readiness deadline.
+      when: daemon start waits for readiness.
+      then: It returns confirmed health once, reports no failure, and launches no duplicate.
+    - name: Child exits early
+      given: The launched daemon exits before exposing a healthy endpoint.
+      when: startup supervision observes the exit.
+      then: It stops early with bounded actionable failure and does not relaunch automatically.
+    - name: Readiness deadline
+      given: The child stays alive but never becomes healthy before the configured deadline.
+      when: the deadline expires.
+      then: It reports a truthful timeout once and does not loop or launch again.
+    - name: Existing daemon
+      given: A matching daemon is already healthy.
+      when: daemon start is called.
+      then: Existing health returns without spawning a process.
+    - name: Integration observation regression
+      given: No daemon socket exists during handoff.
+      when: status, wait, or history is invoked.
+      then: It remains observation-only and never uses the startup supervisor.
+  risks:
+    - Merely increasing a loop constant would hide child exits and remain hard to configure; keep one deadline and observe the child.
+    - Killing a slow child at the deadline could be destructive and race later recovery; do not add cleanup without explicit ownership proof.
+    - A broad CLI timeout flag could change unrelated commands; scope it to daemon start/restart.
+  changeBudget:
+    maxFiles: 6
+    maxDiffLines: 650
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 6
+  fileLimitMode: warn
+  changedLineLimit: 650
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/daemon/client.ts
+    - src/cli.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - docs/operations.md
+    - examples/dogfood/forklight-self-upgrade-delivery-settings.yaml
+acceptance:
+  criteria:
+    - One daemon launch may become healthy after the old five-second boundary without being reported as failed or spawning a duplicate.
+    - Child exit and readiness timeout are bounded, truthful, privacy-safe, and do not auto-relaunch.
+    - Existing daemon start/restart behavior and observation-only Integration commands remain correct.
+    - The accepted change completes a full automatic four-stage self-upgrade under the updated bounded delivery profile.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/daemon-cli.test.ts tests/activation.test.ts tests/integration-operation.test.ts
+    - npm run build
+    - npm run check
+    - git diff --check

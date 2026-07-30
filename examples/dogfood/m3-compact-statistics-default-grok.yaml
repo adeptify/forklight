@@ -1,0 +1,193 @@
+version: 2
+name: Make model statistics compact by default and detailed only on request
+project: /Users/yijunwang/code/forklight
+taskClass: m3-compact-statistics-default
+taskFamily: capability-statistics
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: capability-statistics
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；本任务是通用统计输出收敛，不需要其他 Provider 专项验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Make Provider/model statistics return the aggregate facts needed for routine
+    Main supervision by default, without returning every per-Task failure id and
+    diagnostic. Preserve an explicit deep-audit path for the existing detailed
+    evidence. Apply the same default to CLI JSON, MCP, and the Hub polling bridge
+    so routine model-selection work consumes a small, privacy-safer response while
+    authorized local diagnosis can still retrieve full evidence on demand.
+  presentation:
+    summary: 日常统计只返回选模型真正需要的汇总；逐条失败诊断仅在明确进入深度审计时展开，避免一次查询浪费大量主线程上下文。
+    language: zh-CN
+  context:
+    - A real `forklight stats --json` call currently returns 70,660 UTF-8 bytes for six Provider/model groups; removing only the 148 per-Task failure records reduces the same aggregate response to about 6,181 bytes.
+    - The largest current diagnostic is already bounded to 2,000 characters, but repeating 148 records still caused a single Main read to exceed 30,000 output tokens and truncate.
+    - Hub polls statistics repeatedly but renders only aggregate counts, rates, costs, timing, delivery, remediation, and failureDistribution; it does not consume the `failures` array.
+    - Routing evidence uses StatisticsService directly and must retain its existing evidence semantics.
+    - Deep audit is local read-only inspection, not a Provider request or an authorization to penalize a Worker.
+  inScope:
+    - Define one canonical compact Provider/model statistics projection that allowlists every aggregate field and omits the per-Task `failures` array.
+    - Keep the existing full statistics computation and detailed failure evidence unchanged for explicit deep audit.
+    - Make daemon statistics default to compact detail and accept one validated explicit full/deep-audit request.
+    - Make `forklight stats --json` compact by default and add `--deep-audit` for the existing full JSON; keep human output behavior unchanged because it already prints aggregates only.
+    - Make `forklight_statistics` MCP compact by default with an explicit boolean deep-audit input and clear description of the cost/meaning.
+    - Make Hub request compact statistics explicitly; it must never poll per-Task diagnostics.
+    - Add deterministic tests for aggregate parity, omission of ids/diagnostics, explicit full detail, invalid detail rejection, MCP behavior, and Hub request parameters.
+    - Update concise CLI/operator documentation for the new explicit audit option.
+  outOfScope:
+    - Changing model scores, routing recommendations, failure classification, stored history, Task Detail, pricing, Token arithmetic, automatic competition, automatic Worker selection, retry/correction/adaptation policy, database schema, visual redesign, commit, or push.
+  executionSteps:
+    - Trace statistics production and every routine consumer across core, daemon, CLI, MCP, and Hub.
+    - Add a detached canonical compact projection from the already-computed full summaries; do not recompute rates or classifications in each consumer.
+    - Thread a bounded detail selector through daemon transport and validate it at the server boundary.
+    - Keep routine responses compact; expose full failure records only through the explicit CLI/MCP deep-audit input.
+    - Prove Hub always requests compact detail and does not depend on the omitted array.
+    - Run focused tests, strict build, full test suite, and diff hygiene.
+  deliverables:
+    - Compact default Provider/model statistics for daemon, CLI JSON, MCP, and Hub.
+    - Explicit local deep-audit retrieval preserving current detailed evidence.
+    - Regression tests showing aggregate values are identical while routine responses contain no Task ids, Attempt ids, or diagnostics.
+    - Concise usage documentation and no Provider call, history mutation, commit, or push.
+  modules:
+    - name: Statistics presentation projection
+      responsibility: Convert canonical full Provider/model summaries into detached aggregate-only summaries without changing any calculated value.
+      consumes:
+        - Existing ProviderModelSummary objects including aggregate fields and detailed failure records.
+      produces:
+        - Aggregate-only summaries with the same provider, model, sample, outcome, correction, cost, time, turn, and failure-category values.
+      boundaries:
+        - Does not recalculate evidence, mutate inputs, expose Task/Attempt ids or diagnostics, or change routing evidence.
+    - name: Read-only statistics transport
+      responsibility: Select compact or full detail once at the daemon boundary and carry the result consistently to clients.
+      consumes:
+        - Existing statistics filters plus a bounded compact/full detail selector.
+      produces:
+        - Compact summaries by default or existing full summaries only after an explicit deep-audit request.
+      boundaries:
+        - Rejects unsupported selector values, makes no Provider call, and performs no mutation.
+    - name: Main-facing clients
+      responsibility: Keep routine CLI/MCP supervision compact while making expensive detail an intentional action.
+      consumes:
+        - Canonical daemon statistics response and an optional explicit deep-audit flag.
+      produces:
+        - Small routine JSON/structured content or full local evidence on demand, with human CLI output unchanged.
+      boundaries:
+        - Does not silently fetch detail, infer model quality, or label missing evidence as success/failure.
+    - name: Hub statistics polling
+      responsibility: Poll only aggregate model evidence needed by the current Insights cards.
+      consumes:
+        - Compact Provider/model summaries.
+      produces:
+        - Existing Insights outcome cards without per-Task failure payloads.
+      boundaries:
+        - No UI redesign, diagnostic display, browser-side recomputation, or fallback full fetch.
+  callChain:
+    - StateStore and StatisticsService compute the existing full canonical summaries once.
+    - The daemon validates requested detail and projects compact summaries for the default path.
+    - CLI and MCP omit detail unless explicit deep audit is requested; Hub always asks for compact detail.
+    - Routine Main supervision receives aggregate facts; a deliberate local audit receives the unchanged full failure records.
+    - Focused tests compare compact aggregates with full aggregates and assert private row evidence is absent by default.
+  scenarios:
+    - name: Routine Main model comparison
+      given: Hundreds of historical Tasks include many long bounded failure diagnostics.
+      when: Main calls CLI JSON or MCP statistics without a deep-audit flag.
+      then: It receives all aggregate selection facts but no per-Task failure records, ids, or diagnostics.
+    - name: Explicit failure investigation
+      given: Main needs to investigate why one Provider/model cohort failed.
+      when: It explicitly requests deep audit through CLI or MCP.
+      then: The existing detailed failure evidence is returned locally without changing any history or calling a Provider.
+    - name: Hub background refresh
+      given: Hub polls statistics on its normal interval.
+      when: The Ops bridge calls the daemon.
+      then: It explicitly requests compact detail and renders the same cards without transferring detailed failure rows.
+    - name: Invalid transport detail
+      given: A client sends an unsupported statistics detail value.
+      when: The daemon parses the request.
+      then: It rejects the input with a bounded error and returns no statistics rather than guessing a mode.
+    - name: Aggregate parity
+      given: One canonical full summary contains success, delivery, remediation, cost, timing, turns, and failure categories.
+      when: It is projected to compact form.
+      then: Every aggregate value is unchanged and only the detailed `failures` collection is absent.
+  risks:
+    - Maintaining separate hand-built client projections could drift; define one canonical allowlisted projection in core.
+    - Defaulting the daemon to full for compatibility would leave CLI/MCP Token waste and Hub bandwidth unchanged; compact must be the default.
+    - Removing failureDistribution would make routing and user interpretation weaker; omit only row-level failure evidence.
+    - A permissive truthy flag could accidentally expose detail; accept an explicit validated selector or boolean path only.
+    - Tests that only compare response size could pass while dropping useful aggregates; assert field-by-field parity and forbidden row evidence.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 850
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 12
+  fileLimitMode: warn
+  changedLineLimit: 850
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub/server.ts
+    - tests/statistics.test.ts
+    - tests/daemon.test.ts
+    - tests/mcp.test.ts
+    - tests/hub-ops-mutations.test.ts
+    - README.md
+    - docs/operations.md
+acceptance:
+  criteria:
+    - Routine daemon, CLI JSON, MCP, and Hub statistics preserve every aggregate fact while omitting row-level failures, ids, and diagnostics.
+    - Explicit CLI/MCP deep audit returns the existing full evidence and invalid detail values fail closed.
+    - Human CLI output, routing evidence, stored history, and all model-selection calculations remain unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts tests/daemon.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts
+    - npm run build
+    - npm run check
+    - git diff --check

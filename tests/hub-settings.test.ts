@@ -198,9 +198,11 @@ test("viewModelRoutingSettings projects modelRouting policy fields only", async 
     assert.equal(typeof view.weights.officialCost, "number");
     assert.equal(typeof view.weights.duration, "number");
     assert.equal(typeof view.weights.budgetReliability, "number");
+    assert.equal(typeof view.weights.firstPassSuccess, "number");
     assert.equal(view.weights.officialCost, 0);
     assert.equal(view.weights.duration, 0);
     assert.equal(view.weights.budgetReliability, 0);
+    assert.equal(view.weights.firstPassSuccess, 0.5);
   } finally {
     store.close();
   }
@@ -321,7 +323,12 @@ test("Hub modelRouting settings save and reload via API", async () => {
         uncertaintyThreshold: 0.12,
         competitionOnUncertainty: false,
         missingEvidenceMode: "strict",
-        weights: { acceptedDelivery: 2, officialCost: 0.3, budgetReliability: 0.6 },
+        weights: {
+          acceptedDelivery: 2,
+          officialCost: 0.3,
+          budgetReliability: 0.6,
+          firstPassSuccess: 0.8,
+        },
       },
     });
     assert.equal(save.status, 200);
@@ -335,11 +342,13 @@ test("Hub modelRouting settings save and reload via API", async () => {
     assert.equal(savedWeights.acceptedDelivery, 2);
     assert.equal(savedWeights.officialCost, 0.3);
     assert.equal(savedWeights.budgetReliability, 0.6);
+    assert.equal(savedWeights.firstPassSuccess, 0.8);
     const reloaded = ctx.settings.get();
     assert.equal(reloaded.modelRouting.minRelevantSamples, 8);
     assert.equal(reloaded.modelRouting.missingEvidenceMode, "strict");
     assert.equal(reloaded.modelRouting.weights.acceptedDelivery, 2);
     assert.equal(reloaded.modelRouting.weights.budgetReliability, 0.6);
+    assert.equal(reloaded.modelRouting.weights.firstPassSuccess, 0.8);
     const reject = await doHttp(`${base}/api/settings`, "POST", ctx.token, {
       modelRouting: { minRelevantSamples: 0 },
     });
@@ -569,6 +578,250 @@ test("buildSafeTaskJourney uses real Attempt records and diff paths", async () =
   assert.equal(journey.workerExecution.attempts[0]!.status, "succeeded");
   assert.equal(journey.workerExecution.attempts[1]!.turns, 18);
   assert.ok(!JSON.stringify(journey).includes("raw output must not be copied"));
+});
+
+/**
+ * Live-shaped Relay Board failure: terminal failed Task, Attempt 2 still
+ * recorded as running, but ordered same-Attempt events prove Worker completion
+ * then a later result-finalizing worker.failed. Presentation is display-only.
+ */
+function liveShapedTerminalAttemptFixture() {
+  const attempt1 = "attempt-1-early";
+  const attempt2 = "attempt-2-stale-running";
+  return {
+    task: {
+      id: "5a34afb4-21f7-4b6d-92d6-99de36ec81b7",
+      status: "failed",
+      spec: {
+        version: 1,
+        provider: { name: "xai", model: "grok-4.5" },
+        runtime: { name: "grok-build" },
+        goal: "Relay Board terminal Attempt truth",
+        constraints: [],
+        acceptance: { commands: ["npm test"] },
+      },
+    },
+    decision: {
+      failureCategory: "runtime",
+      verification: {
+        passed: true,
+        commands: [
+          { command: "npm test", exitCode: 0 },
+          { command: "npm run build", exitCode: 0 },
+        ],
+      },
+      remediationDisposition: { status: "verified-repaired-delivered" },
+    },
+    inspect: {
+      attempts: [
+        {
+          id: attempt1,
+          ordinal: 1,
+          status: "failed",
+          startedAt: "2026-07-29T10:00:00.000Z",
+          finishedAt: "2026-07-29T10:05:00.000Z",
+          exitCode: 1,
+          turns: 4,
+        },
+        {
+          id: attempt2,
+          ordinal: 2,
+          status: "running",
+          startedAt: "2026-07-29T10:10:00.000Z",
+          turns: 12,
+          resultText: "private /Users/secret/project path must never leak",
+        },
+      ],
+      events: [
+        {
+          type: "worker.started",
+          sequence: 10,
+          attemptId: attempt2,
+          summary: "Worker started with secret /Users/secret/project",
+        },
+        {
+          type: "worker.completed",
+          sequence: 20,
+          attemptId: attempt2,
+          summary: "Worker completed; private payload /Users/secret/project/out",
+          payload: { privatePath: "/Users/secret/project/out", log: "x".repeat(200) },
+        },
+        {
+          type: "verification.started",
+          sequence: 21,
+          attemptId: attempt2,
+          summary: "verification started",
+        },
+        {
+          type: "verification.command.completed",
+          sequence: 22,
+          attemptId: attempt2,
+          summary: "check 1 passed: npm test -- /Users/secret/project",
+        },
+        {
+          type: "verification.command.completed",
+          sequence: 23,
+          attemptId: attempt2,
+          summary: "check 2 passed",
+        },
+        {
+          type: "verification.command.completed",
+          sequence: 24,
+          attemptId: attempt2,
+          summary: "check 3 passed",
+        },
+        {
+          type: "verification.command.completed",
+          sequence: 25,
+          attemptId: attempt2,
+          summary: "check 4 passed",
+        },
+        {
+          type: "verification.command.completed",
+          sequence: 26,
+          attemptId: attempt2,
+          summary: "check 5 passed",
+        },
+        {
+          type: "worker.failed",
+          sequence: 30,
+          attemptId: attempt2,
+          summary: "result finalization failed: ENOENT /Users/secret/project/candidate",
+          payload: { error: "ENOENT /Users/secret/project/candidate", stderr: "private" },
+        },
+      ],
+    },
+  };
+}
+
+test("buildSafeTaskJourney explains ended post-Worker Attempt without rewriting recorded running", async () => {
+  const { buildSafeTaskJourney } = await import("../src/hub/server.js");
+  const fixture = liveShapedTerminalAttemptFixture();
+  const journey = buildSafeTaskJourney(fixture.task, fixture.decision, fixture.inspect);
+
+  const latest = journey.workerExecution.attempts[0];
+  assert.ok(latest, "Attempt 2 is projected");
+  assert.equal(latest.ordinal, 2);
+  assert.equal(latest.status, "running", "forensic recorded status is preserved");
+  assert.equal(
+    latest.presentationState,
+    "ended-after-worker-completion",
+    "ordered worker.completed then worker.failed closes the presentation",
+  );
+  assert.equal(journey.cause.what, "failed", "original machine failure remains visible");
+  assert.equal(
+    journey.finalDelivery.remediationDisposition?.status,
+    "verified-repaired-delivered",
+    "Main remediation stays a separate final-delivery fact",
+  );
+  assert.notEqual(latest.status, "succeeded", "remediation must not relabel the Worker Attempt");
+  assert.equal(journey.nextAction.label, "done");
+
+  const json = JSON.stringify(journey);
+  assert.ok(!json.includes("/Users/secret"), "private paths from summaries/payloads stay out");
+  assert.ok(!json.includes("ENOENT"), "raw error text is not projected");
+  assert.ok(!json.includes("privatePath"), "payload keys stay out");
+  assert.ok(!json.includes("resultText"), "raw Attempt result text stays out");
+});
+
+test("buildSafeTaskJourney fails closed for genuine running, unrelated ids, and missing completion", async () => {
+  const { buildSafeTaskJourney } = await import("../src/hub/server.js");
+  const baseSpec = {
+    version: 1,
+    provider: { name: "xai", model: "grok-4.5" },
+    runtime: { name: "grok-build" },
+    goal: "Terminal Attempt negative cases",
+    constraints: [],
+    acceptance: { commands: ["npm test"] },
+  };
+
+  // Genuine active execution: parent running, Attempt running, no terminal event.
+  const active = buildSafeTaskJourney(
+    { id: "active-task", status: "running", spec: baseSpec },
+    {},
+    {
+      attempts: [{ id: "attempt-live", ordinal: 1, status: "running", startedAt: "2026-07-29T11:00:00.000Z" }],
+      events: [
+        { type: "worker.started", sequence: 1, attemptId: "attempt-live", summary: "started" },
+      ],
+    },
+  );
+  assert.equal(active.workerExecution.attempts[0]!.status, "running");
+  assert.equal(active.workerExecution.attempts[0]!.presentationState, undefined);
+  assert.equal(active.cause.what, "running");
+  assert.equal(active.nextAction.label, "wait");
+
+  // Unrelated terminal event: worker.failed belongs to a different Attempt id.
+  const unrelated = buildSafeTaskJourney(
+    { id: "unrelated-task", status: "failed", spec: baseSpec },
+    { failureCategory: "runtime" },
+    {
+      attempts: [{ id: "attempt-open", ordinal: 2, status: "running" }],
+      events: [
+        { type: "worker.completed", sequence: 5, attemptId: "other-attempt", summary: "other done" },
+        { type: "worker.failed", sequence: 6, attemptId: "other-attempt", summary: "other failed" },
+      ],
+    },
+  );
+  assert.equal(unrelated.workerExecution.attempts[0]!.status, "running");
+  assert.equal(
+    unrelated.workerExecution.attempts[0]!.presentationState,
+    undefined,
+    "foreign Attempt events must not invent a closed presentation",
+  );
+
+  // Failure before Worker completion: worker.failed without earlier worker.completed.
+  const noCompletion = buildSafeTaskJourney(
+    { id: "no-complete-task", status: "failed", spec: baseSpec },
+    { failureCategory: "runtime" },
+    {
+      attempts: [{ id: "attempt-fail-early", ordinal: 1, status: "running" }],
+      events: [
+        {
+          type: "worker.failed",
+          sequence: 3,
+          attemptId: "attempt-fail-early",
+          summary: "crashed before completion /Users/secret/never-leak",
+        },
+      ],
+    },
+  );
+  assert.equal(noCompletion.workerExecution.attempts[0]!.status, "running");
+  assert.equal(
+    noCompletion.workerExecution.attempts[0]!.presentationState,
+    "ended-unsuccessfully",
+    "worker.failed alone proves ended without claiming Worker completion",
+  );
+  assert.notEqual(
+    noCompletion.workerExecution.attempts[0]!.presentationState,
+    "ended-after-worker-completion",
+  );
+  assert.ok(!JSON.stringify(noCompletion).includes("/Users/secret"));
+
+  // Parent terminal alone with no Attempt-bound terminal events fails closed.
+  const parentOnly = buildSafeTaskJourney(
+    { id: "parent-only", status: "failed", spec: baseSpec },
+    {},
+    {
+      attempts: [{ id: "attempt-stuck", ordinal: 1, status: "running" }],
+      events: [{ type: "task.created", sequence: 1, summary: "created" }],
+    },
+  );
+  assert.equal(parentOnly.workerExecution.attempts[0]!.presentationState, undefined);
+
+  // Events without sequence numbers fail closed (order cannot be proven).
+  const noSequence = buildSafeTaskJourney(
+    { id: "no-seq", status: "failed", spec: baseSpec },
+    {},
+    {
+      attempts: [{ id: "attempt-noseq", ordinal: 1, status: "running" }],
+      events: [
+        { type: "worker.completed", attemptId: "attempt-noseq", summary: "done" },
+        { type: "worker.failed", attemptId: "attempt-noseq", summary: "failed later" },
+      ],
+    },
+  );
+  assert.equal(noSequence.workerExecution.attempts[0]!.presentationState, undefined);
 });
 
 test("buildSafeTaskJourney treats Main-repaired verified delivery as done without rewriting machine failure", async () => {
@@ -1816,4 +2069,374 @@ test("legacy Task reports unavailable retained evidence without denying historic
     },
   }, {}, { events: [], attempts: [], diff: "historical observation" });
   assert.deepEqual(journey.retainedCandidate, { status: "evidence-unavailable" });
+});
+
+test("GET /api/ops/self-upgrade-evidence forwards canonical projection with required=3", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-sue-bridge-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const expected = {
+    required: 3,
+    achieved: 1,
+    remaining: 2,
+    state: "in-progress",
+    breakCategory: "retained-failure",
+    nextAction: "continue-consecutive-proofs",
+    latestQualifyingAt: "2026-07-30T12:00:00.000Z",
+    latestQualifyingOperationId: "efa7d9ae-61c9-421a-a1b5-d427d9353a81",
+    breakOperationId: "66ba9a77-f518-4a37-836f-043e2b70c316",
+    inspectedCount: 2,
+  };
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
+      calls.push({ method, params });
+      if (method === "self_upgrade_evidence") return expected as T;
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/self-upgrade-evidence`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, expected);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "self_upgrade_evidence");
+    assert.deepEqual(calls[0]!.params, { required: 3 });
+    for (const method of [
+      "integration_apply", "submit_file", "provider_probe", "settings_update",
+    ]) {
+      assert.ok(!calls.some((c) => c.method === method), `${method} must not run`);
+    }
+
+    // Repeated polling stays read-only.
+    const again = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/self-upgrade-evidence`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(again.status, 200);
+    assert.deepEqual(again.body, expected);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every((c) => c.method === "self_upgrade_evidence"));
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("projectTaskActivityTimeline filters stream fragments before the transport bound", async () => {
+  const {
+    projectTaskActivityTimeline,
+    TASK_ACTIVITY_TRANSPORT_BOUND,
+  } = await import("../src/hub/server.js");
+
+  // Live-shaped Relay mix: early lifecycle, >80 token fragments, then terminal
+  // verification / failure / remediation landmarks that used to be crowded out.
+  const rawEvents: Array<{ timestamp: string; type: string; summary: string }> = [
+    { timestamp: "2026-07-30T10:00:00.000Z", type: "task.created", summary: "created" },
+    { timestamp: "2026-07-30T10:00:01.000Z", type: "worker.started", summary: "Worker started" },
+    { timestamp: "2026-07-30T10:00:02.000Z", type: "worker.resumed", summary: "Worker resumed" },
+  ];
+  for (let i = 0; i < 120; i += 1) {
+    rawEvents.push({
+      timestamp: `2026-07-30T10:01:${String(i % 60).padStart(2, "0")}.000Z`,
+      type: "worker.message",
+      summary: i % 4 === 0 ? "a" : i % 4 === 1 ? "visual" : i % 4 === 2 ? "check" : "390",
+    });
+  }
+  const lateMilestones = [
+    { timestamp: "2026-07-30T10:02:00.000Z", type: "worker.completed", summary: "Worker finished" },
+    { timestamp: "2026-07-30T10:02:01.000Z", type: "candidate.revision.captured", summary: "revision stored" },
+    { timestamp: "2026-07-30T10:02:02.000Z", type: "verification.started", summary: "checks started" },
+    { timestamp: "2026-07-30T10:02:03.000Z", type: "verification.completed", summary: "checks finished" },
+    { timestamp: "2026-07-30T10:02:04.000Z", type: "worker.failed", summary: "Worker failed later" },
+    { timestamp: "2026-07-30T10:02:05.000Z", type: "remediation.check.started", summary: "repair verify start" },
+    { timestamp: "2026-07-30T10:02:06.000Z", type: "remediation.check.completed", summary: "repair verify done" },
+  ];
+  rawEvents.push(...lateMilestones);
+
+  const projected = projectTaskActivityTimeline(rawEvents);
+  assert.ok(projected.length <= TASK_ACTIVITY_TRANSPORT_BOUND);
+  assert.ok(projected.every((row) => row.type !== "worker.message"),
+    "no stream fragment may appear in ordinary Hub activity");
+  const types = projected.map((row) => row.type);
+  for (const milestone of [
+    "task.created",
+    "worker.started",
+    "worker.resumed",
+    "worker.completed",
+    "candidate.revision.captured",
+    "verification.started",
+    "verification.completed",
+    "worker.failed",
+    "remediation.check.started",
+    "remediation.check.completed",
+  ]) {
+    assert.ok(types.includes(milestone), `milestone ${milestone} must remain visible`);
+  }
+  // Chronological order is preserved among retained milestones.
+  assert.deepEqual(types, [
+    "task.created",
+    "worker.started",
+    "worker.resumed",
+    ...lateMilestones.map((m) => m.type),
+  ]);
+
+  // Filtering after last-80 would drop early milestones; prove filter-first wins.
+  const sliceThenFilter = rawEvents
+    .slice(-80)
+    .filter((ev) => ev.type !== "worker.message")
+    .map((ev) => ev.type);
+  assert.ok(!sliceThenFilter.includes("task.created"),
+    "control case: naive last-80 then filter loses early landmarks");
+  assert.ok(types.includes("task.created"),
+    "filter-before-bound keeps early landmarks");
+
+  // Source array is not mutated; raw inspect evidence stays complete.
+  assert.equal(rawEvents.filter((ev) => ev.type === "worker.message").length, 120);
+  assert.equal(rawEvents.length, 3 + 120 + lateMilestones.length);
+});
+
+test("projectTaskActivityTimeline stays empty for narrative-only Tasks and bounds privacy-safe rows", async () => {
+  const {
+    projectTaskActivityTimeline,
+    TASK_ACTIVITY_TRANSPORT_BOUND,
+  } = await import("../src/hub/server.js");
+
+  const onlyFragments = Array.from({ length: 90 }, (_, i) => ({
+    timestamp: `2026-07-30T11:00:${String(i % 60).padStart(2, "0")}.000Z`,
+    type: "worker.message",
+    summary: `token-${i}`,
+  }));
+  assert.deepEqual(projectTaskActivityTimeline(onlyFragments), [],
+    "narrative-only Tasks project no invented activity rows");
+
+  // More than 80 non-message events still honor the transport bound.
+  const manyMilestones = Array.from({ length: 100 }, (_, i) => ({
+    timestamp: `2026-07-30T12:00:${String(i % 60).padStart(2, "0")}.000Z`,
+    type: i % 2 === 0 ? "verification.command.completed" : "worker.tool.completed",
+    summary: `step-${i}`,
+  }));
+  const bounded = projectTaskActivityTimeline(manyMilestones);
+  assert.equal(bounded.length, TASK_ACTIVITY_TRANSPORT_BOUND);
+  assert.equal(bounded[0]!.summary, "step-20");
+  assert.equal(bounded[bounded.length - 1]!.summary, "step-99");
+
+  // Unrecognized future types remain bounded (not dropped by a broad allowlist).
+  const future = projectTaskActivityTimeline([
+    { timestamp: "t", type: "worker.message", summary: "noise" },
+    { timestamp: "t2", type: "future.lifecycle.event", summary: "safe" },
+  ]);
+  assert.deepEqual(future, [
+    { timestamp: "t2", type: "future.lifecycle.event", summary: "safe" },
+  ]);
+
+  assert.deepEqual(projectTaskActivityTimeline([]), []);
+  assert.deepEqual(projectTaskActivityTimeline(onlyFragments, 0), []);
+
+  // Adversarial non-string fields: never invoke String()/toString on them.
+  let toStringCalls = 0;
+  const hostileSummary = {
+    toString() {
+      toStringCalls += 1;
+      throw new Error("hostile summary toString must not run");
+    },
+    valueOf() {
+      toStringCalls += 1;
+      throw new Error("hostile summary valueOf must not run");
+    },
+  };
+  const hostileTimestamp = {
+    toString() {
+      toStringCalls += 1;
+      throw new Error("hostile timestamp toString must not run");
+    },
+  };
+  const adversarial = projectTaskActivityTimeline([
+    {
+      timestamp: hostileTimestamp as unknown as string,
+      type: "worker.completed",
+      summary: hostileSummary as unknown as string,
+    },
+    {
+      timestamp: "2026-07-30T12:30:00.000Z",
+      type: "verification.completed",
+      summary: "checks ok",
+    },
+  ]);
+  assert.equal(toStringCalls, 0, "hostile coercion must not execute");
+  assert.deepEqual(adversarial, [
+    { timestamp: "", type: "worker.completed", summary: "" },
+    {
+      timestamp: "2026-07-30T12:30:00.000Z",
+      type: "verification.completed",
+      summary: "checks ok",
+    },
+  ]);
+});
+
+test("Hub task detail endpoint ships projected activity without mutating inspect events", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-activity-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+
+  const inspectEvents: Array<{ timestamp: string; type: string; summary: string; payload?: unknown }> = [
+    { timestamp: "2026-07-30T10:00:00.000Z", type: "worker.started", summary: "started" },
+  ];
+  for (let i = 0; i < 100; i += 1) {
+    inspectEvents.push({
+      timestamp: `2026-07-30T10:01:${String(i % 60).padStart(2, "0")}.000Z`,
+      type: "worker.message",
+      summary: `frag-${i}`,
+      payload: { secret: "must-not-leak" },
+    });
+  }
+  inspectEvents.push(
+    { timestamp: "2026-07-30T10:02:00.000Z", type: "worker.completed", summary: "done" },
+    { timestamp: "2026-07-30T10:02:01.000Z", type: "verification.completed", summary: "verified" },
+    { timestamp: "2026-07-30T10:02:02.000Z", type: "candidate.revision.captured", summary: "captured" },
+    { timestamp: "2026-07-30T10:02:03.000Z", type: "remediation.check.started", summary: "remed start" },
+  );
+  const originalEventCount = inspectEvents.length;
+  const originalMessageCount = inspectEvents.filter((e) => e.type === "worker.message").length;
+
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-test-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 42 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 42 } }),
+    daemonRequest: async <T>(method: string) => {
+      if (method === "status") {
+        return {
+          id: "task-activity-1",
+          name: "activity",
+          status: "succeeded",
+          createdAt: "2026-07-30T10:00:00.000Z",
+          spec: {
+            provider: { name: "xai", model: "grok-4.5" },
+            runtime: { name: "grok-build" },
+          },
+        } as T;
+      }
+      if (method === "task_decision") return {} as T;
+      if (method === "task_economics") return {} as T;
+      if (method === "inspect") {
+        return {
+          events: inspectEvents,
+          attempts: [],
+          diff: "",
+        } as T;
+      }
+      if (
+        method === "candidate_reverify_eligibility"
+        || method === "correction_eligibility"
+        || method === "review_graph_status"
+      ) {
+        throw new Error("optional");
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/task-activity-1`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(res.status, 200);
+    const body = res.body as {
+      timeline?: Array<{ type: string; summary: string; payload?: unknown }>;
+    };
+    assert.ok(Array.isArray(body.timeline));
+    const types = body.timeline!.map((row) => row.type);
+    assert.ok(!types.includes("worker.message"), "Hub timeline excludes stream fragments");
+    assert.ok(types.includes("worker.started"));
+    assert.ok(types.includes("worker.completed"));
+    assert.ok(types.includes("verification.completed"));
+    assert.ok(types.includes("candidate.revision.captured"));
+    assert.ok(types.includes("remediation.check.started"));
+    assert.ok(body.timeline!.every((row) => row.payload === undefined),
+      "activity projection never ships raw payload");
+    // Authoritative inspect source remains complete after Hub projection.
+    assert.equal(inspectEvents.length, originalEventCount);
+    assert.equal(
+      inspectEvents.filter((e) => e.type === "worker.message").length,
+      originalMessageCount,
+    );
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("GET /api/ops/self-upgrade-evidence rejects without token and bounds daemon errors", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-sue-err-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async () => {
+      throw new Error("self_upgrade_evidence is temporarily unavailable");
+    },
+  });
+  const port = await server.start();
+  try {
+    const noToken = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/self-upgrade-evidence`,
+      "GET",
+    );
+    assert.equal(noToken.status, 401);
+
+    const res = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/self-upgrade-evidence`,
+      "GET",
+      server.getToken(),
+    );
+    assert.ok(res.status >= 400);
+    const body = res.body as { error?: string };
+    assert.ok(body.error && body.error.includes("self_upgrade_evidence"));
+  } finally {
+    await server.stop();
+    store.close();
+  }
 });

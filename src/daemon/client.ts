@@ -118,24 +118,171 @@ export function daemonRequestTimeoutMs(
     : 15_000;
 }
 
-export async function ensureDaemon(home = forklightHome()): Promise<Record<string, unknown>> {
+/** Default bounded readiness window after one daemon launch. Long enough for
+ *  durable recovery during self-upgrade; still finite. */
+export const DEFAULT_DAEMON_STARTUP_TIMEOUT_MS = 30_000;
+export const MIN_DAEMON_STARTUP_TIMEOUT_MS = 1_000;
+export const MAX_DAEMON_STARTUP_TIMEOUT_MS = 600_000;
+export const DAEMON_STARTUP_POLL_INTERVAL_MS = 100;
+
+/** Privacy-safe: no home, socket path, PID table, or raw transport detail. */
+export const DAEMON_STARTUP_CHILD_EXITED_MESSAGE =
+  "ForkLight daemon process exited before becoming ready";
+/** Privacy-safe timeout; includes only the configured bound. */
+export const DAEMON_STARTUP_TIMEOUT_MESSAGE =
+  "ForkLight daemon did not become ready within the startup timeout";
+
+/** Observed child from a single launch attempt. */
+export interface DaemonChildHandle {
+  readonly pid: number;
+  readonly exited: boolean;
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
+}
+
+/** Options for the startup supervisor. Test seams keep probes deterministic. */
+export interface EnsureDaemonOptions {
+  /** Bounded readiness deadline after the single launch (ms). */
+  startupTimeoutMs?: number;
+  /** Test seam: replace process spawn. Production launches exactly once. */
+  launch?: (home: string) => DaemonChildHandle;
+  /** Test seam: replace health probe. */
+  probeHealth?: (home: string) => Promise<Record<string, unknown>>;
+  /** Test seam: clock for deadline math. */
+  nowMs?: () => number;
+  /** Test seam: sleep between polls. */
+  sleepMs?: (ms: number) => Promise<void>;
+  /** Test seam: poll interval (default 100ms). */
+  pollIntervalMs?: number;
+}
+
+/** Validate a startup readiness timeout. Safe for CLI and ensureDaemon. */
+export function resolveDaemonStartupTimeoutMs(
+  value: unknown = DEFAULT_DAEMON_STARTUP_TIMEOUT_MS,
+): number {
+  if (
+    typeof value !== "number"
+    || !Number.isSafeInteger(value)
+    || value < MIN_DAEMON_STARTUP_TIMEOUT_MS
+    || value > MAX_DAEMON_STARTUP_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `Daemon startup timeout must be an integer from ${MIN_DAEMON_STARTUP_TIMEOUT_MS} to ${MAX_DAEMON_STARTUP_TIMEOUT_MS}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Ensure a matching daemon is healthy. Fast path returns existing health.
+ * Otherwise launches exactly one child, then polls that child and the endpoint
+ * until ready, child exit, or the bounded readiness deadline. Never relaunches.
+ */
+export async function ensureDaemon(
+  home = forklightHome(),
+  options: EnsureDaemonOptions = {},
+): Promise<Record<string, unknown>> {
+  const probeHealth = options.probeHealth
+    ?? ((targetHome: string) => daemonRequest<Record<string, unknown>>("health", {}, targetHome));
   try {
-    return await daemonRequest<Record<string, unknown>>("health", {}, home);
+    return await probeHealth(home);
   } catch {
-    startDaemonProcess(home);
+    // Not reachable — fall through to a single launch.
   }
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    await sleep(100);
-    try {
-      return await daemonRequest<Record<string, unknown>>("health", {}, home);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw new Error(
-    `ForkLight daemon failed to start: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+
+  const startupTimeoutMs = resolveDaemonStartupTimeoutMs(
+    options.startupTimeoutMs ?? DEFAULT_DAEMON_STARTUP_TIMEOUT_MS,
   );
+  const launch = options.launch ?? launchDaemonProcess;
+  const nowMs = options.nowMs ?? Date.now;
+  const sleepMs = options.sleepMs ?? sleep;
+  const pollIntervalMs = typeof options.pollIntervalMs === "number"
+    && Number.isSafeInteger(options.pollIntervalMs)
+    && options.pollIntervalMs > 0
+    ? options.pollIntervalMs
+    : DAEMON_STARTUP_POLL_INTERVAL_MS;
+
+  const child = launch(home);
+  const deadline = nowMs() + startupTimeoutMs;
+
+  while (nowMs() < deadline) {
+    if (child.exited) {
+      throw new Error(DAEMON_STARTUP_CHILD_EXITED_MESSAGE);
+    }
+    try {
+      return await probeHealth(home);
+    } catch {
+      // Still starting; keep observing the same child.
+    }
+    const remaining = deadline - nowMs();
+    if (remaining <= 0) break;
+    await sleepMs(Math.min(pollIntervalMs, remaining));
+  }
+
+  if (child.exited) {
+    throw new Error(DAEMON_STARTUP_CHILD_EXITED_MESSAGE);
+  }
+  throw new Error(`${DAEMON_STARTUP_TIMEOUT_MESSAGE} (${startupTimeoutMs}ms)`);
+}
+
+// --- Observation transport (never starts a daemon) ---
+
+/** Bounded guidance for Main when an Integration observer cannot reach a daemon.
+ *  Privacy-safe: no home, socket path, operation content, or credentials. */
+export const DAEMON_OBSERVER_UNAVAILABLE_MESSAGE =
+  "ForkLight daemon is unavailable for observation; it may be transitioning or stopped. Retry the same observation after the daemon is reachable again. Observation never starts a daemon.";
+
+function errorCode(error: unknown): string {
+  if (error !== null && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" || typeof code === "number") return String(code);
+  }
+  return "";
+}
+
+/** True when the failure is a transport gap (absent/refused/reset/closed socket),
+ *  not a daemon business or identity error. */
+export function isDaemonTransportUnavailable(error: unknown): boolean {
+  if (error === undefined || error === null) return false;
+  const code = errorCode(error);
+  if (/^(ENOENT|ECONNREFUSED|ECONNRESET|EPIPE|ENOTCONN|ECONNABORTED|ETIMEDOUT)$/i.test(code)) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /ECONNREFUSED|ENOENT|ECONNRESET|EPIPE|ENOTCONN|ECONNABORTED|ETIMEDOUT|socket hang up|connect E|daemon request timed out/i
+      .test(message)
+  ) {
+    return true;
+  }
+  if (error instanceof Error && error.cause !== undefined) {
+    return isDaemonTransportUnavailable(error.cause);
+  }
+  return false;
+}
+
+/**
+ * Read-only Integration (and similar) observer request: talks only to an
+ * already-running daemon. Never calls ensureDaemon, startDaemonProcess,
+ * restartDaemon, or any other lifecycle mutation. On transport unavailability
+ * during activation handoff or after a stop, returns one bounded retry-later
+ * error and preserves the original transport error only as `cause`.
+ */
+export async function daemonObserverRequest<T = unknown>(
+  method: DaemonMethod,
+  params: Record<string, unknown> = {},
+  home = forklightHome(),
+): Promise<T> {
+  try {
+    return await daemonRequest<T>(method, params, home);
+  } catch (error) {
+    if (isDaemonTransportUnavailable(error)) {
+      throw new Error(DAEMON_OBSERVER_UNAVAILABLE_MESSAGE, {
+        cause: error instanceof Error ? error : undefined,
+      });
+    }
+    throw error;
+  }
 }
 
 // --- Daemon lifecycle ---
@@ -300,10 +447,13 @@ export async function stopDaemonForHandoff(
   throw new Error("ForkLight daemon did not relinquish endpoint within 10 seconds");
 }
 
-/** Stop fully, then start a fresh daemon. */
-export async function restartDaemon(home = forklightHome()): Promise<Record<string, unknown>> {
+/** Stop fully, then start a fresh daemon with the same bounded readiness rules. */
+export async function restartDaemon(
+  home = forklightHome(),
+  options: EnsureDaemonOptions = {},
+): Promise<Record<string, unknown>> {
   await stopDaemon(home);
-  return ensureDaemon(home);
+  return ensureDaemon(home, options);
 }
 
 export function daemonLaunchArguments(moduleUrl: string): {
@@ -356,7 +506,11 @@ export async function routeMutation<T>(
   return fallback();
 }
 
-export function startDaemonProcess(home = forklightHome()): number {
+/**
+ * Launch exactly one detached daemon child and return an exit-observing handle.
+ * Callers that only need the PID may use `startDaemonProcess`.
+ */
+export function launchDaemonProcess(home = forklightHome()): DaemonChildHandle {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const logFd = openSync(daemonLogPath(home), "a", 0o600);
   const launch = daemonLaunchArguments(import.meta.url);
@@ -365,8 +519,37 @@ export function startDaemonProcess(home = forklightHome()): number {
     env: { ...process.env, FORKLIGHT_HOME: home },
     stdio: ["ignore", logFd, logFd],
   });
+  let exited = false;
+  let exitCode: number | null = null;
+  let signalCode: NodeJS.Signals | null = null;
+  child.once("exit", (code, signal) => {
+    exited = true;
+    exitCode = code;
+    signalCode = signal;
+  });
+  child.once("error", () => {
+    // Spawn failed after handle creation; treat as an early exit so the
+    // startup supervisor can fail closed without relaunching.
+    exited = true;
+  });
   child.unref();
   closeSync(logFd);
   if (child.pid === undefined) throw new Error("Unable to start ForkLight daemon process");
-  return child.pid;
+  return {
+    pid: child.pid,
+    get exited() {
+      return exited;
+    },
+    get exitCode() {
+      return exitCode;
+    },
+    get signalCode() {
+      return signalCode;
+    },
+  };
+}
+
+/** Launch one detached daemon and return its PID (compat wrapper). */
+export function startDaemonProcess(home = forklightHome()): number {
+  return launchDaemonProcess(home).pid;
 }

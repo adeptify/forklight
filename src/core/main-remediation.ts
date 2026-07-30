@@ -502,8 +502,10 @@ export async function verifyMainRemediation(
   }
   activeVerifications.add(input.taskId);
 
-  // 6. Copy current source to isolated verification directory
-  let verifyDir: string | undefined;
+  // 6. Copy current source into an isolated verification container (project
+  // cwd + any declared sibling package mirrors). Always delete the full
+  // owned cleanup root so sibling mirrors are never leaked beside /tmp.
+  let verifyEnv: Awaited<ReturnType<typeof copyForVerification>> | undefined;
   const commands: VerificationCommandResult[] = [];
   let verificationPassed = true;
   const suite =
@@ -530,12 +532,12 @@ export async function verifyMainRemediation(
             }),
       },
     );
-    verifyDir = await copyForVerification(
+    verifyEnv = await copyForVerification(
       task.sourcePath,
       task.spec.workspace.exclude,
     );
     const { env: verificationEnvironment, shellGitPrefix } =
-      await verifierProcessEnvironment(task, verifyDir);
+      await verifierProcessEnvironment(task, verifyEnv.projectCwd);
 
     // 7. Run every suite command against the isolated current-source copy
     for (const command of suite) {
@@ -543,7 +545,7 @@ export async function verifyMainRemediation(
         "/bin/zsh",
         ["-lc", shellGitPrefix + command],
         {
-          cwd: verifyDir,
+          cwd: verifyEnv.projectCwd,
           env: verificationEnvironment,
           timeoutMs: verificationTimeoutMs,
         },
@@ -561,9 +563,9 @@ export async function verifyMainRemediation(
       if (response.exitCode !== 0 || response.timedOut) verificationPassed = false;
     }
   } finally {
-    // 8. Always clean up the isolated directory
-    if (verifyDir !== undefined) {
-      await rm(verifyDir, { recursive: true, force: true });
+    // 8. Always clean up the full owned isolation container
+    if (verifyEnv !== undefined) {
+      await rm(verifyEnv.cleanupRoot, { recursive: true, force: true });
     }
     activeVerifications.delete(input.taskId);
   }

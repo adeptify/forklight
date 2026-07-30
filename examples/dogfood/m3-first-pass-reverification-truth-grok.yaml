@@ -1,0 +1,131 @@
+version: 2
+name: Keep Main reverification from rewriting Worker first-pass evidence
+project: /Users/yijunwang/code/forklight
+taskClass: m3-first-pass-reverification-truth
+taskFamily: capability-statistics
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: capability-statistics
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求今天与明天默认使用 Grok；这是由真实 dogfood 复现出的窄证据修复，不值得启动 Competition。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Preserve the Worker first-pass truth when Main repairs and reverifies the same
+    Candidate. First-pass routing evidence must use the earliest valid independent
+    verification attached to Attempt one, not the latest verification for that Attempt.
+    A later zero-Worker reverification may prove final delivery but must never rewrite
+    the original Worker pass/fail result. Keep every other routing, remediation, and
+    eventual-delivery rule unchanged.
+  presentation:
+    summary: Main 后来修好并复验通过，可以证明最终交付，但不能把 Worker 原本第一次失败改写成第一次成功。
+    language: zh-CN
+  context:
+    - The live Task 305f3f3b-d2d7-4179-984e-2213ed88f370 first failed independent behavior verification, then Main repaired the retained Candidate and reverified the same Attempt without invoking a Worker.
+    - Current classifyFirstPassOutcome binds to Attempt one but calls verificationFrom, which intentionally returns the latest verification.completed event. The live routing projection therefore incorrectly reports firstPassVerifiedSuccessCount 1 of 1.
+    - The general verificationFrom behavior is used for final machine/delivery views and must not be changed globally. First-pass classification needs its own earliest-verification selection.
+  inScope:
+    - Add or use one bounded helper that returns the earliest valid verification.completed payload for Attempt one using durable event sequence order.
+    - Make classifyFirstPassOutcome use that earliest verification while preserving its existing external-failure, policy-only, amended-acceptance, and missing-evidence rules.
+    - Add a regression where Attempt one first has behaviorPassed false and later receives a passing Main reverification; first-pass remains zero successes out of one sample.
+    - Add the inverse stability check where the first verification passes and a later record cannot erase that first-pass success.
+  outOfScope:
+    - Changing general verificationFrom semantics, final Task status, Candidate reverification, remediation disposition, accepted delivery, correction churn, routing weights, Hub UI, Provider behavior, historical records, competition, automatic selection, commit, or push.
+  executionSteps:
+    - Inspect verificationFrom and classifyFirstPassOutcome before editing.
+    - Implement the smallest canonical first-verification projection without duplicating unrelated failure classification.
+    - Add focused executable regressions using two verification events on the same Attempt.
+    - Run focused statistics tests, the full project check, and diff hygiene once.
+  deliverables:
+    - First-pass evidence that remains bound to the Worker Attempt's original independent check across later Main reverification.
+    - Deterministic regression tests and no change to final-delivery truth.
+  modules:
+    - name: First-pass verification projection
+      responsibility: Select the earliest valid independent verification for Attempt one.
+      consumes:
+        - Attempt-one events ordered by durable event sequence.
+      produces:
+        - One original verification result for first-pass classification only.
+      boundaries:
+        - Does not alter the latest-verification projection used elsewhere.
+  callChain:
+    - StateStore returns all durable events for the Task.
+    - classifyFirstPassOutcome filters Attempt-one events and reads their earliest valid verification.
+    - deriveRoutingEvidence aggregates the unchanged first-pass outcome separately from final accepted delivery.
+  scenarios:
+    - name: Main repairs a failed first pass
+      given: Attempt one has an initial behavior failure and a later passing zero-Worker reverification.
+      when: first-pass routing evidence is derived.
+      then: The result remains zero successes out of one sample while final delivery may remain accepted.
+    - name: Later evidence cannot erase a first-pass success
+      given: Attempt one first passes and a later verification record is non-passing.
+      when: first-pass routing evidence is derived.
+      then: The original first-pass success remains one of one.
+  risks:
+    - Reusing latest verification silently rewards Main repair as Worker quality; prove the exact live sequence in a regression.
+    - Changing verificationFrom globally would damage final-state projections; keep the new selection local to first-pass evidence.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 180
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 2
+  fileLimitMode: warn
+  changedLineLimit: 180
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - tests/statistics.test.ts
+acceptance:
+  criteria:
+    - Same-Attempt Main reverification cannot rewrite the original Worker first-pass result.
+    - The first valid verification is selected by durable event order, not array accident or final Task status.
+    - Existing external-failure, policy-only, amended-acceptance, and final-delivery semantics remain unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts
+    - npm run check
+    - git diff --check

@@ -1,0 +1,169 @@
+version: 2
+name: Keep the daemon and background work alive when a client disconnects
+project: /Users/yijunwang/code/forklight
+taskClass: daemon-disconnected-client-resilience
+taskFamily: forklight-self-upgrade
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: forklight-self-upgrade
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-v4-pro
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；只读路由没有同类实测差异，本任务也不需要 Provider 专项验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      xai/grok-4.5: 0
+      deepseek/deepseek-v4-pro[1M]: 0
+
+contract:
+  outcome: >-
+    A local CLI, MCP, or Hub client may disconnect while the daemon is still
+    processing a request. That connection loss must never terminate the daemon,
+    cancel or duplicate the server-side operation, or corrupt durable state.
+    The affected response may be undeliverable, but a later client must still
+    reach the same daemon and inspect the operation truthfully.
+  presentation:
+    summary: 前台等待窗口关掉或超时，只丢失这一次回包；后台任务和 daemon 继续运行，稍后仍能回来查看结果。
+    language: zh-CN
+  context:
+    - A real self-upgrade operation reached source-applied, then an abandoned integration-wait connection caused EPIPE on the daemon socket/readline path and terminated the daemon.
+    - The Integration recovered as outcome-unknown because the daemon process died before source verification, build, and activation could finish.
+    - The current server starts one readline Interface per socket and writes the async response directly with socket.write, without connection-local error handling on either surface.
+    - This Task closes the observed client-disconnect crash. Resuming a genuinely killed process from a partially completed Integration is a separate follow-up and must not be claimed here.
+  inScope:
+    - Introduce one bounded daemon connection lifecycle that treats peer disconnect, reset, EPIPE, and writes to a destroyed stream as connection-local delivery loss.
+    - Install socket and readline error handling before request processing can begin.
+    - Keep an already-started dispatch running exactly once after its client disconnects; never retry or cancel the server-side operation merely because its response cannot be delivered.
+    - Avoid writing after the connection is no longer writable and settle response writes without creating unhandled errors or rejected promises.
+    - Clean up the readline Interface and socket listeners without making daemon shutdown hang.
+    - Add deterministic regression tests using a real local socket and a deliberately disconnected client while an asynchronous daemon request is still pending.
+    - Prove the same daemon PID/process remains reachable afterward and a subsequent health request succeeds.
+    - Add a concise operator note explaining that a disconnected wait can be safely re-queried by operation id.
+  outOfScope:
+    - Restart recovery from a genuinely killed daemon after source-applied, replaying or reapplying an Integration, changing Integration stage semantics, changing client timeouts, swallowing application errors, Provider calls, Worker routing, UI redesign, database migration, commit, or push.
+  executionSteps:
+    - Reproduce the asynchronous response-to-closed-socket path in a focused daemon test.
+    - Encapsulate response delivery and connection cleanup at the daemon transport boundary instead of adding scattered try/catch blocks to Integration code.
+    - Make connection loss harmless while preserving the already-started handleLine/dispatch promise.
+    - Assert a disconnected long request does not emit an uncaught error, stop the daemon, or block a later health request.
+    - Run focused daemon and Integration operation tests, strict build, full check, and diff hygiene.
+  deliverables:
+    - Connection-local error handling in the daemon transport.
+    - Real-socket regression coverage for abandoned asynchronous requests and later daemon health.
+    - Short operator documentation with no claim of process-crash stage resumption.
+  modules:
+    - name: Daemon connection lifecycle
+      responsibility: Parse requests, let dispatch finish once, and attempt response delivery only while the peer connection can receive it.
+      consumes:
+        - One local Unix socket and newline-delimited daemon requests.
+      produces:
+        - At most one response per request when deliverable, or a quiet connection-local delivery loss after peer disconnect.
+      boundaries:
+        - Never retries dispatch, never converts transport loss into operation success/failure, never terminates the daemon, and never exposes request content in errors.
+    - name: Disconnection regression harness
+      responsibility: Exercise a real daemon socket whose client disappears before an async response is ready.
+      consumes:
+        - An isolated ForkLight home, a seeded durable operation, and a raw local client connection.
+      produces:
+        - Evidence that the original request finished server-side and the same daemon remains healthy and closable.
+      boundaries:
+        - No external Provider, real user home, production daemon restart, timing-only assertion, or process-global listener leak.
+  callChain:
+    - A client sends a newline-delimited request and disconnects before dispatch resolves.
+    - The daemon-owned request promise continues exactly once while the per-connection transport records that no response can be delivered.
+    - The response is discarded locally without an unhandled socket/readline error.
+    - A later client connects to the same daemon and reads health or operation status normally.
+  scenarios:
+    - name: Abandoned Integration wait
+      given: An Integration wait request is pending and the client socket is destroyed.
+      when: The wait resolves after the peer is gone.
+      then: No write error escapes, the daemon remains alive, and another client can query it.
+    - name: Ordinary successful request
+      given: A healthy connected client sends a normal request.
+      when: Dispatch succeeds.
+      then: It receives exactly one unchanged protocol response.
+    - name: Application rejection
+      given: Dispatch rejects an invalid request while the client remains connected.
+      when: The daemon formats the response.
+      then: The existing bounded error response is delivered; transport hardening does not swallow application errors.
+    - name: Daemon shutdown after disconnect
+      given: One or more peers disconnected during pending requests.
+      when: The daemon closes after those requests settle.
+      then: readline and socket resources do not keep shutdown hanging or emit late errors.
+  risks:
+    - An empty socket error listener alone may still leave readline emitting an unhandled error; cover both surfaces.
+    - Destroying the socket could accidentally cancel dispatch or cause duplicate cleanup; keep transport state separate from operation execution.
+    - A sleep-only test could pass without exercising the response write; seed a request that deterministically resolves after client destruction and assert post-resolution health.
+    - Catching broad errors around dispatch could hide real application failures; harden only response transport and connection cleanup.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 500
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 500
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/daemon/server.ts
+    - src/daemon/client.ts
+    - tests/daemon.test.ts
+    - tests/integration-operation.test.ts
+    - docs/operations.md
+acceptance:
+  criteria:
+    - A real disconnected local client cannot crash the daemon or cancel/duplicate its already-started asynchronous request.
+    - Ordinary success and application-error responses retain their existing protocol behavior.
+    - A later health request reaches the same daemon after the abandoned response resolves, and shutdown remains bounded.
+    - Documentation distinguishes safe client re-query from still-unimplemented process-crash stage resumption.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/integration-operation.test.ts
+    - npm run build
+    - npm run check
+    - git diff --check

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "Goal bounded-stop live proof plan",
+  "objective": "Use one real Grok milestone and three blocked dependents to prove durable Goal stop boundaries.",
+  "items": [
+    {
+      "id": "foundation",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/m2-goal-live-stop-worker-grok.yaml",
+      "dependsOn": []
+    },
+    {
+      "id": "service",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/m2-goal-live-stop-worker-grok.yaml",
+      "dependsOn": ["foundation"]
+    },
+    {
+      "id": "console",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/m2-goal-live-stop-worker-grok.yaml",
+      "dependsOn": ["foundation"]
+    },
+    {
+      "id": "finish",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/m2-goal-live-stop-worker-grok.yaml",
+      "dependsOn": ["service", "console"]
+    }
+  ]
+}

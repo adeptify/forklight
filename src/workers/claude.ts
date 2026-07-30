@@ -12,6 +12,7 @@ import {
   buildWorkerPrompt,
   claudeCheckpointProtocolLines,
   claudeToolProtocolLines,
+  workerPromptAppendicesForTask,
 } from "../core/task.js";
 import { checkpointLaunch } from "../core/checkpoint.js";
 import { providerEnvironment, resolveProvider } from "../core/providers.js";
@@ -369,10 +370,15 @@ export async function runClaudeWorker(
   };
 
   const adapter = new ClaudeCodeAdapter();
-  const prompt = buildWorkerPrompt(task.spec, resuming, hooks.feedback, {
-    toolLines: adapter.toolProtocolAppendix(task),
-    checkpointLines: adapter.checkpointProtocolAppendix(task),
-  });
+  const prompt = buildWorkerPrompt(
+    task.spec,
+    resuming,
+    hooks.feedback,
+    workerPromptAppendicesForTask(task, {
+      toolLines: adapter.toolProtocolAppendix(task),
+      checkpointLines: adapter.checkpointProtocolAppendix(task),
+    }),
+  );
   await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {
     mode: 0o600,
   });

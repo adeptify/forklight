@@ -1,0 +1,205 @@
+version: 2
+name: Elsewhere decides whether a journey needs world context
+project: /Users/yijunwang/code/elsewhere
+taskClass: elsewhere-m2-context-assessment-gate
+taskFamily: product-domain-workflow
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: product-domain-workflow
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求今天与明天默认使用 Grok 4.5；本任务是边界清楚的领域与工作流实现，不需要 Competition，也不授予 Worker 自由设计 UI 的权限。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    After a person confirms the personal fact mirror, Elsewhere conservatively
+    decides whether historical world context can materially help this journey,
+    persists that decision with provenance-safe retrieval coordinates, and
+    explicitly skips the world path for private journeys. The decision gate must
+    not invent historical facts, call a Provider, change the UI, or alter the
+    existing story-generation path before retrieval and world review exist.
+  presentation:
+    summary: 用户确认个人事实后，系统先判断时代背景是否真的有帮助；私人经历会明确跳过，只有坐标充分的旅程才为后续检索做准备。
+    language: zh-CN
+  context:
+    - Experience redesign M0-M1 is complete and the current App goes directly from confirmed FactSpine to existing story generation.
+    - Milestone 2 begins with ContextAssessment before any historical retrieval, world page, personal-world intersection, or story-direction work.
+    - The five fixed intake fixtures already include a strong-era Hangzhou engineer and a private-expression journey, giving deterministic acceptance evidence without a live model.
+    - The worktree contains substantial accepted M0-M1 changes. Preserve every unrelated edit and touch only the declared focus paths.
+    - Existing Journey schema v1 records without structured intake or context assessment must remain readable and generatable.
+  inScope:
+    - Add typed ContextRole, WorldQuery, and ContextAssessment domain values and an optional persisted contextAssessment on JourneyBody without bumping or invalidating schema v1.
+    - Implement one pure, deterministic context-assessment service over the confirmed FactSpine, StructuredJourneyIntake, and ForkBrief. It performs no I/O and uses only explicit user-provided coordinates.
+    - >-
+      Use four roles with exact downstream meaning: driver and constraint may enter full retrieval later; atmosphere may support at most one or two background items later; irrelevant skips the world path.
+    - >-
+      Derive query coordinates conservatively from the exact structured answer fields: explicit four-digit years may form period bounds; place, occupation, domain, and decision lens values must remain traceable to the supplied answer text.
+    - Never promote FactSpine inference or unresolved personal-gap text into retrieval coordinates. Never parse or infer a company, city, industry, occupation, era, or political context that the person did not state.
+    - Make private expression and relationship-only journeys irrelevant unless explicit non-private place, education, career, or industry coordinates are present. Lack of structured intake also returns irrelevant with an honest reason.
+    - Ensure the strong-era Hangzhou engineer fixture produces a retrieval-capable driver or constraint assessment with an explicit year and user-supplied coordinates, while the private-expression fixture produces irrelevant with no query.
+    - Compute and persist the assessment atomically when confirmFactSpine saves the confirmed FactSpine. Re-confirmation replaces the prior assessment from the current inputs.
+    - Add focused tests for all five fixtures, query provenance, legacy records, idempotent re-confirmation, and workflow persistence.
+  outOfScope:
+    - Historical network retrieval, sources, cache, allowlists, world facts, WorldSpine, world UI, animations, story direction, personal-world intersections, current weather, model calls, prompt changes, generation input changes, or a new Journey status.
+    - Reclassifying existing generated journeys, migrating stored data, parsing arbitrary prose with NLP, guessing entities from common knowledge, changing fixture answers, broad App refactors, visual design, dependencies, commit, or push.
+    - Competition, automatic retry, adaptive policy loops, a second Worker, or claiming Token savings from this Task.
+  executionSteps:
+    - Trace JourneyBody, StructuredJourneyIntake, FactSpine confirmation, fixture construction, repository save behavior, and legacy workflow tests before editing.
+    - Define the smallest backward-compatible domain values and a pure assessor with explicit provenance rules.
+    - Wire assessment into the existing confirmFactSpine save so FactSpine and decision are persisted together without adding a Provider call.
+    - Add deterministic service and workflow regressions using the existing five fixtures and one legacy record without structured intake.
+    - Run focused tests, the full Elsewhere check, production build, and diff hygiene once; report any baseline-only failure instead of expanding scope.
+  deliverables:
+    - Backward-compatible persisted ContextAssessment domain data.
+    - Pure conservative assessment and query-coordinate builder.
+    - Atomic FactSpine-confirmation integration.
+    - Deterministic evidence that strong-era and private journeys take different paths for the right reason.
+  modules:
+    - name: Context assessment domain
+      responsibility: Describe why world context is useful or unnecessary and carry only user-grounded retrieval coordinates.
+      consumes:
+        - Confirmed FactSpine, structured intake provenance, and fork metadata.
+      produces:
+        - ContextRole, optional WorldQuery, plain reason, and assessment timestamp or input marker needed for persistence.
+      boundaries:
+        - Optional on JourneyBody, backward compatible with schema v1, and contains no retrieved world fact.
+    - name: Conservative context assessor
+      responsibility: Classify world relevance and extract exact retrieval coordinates without I/O or model knowledge.
+      consumes:
+        - Structured question ids, exact answer display text, JourneyLens, ForkBrief, and confirmed FactSpine.
+      produces:
+        - A driver, constraint, atmosphere, or irrelevant assessment with a query only when coordinates are sufficient.
+      boundaries:
+        - Facts may support classification; inferences and unknowns never become query coordinates; no guessed entity or free-text historical claim.
+    - name: Fact confirmation workflow
+      responsibility: Save the confirmed personal facts and the current context decision in one repository write.
+      consumes:
+        - Fact-review Journey, reviewed FactSpine, and pure assessment result.
+      produces:
+        - Updated fact-review Journey ready for the existing generation path and later M2 retrieval work.
+      boundaries:
+        - No Provider call, no new status, no generation behavior change, and no partial persistence.
+    - name: M2 context-gate regressions
+      responsibility: Prove classification, provenance, legacy compatibility, and workflow persistence against real acceptance fixtures.
+      consumes:
+        - Five fixed bilingual fixtures, legacy Journey records, and an in-memory repository.
+      produces:
+        - Deterministic tests for strong, weak, private, missing-coordinate, and reconfirmation cases.
+      boundaries:
+        - No live Provider, network request, screenshot, broad snapshot, or mutation outside the test workspace.
+  callChain:
+    - Progressive intake produces StructuredJourneyIntake and the adapter stores it on JourneyBody.
+    - Fact review produces a user-reviewed FactSpine.
+    - confirmFactSpine stamps the confirmed facts and calls the pure context assessor with current Journey inputs.
+    - The repository atomically stores FactSpine and ContextAssessment on the same JourneyBody revision.
+    - Existing generate continues unchanged; a later M2 task will consume only retrieval-capable assessments through a HistoricalContextPort.
+  scenarios:
+    - name: Strong era journey prepares retrieval
+      given: The fixed Hangzhou engineer fixture explicitly supplies after 2010, Hangzhou, software engineering, and e-commerce-team context.
+      when: The reviewed FactSpine is confirmed.
+      then: The saved assessment is driver or constraint, contains an explicit 2010 lower bound and only user-supplied coordinate text, and is ready for later retrieval without containing any historical fact.
+    - name: Private expression skips world context
+      given: The fixed private-expression fixture contains only a personal relationship and expression fork with no place, education, career, or industry coordinate.
+      when: The reviewed FactSpine is confirmed.
+      then: The saved assessment is irrelevant, has no query, and the existing generation path remains available.
+    - name: Weak or incomplete coordinates stay conservative
+      given: A journey has a broad time phrase or generic destination but lacks a named historical coordinate.
+      when: Context relevance is assessed.
+      then: It is atmosphere or irrelevant rather than promoted to driver, and no guessed city, company, industry, or year appears.
+    - name: Legacy record remains usable
+      given: A schema v1 fact-review Journey has no structuredIntake and no contextAssessment.
+      when: Its facts are confirmed and later generated through the existing path.
+      then: Confirmation persists an honest irrelevant assessment and generation behavior is otherwise unchanged.
+    - name: Reconfirmation replaces current decision
+      given: A fact-review Journey is confirmed more than once with current inputs.
+      when: confirmFactSpine saves again.
+      then: Exactly one current assessment is persisted with the current facts and inputs; stale query coordinates are not retained.
+  risks:
+    - A keyword classifier can quietly become fake historical intelligence; keep the service provenance-based and conservative, with no common-knowledge entity expansion.
+    - Persisting a new field could break legacy records or exports; keep it optional and avoid schema-version migration in this slice.
+    - Wiring assessment into confirmation could accidentally block generation; retain the existing status and generate contract and test the legacy path.
+    - The dirty worktree could lose M0-M1 work; enforce focus paths and review the candidate diff against the captured baseline before Integration.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 900
+
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - src-tauri/target
+  generatedPaths:
+    - dist/**
+    - src-tauri/target/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/domain/journey/types.ts
+    - src/services/world-context/context-assessment.ts
+    - src/services/journey-workflow/journey-workflow.ts
+    - tests/services/context-assessment.test.ts
+    - tests/services/journey-workflow.test.ts
+acceptance:
+  criteria:
+    - Strong-era and private-expression fixtures take different context paths using only user-provided evidence.
+    - ContextAssessment is persisted atomically with FactSpine confirmation and remains optional for schema v1 compatibility.
+    - Query coordinates never consume FactSpine inference or unresolved personal-gap text and never contain an invented historical fact.
+    - No Provider, network, UI, Journey-status, or story-generation behavior is added in this slice.
+    - Focused tests, complete Elsewhere check, production build, and diff hygiene pass from the captured 142-test baseline.
+  commands:
+    - pnpm vitest run tests/services/context-assessment.test.ts tests/services/journey-workflow.test.ts
+    - pnpm check
+    - pnpm build
+    - git diff --check

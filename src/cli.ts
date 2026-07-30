@@ -16,7 +16,10 @@ import { forklightHome } from "./core/config.js";
 import { providerProbeBatchFailed } from "./core/provider-probe.js";
 import { providerLabel, providerNames, providerReadiness } from "./core/providers.js";
 import type { RuntimeName } from "./core/runtime-names.js";
-import type { ProviderModelSummary } from "./core/statistics.js";
+import type {
+  CompactProviderModelSummary,
+  ProviderModelSummary,
+} from "./core/statistics.js";
 import type {
   AttemptAuthorization, AttemptExecutionOptions, AttemptRecord, EventRecord,
   NormalizedWorkerEvent, TaskDecisionView, TaskRecord,
@@ -42,6 +45,10 @@ import {
 import { buildCompactIntegrationOperationView } from "./core/integration-operation.js";
 import type { IntegrationOperationView } from "./core/types.js";
 import {
+  parseRequiredStreakCountFromString,
+  type SelfUpgradeEvidenceProjection,
+} from "./core/self-upgrade-evidence.js";
+import {
   buildTaskAdmissionPreview,
   formatTaskAdmissionPreviewHuman,
   taskPolicyFromSettings,
@@ -49,9 +56,11 @@ import {
 import { createKeychainStore } from "./core/secrets.js";
 import { SettingsService } from "./core/settings.js";
 import {
+  daemonObserverRequest,
   daemonRequest,
   ensureDaemon,
   probeDaemon,
+  resolveDaemonStartupTimeoutMs,
   restartDaemon,
   routeMutation,
   stopDaemon,
@@ -67,6 +76,11 @@ import {
   publishHubInstance,
   releaseHubInstance,
   replaceHubOwner,
+  resolveHubOpenUrl,
+  resolveHubStartupTimeoutMs,
+  restartHubDetached,
+  type DetachedHubRestartResult,
+  type HubDiscovery,
   type HubInspectionStatus,
 } from "./hub/instance.js";
 import { StateStore } from "./state/store.js";
@@ -126,6 +140,12 @@ Usage:
   forklight submit-plan <plan.yaml>
   forklight inspect-plan <plan-id> [--json]
   forklight board [--json]
+  forklight submit-goal <goal.yaml>
+  forklight goal status <goal-id> [--json]
+  forklight goal list [--json] [--limit <n>]
+  forklight goal advance <goal-id> --confirm [--json]
+  forklight goal stop <goal-id> --confirm [--json]
+  forklight goal handoff <task-id> --revision <id> --reusable <json> --gaps <json> --to-profile <id> --reason <text> --confirm [--json]
   forklight status <task-id> [--json]
   forklight wait <task-id> --timeout-ms <positive integer> [--poll-ms <positive integer>] [--until change|terminal] [--json]
       # change = status/attempt/event-sequence/updatedAt cursor (not status-only)
@@ -133,19 +153,29 @@ Usage:
   forklight revise <task-id> --feedback <text>
   forklight correct <task-id> --feedback <text> [--max-budget-usd <number|none>] [--candidate-revision <id> --reusable-paths <json-array> --remaining-gaps <json-array>] --confirm
   forklight main-review <task-id> --decision <accept|revise|reject> --reason <text> --confirm
+  forklight review-graph create <task-id> --reviewer-profile <id> [--reviewer-profile <id> ...] --reason <text> --confirm [--json]
+      # or --reviewer-profiles <id1,id2,id3> for 1–3 independent read-only judges
+  forklight review-graph status <task-id> [--json]
   forklight inspect <task-id> [--summary] [--events <nonnegative integer>] [--json]
       # prefer --summary for main-thread supervision; full inspect is for deep audit
   forklight list [--json]
-  forklight stats [--json] [--provider <name>] [--model <name>] [--since <ISO>] [--until <ISO>]
+  forklight stats [--json] [--provider <name>] [--model <name>] [--since <ISO>] [--until <ISO>] [--deep-audit]
+      # default JSON is aggregate-only; --deep-audit requires --json for full failure evidence
   forklight routing <task-class> --candidates <json> [--json]
   forklight daemon <start|status|stop|restart>
+      # start|restart accept optional --startup-timeout-ms <1000-600000>; default 30000
   forklight health [--json]
   forklight settings <get|set|apply|reset> [...]
   forklight integration preflight <task-id> [--json]
   forklight integration apply <task-id> --receipt <receipt-id> --confirm [--json]
   forklight integration status <operation-id> [--json] [--deep-audit]
+      # observation only; never starts a daemon
   forklight integration wait <operation-id> --timeout-ms <positive integer> [--json] [--deep-audit]
+      # observation only; never starts a daemon
   forklight integration history <task-id> [--json]
+      # observation only; never starts a daemon
+  forklight upgrade status [--required <1-20>] [--json]
+      # read-only consecutive self-upgrade streak; never starts a daemon or Integration
   forklight tokens <task-id> [--json]
   forklight direct-codex capture --usage <json-object> --metadata <json-object> [--json]
   forklight direct-codex capture-task --task-id <id> --run-ref <ref> --usage <json-object> [--json]
@@ -153,10 +183,13 @@ Usage:
   forklight direct-codex review --sample-id <id> --decision <accepted|rejected> [--rejection-reason <reason>] --reviewer <reviewer> --reviewed-at <canonical-ISO> --schema-version <version> --confirm [--json]
   forklight direct-codex publication-preview --task-class <class> --profile-id <id> [--json]
   forklight direct-codex publication-register --task-class <class> --profile-id <id> --method <method> --confidence <level> --created-at <canonical-ISO> --confirm [--json]
-  forklight compete <task.yaml> --candidates <json>
+  forklight compete <task.yaml> --candidates <json> [--reason <text>]
   forklight competition status <id> [--json]
   forklight competition list [--json]
   forklight competition compare <id> [--json] [--weights <json>]
+  forklight competition main-decision <id> <candidate-id> <accept|revise|reject> --reason <text> --confirm [--json]
+  forklight competition retain-partial <id> <candidate-id> --reusable <json> --gaps <json> --confirm [--json]
+  forklight competition handoff <id> <candidate-id> --revision <id> --to-profile <id> --reason <text> --confirm [--json]
   forklight providers status [<name>] [--json]
   forklight providers probe [<name>] [--json]
   forklight adapt preview <task-id> --patch <json> --reason <category> [--json]
@@ -167,8 +200,9 @@ Usage:
       # rerun a failed candidate's original acceptance suite without a Worker or new Attempt
   forklight hub [--no-open] [--port <port>]
       # starts backend daemon + Hub UI (only control-center UI)
-  forklight hub restart --confirm
+  forklight hub restart --confirm [--detach] [--no-open] [--port <port>] [--startup-timeout-ms <1000-60000>] [--json]
       # replaces a stale-version Hub owner after proving its identity
+      # --detach launches one background Hub and returns after authenticated readiness
   forklight hub status [--json]
       # read-only Hub status; never starts, claims, replaces, or signals
   forklight doctor [--json]
@@ -337,6 +371,73 @@ function humanIntegrationHistoryLines(history: {
   return `${lines.join("\n")}\n`;
 }
 
+/** Plain-language consecutive self-upgrade streak (no raw errors or paths).
+ *  JSON keeps stable codes; human output explains progress, break, and next step. */
+function humanSelfUpgradeEvidenceLines(
+  evidence: SelfUpgradeEvidenceProjection,
+): string {
+  const lines: string[] = [];
+  lines.push(
+    `Reliable self-upgrade streak: ${evidence.achieved} of ${evidence.required} consecutive complete upgrades.`,
+  );
+  switch (evidence.state) {
+    case "empty":
+      lines.push("No complete upgrade has been recorded yet.");
+      break;
+    case "in-progress":
+      lines.push(
+        "A consecutive streak is building, but the reliability milestone is not ready yet.",
+      );
+      break;
+    case "ready":
+      lines.push("The required consecutive complete upgrades are ready.");
+      break;
+  }
+  switch (evidence.breakCategory) {
+    case "retained-failure":
+      lines.push(
+        "A previous upgrade failed during activation and broke the streak.",
+      );
+      break;
+    case "rejected":
+      lines.push("A previous upgrade was rejected and broke the streak.");
+      break;
+    case "rolled-back":
+      lines.push("A previous upgrade was rolled back and broke the streak.");
+      break;
+    case "insufficient-evidence":
+      lines.push(
+        "A previous upgrade lacked complete four-stage evidence and cannot count toward the streak.",
+      );
+      break;
+    case "none":
+      break;
+  }
+  if (evidence.remaining > 0 && evidence.state !== "ready") {
+    lines.push(
+      `${evidence.remaining} more consecutive complete upgrade(s) still needed.`,
+    );
+  }
+  switch (evidence.nextAction) {
+    case "run-first-upgrade":
+      lines.push(
+        "Next: Run one complete self-upgrade that applies, verifies, builds, and activates successfully.",
+      );
+      break;
+    case "continue-consecutive-proofs":
+      lines.push(
+        "Next: Run more complete self-upgrades in a row without an intervening failure.",
+      );
+      break;
+    case "milestone-ready":
+      lines.push(
+        "Next: The consecutive reliability milestone is satisfied for this count.",
+      );
+      break;
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 /** Render the human adaptation preview block as a single exact string.
  *  Never contains raw prompt, source, Diff, log, or secret content. */
 function humanAdaptationPreviewLines(preview: Record<string, unknown>): string {
@@ -380,6 +481,102 @@ function humanAdaptationApplyLines(result: Record<string, unknown>): string {
 function option(arguments_: string[], flag: string): string | undefined {
   const index = arguments_.indexOf(flag);
   return index >= 0 ? arguments_[index + 1] : undefined;
+}
+
+/** Optional readiness deadline for daemon start/restart only. */
+function parseOptionalDaemonStartupTimeoutMs(arguments_: string[]): number | undefined {
+  if (!arguments_.includes("--startup-timeout-ms")) return undefined;
+  const raw = option(arguments_, "--startup-timeout-ms");
+  if (raw === undefined || raw.length === 0 || raw.startsWith("-")) {
+    throw new Error(
+      "daemon start/restart requires --startup-timeout-ms <integer milliseconds>",
+    );
+  }
+  return resolveDaemonStartupTimeoutMs(Number(raw));
+}
+
+/** Optional readiness deadline for detached Hub restart only. */
+function parseOptionalHubStartupTimeoutMs(arguments_: string[]): number | undefined {
+  if (!arguments_.includes("--startup-timeout-ms")) return undefined;
+  const raw = option(arguments_, "--startup-timeout-ms");
+  if (raw === undefined || raw.length === 0 || raw.startsWith("-")) {
+    throw new Error(
+      "hub restart --detach requires --startup-timeout-ms <integer milliseconds>",
+    );
+  }
+  const asNumber = Number(raw);
+  if (!Number.isFinite(asNumber)) {
+    throw new Error(
+      "hub restart --detach requires --startup-timeout-ms <integer milliseconds>",
+    );
+  }
+  return resolveHubStartupTimeoutMs(asNumber);
+}
+
+/** Privacy-safe detached restart JSON: closed fields only, never token/nonce/path. */
+function renderDetachedHubRestartJson(
+  result: DetachedHubRestartResult,
+  browserOpened: boolean,
+): string {
+  const payload: Record<string, unknown> = {
+    ok: result.ok,
+    state: result.state,
+    replacement: result.replacement,
+    nextAction: result.nextAction,
+    browserOpened,
+  };
+  if (result.pid !== undefined) payload.pid = result.pid;
+  if (result.port !== undefined) payload.port = result.port;
+  if (result.reason !== undefined) payload.reason = result.reason;
+  return `${JSON.stringify(payload, null, 2)}\n`;
+}
+
+/** Human explanation for detached restart. Never prints token, nonce, or path. */
+function humanDetachedHubRestartLines(
+  result: DetachedHubRestartResult,
+  browserOpened: boolean,
+): string {
+  const lines: string[] = [];
+  const details: string[] = [];
+  if (result.pid !== undefined) details.push(`pid=${result.pid}`);
+  if (result.port !== undefined) details.push(`port=${result.port}`);
+
+  if (result.state === "current") {
+    lines.push("The active ForkLight Hub already runs this build. No replacement is needed.");
+  } else if (result.state === "ready") {
+    if (result.replacement === "replaced") {
+      lines.push("Replaced the previous ForkLight Hub owner with the current build.");
+    } else {
+      lines.push("Started a detached ForkLight Hub with the current build.");
+    }
+    lines.push("The Hub is authenticated and ready.");
+  } else {
+    lines.push("Detached ForkLight Hub restart failed.");
+    if (result.reason !== undefined) lines.push(`reason: ${result.reason}`);
+  }
+
+  if (details.length > 0) lines.push(`details: ${details.join(" ")}`);
+  lines.push(`replacement: ${result.replacement}`);
+  lines.push(
+    browserOpened
+      ? "browser: opened"
+      : "browser: not opened",
+  );
+  switch (result.nextAction) {
+    case "use-existing-hub":
+      lines.push("next: use the existing Hub");
+      break;
+    case "use-new-hub":
+      lines.push("next: use the new Hub");
+      break;
+    case "investigate":
+      lines.push(
+        "next: run `forklight hub status` and investigate before any lifecycle action "
+        + "(do not retry restart while a launched Hub may still be starting)",
+      );
+      break;
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function parseResumeAuthorization(arguments_: string[]): AttemptAuthorization | undefined {
@@ -571,7 +768,7 @@ function findPackageRoot(): string {
   throw new Error("ForkLight package root not found");
 }
 
-function printStatistics(summaries: ProviderModelSummary[]): void {
+function printStatistics(summaries: CompactProviderModelSummary[]): void {
   if (summaries.length === 0) {
     process.stdout.write("No matching statistics.\n");
     return;
@@ -1090,10 +1287,210 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "submit-goal") {
+    await ensureDaemon();
+    const result = await daemonRequest<{
+      goalId: string;
+      planId: string;
+      taskIdsByItemId: Record<string, string>;
+    }>("goal_submit_file", { goalFile: path.resolve(required(positional, "goal file")) });
+    process.stdout.write(`goalId: ${result.goalId}\n`);
+    process.stdout.write(`planId: ${result.planId}\n`);
+    for (const [itemId, taskId] of Object.entries(result.taskIdsByItemId).sort()) {
+      process.stdout.write(`  ${itemId}: ${taskId}\n`);
+    }
+    return;
+  }
+
+  if (command === "goal") {
+    const operation = required(positional, "goal operation");
+    await ensureDaemon();
+    if (operation === "status") {
+      const goalId = required(rest[0], "goal id");
+      const view = await daemonRequest<Record<string, unknown>>("goal_status", { goalId });
+      if (json) process.stdout.write(`${JSON.stringify(view, null, 2)}\n`);
+      else {
+        process.stdout.write(`Goal: ${String(view.name)}\n`);
+        process.stdout.write(`Objective: ${String(view.objective)}\n`);
+        process.stdout.write(`Status: ${String(view.status)}\n`);
+        process.stdout.write(`What just happened: ${String(view.whatJustHappened)}\n`);
+        process.stdout.write(`What is waiting: ${String(view.whatIsWaiting)}\n`);
+        process.stdout.write(`Next: ${String(view.nextAction)}\n`);
+        if (view.reason && view.reasonCode && view.reasonCode !== "none") {
+          process.stdout.write(`Reason (${String(view.reasonCode)}): ${String(view.reason)}\n`);
+        }
+        const policy = view.policy as {
+          maxDurationMs?: number | null;
+          noProgressTimeoutMs?: number | null;
+          maxCorrectionRounds?: number;
+          maxReviewRounds?: number;
+          maxNoNewEvidenceCycles?: number;
+        } | undefined;
+        if (policy) {
+          const formatPolicyMs = (ms: number | null | undefined): string => {
+            if (ms === null || ms === undefined) return "unlimited";
+            if (ms >= 3_600_000 && ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
+            if (ms >= 60_000) return `${Math.ceil(ms / 60_000)}m`;
+            return `${Math.ceil(ms / 1000)}s`;
+          };
+          process.stdout.write(
+            `Policy: total duration ${formatPolicyMs(policy.maxDurationMs)}; `
+            + `no-progress stop after ${formatPolicyMs(policy.noProgressTimeoutMs)}; `
+            + `max corrections ${String(policy.maxCorrectionRounds ?? 0)}; `
+            + `max reviews ${String(policy.maxReviewRounds ?? 0)}; `
+            + `max no-new-evidence ${String(policy.maxNoNewEvidenceCycles ?? 0)}\n`,
+          );
+        }
+        if (view.status === "stopped" && view.stoppedAt) {
+          process.stdout.write(`Stopped at: ${String(view.stoppedAt)}\n`);
+        }
+        const current = view.currentMilestone as Record<string, unknown> | undefined;
+        if (current) {
+          process.stdout.write(
+            `Current milestone: ${String(current.itemId)} (${String(current.gate)})\n`,
+          );
+        }
+        const progress = view.progress as { satisfied?: number; total?: number; percent?: number } | undefined;
+        if (progress) {
+          process.stdout.write(
+            `Progress: ${progress.satisfied ?? 0}/${progress.total ?? 0} (${progress.percent ?? 0}%)\n`,
+          );
+        }
+      }
+      return;
+    }
+    if (operation === "list") {
+      const limitRaw = option(rest, "--limit");
+      const limit = limitRaw === undefined ? 50 : Number(limitRaw);
+      const goals = await daemonRequest<Array<Record<string, unknown>>>("goal_list", { limit });
+      if (json) process.stdout.write(`${JSON.stringify(goals, null, 2)}\n`);
+      else if (goals.length === 0) process.stdout.write("No goals.\n");
+      else {
+        for (const goal of goals) {
+          const progress = goal.progress as { satisfied?: number; total?: number } | undefined;
+          process.stdout.write(`${String(goal.goalId)}\n`);
+          process.stdout.write(
+            `  ${String(goal.name)} — ${String(goal.status)} — ${progress?.satisfied ?? 0}/${progress?.total ?? 0}\n`,
+          );
+          process.stdout.write(`  Next: ${String(goal.nextAction)}\n`);
+        }
+      }
+      return;
+    }
+    if (operation === "advance") {
+      const goalId = required(rest[0], "goal id");
+      if (!rest.includes("--confirm")) {
+        throw new Error("goal advance requires --confirm");
+      }
+      const result = await daemonRequest<Record<string, unknown>>("goal_advance", {
+        goalId,
+        confirm: true,
+      });
+      if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        const goal = result.goal as Record<string, unknown> | undefined;
+        process.stdout.write(
+          `Advanced: ${String(result.advanced)} newEvidence: ${String(result.newEvidence)} cycles: ${String(result.noNewEvidenceCycles)}\n`,
+        );
+        if (goal) {
+          process.stdout.write(`Status: ${String(goal.status)}\n`);
+          process.stdout.write(`Next: ${String(goal.nextAction)}\n`);
+        }
+      }
+      return;
+    }
+    if (operation === "stop") {
+      const goalId = required(rest[0], "goal id");
+      if (!rest.includes("--confirm")) {
+        throw new Error("goal stop requires --confirm");
+      }
+      const view = await daemonRequest<Record<string, unknown>>("goal_stop", {
+        goalId,
+        confirm: true,
+      });
+      if (json) process.stdout.write(`${JSON.stringify(view, null, 2)}\n`);
+      else {
+        process.stdout.write(`Goal stopped: ${String(view.goalId)}\n`);
+        process.stdout.write(`Reason: ${String(view.reason)}\n`);
+        process.stdout.write(`Next: ${String(view.nextAction)}\n`);
+      }
+      return;
+    }
+    if (operation === "handoff") {
+      const taskId = required(rest[0], "source Goal Task id");
+      const candidateRevisionId = required(option(rest, "--revision"), "--revision candidateRevisionId");
+      const reusableRaw = required(option(rest, "--reusable"), "--reusable JSON array of relative paths");
+      const gapsRaw = required(option(rest, "--gaps"), "--gaps JSON array of remaining gaps");
+      const destinationWorkerProfileId = required(
+        option(rest, "--to-profile"),
+        "--to-profile destination Worker Profile id",
+      );
+      const reason = required(option(rest, "--reason"), "--reason text");
+      const reasonText = reason.trim();
+      if (reasonText.length === 0 || reasonText.length > 1000) {
+        throw new Error("--reason must be 1-1000 characters");
+      }
+      if (option(rest, "--confirm") === undefined) {
+        throw new Error("goal handoff requires --confirm to authorize the cross-Worker successor");
+      }
+      let reusablePaths: unknown;
+      let remainingGaps: unknown;
+      try {
+        reusablePaths = JSON.parse(reusableRaw);
+      } catch {
+        throw new Error("--reusable must be valid JSON");
+      }
+      try {
+        remainingGaps = JSON.parse(gapsRaw);
+      } catch {
+        throw new Error("--gaps must be valid JSON");
+      }
+      const result = await daemonRequest<Record<string, unknown>>("goal_task_handoff", {
+        taskId,
+        candidateRevisionId,
+        reusablePaths,
+        remainingGaps,
+        destinationWorkerProfileId,
+        reason: reasonText,
+        confirm: true,
+      });
+      if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(
+          `Goal handoff ${String(result.status)}: retained ${String(result.reusablePathCount)} path(s) and ${String(result.remainingGapCount)} gap(s)\n`,
+        );
+        process.stdout.write(
+          `source Task ${String(result.sourceTaskId)} → destination ${String(result.destinationWorkerProfileId)}\n`,
+        );
+        process.stdout.write(
+          `successor Task ${String(result.successorTaskId)} (not a retry); digest ${String(result.sourceDigestPrefix)}\n`,
+        );
+        if (result.goalId !== undefined) {
+          process.stdout.write(
+            `Goal ${String(result.goalId)} milestone ${String(result.itemId ?? "")} now follows the successor for gates.\n`,
+          );
+        }
+        if (result.failureCode !== undefined) {
+          process.stdout.write(`failure: ${String(result.failureCode)}\n`);
+        }
+        process.stdout.write(`next: ${String(result.nextAction)}\n`);
+        process.stdout.write(
+          "Original Plan Task is history. Fresh verification, Main Review, and Integration still apply to the successor.\n",
+        );
+      }
+      return;
+    }
+    throw new Error(`Unknown goal operation: ${operation}\n\n${usage()}`);
+  }
+
   if (command === "daemon") {
     const operation = required(positional, "daemon operation");
     if (operation === "start") {
-      const result = await ensureDaemon();
+      const startupTimeoutMs = parseOptionalDaemonStartupTimeoutMs(rest);
+      const result = await ensureDaemon(
+        forklightHome(),
+        startupTimeoutMs === undefined ? {} : { startupTimeoutMs },
+      );
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return;
     }
@@ -1117,7 +1514,11 @@ async function main(): Promise<void> {
       return;
     }
     if (operation === "restart") {
-      const result = await restartDaemon();
+      const startupTimeoutMs = parseOptionalDaemonStartupTimeoutMs(rest);
+      const result = await restartDaemon(
+        forklightHome(),
+        startupTimeoutMs === undefined ? {} : { startupTimeoutMs },
+      );
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return;
     }
@@ -1146,6 +1547,14 @@ async function main(): Promise<void> {
 
   if (command === "stats") {
     const options = [positional, ...rest].filter((value): value is string => value !== undefined);
+    const deepAudit = options.includes("--deep-audit");
+    // Human output prints aggregates only; full failure rows are JSON-only.
+    // Reject before daemon contact so --deep-audit never pays transfer cost without delivering detail.
+    if (deepAudit && !json) {
+      throw new Error(
+        "stats --deep-audit requires --json (human output already prints aggregates only)",
+      );
+    }
     const filter = {
       ...(option(options, "--provider") === undefined
         ? {}
@@ -1153,9 +1562,13 @@ async function main(): Promise<void> {
       ...(option(options, "--model") === undefined ? {} : { modelName: option(options, "--model") }),
       ...(option(options, "--since") === undefined ? {} : { since: option(options, "--since") }),
       ...(option(options, "--until") === undefined ? {} : { until: option(options, "--until") }),
+      detail: deepAudit ? "full" as const : "compact" as const,
     };
     await ensureDaemon();
-    const summaries = await daemonRequest<ProviderModelSummary[]>("statistics", filter);
+    const summaries = await daemonRequest<ProviderModelSummary[] | CompactProviderModelSummary[]>(
+      "statistics",
+      filter,
+    );
     if (json) process.stdout.write(`${JSON.stringify(summaries, null, 2)}\n`);
     else printStatistics(summaries);
     return;
@@ -1305,6 +1718,25 @@ async function main(): Promise<void> {
     throw new Error(`Unknown settings subcommand: ${subcommand}. Use: get, set, apply, or reset.`);
   }
 
+  if (command === "upgrade") {
+    const subcommand = required(positional, "upgrade subcommand (status)");
+    if (subcommand === "status") {
+      const requiredCount = parseRequiredStreakCountFromString(option(rest, "--required"));
+      // Observation only: never ensureDaemon / start Integration / mutate state.
+      const evidence = await daemonObserverRequest<SelfUpgradeEvidenceProjection>(
+        "self_upgrade_evidence",
+        { required: requiredCount },
+      );
+      process.stdout.write(
+        json
+          ? `${JSON.stringify(evidence, null, 2)}\n`
+          : humanSelfUpgradeEvidenceLines(evidence),
+      );
+      return;
+    }
+    throw new Error(`Unknown upgrade subcommand: ${subcommand}. Use: status.`);
+  }
+
   if (command === "integration") {
     const subcommand = required(positional, "integration subcommand (preflight, apply, status, wait, or history)");
     if (subcommand === "preflight") {
@@ -1359,8 +1791,8 @@ async function main(): Promise<void> {
         args: { taskId, json },
         taskId,
         invoke: async () => {
-          await ensureDaemon();
-          return daemonRequest<{ receipts: unknown[]; results: unknown[] }>(
+          // Observation only: never ensureDaemon / start a replacement.
+          return daemonObserverRequest<{ receipts: unknown[]; results: unknown[] }>(
             "integration_history", { taskId });
         },
         renderOutput: (history) => json
@@ -1396,8 +1828,8 @@ async function main(): Promise<void> {
         args: { operationId, ...(timeoutMs === undefined ? {} : { timeoutMs }), json, deepAudit },
         taskId: () => taskId,
         invoke: async () => {
-          await ensureDaemon();
-          const view = await daemonRequest<IntegrationOperationView>(
+          // Observation only: never ensureDaemon / start a replacement during handoff.
+          const view = await daemonObserverRequest<IntegrationOperationView>(
             method,
             { operationId, ...(timeoutMs === undefined ? {} : { timeoutMs }) },
           );
@@ -1429,9 +1861,24 @@ async function main(): Promise<void> {
     let candidates: unknown[];
     try { candidates = JSON.parse(raw) as unknown[]; if (!Array.isArray(candidates)) throw new Error("not an array"); }
     catch (e) { throw new Error(`Invalid --candidates JSON: ${e instanceof Error ? e.message : String(e)}`); }
-    const competition = await daemonRequest<Record<string, unknown>>("competition_submit_file", { taskFile, candidates });
+    const reasonNote = option(rest, "--reason");
+    const params: Record<string, unknown> = { taskFile, candidates };
+    if (reasonNote !== undefined) {
+      const note = reasonNote.trim();
+      if (note.length === 0 || note.length > 1000) {
+        throw new Error("--reason must be 1-1000 characters");
+      }
+      // Explicit CLI compete with a reason is a user-requested Competition.
+      params.reason = { intent: "required", triggers: ["user-requested"], note };
+    }
+    const competition = await daemonRequest<Record<string, unknown>>("competition_submit_file", params);
     if (json) process.stdout.write(`${JSON.stringify(competition, null, 2)}\n`);
-    else { const r = competition as Record<string, unknown>; process.stdout.write(`competitionId: ${r.id}\nname: ${r.name}\nstatus: ${r.status}\ncandidates: ${candidates.length}\n`); }
+    else {
+      const r = competition as Record<string, unknown>;
+      process.stdout.write(`competitionId: ${r.id}\nname: ${r.name}\nstatus: ${r.status}\ncandidates: ${candidates.length}\n`);
+      if (r.legacy === true) process.stdout.write("reason: unavailable (legacy explicit submission)\n");
+      else if (r.reason) process.stdout.write(`reason: ${(r.reason as Record<string, unknown>).note}\n`);
+    }
     return;
   }
 
@@ -1456,10 +1903,57 @@ async function main(): Promise<void> {
       if (json) { process.stdout.write(`${JSON.stringify(result, null, 2)}\n`); return; }
       const r = result, comp = r.competition as Record<string, unknown>, progress = r.progress as Record<string, number>;
       process.stdout.write(`id: ${comp.id}\nname: ${comp.name}\nstatus: ${comp.status}\nprogress: ${progress.terminal}/${progress.total} terminal\n`);
+      if (comp.legacy === true) {
+        process.stdout.write("reason: unavailable (legacy competition predates reasoned admission)\n");
+      } else if (comp.reason) {
+        const rn = comp.reason as Record<string, unknown>;
+        process.stdout.write(`reason: ${rn.note} (intent=${rn.intent})\n`);
+      }
       for (const c of r.candidates as Array<Record<string, unknown>>) {
-        process.stdout.write(`  ${c.candidateId}: ${c.providerName}/${c.modelName} [${c.taskStatus}]${c.error ? ` — ${c.error}` : ""}\n`);
+        process.stdout.write(`  ${c.candidateId}: ${(() => { const id = (c as Record<string, unknown>).identity as Record<string, unknown> | undefined; return id === undefined ? "identity unavailable (legacy)" : `${String(id.provider)}/${String(id.model)} (${String(id.runtime)}/${String(id.effort)})`; })()} [${c.taskStatus}]${c.error ? ` — ${c.error}` : ""}\n`);
+      }
+      const mc = r.machineComparison as Record<string, unknown> | undefined;
+      if (mc) {
+        if (mc.state === "no-deliverable") {
+          process.stdout.write("machine comparison: no deliverable candidate; no winner was selected\n");
+        } else if (mc.state === "waiting") {
+          process.stdout.write("machine comparison: candidates are still running or comparison is not ready\n");
+        } else if (mc.waitingForMain === true) {
+          process.stdout.write("machine comparison: waiting for Main judgment (not a final choice)\n");
+        } else if (mc.recommendation) {
+          const rec = mc.recommendation as Record<string, unknown>;
+          process.stdout.write(`machine comparison: ${rec.candidateId} (confidence ${rec.confidence}) - not a final choice until Main accepts\n`);
+        }
+      }
+      const md = r.mainDecision as Record<string, unknown> | undefined;
+      if (md) {
+        process.stdout.write(`Main decision: ${md.decision} on candidate ${md.candidateId} - ${md.reason}${r.mainDecisionCurrent === true ? "" : " (historical; a newer Candidate Revision needs review)"}\n`);
+      }
+      if (r.finalChoice) {
+        const fc = r.finalChoice as Record<string, unknown>;
+        process.stdout.write(`final choice: candidate ${fc.candidateId} (revision ${fc.candidateRevisionId ?? "-"}); Integration still requires explicit confirmation\n`);
+      }
+      const handoffs = r.handoffs as Array<Record<string, unknown>> | undefined;
+      if (handoffs && handoffs.length > 0) {
+        process.stdout.write("handoffs:\n");
+        for (const entry of handoffs) {
+          process.stdout.write(
+            `  ${String(entry.sourceCandidateId)} → ${String(entry.destinationWorkerProfileId)} `
+            + `status=${String(entry.status)} successor=${String(entry.successorTaskId)} `
+            + `paths=${String(entry.reusablePathCount)} gaps=${String(entry.remainingGapCount)} `
+            + `next=${String(entry.nextAction)}\n`,
+          );
+        }
+      }
+      const rp = r.retainedPartial as Array<Record<string, unknown>> | undefined;
+      if (rp && rp.length > 0) {
+        process.stdout.write("retained partial evidence:\n");
+        for (const entry of rp) {
+          process.stdout.write(`  candidate ${entry.candidateId}: ${(entry.reusablePaths as string[]).length} reusable path(s), ${(entry.remainingGaps as unknown[]).length} gap(s) retained for M2\n`);
+        }
       }
       if (r.evaluation) { process.stdout.write("evaluation:\n"); printScoredCandidates((r.evaluation as Record<string, unknown>).candidates as Array<Record<string, unknown>>); const rec = (r.evaluation as Record<string, unknown>).recommendation as Record<string, unknown> | undefined; if (rec) process.stdout.write(`recommendation: ${rec.candidateId} (confidence ${rec.confidence}) — ${rec.reasoning}\n`); }
+      process.stdout.write(`next: ${String(r.nextAction ?? "main-review")}\n`);
       return;
     }
     if (subcommand === "list") {
@@ -1486,7 +1980,105 @@ async function main(): Promise<void> {
       if (rec) process.stdout.write(`recommendation: ${rec.candidateId} (confidence ${rec.confidence})\n  ${rec.reasoning}\n`);
       return;
     }
-    throw new Error(`Unknown competition subcommand: ${subcommand}. Use: status, list, or compare.`);
+    if (subcommand === "main-decision") {
+      const competitionId = required(rest[0], "competition id");
+      const candidateId = required(rest[1], "candidate id");
+      const decision = required(rest[2], "decision (accept, revise, or reject)");
+      if (decision !== "accept" && decision !== "revise" && decision !== "reject") {
+        throw new Error("decision must be accept, revise, or reject");
+      }
+      const reason = required(option(rest, "--reason"), "--reason text");
+      const reasonText = reason.trim();
+      if (reasonText.length === 0 || reasonText.length > 1000) {
+        throw new Error("--reason must be 1-1000 characters");
+      }
+      if (option(rest, "--confirm") === undefined) {
+        throw new Error("main-decision requires --confirm to authorize the decision");
+      }
+      const result = await daemonRequest<Record<string, unknown>>("competition_main_decision", {
+        competitionId, candidateId, decision, reason: reasonText, confirm: true,
+      });
+      if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(`Competition Main decision: ${result.decision} on candidate ${result.candidateId}\n`);
+        if (decision === "accept") {
+          process.stdout.write(`final choice: revision ${result.candidateRevisionId ?? "-"}; Integration still requires explicit confirmation\n`);
+        } else if (decision === "revise") {
+          process.stdout.write("No automatic retry; authorize at most one same-Candidate correction through the existing correction authority.\n");
+        } else {
+          process.stdout.write("No retry is authorized.\n");
+        }
+      }
+      return;
+    }
+    if (subcommand === "retain-partial") {
+      const competitionId = required(rest[0], "competition id");
+      const candidateId = required(rest[1], "candidate id");
+      const reusableRaw = required(option(rest, "--reusable"), "--reusable JSON array of paths");
+      const gapsRaw = required(option(rest, "--gaps"), "--gaps JSON array of {description, acceptanceExpectation}");
+      let reusablePaths: unknown;
+      let remainingGaps: unknown;
+      try { reusablePaths = JSON.parse(reusableRaw); } catch (e) { throw new Error(`Invalid --reusable JSON: ${e instanceof Error ? e.message : String(e)}`); }
+      try { remainingGaps = JSON.parse(gapsRaw); } catch (e) { throw new Error(`Invalid --gaps JSON: ${e instanceof Error ? e.message : String(e)}`); }
+      if (option(rest, "--confirm") === undefined) {
+        throw new Error("retain-partial requires --confirm to authorize retention");
+      }
+      const result = await daemonRequest<Record<string, unknown>>("competition_retained_partial", {
+        competitionId, candidateId, reusablePaths, remainingGaps, confirm: true,
+      });
+      if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(`Retained ${(result.reusablePaths as string[]).length} reusable path(s) and ${(result.remainingGaps as unknown[]).length} gap(s) from candidate ${result.candidateId} for M2 handoff.\n`);
+        process.stdout.write("No Worker retry or successor started.\n");
+      }
+      return;
+    }
+    if (subcommand === "handoff") {
+      const competitionId = required(rest[0], "competition id");
+      const candidateId = required(rest[1], "candidate id");
+      const candidateRevisionId = required(option(rest, "--revision"), "--revision candidateRevisionId");
+      const destinationWorkerProfileId = required(
+        option(rest, "--to-profile"),
+        "--to-profile destination Worker Profile id",
+      );
+      const reason = required(option(rest, "--reason"), "--reason text");
+      const reasonText = reason.trim();
+      if (reasonText.length === 0 || reasonText.length > 1000) {
+        throw new Error("--reason must be 1-1000 characters");
+      }
+      if (option(rest, "--confirm") === undefined) {
+        throw new Error("handoff requires --confirm to authorize the cross-Worker successor");
+      }
+      const result = await daemonRequest<Record<string, unknown>>("competition_handoff", {
+        competitionId,
+        candidateId,
+        candidateRevisionId,
+        destinationWorkerProfileId,
+        reason: reasonText,
+        confirm: true,
+      });
+      if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(
+          `Handoff ${String(result.status)}: retained ${String(result.reusablePathCount)} path(s) and ${String(result.remainingGapCount)} gap(s)\n`,
+        );
+        process.stdout.write(
+          `source candidate ${String(result.sourceCandidateId)} → destination ${String(result.destinationWorkerProfileId)}\n`,
+        );
+        process.stdout.write(
+          `successor Task ${String(result.successorTaskId)} (not a retry); digest ${String(result.sourceDigestPrefix)}\n`,
+        );
+        if (result.failureCode !== undefined) {
+          process.stdout.write(`failure: ${String(result.failureCode)}\n`);
+        }
+        process.stdout.write(`next: ${String(result.nextAction)}\n`);
+        process.stdout.write(
+          "Source Task and Candidate evidence are unchanged. Fresh Main Review is required before Integration.\n",
+        );
+      }
+      return;
+    }
+    throw new Error(`Unknown competition subcommand: ${subcommand}. Use: status, list, compare, main-decision, retain-partial, or handoff.`);
   }
 
   if (command === "console" || command === "setup") {
@@ -1829,16 +2421,98 @@ async function main(): Promise<void> {
 
     const home = forklightHome();
     const runIdentity = currentBuildIdentity();
-    let discovery = await discoverOrClaimHub(home, { runIdentity });
+    let discovery: HubDiscovery;
 
-    // --- Explicit confirmed restart (hub restart --confirm) ---
+    // --- Explicit confirmed restart (hub restart --confirm [--detach]) ---
     if (positional === "restart") {
-      if (!hubOptions.includes("--confirm")) {
+      const detach = hubOptions.includes("--detach");
+      const restartJson = hubOptions.includes("--json");
+      const restartConfirm = hubOptions.includes("--confirm");
+
+      // Validate restart flags before any lifecycle mutation.
+      const restartFlagValues = new Set([
+        "restart",
+        "--confirm",
+        "--detach",
+        "--no-open",
+        "--json",
+        "--port",
+        "--startup-timeout-ms",
+      ]);
+      for (let index = 0; index < hubOptions.length; index += 1) {
+        const flag = hubOptions[index]!;
+        if (flag === "--port" || flag === "--startup-timeout-ms") {
+          const value = hubOptions[index + 1];
+          if (value === undefined || value.startsWith("-")) {
+            throw new Error(`${flag} requires a value\n\n${usage()}`);
+          }
+          index += 1;
+          continue;
+        }
+        if (!restartFlagValues.has(flag)) {
+          throw new Error(`Unknown hub restart flag: ${flag}\n\n${usage()}`);
+        }
+      }
+
+      if (!restartConfirm) {
         throw new Error(
           "Hub restart requires explicit --confirm. A normal `forklight hub` diagnoses a stale owner; "
           + "restart replaces it after proving the exact identity.\n\n" + usage(),
         );
       }
+
+      if (restartJson && !detach) {
+        throw new Error(
+          "hub restart --json requires --detach so the command can return a finite result.\n\n"
+          + usage(),
+        );
+      }
+      if (hubOptions.includes("--startup-timeout-ms") && !detach) {
+        throw new Error(
+          "hub restart --startup-timeout-ms requires --detach.\n\n" + usage(),
+        );
+      }
+
+      // --- Detached path: replace if needed, launch one child, wait, return ---
+      if (detach) {
+        const startupTimeoutMs = parseOptionalHubStartupTimeoutMs(hubOptions);
+        const explicitPort = portFlag !== undefined ? port : undefined;
+        const result = await restartHubDetached(home, {
+          runIdentity,
+          ...(explicitPort !== undefined ? { port: explicitPort } : {}),
+          ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
+        });
+
+        let browserOpened = false;
+        if (
+          result.ok
+          && !noOpen
+          && process.platform === "darwin"
+          && result.pid !== undefined
+          && result.port !== undefined
+        ) {
+          const openUrl = resolveHubOpenUrl(home, result.pid, result.port);
+          if (openUrl !== undefined) {
+            try {
+              execFileSync("open", [openUrl], { stdio: "ignore" });
+              browserOpened = true;
+            } catch {
+              browserOpened = false;
+            }
+          }
+        }
+
+        if (restartJson) {
+          process.stdout.write(renderDetachedHubRestartJson(result, browserOpened));
+        } else {
+          process.stdout.write(humanDetachedHubRestartLines(result, browserOpened));
+        }
+        if (!result.ok) process.exitCode = 1;
+        return;
+      }
+
+      // --- Foreground path (unchanged): replace then become the Hub owner ---
+      discovery = await discoverOrClaimHub(home, { runIdentity });
       if (discovery.kind === "reuse") {
         process.stdout.write(
           "The active ForkLight Hub already runs this build. No replacement is needed.\n",
@@ -1866,8 +2540,10 @@ async function main(): Promise<void> {
         );
         discovery = await discoverOrClaimHub(home, { runIdentity });
       }
-      // A clean home already returned a start claim; proceed without inventing
-      // an old owner to restart.
+      // A clean home already returned a start claim; fall through without
+      // inventing an old owner to restart.
+    } else {
+      discovery = await discoverOrClaimHub(home, { runIdentity });
     }
 
     // --- Version-aware reuse (matching build identity) ---
@@ -2298,6 +2974,132 @@ async function main(): Promise<void> {
       });
       process.stdout.write(output);
       return;
+    }
+    if (command === "review-graph") {
+      const sub = required(positional, "review-graph subcommand (create|status)");
+      const taskId = required(rest[0], "task id");
+      const asJson = rest.includes("--json");
+      if (sub === "create") {
+        const profileIds: string[] = [];
+        const profilesCsv = option(rest, "--reviewer-profiles");
+        if (profilesCsv !== undefined) {
+          for (const part of profilesCsv.split(",")) {
+            const trimmed = part.trim();
+            if (trimmed.length > 0) profileIds.push(trimmed);
+          }
+        }
+        for (let index = 0; index < rest.length; index += 1) {
+          if (rest[index] === "--reviewer-profile") {
+            const value = rest[index + 1];
+            if (value === undefined || value.startsWith("--")) {
+              throw new Error("review-graph create --reviewer-profile requires a profile id");
+            }
+            profileIds.push(value.trim());
+          }
+        }
+        if (profileIds.length === 0) {
+          throw new Error(
+            "review-graph create requires --reviewer-profile <id> or --reviewer-profiles <id1,id2,id3>",
+          );
+        }
+        const reason = required(option(rest, "--reason"), "review reason");
+        if (!rest.includes("--confirm")) {
+          throw new Error("review-graph create requires --confirm");
+        }
+        await ensureDaemon();
+        const result = await daemonRequest<Record<string, unknown>>("review_graph_create", {
+          taskId,
+          reviewerWorkerProfileIds: profileIds,
+          // Backward-compatible single-profile field for one-item callers.
+          ...(profileIds.length === 1
+            ? { reviewerWorkerProfileId: profileIds[0] }
+            : {}),
+          reason,
+          confirm: true,
+        });
+        if (asJson) {
+          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        } else {
+          const graph = result.graph as Record<string, unknown> | undefined;
+          const reviewerTaskIds = Array.isArray(result.reviewerTaskIds)
+            ? result.reviewerTaskIds
+            : [result.reviewerTaskId];
+          process.stdout.write(`review-graph: ${String(graph?.id ?? result.reviewerTaskId)}\n`);
+          process.stdout.write(`created: ${String(result.created)}\n`);
+          process.stdout.write(`judges: ${String(reviewerTaskIds.length)}\n`);
+          process.stdout.write(`reviewerTaskId: ${String(result.reviewerTaskId)}\n`);
+          process.stdout.write(`reviewerTaskIds: ${reviewerTaskIds.map(String).join(",")}\n`);
+          process.stdout.write(`status: ${String(graph?.status ?? "unknown")}\n`);
+          const aggregation = graph?.aggregation as Record<string, unknown> | undefined;
+          if (aggregation !== undefined) {
+            process.stdout.write(
+              `aggregation: state=${String(aggregation.state)} ` +
+              `usable=${String(aggregation.usable)}/${String(aggregation.total)} ` +
+              `pending=${String(aggregation.pending)}\n`,
+            );
+            process.stdout.write(`explanation: ${String(aggregation.explanation ?? "")}\n`);
+          }
+          process.stdout.write(`next: ${String(graph?.nextAction ?? "")}\n`);
+          process.stdout.write(
+            "Judge output is evidence only. Main decides accept/revise/reject after every judge finishes. No automatic vote or retry.\n",
+          );
+        }
+        return;
+      }
+      if (sub === "status") {
+        await ensureDaemon();
+        const result = await daemonRequest<Record<string, unknown> | null>(
+          "review_graph_status",
+          { taskId },
+        );
+        if (asJson) {
+          process.stdout.write(`${JSON.stringify(result ?? null, null, 2)}\n`);
+        } else if (result === null || result === undefined) {
+          process.stdout.write("review-graph: none\n");
+        } else {
+          process.stdout.write(`review-graph: ${String(result.id)}\n`);
+          process.stdout.write(`status: ${String(result.status)}\n`);
+          process.stdout.write(`revision: ${String(result.candidateRevisionId)}\n`);
+          process.stdout.write(`digestPrefix: ${String(result.digestPrefix)}\n`);
+          process.stdout.write(`blocksIntegration: ${String(result.blocksIntegration)}\n`);
+          process.stdout.write(
+            `requiresFreshMainReview: ${String(result.requiresFreshMainReview)}\n`,
+          );
+          const aggregation = result.aggregation as Record<string, unknown> | undefined;
+          if (aggregation !== undefined) {
+            process.stdout.write(
+              `aggregation: state=${String(aggregation.state)} ` +
+              `usable=${String(aggregation.usable)}/${String(aggregation.total)} ` +
+              `unusable=${String(aggregation.unusable)} pending=${String(aggregation.pending)}\n`,
+            );
+            process.stdout.write(`explanation: ${String(aggregation.explanation ?? "")}\n`);
+          }
+          process.stdout.write(`next: ${String(result.nextAction)}\n`);
+          const assignments = Array.isArray(result.assignments) ? result.assignments : [];
+          for (const raw of assignments) {
+            const a = raw as Record<string, unknown>;
+            process.stdout.write(
+              `assignment ${String(a.ordinal)}: profile=${String(a.reviewerWorkerProfileId)} ` +
+              `task=${String(a.reviewerTaskId)} status=${String(a.status)} ` +
+              `usable=${String(a.resultUsable)}\n`,
+            );
+            if (a.result && typeof a.result === "object") {
+              const r = a.result as Record<string, unknown>;
+              process.stdout.write(
+                `  suggested: ${String(r.proposedDisposition)} — ${String(r.summary)}\n`,
+              );
+            }
+            if (a.failureCode !== undefined) {
+              process.stdout.write(`  failure: ${String(a.failureCode)}\n`);
+            }
+          }
+          process.stdout.write(
+            "Main remains the final authority; judge dispositions are never automatic acceptance or a vote.\n",
+          );
+        }
+        return;
+      }
+      throw new Error("review-graph subcommand must be create or status");
     }
     if (command === "revise") {
       const taskId = required(positional, "task id");

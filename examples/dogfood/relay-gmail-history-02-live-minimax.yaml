@@ -1,0 +1,130 @@
+version: 2
+name: Implement bounded Gmail full and incremental history fetching
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-history-live-adapter
+taskFamily: relay-gmail-incremental-sync
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: minimax-m3-cn
+
+contract:
+  outcome: >-
+    Relay's credentialed Gmail adapter performs a bounded first/full sync and
+    then uses users.history.list from the validated stored historyId. It follows
+    pagination completely, fetches only bounded relevant message metadata,
+    returns a new cursor only after every required request succeeds, and reports
+    stale history as a typed full-resync requirement rather than fake success.
+    No credentialed failure falls back to fixtures, no partial page advances the
+    cursor, and existing Relay Items are not deleted from mailbox history.
+  presentation:
+    summary: 让 Gmail 第一次有限拉取，之后只读取上次以来的变化；任何分页或详情失败都不会悄悄推进游标。
+    language: zh-CN
+  context:
+    - The prior Goal milestone integrates the versioned cursor parser, bounded constants, history reducer, and final-cursor eligibility rules; consume them rather than redefining them.
+    - Current live Gmail sync always lists ten unread messages and ignores cursor. Its truthful credential/failure boundary and token refresh lifecycle are already integrated and must remain.
+    - Google users.history.list returns records after startHistoryId in increasing but non-contiguous order, uses nextPageToken, and typically returns HTTP 404 for stale history that requires full sync.
+    - History responses often contain only message id/threadId. Relay needs bounded messages.get metadata calls before producing ConnectorIngestItem.
+    - This MiniMax milestone is the intentional heterogeneous implementation point for M2. It gets one ordinary Attempt and no same-Worker correction; if Main finds reusable work plus remaining gaps, the new direct Goal handoff may transfer the exact Candidate to Volcengine GLM. Do not intentionally leave work incomplete.
+    - Preserve dirty Relay work. Do not commit or push.
+  inScope:
+    - Use the integrated cursor decision to choose bounded full sync for missing/legacy/fixture cursor and incremental history sync for a valid live cursor.
+    - For full sync, list recent unread messages within the frozen count/page limits, fetch bounded metadata, and derive a real historyId from provider evidence according to the integrated cursor contract. Do not write a placeholder.
+    - For incremental sync, call users.history.list with encoded startHistoryId, pageToken, bounded maxResults and specific history types relevant to added/inbox/unread messages. Follow pages until complete or the fixed cap rejects.
+    - Collect unique relevant message ids from the pure reducer, fetch metadata once per id within the fixed limit, preserve the existing title/From/body-minimization mapping, and keep detail 404/410 as per-message race skips.
+    - Classify 401/403 as needs-auth, stale history 404 as a closed stale-history/full-resync-required failure, network exceptions as network, 429/5xx/other non-ok or malformed payloads as provider failure with safe bounded recovery actions.
+    - Never include response body, token, URL query secrets, stack, raw exception, message content beyond the existing minimal fields, or arbitrary Provider text in public errors/events.
+    - Return ConnectorSyncSuccess only after every required page and detail request has completed; include the real versioned cursor candidate. Any failure returns no items/cursor success object.
+    - Keep no-credential fixture behavior and GitHub compatibility unchanged.
+    - Add deterministic fetch-router tests for first sync, incremental one/multi-page, empty changes, duplicate ids, stale 404, page cap, detail races/failures, auth/network/provider/malformed branches, real final historyId, and no partial success.
+  outOfScope:
+    - Application/database transaction changes, automatic retry, background sync, push/watch, scheduling, deleting/updating old Relay Items from Gmail deletions/labels, attachments, full bodies, OAuth changes, UI, docs, commit, or push.
+  executionSteps:
+    - Trace the integrated cursor API, current live list/detail mapper, safe failure constructors, and existing mock URL routing before editing.
+    - Split bounded full, history-page, and detail-fetch paths into small adapter helpers while keeping one ConnectorPort.sync result boundary.
+    - Use URL/URLSearchParams or equivalent exact routing; tests must distinguish history, message list, and message detail endpoints without broad substring collisions.
+    - Add focused provider-route tests, run them once, then run full Relay check once.
+  deliverables:
+    - Bounded credentialed Gmail full-sync path with real history cursor.
+    - Bounded paginated users.history.list incremental path.
+    - Safe typed stale/auth/network/provider handling and route-accurate tests.
+  modules:
+    - name: Gmail full-sync fetcher
+      responsibility: Retrieve a bounded recent unread snapshot and real history progress for first or recovery sync.
+      consumes: [usable token, fetch implementation, full-sync decision and limits]
+      produces: [complete minimal message items and eligible versioned cursor candidate]
+      boundaries: [no placeholder cursor, unbounded pages/details, fixture fallback, body/attachment expansion, or partial success]
+    - name: Gmail history fetcher
+      responsibility: Page from exact startHistoryId, reduce relevant changes, and fetch each required metadata record once.
+      consumes: [validated live cursor, history reducer, token, fetch implementation and limits]
+      produces: [complete changed items and final response history cursor]
+      boundaries: [no cursor advance before final page/details, generic message-array duplication, deletion of Relay Items, or automatic full resync]
+    - name: Safe provider classifier
+      responsibility: Map each HTTP/network/malformed/stale branch to the existing closed ConnectorSyncFailure boundary.
+      consumes: [request stage, HTTP status or closed parse result]
+      produces: [needs-auth, network, provider, or stale-history recovery result]
+      boundaries: [no raw body, stack, exception, credential, endpoint query, retry loop, or fixture substitution]
+  callChain:
+    - Application supplies the previously persisted cursor to Gmail ConnectorPort.sync.
+    - Cursor decision selects full or incremental path.
+    - Adapter finishes all bounded pages and detail requests, or returns one closed failure.
+    - Only the complete success returns items and a real versioned cursor to the later application transaction.
+  scenarios:
+    - name: First credentialed sync
+      given: A usable token and no valid live cursor.
+      when: Sync runs.
+      then: Relay fetches a bounded unread snapshot, maps minimal metadata, and returns a real provider-derived history cursor.
+    - name: Incremental multi-page sync
+      given: A valid historyId and two history pages with overlapping relevant message ids.
+      when: Sync runs.
+      then: Every page completes, each unique detail is fetched once, and only the final historyId becomes eligible.
+    - name: Stale or partial history
+      given: history.list returns 404, too many pages, malformed JSON, or a required detail fails.
+      when: Sync runs.
+      then: No success items or new cursor are returned; the typed failure names a safe full-resync or retry action.
+  risks:
+    - Full-sync cursor capture can skip messages arriving during the scan if the wrong high-water mark is used; follow the integrated contract and freeze test ordering.
+    - A broad messages URL matcher can feed list JSON into detail parsing; exact endpoint/query tests are mandatory.
+    - Advancing on an empty intermediate page with nextPageToken would lose later updates; only a final page can complete.
+    - Treating history 404 as ordinary provider failure gives no recovery path; classify it explicitly without automatically rerunning.
+  changeBudget: { maxFiles: 7, maxDiffLines: 1400 }
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 7
+  fileLimitMode: warn
+  changedLineLimit: 1400
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/adapters/connectors/gmail.ts
+    - src/adapters/connectors/types.ts
+    - src/application/connector-sync.ts
+    - tests/connectors-and-product.test.ts
+    - tests/gmail-oauth.test.ts
+acceptance:
+  criteria:
+    - A valid live cursor drives bounded paginated users.history.list; missing/legacy cursor drives bounded full sync; both return a real provider-derived versioned cursor only after complete work.
+    - Relevant ids are deduped, metadata fetches are bounded and exact-routed, empty final history succeeds, and detail 404/410 skips only that message.
+    - Stale history 404, auth, network, rate/provider, page-cap, malformed page/detail and required-detail failures return closed typed failure with no partial items/cursor success or fixture substitution.
+    - Fixture-without-credential, token refresh, privacy, GitHub compatibility and existing failure preservation remain green.
+    - Focused tests, full Relay check and diff hygiene pass with no commit or push.
+  commands:
+    - node --test --import tsx tests/connectors-and-product.test.ts tests/gmail-oauth.test.ts
+    - npm run check
+    - git diff --check

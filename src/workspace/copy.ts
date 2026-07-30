@@ -5,14 +5,17 @@ import {
   mkdir,
   readFile,
   readdir,
-  realpath,
   rm,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import { lstatSync } from "node:fs";
 import path from "node:path";
 import type { TaskPaths, TaskSpec } from "../core/types.js";
+import {
+  materializeDeclaredLocalPackages,
+  materializeProjectDependencies,
+  RUNTIME_DEPENDENCY_DIRECTORIES,
+} from "./dependency-materializer.js";
 import { matchesExcludedSegment } from "./path-policy.js";
 
 interface ManifestEntry {
@@ -30,7 +33,6 @@ interface WorkspaceManifest extends Manifest {
   linkedDependencies: string[];
 }
 
-const SHARED_DEPENDENCY_DIRECTORIES = ["node_modules"];
 const WORKSPACE_CONTEXT_PATH = path.join(".forklight", "workspace-context.md");
 const WORKSPACE_CONTEXT_MAX_FILES = 200;
 
@@ -125,35 +127,33 @@ export async function buildManifest(root: string, excludes: Set<string>): Promis
   return { files, skippedSymlinks };
 }
 
-async function linkSharedDependencies(
+/**
+ * Materialize excluded runtime dependencies and root-manifest declared relative
+ * file:/link: package roots into the Worker/verifier isolation container only.
+ * The immutable diff baseline stays dependency-free so Candidate patches never
+ * observe node_modules or sibling package mirrors. Dependencies always come
+ * from the real project (spec.project), not from an optional snapshot copySource.
+ *
+ * Runtime dirs land under the workspace project. Declared local packages land
+ * at the equivalent relative path from the workspace inside the Task root
+ * (paths.root), so `file:../sibling/sdk` resolves for workspace commands.
+ */
+async function materializeSharedDependencies(
   spec: TaskSpec,
-  paths: TaskPaths,
+  workspaceRoot: string,
+  isolationContainer: string,
   excludes: Set<string>,
 ): Promise<string[]> {
-  const linked: string[] = [];
-  for (const name of SHARED_DEPENDENCY_DIRECTORIES) {
-    if (!excludes.has(name)) continue;
-    const source = path.join(spec.project, name);
-    let dependencySource = source;
-    try {
-      const metadata = await lstat(source);
-      if (metadata.isSymbolicLink()) dependencySource = await realpath(source);
-      const resolvedMetadata = await lstat(dependencySource);
-      if (!resolvedMetadata.isDirectory()) continue;
-    } catch {
-      continue;
-    }
-    for (const root of [paths.baseline, paths.workspace]) {
-      const target = path.join(root, name);
-      try {
-        await lstat(target);
-      } catch {
-        await symlink(dependencySource, target, "dir");
-      }
-    }
-    linked.push(name);
-  }
-  return linked;
+  const names = RUNTIME_DEPENDENCY_DIRECTORIES.filter((name) => excludes.has(name));
+  const runtime = names.length === 0
+    ? []
+    : await materializeProjectDependencies(spec.project, workspaceRoot, names);
+  const local = await materializeDeclaredLocalPackages(
+    spec.project,
+    workspaceRoot,
+    isolationContainer,
+  );
+  return [...runtime, ...local.map((entry) => entry.relativeTarget)];
 }
 
 async function writeWorkspaceContext(
@@ -210,7 +210,7 @@ async function writeWorkspaceContext(
     "## Prioritized file index",
     ...shownFiles.map((filePath) => `- ${filePath}`),
     "",
-    "## Verifier-only dependency links",
+    "## Verifier-only dependency mirrors",
     ...(linkedDependencies.length > 0
       ? linkedDependencies.map((dependency) => `- ${dependency}`)
       : ["- None"]),
@@ -315,8 +315,16 @@ export async function prepareWorkspace(
   });
   await emitStage(observer, now, startedAtMs, "worker-copy", "complete");
 
+  // Stage code stays "dependency-link" for durable progress/event compatibility;
+  // the implementation materializes workspace-local mirrors (runtime dirs and
+  // declared local packages) rather than external symlinks.
   await emitStage(observer, now, startedAtMs, "dependency-link", "start");
-  const linkedDependencies = await linkSharedDependencies(spec, paths, excludes);
+  const linkedDependencies = await materializeSharedDependencies(
+    spec,
+    paths.workspace,
+    paths.root,
+    excludes,
+  );
   await emitStage(
     observer,
     now,

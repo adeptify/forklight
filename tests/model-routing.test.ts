@@ -158,10 +158,17 @@ function evidence(
     correctionChurn: 0,
     correctionChurnRate: 0,
     acceptedDeliveryCount: 10,
+    acceptedDeliverySampleCount: 10,
+    acceptedDeliveryNotAcceptedCount: 0,
+    acceptedDeliveryUnavailableCount: 0,
     acceptedDeliveryRate: 1,
     verifiedBehaviorSampleCount: 10,
     verifiedBehaviorCount: 10,
     verifiedBehaviorRate: 1,
+    firstPassVerifiedSampleCount: 10,
+    firstPassVerifiedSuccessCount: 10,
+    firstPassVerifiedSuccessRate: 1,
+    firstPassUnavailableCount: 0,
     officialCostAttemptCount: 0,
     officialCostQuotedAttemptCount: 0,
     officialCostUnavailableCount: 0,
@@ -244,7 +251,12 @@ test("routing evidence isolates taskClass and excludes credential failures from 
   assert.equal(actual.terminalTaskCount, 3);
   assert.equal(actual.relevantSampleCount, 2);
   assert.equal(actual.modelQualityFailureCount, 1);
-  assert.equal(actual.acceptedDeliveryCount, 1);
+  // Machine success alone is unavailable final delivery; model-quality failure
+  // is a comparable non-acceptance.
+  assert.equal(actual.acceptedDeliveryCount, 0);
+  assert.equal(actual.acceptedDeliverySampleCount, 1);
+  assert.equal(actual.acceptedDeliveryNotAcceptedCount, 1);
+  assert.equal(actual.acceptedDeliveryUnavailableCount, 2);
   assert.equal(actual.ignoredNonModelTaskCount, 1);
   assert.equal(actual.ignoredNonModelFailures.credential, 1);
 });
@@ -279,8 +291,64 @@ test("Main-remediated delivery and explicit revision produce correction evidence
   });
   const actual = map.get("deepseek\0v4")!;
   assert.equal(actual.acceptedDeliveryCount, 1);
+  assert.equal(actual.acceptedDeliverySampleCount, 1);
+  assert.equal(actual.acceptedDeliveryRate, 1);
   assert.equal(actual.modelQualityFailureCount, 1);
   assert.equal(actual.correctionChurn, 2);
+});
+
+test("acceptedDelivery requires comparable Main/delivery coverage on every candidate", () => {
+  const complete = evidence("deepseek", "v4", {
+    acceptedDeliverySampleCount: 10,
+    acceptedDeliveryCount: 8,
+    acceptedDeliveryNotAcceptedCount: 2,
+    acceptedDeliveryUnavailableCount: 0,
+    acceptedDeliveryRate: 0.8,
+  });
+  const sparse = evidence("qwen", "plus", {
+    acceptedDeliverySampleCount: 2,
+    acceptedDeliveryCount: 2,
+    acceptedDeliveryNotAcceptedCount: 0,
+    acceptedDeliveryUnavailableCount: 8,
+    acceptedDeliveryRate: 1,
+  });
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    missingEvidenceMode: "flexible",
+    weights: { ...DEFAULT_ROUTING_POLICY.weights, acceptedDelivery: 1 },
+  };
+  const result = advice(complete, sparse, policy);
+  assert.deepEqual(result.omittedFactors.filter((f) => f.factor === "acceptedDelivery"), [{
+    factor: "acceptedDelivery",
+    reason: "accepted-delivery-coverage-incomplete",
+  }]);
+  assert.ok(result.candidates.every((c) =>
+    c.factors.find((f) => f.factor === "acceptedDelivery")?.available === false));
+  // Other factors with complete evidence may still participate in flexible mode.
+  assert.ok(result.candidates.every((c) =>
+    c.factors.find((f) => f.factor === "verifiedBehavior")?.available === true));
+});
+
+test("acceptedDelivery strict mode blocks when coverage is incomplete", () => {
+  const complete = evidence("deepseek", "v4");
+  const sparse = evidence("qwen", "plus", {
+    acceptedDeliverySampleCount: 0,
+    acceptedDeliveryCount: 0,
+    acceptedDeliveryNotAcceptedCount: 0,
+    acceptedDeliveryUnavailableCount: 10,
+    acceptedDeliveryRate: 0,
+  });
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    missingEvidenceMode: "strict",
+    weights: { ...DEFAULT_ROUTING_POLICY.weights, acceptedDelivery: 1 },
+  };
+  const result = advice(complete, sparse, policy);
+  assert.equal(result.recommendation, undefined);
+  assert.ok(result.candidates.every((c) =>
+    c.uncertainty.reasons.includes("positive-factor-unavailable")));
+  assert.ok(result.omittedFactors.some((f) =>
+    f.factor === "acceptedDelivery" && f.reason === "accepted-delivery-coverage-incomplete"));
 });
 
 test("official cost records every quote, missing record, and native currency", () => {
@@ -446,9 +514,11 @@ test("canonical field names match Hub settings bridge expectations", () => {
   assert.ok("verifiedBehavior" in w);
   assert.ok("modelQualityFailure" in w);
   assert.ok("correctionChurn" in w);
+  assert.ok("firstPassSuccess" in w);
   assert.ok("officialCost" in w);
   assert.ok("duration" in w);
   assert.ok("budgetReliability" in w);
+  assert.equal(w.firstPassSuccess, 0.5);
   assert.equal(w.officialCost, 0);
   assert.equal(w.duration, 0);
   assert.equal(w.budgetReliability, 0);
@@ -464,6 +534,7 @@ test("zero-weight factors never affect recommendation but remain visible", () =>
       verifiedBehavior: 0,
       modelQualityFailure: 0,
       correctionChurn: 0,
+      firstPassSuccess: 0,
       officialCost: 0,
       duration: 0,
       budgetReliability: 0,
@@ -579,6 +650,7 @@ test("flexible mode still blocks insufficient samples and zero active factors", 
         verifiedBehavior: 0,
         modelQualityFailure: 0,
         correctionChurn: 0,
+        firstPassSuccess: 0,
         officialCost: 0,
         duration: 0,
         budgetReliability: 0,
@@ -588,6 +660,130 @@ test("flexible mode still blocks insufficient samples and zero active factors", 
   assert.equal(noFactors.recommendation, undefined);
   assert.ok(noFactors.candidates.every((candidate) =>
     candidate.uncertainty.reasons.includes("no-active-factors")));
+});
+
+// --- First-pass verified success factor -----------------------------------
+
+test("firstPassSuccess prefers higher Attempt-one verified rate without replacing delivery", () => {
+  const firstPassReady = evidence("deepseek", "v4", {
+    firstPassVerifiedSampleCount: 10,
+    firstPassVerifiedSuccessCount: 9,
+    firstPassVerifiedSuccessRate: 0.9,
+    acceptedDeliveryRate: 1,
+    correctionChurnRate: 0.2,
+  });
+  const needsCorrection = evidence("qwen", "plus", {
+    firstPassVerifiedSampleCount: 10,
+    firstPassVerifiedSuccessCount: 2,
+    firstPassVerifiedSuccessRate: 0.2,
+    acceptedDeliveryRate: 1,
+    acceptedDeliveryCount: 10,
+    correctionChurnRate: 0.8,
+    correctionChurn: 8,
+  });
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    missingEvidenceMode: "strict",
+    weights: {
+      ...DEFAULT_ROUTING_POLICY.weights,
+      acceptedDelivery: 0,
+      verifiedBehavior: 0,
+      modelQualityFailure: 0,
+      correctionChurn: 0,
+      firstPassSuccess: 1,
+      officialCost: 0,
+      duration: 0,
+      budgetReliability: 0,
+    },
+  };
+  const result = advice(firstPassReady, needsCorrection, policy);
+  assert.equal(result.recommendation?.provider, "deepseek");
+  const factor = result.candidates
+    .find((c) => c.provider === "deepseek")!
+    .factors.find((f) => f.factor === "firstPassSuccess")!;
+  assert.equal(factor.available, true);
+  assert.equal(factor.rawValue, 0.9);
+});
+
+test("firstPassSuccess requires comparable coverage on every candidate", () => {
+  const complete = evidence("deepseek", "v4", {
+    firstPassVerifiedSampleCount: 10,
+    firstPassVerifiedSuccessCount: 10,
+    firstPassVerifiedSuccessRate: 1,
+  });
+  const sparse = evidence("qwen", "plus", {
+    firstPassVerifiedSampleCount: 2,
+    firstPassVerifiedSuccessCount: 2,
+    firstPassVerifiedSuccessRate: 1,
+    firstPassUnavailableCount: 8,
+  });
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    missingEvidenceMode: "flexible",
+    weights: { ...DEFAULT_ROUTING_POLICY.weights, firstPassSuccess: 1 },
+  };
+  const result = advice(complete, sparse, policy);
+  assert.deepEqual(result.omittedFactors.filter((f) => f.factor === "firstPassSuccess"), [{
+    factor: "firstPassSuccess",
+    reason: "first-pass-success-coverage-incomplete",
+  }]);
+  assert.ok(result.candidates.every((c) =>
+    c.factors.find((f) => f.factor === "firstPassSuccess")?.available === false));
+});
+
+test("firstPassSuccess strict mode blocks when coverage is incomplete", () => {
+  const complete = evidence("deepseek", "v4");
+  const sparse = evidence("qwen", "plus", {
+    firstPassVerifiedSampleCount: 0,
+    firstPassVerifiedSuccessCount: 0,
+    firstPassVerifiedSuccessRate: 0,
+    firstPassUnavailableCount: 10,
+  });
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    missingEvidenceMode: "strict",
+    weights: { ...DEFAULT_ROUTING_POLICY.weights, firstPassSuccess: 1 },
+  };
+  const result = advice(complete, sparse, policy);
+  assert.equal(result.recommendation, undefined);
+  assert.ok(result.candidates.every((c) =>
+    c.uncertainty.reasons.includes("positive-factor-unavailable")));
+  assert.ok(result.omittedFactors.some((f) =>
+    f.factor === "firstPassSuccess" && f.reason === "first-pass-success-coverage-incomplete"));
+});
+
+test("full Worker identity zero history keeps real provider and model", () => {
+  const result = provideRoutingAdvice({
+    taskClass: "coding:new",
+    candidates: [
+      { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high" },
+      { provider: "qwen", model: "plus", runtime: "claude-code", effort: "max" },
+    ],
+    evidenceMap: new Map(),
+    familyEvidenceMap: new Map(),
+    policy: DEFAULT_ROUTING_POLICY,
+  });
+  const deepseek = result.candidates.find((c) => c.provider === "deepseek")!;
+  const qwen = result.candidates.find((c) => c.provider === "qwen")!;
+  assert.equal(deepseek.provider, "deepseek");
+  assert.equal(deepseek.model, "v4");
+  assert.equal(deepseek.runtime, "claude-code");
+  assert.equal(deepseek.effort, "high");
+  assert.equal(deepseek.evidence.provider, "deepseek");
+  assert.equal(deepseek.evidence.model, "v4");
+  assert.equal(deepseek.evidence.terminalTaskCount, 0);
+  assert.equal(qwen.provider, "qwen");
+  assert.equal(qwen.model, "plus");
+  assert.equal(qwen.evidence.provider, "qwen");
+  assert.equal(qwen.evidence.model, "plus");
+  // Must not fall back to synthetic unknown/unknown identity rows.
+  assert.equal(
+    result.candidates.some((c) => c.provider === "unknown" || c.model === "unknown"
+      || c.evidence.provider === "unknown" || c.evidence.model === "unknown"),
+    false,
+  );
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /taskId|attemptId|rawLog|apiKey|endpoint|sourcePath|prompt/i);
 });
 
 // --- Budget reliability (opt-in budgetReliability factor) -----------------
@@ -943,6 +1139,180 @@ test("family fallback fails when not all candidates meet family threshold", () =
   assert.equal(result.evidenceScope, "none");
   assert.equal(result.knowledge, "unknown");
   assert.equal(result.shouldRunCompetition, false);
+});
+
+test("asymmetric family history stays undecided but exposes real sample coverage", () => {
+  // Scenario: Grok has 13 family samples, MiniMax has 2; threshold is 5 for every candidate.
+  // Exact task class is new (zero samples). Incomplete family set must not score or recommend.
+  const emptyExactGrok = evidence("xai", "grok-4.5", {
+    terminalTaskCount: 0, relevantSampleCount: 0,
+  });
+  const emptyExactMini = evidence("minimax", "m2", {
+    terminalTaskCount: 0, relevantSampleCount: 0,
+  });
+  const familyMap = new Map([
+    ["xai\0grok-4.5", evidence("xai", "grok-4.5", {
+      terminalTaskCount: 15, relevantSampleCount: 13,
+      acceptedDeliveryCount: 12, acceptedDeliveryRate: 12 / 13,
+    })] as const,
+    ["minimax\0m2", evidence("minimax", "m2", {
+      terminalTaskCount: 3, relevantSampleCount: 2,
+      acceptedDeliveryCount: 1, acceptedDeliveryRate: 0.5,
+    })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+  const result = advice(emptyExactGrok, emptyExactMini, DEFAULT_ROUTING_POLICY, {
+    taskFamily: "bounded-javascript-change",
+    familyEvidenceMap: familyMap,
+    competitionIntent: "none",
+  });
+  assert.equal(result.evidenceScope, "none");
+  assert.equal(result.knowledge, "unknown");
+  assert.equal(result.recommendation, undefined);
+  assert.equal(result.shouldRunCompetition, false);
+  assert.equal(result.competition.shouldRunCompetition, false);
+  assert.equal(result.competition.intent, "none");
+
+  const grok = result.candidates.find((c) => c.provider === "xai")!;
+  const mini = result.candidates.find((c) => c.provider === "minimax")!;
+  assert.equal(grok.sampleCoverage.exactRelevantCount, 0);
+  assert.equal(grok.sampleCoverage.exactTerminalCount, 0);
+  assert.equal(grok.sampleCoverage.exactMinRelevantSamples, 5);
+  assert.equal(grok.sampleCoverage.familyRelevantCount, 13);
+  assert.equal(grok.sampleCoverage.familyTerminalCount, 15);
+  assert.equal(grok.sampleCoverage.familyMinRelevantSamples, 5);
+  assert.equal(mini.sampleCoverage.exactRelevantCount, 0);
+  assert.equal(mini.sampleCoverage.familyRelevantCount, 2);
+  assert.equal(mini.sampleCoverage.familyMinRelevantSamples, 5);
+  // Incomplete family evidence must not score: all candidates stay at zero total.
+  assert.equal(grok.totalScore, 0);
+  assert.equal(mini.totalScore, 0);
+  assert.ok(grok.uncertainty.insufficientSamples);
+  assert.ok(mini.uncertainty.insufficientSamples);
+});
+
+test("sample coverage omits family fields when no task family is supplied", () => {
+  const result = advice(
+    evidence("deepseek", "v4", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+    evidence("qwen", "plus", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+  );
+  assert.equal(result.evidenceScope, "none");
+  for (const c of result.candidates) {
+    assert.equal(c.sampleCoverage.exactRelevantCount, 0);
+    assert.equal(c.sampleCoverage.exactMinRelevantSamples, 5);
+    assert.equal(c.sampleCoverage.familyRelevantCount, undefined);
+    assert.equal(c.sampleCoverage.familyTerminalCount, undefined);
+    assert.equal(c.sampleCoverage.familyMinRelevantSamples, undefined);
+  }
+});
+
+test("exact evidence win keeps recommendation and binds coverage by identity", () => {
+  const strong = evidence("deepseek", "v4", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 10, acceptedDeliveryRate: 1,
+  });
+  const weak = evidence("qwen", "plus", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+    modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+    verifiedBehaviorCount: 2, verifiedBehaviorRate: 0.2,
+  });
+  const familyEvidence = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 40, relevantSampleCount: 30 })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 40, relevantSampleCount: 25 })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+  const result = advice(strong, weak, DEFAULT_ROUTING_POLICY, {
+    taskFamily: "coding",
+    familyEvidenceMap: familyEvidence,
+  });
+  assert.equal(result.evidenceScope, "exact-class");
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.recommendation?.provider, "deepseek");
+  const deepseek = result.candidates.find((c) => c.provider === "deepseek")!;
+  const qwen = result.candidates.find((c) => c.provider === "qwen")!;
+  assert.equal(deepseek.sampleCoverage.exactRelevantCount, 10);
+  assert.equal(deepseek.sampleCoverage.familyRelevantCount, 30);
+  assert.equal(qwen.sampleCoverage.exactRelevantCount, 10);
+  assert.equal(qwen.sampleCoverage.familyRelevantCount, 25);
+});
+
+test("family fallback win keeps recommendation and reports family coverage", () => {
+  const sparse = evidence("deepseek", "v4", { terminalTaskCount: 1, relevantSampleCount: 1 });
+  const sparse2 = evidence("qwen", "plus", { terminalTaskCount: 1, relevantSampleCount: 1 });
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 20, relevantSampleCount: 15, acceptedDeliveryCount: 15,
+      modelQualityFailureCount: 0, modelQualityFailureRate: 0,
+    })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 20, relevantSampleCount: 10, acceptedDeliveryCount: 5,
+      acceptedDeliveryRate: 0.5,
+      modelQualityFailureCount: 5, modelQualityFailureRate: 0.5,
+    })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+  const result = advice(sparse, sparse2, DEFAULT_ROUTING_POLICY, {
+    taskFamily: "coding:backend",
+    familyEvidenceMap: familyMap,
+  });
+  assert.equal(result.evidenceScope, "task-family");
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.recommendation?.provider, "deepseek");
+  const deepseek = result.candidates.find((c) => c.provider === "deepseek")!;
+  const qwen = result.candidates.find((c) => c.provider === "qwen")!;
+  assert.equal(deepseek.sampleCoverage.exactRelevantCount, 1);
+  assert.equal(deepseek.sampleCoverage.familyRelevantCount, 15);
+  assert.equal(qwen.sampleCoverage.exactRelevantCount, 1);
+  assert.equal(qwen.sampleCoverage.familyRelevantCount, 10);
+});
+
+test("sample coverage stays bound to identity after score sorting reorders candidates", () => {
+  // Weaker model alphabetically first so alphabetical order alone would not sort;
+  // strong quality scores put deepseek first after sort.
+  const weak = evidence("aaa", "first", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+    modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+    verifiedBehaviorCount: 2, verifiedBehaviorRate: 0.2,
+  });
+  const strong = evidence("zzz", "last", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 10, acceptedDeliveryRate: 1,
+  });
+  const familyMap = new Map([
+    ["aaa\0first", evidence("aaa", "first", {
+      terminalTaskCount: 7, relevantSampleCount: 6 })] as const,
+    ["zzz\0last", evidence("zzz", "last", {
+      terminalTaskCount: 99, relevantSampleCount: 88 })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+  const result = advice(weak, strong, DEFAULT_ROUTING_POLICY, {
+    taskFamily: "coding",
+    familyEvidenceMap: familyMap,
+  });
+  assert.equal(result.candidates[0]!.provider, "zzz");
+  assert.equal(result.candidates[0]!.sampleCoverage.familyRelevantCount, 88);
+  assert.equal(result.candidates[0]!.sampleCoverage.exactRelevantCount, 10);
+  assert.equal(result.candidates[1]!.provider, "aaa");
+  assert.equal(result.candidates[1]!.sampleCoverage.familyRelevantCount, 6);
+  assert.equal(result.candidates[1]!.sampleCoverage.exactRelevantCount, 10);
+});
+
+test("sample coverage serialization stays privacy-safe", () => {
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 13, relevantSampleCount: 13 })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 2, relevantSampleCount: 2 })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+  const result = advice(
+    evidence("deepseek", "v4", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+    evidence("qwen", "plus", { terminalTaskCount: 0, relevantSampleCount: 0 }),
+    DEFAULT_ROUTING_POLICY,
+    { taskFamily: "coding", familyEvidenceMap: familyMap },
+  );
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /taskId|attemptId|rawLog|apiKey|endpoint|sourcePath|diagnostic/i);
+  assert.match(serialized, /"sampleCoverage"/);
+  assert.match(serialized, /"exactRelevantCount":0/);
+  assert.match(serialized, /"familyRelevantCount":13/);
+  // Compact projection only — no nested full evidence clone under sampleCoverage.
+  assert.doesNotMatch(serialized, /"sampleCoverage":\{[^}]*"ignoredNonModelFailures"/);
 });
 
 test("critical work with consider intent and enabled trigger suggests competition", () => {

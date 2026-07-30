@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "Relay Gmail production-readiness continuation",
+  "objective": "Continue from the two already integrated Gmail milestones through four bounded tasks: truthful connector results, exact failure preservation, readable onboarding UI, and shipped-accurate setup documentation.",
+  "items": [
+    {
+      "id": "honest-adapter",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-03c-honest-adapter-grok.yaml",
+      "dependsOn": []
+    },
+    {
+      "id": "failure-preservation",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-03d-preservation-grok.yaml",
+      "dependsOn": ["honest-adapter"]
+    },
+    {
+      "id": "onboarding-ui",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-04b-onboarding-ui-grok.yaml",
+      "dependsOn": ["failure-preservation"]
+    },
+    {
+      "id": "setup-docs",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-goal-04c-setup-docs-grok.yaml",
+      "dependsOn": ["onboarding-ui"]
+    }
+  ]
+}

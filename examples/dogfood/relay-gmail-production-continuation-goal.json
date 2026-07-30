@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "Relay Gmail production readiness continuation",
+  "objective": "Finish Gmail readiness after the first Goal truthfully stopped at its frozen correction cap; retain the two integrated milestones and complete four bounded continuation capabilities without reopening them.",
+  "planFile": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-production-continuation-plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 2,
+    "maxReviewRounds": 1,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "honest-adapter", "gate": "integration" },
+    { "itemId": "failure-preservation", "gate": "integration" },
+    { "itemId": "onboarding-ui", "gate": "integration" },
+    { "itemId": "setup-docs", "gate": "integration" }
+  ]
+}

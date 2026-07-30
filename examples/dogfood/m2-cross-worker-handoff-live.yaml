@@ -1,0 +1,104 @@
+version: 2
+name: Complete two-file label pipeline for live handoff
+project: /tmp/forklight-handoff-live
+taskClass: cross-worker-handoff-live-proof
+taskFamily: bounded-javascript-change
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: Implement the parser and formatter halves of a small label pipeline so the existing tests pass.
+  presentation:
+    summary: 用两个独立文件验证：Main 保留 Grok 做好的解析器，只把格式化缺口交给另一个 Worker。
+    language: zh-CN
+  context:
+    - This is an isolated temporary project used once to prove durable cross-Worker handoff.
+    - Existing tests fully define the required behavior; do not change them.
+  inScope:
+    - Implement lib/parser.js to split comma-separated input, trim and lowercase labels, remove blanks, and deduplicate while preserving first occurrence order.
+    - Implement lib/formatter.js to render labels as hash-prefixed values joined by a middle dot, or No labels for an empty array.
+  outOfScope:
+    - Test changes, dependencies, unrelated files, commit, push, retries, or extra features.
+  executionSteps:
+    - Inspect the two stubs and existing tests.
+    - Implement both files with small readable functions.
+    - Run npm test once and stop.
+  deliverables:
+    - Working parser implementation.
+    - Working formatter implementation.
+  modules:
+    - name: Label parser
+      responsibility: Normalize a comma-separated label string into a stable unique list.
+      consumes:
+        - A comma-separated string.
+      produces:
+        - An ordered array of normalized labels.
+      boundaries:
+        - No validation or coercion beyond the test contract.
+    - name: Label formatter
+      responsibility: Turn normalized labels into a compact display string.
+      consumes:
+        - An array of normalized labels.
+      produces:
+        - A hash-prefixed display string or the empty-state copy.
+      boundaries:
+        - No mutation of the input array.
+  callChain:
+    - A caller sends raw comma-separated labels to parseLabels.
+    - The normalized array is passed to formatLabels.
+    - The UI consumes the returned display string.
+  scenarios:
+    - name: repeated mixed-case input
+      given: Labels contain whitespace, duplicates, blanks, and mixed casing.
+      when: They are parsed.
+      then: A lowercase unique array preserves first occurrence order.
+    - name: populated display
+      given: Three normalized labels.
+      when: They are formatted.
+      then: Hash-prefixed labels are joined by a middle dot.
+    - name: empty display
+      given: No normalized labels.
+      when: They are formatted.
+      then: The result is No labels.
+  risks:
+    - Retaining both files would not prove partial reuse; the live handoff must retain only lib/parser.js.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 80
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 300000
+  workerStopGraceMs: 10000
+  fileLimit: 2
+  fileLimitMode: warn
+  changedLineLimit: 80
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - lib/parser.js
+    - lib/formatter.js
+acceptance:
+  criteria:
+    - Existing tests pass without modification.
+    - Only lib/parser.js and lib/formatter.js change.
+  commands:
+    - npm test

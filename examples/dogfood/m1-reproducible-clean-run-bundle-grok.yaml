@@ -1,0 +1,200 @@
+version: 2
+name: Build a verified clean-user bundle with one command
+project: /Users/yijunwang/code/forklight
+taskClass: clean-user-bundle-builder
+taskFamily: forklight-out-of-box
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: forklight-out-of-box
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok；这是本地打包和验收链路，不需要其他 Provider 专项验证。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      xai/grok-4.5: 0
+
+contract:
+  outcome: >-
+    A release operator can run one checked-in command with an explicit new
+    output directory and receive a frozen ForkLight clean-user bundle. The
+    command independently packs the current product, verifies the package from
+    an isolated install and ForkLight home, starts and cleanly stops the
+    installed Hub/daemon, scans packaged filenames, and writes external
+    non-self-referential evidence. It refuses overwrite and leaves no product
+    process or partial public bundle on failure.
+  presentation:
+    summary: 每次 ForkLight 更新后，都能一条命令生成可交给新用户的安装包和可核对证据，不再靠人工复制与手写结论。
+    language: zh-CN
+  context:
+    - >-
+      The latest frozen bundle `/Users/Shared/ForkLight-Clean-Run.TrcwKU` is
+      bound to build 7426d0f... and 1,587 tests, while the current verified
+      product is build 3403d90... with 1,837 tests. Frequent self-upgrades make
+      manually assembled bundles stale immediately.
+    - >-
+      The existing bundle contains exactly a tarball, copied build identity,
+      runbook, and external bundle-evidence.json. Evidence proves prepack,
+      isolated-prefix install, CLI/MCP entry load, installed Hub/daemon identity,
+      clean shutdown, and sensitive-filename scan, while clearly stating that
+      a new user/VM/Mac is still required.
+    - >-
+      The newly delivered detached Hub restart can start one installed Hub in
+      an isolated FORKLIGHT_HOME and return finite pid/port evidence for exact
+      cleanup.
+  inScope:
+    - Add one documented `npm run bundle:clean -- --output <new-directory>` operator command; output must be explicit and the target must not already exist.
+    - Create all work under a private staging directory next to the destination and publish with one final rename only after every check passes.
+    - Run real `npm pack --json`; allow its existing prepack to run the authoritative full check and parse the final passed/total test summary without inventing counts.
+    - Hash the exact tarball with SHA-256 and read the packaged build identity from package contents or the isolated install.
+    - Scan every tar entry for absolute paths, traversal, and a documented closed set of credential-sensitive filename patterns. Never scan or serialize credential values.
+    - Install the tarball into a private isolated npm prefix without changing global npm state or the current user's ForkLight home.
+    - Verify installed CLI entry, MCP entry handshake/load, and exact installed build identity against the packaged identity.
+    - Start the installed Hub in detached no-open mode with a private isolated FORKLIGHT_HOME, require Hub current and daemon build identity equal to the tarball, then stop the exact Hub pid and installed daemon and prove both are gone.
+    - Copy only the tarball, build-identity.json, and current clean-user runbook into the final bundle; write bundle-evidence.json outside the tarball after verification.
+    - Evidence uses schemaVersion 1 compatible with the previous bundle, contains only relative artifact names, hashes, build identity, closed pass/fail facts, test counts, timestamp, and explicit limitations. No absolute paths, token, nonce, endpoint, environment, command output, or credentials.
+    - On any failure, stop only exact processes started by this run, remove the private staging directory, leave an existing destination untouched, and return one bounded cause. Do not retry automatically.
+    - Add deterministic tests using injected process/filesystem seams or fixture commands; unit tests must never invoke real npm pack recursively, touch Keychain, start Providers, or alter global install state.
+  outOfScope:
+    - Running the clean-user journey for a real new user, creating a macOS account or VM, installing Main integrations, configuring API keys, probing Providers, publishing npm/GitHub releases, changing license/version, overwriting old bundles, commit, or push.
+  executionSteps:
+    - Trace the old bundle schema, package entrypoints, build identity, Hub detached lifecycle, daemon stop, and clean-run runbook.
+    - Define a small bundle planner/evidence validator with closed steps, safe relative names, sensitive filename policy, and cleanup ownership.
+    - Implement the operator command with explicit output validation, private staging, exact argv subprocesses, bounded output capture, and atomic publication.
+    - Verify the installed CLI/MCP/build plus isolated Hub/daemon lifecycle, recording only bounded pass/fail facts.
+    - Add unit and process-level fixture tests without recursively packing ForkLight inside `npm test`.
+    - Document the command and the boundary between package verification and the still-required clean-user run.
+    - Run focused tests, build, full check, and diff hygiene. Main will run the real command once after Integration into a new `/Users/Shared/ForkLight-Clean-Run.*` directory.
+  deliverables:
+    - One repeatable clean-user bundle command.
+    - External schema-compatible evidence generated from actual checks.
+    - Atomic cleanup-safe implementation and deterministic tests.
+    - Updated runbook/README operator instructions.
+  modules:
+    - name: Bundle plan and evidence core
+      responsibility: Validate explicit destinations, artifact names, tar entries, build identity, test summaries, and the final evidence shape.
+      consumes:
+        - Output request, npm pack result, tar listing, packaged identity, and closed verification observations.
+      produces:
+        - Frozen artifact plan and schemaVersion 1 evidence with relative names only.
+      boundaries:
+        - No subprocess, Keychain, Provider, global install, raw output, absolute path, or credential value in evidence.
+    - name: Isolated verification runner
+      responsibility: Pack, install, exercise installed entrypoints, prove Hub/daemon identity, and clean up exactly owned processes.
+      consumes:
+        - Valid plan, current project, private staging/prefix/home, and exact command argv.
+      produces:
+        - Tarball, SHA, packaged identity, bounded verification facts, and cleanup proof.
+      boundaries:
+        - No shell strings, global npm changes, Main install, Provider call, retry, or signal outside exact child pids/home.
+    - name: Atomic bundle publisher
+      responsibility: Assemble only approved artifacts and rename the complete private staging directory to the explicit new destination.
+      consumes:
+        - Verified tarball, identity, runbook, and evidence.
+      produces:
+        - One immutable-looking clean-run directory or no public directory on failure.
+      boundaries:
+        - Refuses existing target; evidence remains outside tarball; no partial final directory or overwrite.
+  callChain:
+    - Operator supplies a new output directory.
+    - Planner validates target and creates a private sibling staging area.
+    - npm pack runs the authoritative prepack full check and produces one tarball.
+    - Runner scans and hashes the tarball, installs it privately, and verifies installed CLI/MCP/build identity.
+    - Installed CLI starts one isolated Hub/daemon; runner verifies exact identities and stops exact owned processes.
+    - Evidence builder records bounded facts and limitations, then publisher copies four approved artifacts and atomically renames staging to final.
+  scenarios:
+    - name: Complete verified bundle
+      given: Current source passes prepack and installed entrypoints/lifecycle are healthy.
+      when: An absent explicit output directory is requested.
+      then: Exactly four approved files appear and evidence hashes the tarball and proves installed identity and clean shutdown.
+    - name: Existing destination
+      given: The requested final directory already exists.
+      when: The command starts.
+      then: It fails before pack, install, process launch, or any mutation inside that directory.
+    - name: Verification failure after Hub start
+      given: The installed Hub starts but daemon identity does not match the tarball.
+      when: Verification fails.
+      then: Only the exact Hub and isolated daemon are stopped, staging is removed, and no final bundle appears.
+    - name: Sensitive package entry
+      given: The tarball listing includes traversal, an absolute path, or a credential-sensitive filename.
+      when: It is scanned.
+      then: Publication stops with one bounded category and no filename or content copied into public evidence.
+    - name: Honest evidence boundary
+      given: All package checks pass on the development Mac.
+      when: evidence is written.
+      then: It still says first-time Keychain, Main install, comprehension, and 15-minute timing require a new user, VM, or Mac.
+  risks:
+    - Invoking the real builder from `npm test` would recurse through prepack; tests must use seams/fixtures and the real command is dogfooded only outside the test process after Integration.
+    - Publishing before cleanup/verification could leave a misleading usable-looking bundle; final rename is the last action.
+    - A generic process kill could affect the development stack; cleanup is restricted to exact returned Hub pid and isolated-home daemon authority.
+    - Embedding bundle-evidence inside the tarball would make the SHA self-referential; evidence is written externally after the tarball is final.
+    - Capturing raw npm/Hub output in evidence could expose local paths or tokens; parse bounded facts and discard raw streams after private diagnostics.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1500
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 1500
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - package.json
+    - scripts/write-build-identity.mjs
+    - src/core/build-identity.ts
+    - src/hub/instance.ts
+    - docs/m1-clean-user-runbook.md
+    - docs/m1-daily-assistant-acceptance.md
+    - tests/package.test.ts
+acceptance:
+  criteria:
+    - One explicit command creates a complete bundle only after real pack, isolated install, installed CLI/MCP/build checks, installed Hub/daemon identity checks, and clean shutdown pass.
+    - Existing destinations and all failure cases remain untouched publicly; private staging and exact owned processes are cleaned without retries.
+    - The tarball SHA and packaged/installed identity are exact, evidence is external and privacy-safe, and limitations never overclaim a clean-user run.
+    - Tests cover planning, parsing, filename policy, identity mismatch, cleanup, atomic publish, and recursive-test prevention without invoking real ForkLight npm pack inside npm test.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/clean-run-bundle.test.ts tests/package.test.ts tests/hub-instance.test.ts
+    - npm run build
+    - npm run check
+    - git diff --check

@@ -1,0 +1,232 @@
+version: 2
+name: Elsewhere retrieves sourced world context without blocking the journey
+project: /Users/yijunwang/code/elsewhere
+taskClass: elsewhere-m2-sourced-world-context
+taskFamily: product-domain-workflow
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: product-domain-workflow
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok 4.5；这是已有方案内边界清楚的数据与工作流切片，不需要 Competition，也不授予 Worker UI 设计权限。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    For a journey whose persisted ContextAssessment says world context may help,
+    Elsewhere can request de-identified historical evidence through an injected
+    port, validate every visible fact against an allowed HTTPS source, build and
+    cache a bounded WorldSpine, and persist an understandable skipped, ready, or
+    unavailable result. Private journeys never call the port; missing, conflicting,
+    or failed sources never block the existing journey or fall back to model knowledge.
+  presentation:
+    summary: 需要时代背景时，Elsewhere 只使用有来源的历史材料；私人旅程不检索，资料失败也不会卡住原来的故事。
+    language: zh-CN
+  context:
+    - Experience redesign M2 now persists a conservative ContextAssessment when the personal FactSpine is confirmed; existing generation remains unchanged.
+    - The next milestone in docs/experience-redesign-v1.md requires a HistoricalContextPort, caching, source provenance, conflicts, empty-result handling, and failure degradation before any world page is designed.
+    - Journey bodies are already encrypted and versioned by JourneyRepository, so one current world-context snapshot can be cached with the Journey without a second database or plaintext file.
+    - The production runtime has no approved general historical-data Provider yet. It must fail closed as not configured instead of browsing, calling the story model, or inventing history.
+    - Browser Demo may use an explicitly labeled fixed catalog. It must never perform network I/O.
+    - >-
+      Main independently verified these three official records for the strong-era Hangzhou fixture; Worker may encode only the bounded facts stated here and their exact source URLs:
+    - >-
+      2013 Hangzhou e-commerce policy: the city linked e-commerce development with logistics, cloud/IoT infrastructure, and online payment. Source: https://zfgb.hangzhou.gov.cn/10/105220253/t123220253054/519894.shtml
+    - >-
+      2013 Hangzhou-Alibaba cooperation record: the parties planned clusters for e-commerce services, smart logistics, cross-border e-commerce, cloud computing, and big data. Source: https://zcom.zj.gov.cn/art/2013/12/4/art_1384592_12906601.html
+    - >-
+      2015 State Council approval: the China (Hangzhou) Cross-border E-commerce Comprehensive Pilot Zone was approved to experiment with transactions, payments, logistics, customs, tax refund, settlement, and information systems. Source: https://www.cac.gov.cn/2015-03/16/c_1114657947.htm
+    - The worktree remains heavily modified from accepted M0-M2 work. Preserve unrelated edits and touch only declared focus paths.
+  inScope:
+    - Add backward-compatible WorldSpineItem, WorldSpine, and persisted world-context snapshot types without changing Journey schema version or JourneyStatus.
+    - Define a narrow HistoricalContextPort whose request contains only WorldQuery, locale, and cancellation signal; it must never receive ForkBrief, FactSpine, raw interview answers, owner id, model credentials, or current location.
+    - Define source evidence with a stable claim key, localized bounded fact, period, place, role, relevance tags, source title, HTTPS URL, and exact matched query values.
+    - Build a pure/service-level preparation pipeline that validates source origin allowlists, HTTPS URLs, exact query-value matches, role limits, time overlap when both sides provide bounds, duplicate claims, and contradictory facts sharing one claim key.
+    - A conflict fails the whole preparation as source-conflict rather than choosing silently. Invalid or disallowed records are discarded; zero valid records becomes no-relevant-results.
+    - Persist one snapshot bound to ContextAssessment.assessedAt with status skipped, ready, or unavailable, stable privacy-safe reason code, attemptedAt, and WorldSpine only when ready.
+    - Reuse a same-assessment snapshot without calling the port again. An explicit refresh may retry ready or unavailable snapshots; a changed assessment ignores stale cache.
+    - For irrelevant or query-less assessments, persist skipped and call the port zero times. For missing port, thrown error, abort, conflict, or empty results, persist unavailable without raw error text and keep existing generate behavior available.
+    - Add a curated in-memory Demo port with exactly the three Main-verified official Hangzhou records above, localized facts and titles, deterministic matching, and no network call.
+    - Add JourneyWorkflow.prepareWorldContext as an explicit recoverable step after confirmed facts. Reconfirming or editing upstream answers must remove any stale world-context snapshot.
+    - Add deterministic tests for the five fixtures, official Demo records, source allowlist, conflict, invalid URL, exact-match provenance, time overlap, cache hit, explicit refresh, abort/failure redaction, private skip, stale-assessment replacement, and unchanged generation.
+  outOfScope:
+    - World page UI, story-direction UI, animation, a new Journey status, App.tsx flow changes, automatic retrieval on confirmation, live web search, scraping, remote HTTP adapters, user-configured source providers, source ranking, political/sensitive-topic policy, or current weather.
+    - Passing WorldSpine into story generation, personal-world intersections, writing prompts, AI review, inferred personal outcomes, company/job/income claims, or treating official policy intent as proof that one person received an opportunity.
+    - Generalizing the three Demo facts beyond the Hangzhou fixture, adding unsourced facts, modifying fixture answers, schema migration, new dependencies, separate cache storage, logs with query values, telemetry, commit, or push.
+    - Competition, another Worker, automatic retry, adaptation, unlimited correction loops, or Token-savings claims.
+  executionSteps:
+    - Trace current ContextAssessment persistence, JourneyWorkflow, encrypted JourneyBody repository, Demo runtime, and recovery tests before editing.
+    - Add the smallest backward-compatible world-spine and snapshot domain values, then define the privacy-minimal port request and evidence response.
+    - Implement deterministic validation, conflict handling, bounded item selection, cache reuse, explicit refresh, and stable failure redaction without I/O in the service.
+    - Wire one explicit prepareWorldContext workflow method and clear stale snapshots when upstream facts or answers change; do not change generation or UI.
+    - Add the three exact curated Demo records with source provenance and fixture-only matching.
+    - Add focused behavioral tests, then run the full Elsewhere check, production build, and diff hygiene once. Return unresolved product-source questions to Main rather than inventing a Provider.
+  deliverables:
+    - Privacy-minimal HistoricalContextPort and deterministic sourced-evidence pipeline.
+    - Recoverable encrypted Journey snapshot with cache and honest failure states.
+    - Three official-source Demo records for the strong Hangzhou sample.
+    - Workflow and regression evidence that private or failed retrieval never blocks the original journey.
+  modules:
+    - name: Historical context port
+      responsibility: Obtain source evidence for a de-identified WorldQuery through an injected capability.
+      consumes:
+        - WorldQuery, locale, and optional AbortSignal.
+      produces:
+        - Bounded historical evidence records or a typed unavailable result.
+      boundaries:
+        - No personal narrative, model call, raw log, storage write, or implicit network implementation.
+    - name: Sourced world-context pipeline
+      responsibility: Validate provenance, relevance, time, duplicates, conflicts, item limits, and cache identity before producing a WorldSpine.
+      consumes:
+        - Current ContextAssessment, optional prior snapshot, injected port, allowed source origins, clock, refresh intent, and signal.
+      produces:
+        - One skipped, ready, or unavailable snapshot with only stable reason codes and a sourced WorldSpine when ready.
+      boundaries:
+        - No partial result on conflict, no raw exception persistence, no unsupported source, and no personal-outcome inference.
+    - name: Journey workflow integration
+      responsibility: Persist world-context preparation atomically as one encrypted JourneyBody revision and preserve recovery behavior.
+      consumes:
+        - Fact-review Journey with confirmed FactSpine and current ContextAssessment plus explicit refresh intent.
+      produces:
+        - Updated Journey containing one current snapshot while retaining the existing status and generation path.
+      boundaries:
+        - No automatic call on confirmation, no new status, no App navigation, and upstream edits clear stale context.
+    - name: Curated Demo evidence
+      responsibility: Demonstrate the full sourced path for the strong-era fixture with three Main-verified official records.
+      consumes:
+        - De-identified query values and locale.
+      produces:
+        - Deterministic localized records with exact HTTPS sources and query matches.
+      boundaries:
+        - No network, no other fixture facts, no company-employment inference, and no claim beyond the official source summaries.
+    - name: Historical-context regressions
+      responsibility: Prove source truth, privacy, caching, failure degradation, workflow persistence, and generation compatibility.
+      consumes:
+        - Fake ports, five fixtures, official Demo catalog, in-memory repository, cancellation, and stale snapshots.
+      produces:
+        - Deterministic service, workflow, and Demo tests with no live Provider or HTTP request.
+      boundaries:
+        - No screenshot, giant snapshot, broad App test rewrite, or mutation outside the isolated workspace.
+  callChain:
+    - Fact confirmation persists a current ContextAssessment and clears any older world-context snapshot.
+    - A future world step explicitly calls JourneyWorkflow.prepareWorldContext.
+    - The workflow passes only assessment query, locale, refresh intent, and signal into the sourced pipeline.
+    - The pipeline returns a cached snapshot or calls HistoricalContextPort, validates evidence, and builds a bounded WorldSpine.
+    - JourneyRepository atomically stores the skipped, ready, or unavailable snapshot in encrypted JourneyBody content.
+    - Existing generate remains callable regardless of skipped or unavailable world context; a later UI task will ask the user to review only ready items.
+  scenarios:
+    - name: Strong Hangzhou journey receives official world facts
+      given: The confirmed strong-era fixture has a driver or constraint assessment containing 2010, Hangzhou, software, and e-commerce coordinates, and Demo uses the curated port.
+      when: prepareWorldContext runs.
+      then: Exactly three source-backed items from the declared official URLs are stored as ready, every item has exact query matches, and none predicts company, role, income, or success.
+    - name: Private expression never retrieves
+      given: The private-expression fixture has irrelevant ContextAssessment and no query.
+      when: prepareWorldContext runs.
+      then: It stores skipped, calls the port zero times, and generation stays available.
+    - name: Retrieval failure degrades honestly
+      given: An eligible assessment and a port that throws, aborts, is absent, or returns no valid evidence.
+      when: preparation runs.
+      then: It stores an unavailable snapshot with one stable reason code, no raw error or query text, starts no retry, and does not block generation.
+    - name: Source conflict fails closed
+      given: Two allowed records share a claim key but assert different normalized facts.
+      when: evidence is validated.
+      then: The whole result is unavailable with source-conflict and no partial WorldSpine is persisted.
+    - name: Cached evidence avoids repeated work
+      given: A ready or unavailable snapshot is bound to the current assessment timestamp.
+      when: preparation runs again without refresh and then with explicit refresh.
+      then: The first call reuses the snapshot with zero port calls; the explicit refresh calls the port once and replaces the snapshot.
+    - name: Upstream change invalidates cache
+      given: A Journey contains a world snapshot from an older assessment.
+      when: answers are edited or facts are reconfirmed and a new assessment is persisted.
+      then: The stale snapshot is removed before any later preparation and cannot leak into the new story.
+  risks:
+    - An official policy can be mistaken for a personal outcome; facts must describe only the documented environment and carry an explicit guardrail in tests and copy.
+    - A matching heuristic can invent relevance; the port must return exact matched query values and the service must verify them against current query strings.
+    - Persisted failures can create accidental permanent cache; reuse is deliberate by default to avoid repeated cost, while explicit refresh is the only retry path.
+    - Source conflict or remote failure could block the core ritual; generation compatibility and zero automatic retry require explicit regressions.
+    - Dirty source could be overwritten; focus paths, source fingerprint preflight, and Main diff review are required before Integration.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1500
+
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1500
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - src-tauri/target
+  generatedPaths:
+    - dist/**
+    - src-tauri/target/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/domain/journey/types.ts
+    - src/services/historical-context/
+    - src/services/journey-workflow/journey-workflow.ts
+    - src/demo/create-demo-runtime.ts
+    - tests/services/historical-context.test.ts
+    - tests/services/journey-workflow.test.ts
+    - tests/demo/create-demo-runtime.test.ts
+acceptance:
+  criteria:
+    - Ready WorldSpine items are bounded, query-matched, HTTPS sourced, allowlisted, conflict-free, and contain no personal outcome claim.
+    - The strong Hangzhou Demo fixture returns exactly the three declared official records; private and unrelated fixtures never receive fabricated history.
+    - Same-assessment cache reuse, explicit refresh, stale invalidation, abort, missing-port, thrown-error, empty, invalid-source, and conflict behavior are deterministic and privacy-safe.
+    - Existing schema-v1 records, Journey status transitions, AI generation inputs, UI, Provider calls, and current full product behavior remain unchanged.
+    - Focused tests, complete Elsewhere check, production build, and diff hygiene pass from the current 156-test baseline.
+  commands:
+    - pnpm vitest run tests/services/historical-context.test.ts tests/services/journey-workflow.test.ts tests/demo/create-demo-runtime.test.ts
+    - pnpm check
+    - pnpm build
+    - git diff --check

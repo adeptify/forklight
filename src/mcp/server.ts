@@ -2,7 +2,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { forklightHome } from "../core/config.js";
-import type { ProviderModelSummary } from "../core/statistics.js";
+import type {
+  CompactProviderModelSummary,
+  ProviderModelSummary,
+} from "../core/statistics.js";
 import type { RoutingAdvisoryResponse } from "../core/model-routing.js";
 import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
 import type {
@@ -83,6 +86,59 @@ const taskPresentationSchema = z.object({
   }),
 }).strict();
 
+/** Structural MCP shape for frozen Worker identities. Semantic identity matching
+ *  (shortlist membership, match to resolved Task) is enforced only by parseTaskSpec. */
+const frozenWorkerIdentitySchema = z.object({
+  provider: z.string().min(1).max(100)
+    .describe("Provider name frozen at selection time"),
+  model: z.string().min(1).max(200)
+    .describe("Model id frozen at selection time"),
+  runtime: z.enum(SUPPORTED_RUNTIME_NAMES)
+    .describe("Worker runtime frozen at selection time"),
+  effort: z.enum(["low", "medium", "high", "xhigh", "max"])
+    .describe("Effort frozen at selection time"),
+  workerProfileId: z.string().min(1).max(64).optional()
+    .describe("Worker Profile id provenance only; later settings edits must not rewrite history"),
+}).strict();
+
+/** Bounded Main routing-decision snapshot for tool discovery.
+ *  Structure only — parseTaskSpec remains the single semantic authority. */
+const routingDecisionSchema = z.object({
+  taskFamily: z.string().min(1).max(80).optional()
+    .describe("Optional family echo; must match top-level taskFamily when both are present"),
+  shortlist: z.array(frozenWorkerIdentitySchema).min(1)
+    .describe("Every Worker Main genuinely considered, frozen by identity"),
+  selectedWorker: frozenWorkerIdentitySchema
+    .describe("The one Worker selected to execute; must match resolved Task provider/runtime/effort"),
+  selectedBecause: z.object({
+    code: z.string().min(1).max(40)
+      .describe("Bounded reason code: relevant-delivery, runtime-capability, user-specified, only-available, main-judgment, or custom ≤40 chars"),
+    note: z.string().min(1).max(300)
+      .describe("Plain-language selection explanation"),
+  }).strict(),
+  competition: z.object({
+    intent: z.enum(["none", "consider", "required"])
+      .describe("Main's explicit Competition intent; unknown evidence alone must stay none"),
+    triggers: z.array(z.enum([
+      "critical",
+      "multiple-plausible-solutions",
+      "new-family",
+      "user-requested",
+    ]))
+      .describe("Explicit triggers; non-empty when intent is consider or required (enforced by parseTaskSpec)"),
+  }).strict(),
+  evidenceSnapshot: z.object({
+    scope: z.enum(["exact-class", "task-family", "none"])
+      .describe("Evidence scope used at decision time"),
+    exactSampleCounts: z.record(z.string(), z.number().int().nonnegative())
+      .describe("Exact taskClass sample count per candidate identity key"),
+    familySampleCounts: z.record(z.string(), z.number().int().nonnegative()).optional()
+      .describe("Required by parseTaskSpec when scope is task-family"),
+    settingsDigest: z.string().min(1).max(200).optional()
+      .describe("Optional settings version fingerprint; never settings values"),
+  }).strict(),
+}).strict();
+
 const taskInputSchema = z.object({
   project: z.string().min(1).describe("Absolute path to the source project"),
   name: z.string().min(1).max(120),
@@ -107,6 +163,18 @@ const taskInputSchema = z.object({
     criteria: z.array(z.string().min(1)).min(1),
     commands: z.array(z.string().min(1)).min(1),
   }),
+  /** Exact task class for audit and routing evidence. Optional for legacy callers;
+   *  never inferred by ForkLight. */
+  taskClass: z.string().min(1).max(80).optional()
+    .describe("Exact task class for audit and routing evidence — never inferred"),
+  /** Stable family id for cross-project evidence. Optional for legacy callers;
+   *  never inferred from name or prompt. */
+  taskFamily: z.string().min(1).max(80).optional()
+    .describe("Stable family id for cross-project evidence — explicit only, never inferred"),
+  /** Immutable Main routing-decision snapshot. Optional for legacy callers;
+   *  never auto-generated from workerProfileId. parseTaskSpec is the semantic authority. */
+  routingDecision: routingDecisionSchema.optional()
+    .describe("Main routing-decision snapshot frozen before any Worker starts: shortlist, selectedWorker, selectedBecause, competition intent/triggers, evidenceSnapshot"),
   provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]).optional(),
   model: z.string().min(1).optional(),
   endpoint: z.string().url().optional(),
@@ -176,6 +244,10 @@ export function inlineTask(
     name: input.name,
     project: input.project,
     contract: input.contract,
+    // Classification + Main routing snapshot: forward unchanged; parseTaskSpec validates.
+    ...(input.taskClass === undefined ? {} : { taskClass: input.taskClass }),
+    ...(input.taskFamily === undefined ? {} : { taskFamily: input.taskFamily }),
+    ...(input.routingDecision === undefined ? {} : { routingDecision: input.routingDecision }),
     ...(resolved.profileId === undefined ? {} : { workerProfileId: resolved.profileId }),
     provider: {
       name: resolved.provider,
@@ -357,6 +429,169 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         content: [{ type: "text", text: JSON.stringify(plans, null, 2) }],
         structuredContent: { plans },
       };
+    },
+  );
+
+  server.registerTool(
+    "forklight_goal_submit",
+    {
+      title: "Submit a durable Goal",
+      description:
+        "Submit one durable Goal that supervises a four-to-eight Task Work Plan through the ordinary Plan scheduler. Atomically freezes policy, milestones, Plan Tasks, and dependencies. Never auto-accepts, auto-integrates, or creates a second scheduler.",
+      inputSchema: z.object({
+        goalFile: z.string().min(1).describe("Absolute path to the Goal YAML or JSON file"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    },
+    async ({ goalFile }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "goal_submit_file",
+        { goalFile },
+        home,
+      );
+      return textAndData(result);
+    },
+  );
+
+  server.registerTool(
+    "forklight_goal_status",
+    {
+      title: "Inspect a durable Goal",
+      description:
+        "Read privacy-safe Goal status: objective, current milestone, what just happened, what is waiting, why it stopped, and the one next Main action. Never exposes raw patches, prompts, absolute paths, or credentials.",
+      inputSchema: z.object({ goalId: z.string().min(1) }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ goalId }) => {
+      await ensureDaemon(home);
+      const goal = await daemonRequest<Record<string, unknown>>("goal_status", { goalId }, home);
+      return textAndData(goal);
+    },
+  );
+
+  server.registerTool(
+    "forklight_goal_list",
+    {
+      title: "List durable Goals",
+      description: "List bounded privacy-safe Goal summaries with progress and next action.",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(100).default(50) }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ limit }) => {
+      await ensureDaemon(home);
+      const goals = await daemonRequest<Record<string, unknown>[]>(
+        "goal_list",
+        { limit },
+        home,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(goals, null, 2) }],
+        structuredContent: { goals },
+      };
+    },
+  );
+
+  server.registerTool(
+    "forklight_goal_advance",
+    {
+      title: "Explicitly advance a Goal",
+      description:
+        "Main-only continue/advance. Identical evidence increments the no-new-evidence counter and stops at the frozen cap without launching a Worker. New authoritative evidence reconciles gates once. Requires confirm: true.",
+      inputSchema: z.object({
+        goalId: z.string().min(1),
+        confirm: z.literal(true),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ goalId, confirm }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "goal_advance",
+        { goalId, confirm },
+        home,
+      );
+      return textAndData(result);
+    },
+  );
+
+  server.registerTool(
+    "forklight_goal_stop",
+    {
+      title: "Stop a durable Goal",
+      description:
+        "Durable Main stop. Prevents future Goal Task admission across restart, keeps history readable, and does not silently kill unrelated Tasks. Requires confirm: true.",
+      inputSchema: z.object({
+        goalId: z.string().min(1),
+        confirm: z.literal(true),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async ({ goalId, confirm }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "goal_stop",
+        { goalId, confirm },
+        home,
+      );
+      return textAndData(result);
+    },
+  );
+
+  server.registerTool(
+    "forklight_goal_task_handoff",
+    {
+      title: "Hand one Goal Task Candidate to a different Worker",
+      description:
+        "Explicit Main direct handoff of one exact normal Goal milestone Candidate: retain selected whole-file paths, name remaining gaps, and hand to one different saved Worker Profile. Creates exactly one durable successor Task without a Competition. Goal keeps the original Plan Task as history and follows the successor for gates, review, Main decision, and Integration. Requires confirm:true. Never auto-selects, retries, accepts, integrates, commits, or pushes. Limited to one hop.",
+      inputSchema: z.object({
+        taskId: z.string().min(1),
+        candidateRevisionId: z.string().min(1),
+        reusablePaths: z.array(z.string().min(1)).min(1).max(20),
+        remainingGaps: z.array(z.object({
+          description: z.string().trim().min(10).max(500),
+          acceptanceExpectation: z.string().trim().min(10).max(500),
+        }).strict()).min(1).max(8),
+        destinationWorkerProfileId: z.string().min(1),
+        reason: z.string().trim().min(1).max(1000),
+        confirm: z.literal(true),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({
+      taskId,
+      candidateRevisionId,
+      reusablePaths,
+      remainingGaps,
+      destinationWorkerProfileId,
+      reason,
+    }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "goal_task_handoff",
+        {
+          taskId,
+          candidateRevisionId,
+          reusablePaths,
+          remainingGaps,
+          destinationWorkerProfileId,
+          reason,
+          confirm: true,
+        },
+        home,
+      );
+      const status = String(result.status ?? "unknown");
+      const paths = String(result.reusablePathCount ?? 0);
+      const gaps = String(result.remainingGapCount ?? 0);
+      const dest = String(result.destinationWorkerProfileId ?? destinationWorkerProfileId);
+      const successor = String(result.successorTaskId ?? "");
+      const next = String(result.nextAction ?? "none");
+      const fail = result.failureCode === undefined ? "" : ` Failure: ${String(result.failureCode)}.`;
+      return textAndData(
+        result,
+        `Goal handoff ${status}: ${paths} reusable path(s) and ${gaps} gap(s) handed to ${dest}. ` +
+          `Successor Task ${successor} is not a retry. Goal follows the successor for verification and review. Next: ${next}.${fail}`,
+      );
     },
   );
 
@@ -722,24 +957,30 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Query ForkLight statistics",
       description:
-        "Query local provider/model outcomes, failures, costs, and separate timing evidence. Duration is reported but is not a default quality ranking signal.",
+        "Query local provider/model aggregate outcomes, failure categories, costs, delivery rates, and separate timing evidence. Default response is compact (no per-Task failure ids or diagnostics) for routine model selection. Set deepAudit=true only for local deep audit of full failure evidence — that expands response size substantially and never calls a Provider or mutates history. Duration is reported but is not a default quality ranking signal.",
       inputSchema: z.object({
         provider: z.string().min(1).optional(),
         model: z.string().min(1).optional(),
         since: z.string().datetime({ offset: true }).optional(),
         until: z.string().datetime({ offset: true }).optional(),
+        deepAudit: z.boolean().optional().describe(
+          "When true, returns the existing full per-Task failure evidence (ids, attempt ids, diagnostics). Default false returns aggregate facts only. Local read-only; large responses; never a Provider call.",
+        ),
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ provider, model, since, until }) => {
+    async ({ provider, model, since, until, deepAudit }) => {
       await ensureDaemon(home);
-      const summaries = await daemonRequest<ProviderModelSummary[]>(
+      const summaries = await daemonRequest<
+        ProviderModelSummary[] | CompactProviderModelSummary[]
+      >(
         "statistics",
         {
           ...(provider === undefined ? {} : { providerName: provider }),
           ...(model === undefined ? {} : { modelName: model }),
           ...(since === undefined ? {} : { since }),
           ...(until === undefined ? {} : { until }),
+          detail: deepAudit === true ? "full" : "compact",
         },
         home,
       );
@@ -1019,14 +1260,21 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Start a model competition",
       description:
-        "Submit a Task Contract with multiple candidate models. Runs each candidate in an isolated workspace from a single canonical snapshot. Returns the competition ID immediately; poll forklight_competition_status for progress.",
+        "Submit a Task Contract with multiple candidate models. Runs each candidate in an isolated workspace from a single canonical snapshot. New reasoned admissions reference a saved Worker Profile per candidate so a Claude Code Worker and a Grok Build Worker can truthfully compete; a bounded Main reason is required for that mixed-runtime entrance. Legacy provider/model-only submissions remain compatible and are stored reason-unavailable. Returns the competition ID immediately; poll forklight_competition_status for progress.",
       inputSchema: taskInputSchema.extend({
         candidates: z.array(z.object({
-          providerName: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]),
-          modelName: z.string().min(1),
-          // Per-candidate override: null = unlimited for that candidate (FL-D92 parity).
+          workerProfileId: z.string().min(1).max(64).optional()
+            .describe("Saved Worker Profile id. When set on every candidate, each candidate resolves its own frozen provider/model/runtime/effort identity (reasoned mixed-runtime admission)."),
+          providerName: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]).optional(),
+          modelName: z.string().min(1).optional(),
           maxBudgetUsd: z.number().positive().nullable().optional(),
         })).min(1),
+        reason: z.object({
+          intent: z.enum(["none", "consider", "required"]),
+          triggers: z.array(z.enum(["critical", "multiple-plausible-solutions", "new-family", "user-requested"])).optional(),
+          note: z.string().trim().min(1).max(1000),
+        }).strict().optional()
+          .describe("Bounded Main reason the Competition is worth running. Required for the reasoned Worker-Profile entrance; optional for legacy provider/model submissions."),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
@@ -1036,12 +1284,135 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       const taskDef = inlineTask(input, settings);
       const competition = await daemonRequest<Record<string, unknown>>(
         "competition_submit",
-        { task: taskDef, baseDirectory: input.project, candidates: input.candidates },
+        {
+          task: taskDef,
+          baseDirectory: input.project,
+          candidates: input.candidates,
+          ...(input.reason === undefined ? {} : { reason: input.reason }),
+        },
+        home,
+      );
+      const r = competition as Record<string, unknown>;
+      const summary = r.legacy === true
+        ? `Competition ${r.id} started with ${input.candidates.length} candidates (legacy explicit submission; reason unavailable).`
+        : `Competition ${r.id} started with ${input.candidates.length} candidates. Poll forklight_competition_status for progress.`;
+      return textAndData(competition, summary);
+    },
+  );
+
+  server.registerTool(
+    "forklight_competition_main_decision",
+    {
+      title: "Record Competition Main decision",
+      description:
+        "Record Main's Competition-level accept, revise, or reject of one exact Candidate Revision. The decision is an explicit derivation of the chosen candidate Task's latest Main Review (recorded via forklight_main_review on that candidate Task): the attempt, verification, and revision must match exactly. Only accept makes the exact revision the final choice eligible for Integration, which still requires explicit confirmation. Never auto-retries, auto-accepts a machine recommendation, or auto-integrates.",
+      inputSchema: z.object({
+        competitionId: z.string().min(1),
+        candidateId: z.string().min(1),
+        decision: z.enum(["accept", "revise", "reject"]),
+        reason: z.string().trim().min(1).max(1000),
+        confirm: z.literal(true),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ competitionId, candidateId, decision, reason }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "competition_main_decision",
+        { competitionId, candidateId, decision, reason, confirm: true },
         home,
       );
       return textAndData(
-        competition,
-        `Competition ${competition.id} started with ${input.candidates.length} candidates. Poll forklight_competition_status for progress.`,
+        result,
+        `Competition Main decision recorded as ${decision} on candidate ${candidateId}.` +
+          (decision === "accept"
+            ? " This exact revision is the final choice; Integration still requires explicit confirmation."
+            : decision === "revise"
+              ? " Main requests one bounded same-Candidate correction through the existing correction authority; no automatic retry."
+              : " No retry is authorized."),
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_competition_retained_partial",
+    {
+      title: "Retain partial Candidate evidence",
+      description:
+        "Record bounded retained-partial evidence for one non-selected Candidate: reusable paths validated against that Candidate's latest revision affected set, plus named remaining gaps. Stores evidence for later M2 cross-Worker handoff only. It never starts a Worker, retry, successor, or Integration, and it never overwrites the original failure.",
+      inputSchema: z.object({
+        competitionId: z.string().min(1),
+        candidateId: z.string().min(1),
+        reusablePaths: z.array(z.string().trim().min(1).max(500)).max(20),
+        remainingGaps: z.array(z.object({
+          description: z.string().trim().min(10).max(500),
+          acceptanceExpectation: z.string().trim().min(10).max(500),
+        }).strict()).min(1).max(8),
+        confirm: z.literal(true),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ competitionId, candidateId, reusablePaths, remainingGaps }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "competition_retained_partial",
+        { competitionId, candidateId, reusablePaths, remainingGaps, confirm: true },
+        home,
+      );
+      return textAndData(
+        result,
+        `Retained ${reusablePaths.length} reusable path(s) and ${remainingGaps.length} gap(s) from candidate ${candidateId} for later M2 handoff. No retry or successor started.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_competition_handoff",
+    {
+      title: "Hand one retained Candidate to a different Worker",
+      description:
+        "Explicit Main handoff of one exact retained Competition Candidate to one different saved Worker Profile. Creates exactly one durable successor Task from the current project snapshot, imports only Main-approved reusable paths from the exact Candidate revision, freezes destination identity, and runs ordinary Task lifecycle. Requires confirm:true. Never mutates the source Task, auto-selects a Worker, retries, accepts, integrates, commits, or pushes. Limited to one hop.",
+      inputSchema: z.object({
+        competitionId: z.string().min(1),
+        candidateId: z.string().min(1),
+        candidateRevisionId: z.string().min(1),
+        destinationWorkerProfileId: z.string().min(1),
+        reason: z.string().trim().min(1).max(1000),
+        confirm: z.literal(true),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({
+      competitionId,
+      candidateId,
+      candidateRevisionId,
+      destinationWorkerProfileId,
+      reason,
+    }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "competition_handoff",
+        {
+          competitionId,
+          candidateId,
+          candidateRevisionId,
+          destinationWorkerProfileId,
+          reason,
+          confirm: true,
+        },
+        home,
+      );
+      const status = String(result.status ?? "unknown");
+      const paths = String(result.reusablePathCount ?? 0);
+      const gaps = String(result.remainingGapCount ?? 0);
+      const dest = String(result.destinationWorkerProfileId ?? destinationWorkerProfileId);
+      const successor = String(result.successorTaskId ?? "");
+      const next = String(result.nextAction ?? "none");
+      const fail = result.failureCode === undefined ? "" : ` Failure: ${String(result.failureCode)}.`;
+      return textAndData(
+        result,
+        `Handoff ${status}: ${paths} reusable path(s) and ${gaps} gap(s) handed to ${dest}. `
+        + `Successor Task ${successor} is not a retry; source evidence is unchanged.${fail} Next: ${next}.`,
       );
     },
   );
@@ -1340,6 +1711,111 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
           );
         },
       });
+    },
+  );
+
+  server.registerTool(
+    "forklight_review_graph_create",
+    {
+      title: "Assign 1–3 read-only judges to the current Candidate Revision",
+      description:
+        "Explicitly select one through three unique saved Worker Profiles as independent read-only judges for the current exact immutable Candidate Revision. ForkLight freezes a private bounded review packet, atomically registers linked allowEdits=false reviewer Tasks, and queues them through the ordinary daemon. Judges cannot edit, integrate, commit, push, vote, or retry. Aggregation describes agreement, disagreement, a single usable opinion, or insufficient evidence; Main remains the final authority. Idempotent for the same revision + ordered profile set. Accepts reviewerWorkerProfileIds (preferred) or the single-profile alias reviewerWorkerProfileId.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        reviewerWorkerProfileIds: z.array(z.string().min(1).max(64)).min(1).max(3).optional(),
+        reviewerWorkerProfileId: z.string().min(1).max(64).optional(),
+        reason: z.string().trim().min(1).max(1000),
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that Main wants a read-only multi-judge review. Must be true.",
+        ),
+      }).strict().refine(
+        (value) =>
+          (value.reviewerWorkerProfileIds !== undefined && value.reviewerWorkerProfileIds.length > 0)
+          || (value.reviewerWorkerProfileId !== undefined && value.reviewerWorkerProfileId.length > 0),
+        {
+          message:
+            "Provide reviewerWorkerProfileIds (1–3) or reviewerWorkerProfileId",
+        },
+      ),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, reviewerWorkerProfileIds, reviewerWorkerProfileId, reason }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_review_graph_create",
+        home,
+        args: {
+          taskId,
+          reviewerWorkerProfileIds: reviewerWorkerProfileIds
+            ?? (reviewerWorkerProfileId === undefined ? [] : [reviewerWorkerProfileId]),
+          reasonLength: reason.length,
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const result = await daemonRequest<Record<string, unknown>>(
+            "review_graph_create",
+            {
+              taskId,
+              ...(reviewerWorkerProfileIds === undefined
+                ? {}
+                : { reviewerWorkerProfileIds }),
+              ...(reviewerWorkerProfileId === undefined
+                ? {}
+                : { reviewerWorkerProfileId }),
+              reason,
+              confirm: true,
+            },
+            home,
+          );
+          const graph = result.graph as Record<string, unknown> | undefined;
+          const reviewerTaskIds = Array.isArray(result.reviewerTaskIds)
+            ? result.reviewerTaskIds
+            : [result.reviewerTaskId];
+          const aggregation = graph?.aggregation as Record<string, unknown> | undefined;
+          return textAndData(
+            result,
+            `Read-only judge review ${result.created === true ? "created" : "resumed"} for Task ${taskId}. ` +
+            `${reviewerTaskIds.length} judge(s); status ${String(graph?.status ?? "unknown")}` +
+            (aggregation === undefined ? "" : `; aggregate ${String(aggregation.state)}`) +
+            ". Judge output is evidence only; Main decides. No automatic vote or retry.",
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_review_graph_status",
+    {
+      title: "Inspect read-only multi-judge review status",
+      description:
+        "Return the privacy-safe Review Graph projection for a Candidate Task: what was reviewed, who reviewed it, per-judge progress/opinions/failures, aggregate state (pending, single-opinion, agreement, disagreement, insufficient-evidence), and the one next Main action. Never includes private packet paths, raw patches, raw result text, credentials, or absolute paths. Judge dispositions are never an automatic Main decision or vote.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+      }).strict(),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ taskId }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown> | null>(
+        "review_graph_status",
+        { taskId },
+        home,
+      );
+      if (result === null || result === undefined) {
+        return textAndData(
+          { taskId, reviewGraph: null },
+          `No Review Graph for Task ${taskId}.`,
+        );
+      }
+      const aggregation = result.aggregation as Record<string, unknown> | undefined;
+      return textAndData(
+        result,
+        `Review Graph ${String(result.id)} status=${String(result.status)}` +
+        (aggregation === undefined ? "" : `; aggregate=${String(aggregation.state)}`) +
+        `; next: ${String(result.nextAction ?? "")}`,
+      );
     },
   );
 

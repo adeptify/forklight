@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   AdaptationTransitionRecord,
   AttemptRecord,
+  CandidateHandoffRecord,
   CompetitionCandidateRecord,
   CompetitionEvaluationRecord,
   CompetitionRecord,
@@ -11,6 +12,8 @@ import type {
   DependencyRecord,
   EventRecord,
   EventType,
+  GoalMilestoneRecord,
+  GoalRecord,
   IntegrationReceiptRecord,
   IntegrationResultRecord,
   PlanItemRecord,
@@ -19,12 +22,16 @@ import type {
   ProbeEvidence,
   RemediationCheckRecord,
   RemediationDisposition,
+  ReviewAssignmentRecord,
+  ReviewGraphRecord,
+  ReviewGraphStatus,
   StagedTaskRegistration,
   TaskRecord,
   TaskStatus,
 } from "../core/types.js";
 import { normalizeDirectCodexPairedSample, normalizeDirectCodexProfileId, normalizeDirectCodexProfilePublication, type DirectCodexPairedSample, type DirectCodexProfilePublication } from "../core/direct-codex-calibration.js";
 import { normalizeDirectCodexSampleReview, type DirectCodexSampleReview } from "../core/direct-codex-review.js";
+import { SELF_UPGRADE_DELIVERY_PROFILE_ID } from "../core/self-upgrade-evidence.js";
 import { normalizeDirectCodexCalibrationRecord, normalizeOrchestrationExchangeReceipt, type DirectCodexCalibrationRecord, type OrchestrationExchangeReceipt } from "../core/token-efficiency.js";
 import { isoTimestamp as now } from "../core/time.js";
 
@@ -291,6 +298,80 @@ export class StateStore {
         disposition_json TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS review_graphs (
+        id TEXT PRIMARY KEY,
+        candidate_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        candidate_revision_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (candidate_task_id, candidate_revision_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_review_graphs_candidate
+        ON review_graphs(candidate_task_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_review_graphs_revision
+        ON review_graphs(candidate_revision_id);
+      CREATE INDEX IF NOT EXISTS idx_review_graphs_status
+        ON review_graphs(status, updated_at);
+      CREATE TABLE IF NOT EXISTS review_assignments (
+        id TEXT PRIMARY KEY,
+        graph_id TEXT NOT NULL REFERENCES review_graphs(id) ON DELETE CASCADE,
+        candidate_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        candidate_revision_id TEXT NOT NULL,
+        reviewer_task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+        reviewer_worker_profile_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+        status TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (graph_id, ordinal),
+        UNIQUE (candidate_revision_id, reviewer_worker_profile_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_review_assignments_graph
+        ON review_assignments(graph_id, ordinal);
+      CREATE INDEX IF NOT EXISTS idx_review_assignments_reviewer
+        ON review_assignments(reviewer_task_id);
+      CREATE TABLE IF NOT EXISTS goals (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL UNIQUE REFERENCES plans(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        record_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status, updated_at);
+      CREATE TABLE IF NOT EXISTS goal_milestones (
+        goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        gate TEXT NOT NULL,
+        item_index INTEGER NOT NULL,
+        satisfied INTEGER NOT NULL DEFAULT 0,
+        record_json TEXT NOT NULL,
+        PRIMARY KEY (goal_id, item_id),
+        UNIQUE (goal_id, item_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_milestones_task ON goal_milestones(task_id);
+      CREATE INDEX IF NOT EXISTS idx_goal_milestones_goal ON goal_milestones(goal_id, item_index);
+      CREATE TABLE IF NOT EXISTS candidate_handoffs (
+        id TEXT PRIMARY KEY,
+        source_revision_id TEXT NOT NULL UNIQUE,
+        source_task_id TEXT NOT NULL REFERENCES tasks(id),
+        successor_task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+        competition_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_candidate_handoffs_source
+        ON candidate_handoffs(source_task_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_candidate_handoffs_competition
+        ON candidate_handoffs(competition_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_candidate_handoffs_status
+        ON candidate_handoffs(status, updated_at);
     `);
   }
 
@@ -633,6 +714,187 @@ export class StateStore {
     });
   }
 
+  /**
+   * Atomically register Plan Tasks, dependencies, Goal, and milestones before
+   * any in-memory queue action. Validation must already be complete.
+   */
+  createPlanExecutionWithGoal(
+    registrations: StagedTaskRegistration[],
+    plan: PlanRecord,
+    items: PlanItemRecord[],
+    dependencies: DependencyRecord[],
+    goal: GoalRecord,
+    milestones: GoalMilestoneRecord[],
+  ): void {
+    this.validatePlanGraph(plan, items, dependencies);
+    const taskIds = new Set(registrations.map(({ task }) => task.id));
+    const itemTaskIds = items.map((item) => item.taskId);
+    if (
+      taskIds.size !== registrations.length
+      || itemTaskIds.length !== registrations.length
+      || itemTaskIds.some((taskId) => taskId === undefined || !taskIds.has(taskId))
+    ) {
+      throw new Error("Plan execution requires one unique staged task for every plan item");
+    }
+    if (goal.planId !== plan.id) {
+      throw new Error("Goal planId must match the registered plan");
+    }
+    if (milestones.length !== items.length) {
+      throw new Error("Goal must declare one milestone for every plan item");
+    }
+    for (const milestone of milestones) {
+      if (milestone.goalId !== goal.id) {
+        throw new Error(`Every milestone must belong to goal ${goal.id}`);
+      }
+      if (!items.some((item) => item.id === milestone.itemId && item.taskId === milestone.taskId)) {
+        throw new Error(`Milestone ${milestone.itemId} must link the registered plan Task`);
+      }
+    }
+    this.transact(() => {
+      for (const { task, creationEvent } of registrations) {
+        this.insertTask(task);
+        this.insertEvent(
+          task.id,
+          undefined,
+          "task.created",
+          creationEvent.summary,
+          creationEvent.payload,
+        );
+      }
+      this.insertPlanGraph(plan, items, dependencies);
+      this.insertGoal(goal, milestones);
+    });
+  }
+
+  private insertGoal(goal: GoalRecord, milestones: GoalMilestoneRecord[]): void {
+    this.db
+      .prepare(
+        "INSERT INTO goals (id, plan_id, status, created_at, updated_at, record_json) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        goal.id,
+        goal.planId,
+        goal.status,
+        goal.createdAt,
+        goal.updatedAt,
+        JSON.stringify(goal),
+      );
+    const insertMilestone = this.db.prepare(
+      `INSERT INTO goal_milestones
+        (goal_id, item_id, task_id, gate, item_index, satisfied, record_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const milestone of milestones) {
+      insertMilestone.run(
+        milestone.goalId,
+        milestone.itemId,
+        milestone.taskId ?? null,
+        milestone.gate,
+        milestone.itemIndex,
+        milestone.satisfied ? 1 : 0,
+        JSON.stringify(milestone),
+      );
+    }
+  }
+
+  saveGoal(goal: GoalRecord, milestones?: readonly GoalMilestoneRecord[]): void {
+    this.transact(() => {
+      this.db
+        .prepare(
+          "UPDATE goals SET plan_id = ?, status = ?, updated_at = ?, record_json = ? WHERE id = ?",
+        )
+        .run(goal.planId, goal.status, goal.updatedAt, JSON.stringify(goal), goal.id);
+      if (milestones !== undefined) {
+        const update = this.db.prepare(
+          `UPDATE goal_milestones
+           SET task_id = ?, gate = ?, item_index = ?, satisfied = ?, record_json = ?
+           WHERE goal_id = ? AND item_id = ?`,
+        );
+        for (const milestone of milestones) {
+          update.run(
+            milestone.taskId ?? null,
+            milestone.gate,
+            milestone.itemIndex,
+            milestone.satisfied ? 1 : 0,
+            JSON.stringify(milestone),
+            milestone.goalId,
+            milestone.itemId,
+          );
+        }
+      }
+    });
+  }
+
+  getGoal(goalId: string): GoalRecord {
+    const row = this.db.prepare("SELECT record_json FROM goals WHERE id = ?").get(goalId) as
+      | { record_json: string }
+      | undefined;
+    if (!row) throw new Error(`Unknown ForkLight goal: ${goalId}`);
+    return parseRecord<GoalRecord>(row.record_json, "goal");
+  }
+
+  listGoals(limit = 50): GoalRecord[] {
+    const bounded = Math.max(1, Math.min(limit, 100));
+    const rows = this.db
+      .prepare("SELECT record_json FROM goals ORDER BY updated_at DESC LIMIT ?")
+      .all(bounded) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) => parseRecord<GoalRecord>(row.record_json, "goal"));
+  }
+
+  getGoalByPlanId(planId: string): GoalRecord | undefined {
+    const row = this.db
+      .prepare("SELECT record_json FROM goals WHERE plan_id = ?")
+      .get(planId) as { record_json: string } | undefined;
+    return row ? parseRecord<GoalRecord>(row.record_json, "goal") : undefined;
+  }
+
+  getGoalByTaskId(taskId: string): GoalRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT g.record_json AS record_json
+         FROM goal_milestones gm
+         JOIN goals g ON g.id = gm.goal_id
+         WHERE gm.task_id = ?
+         LIMIT 1`,
+      )
+      .get(taskId) as { record_json: string } | undefined;
+    if (row) return parseRecord<GoalRecord>(row.record_json, "goal");
+
+    // Direct Goal-Task handoff successor: resolve via source milestone Task.
+    const asSuccessor = this.getCandidateHandoffBySuccessorTaskId(taskId);
+    if (
+      asSuccessor !== undefined
+      && asSuccessor.origin.kind === "goal-task"
+    ) {
+      try {
+        return this.getGoal(asSuccessor.origin.goalId);
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  getGoalMilestones(goalId: string): GoalMilestoneRecord[] {
+    const rows = this.db
+      .prepare(
+        "SELECT record_json FROM goal_milestones WHERE goal_id = ? ORDER BY item_index",
+      )
+      .all(goalId) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) => parseRecord<GoalMilestoneRecord>(row.record_json, "goal milestone"));
+  }
+
+  getGoalMilestone(goalId: string, itemId: string): GoalMilestoneRecord | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT record_json FROM goal_milestones WHERE goal_id = ? AND item_id = ?",
+      )
+      .get(goalId, itemId) as { record_json: string } | undefined;
+    return row
+      ? parseRecord<GoalMilestoneRecord>(row.record_json, "goal milestone")
+      : undefined;
+  }
+
   getPlan(planId: string): PlanRecord {
     const row = this.db.prepare("SELECT record_json FROM plans WHERE id = ?").get(planId) as
       | { record_json: string }
@@ -881,7 +1143,14 @@ export class StateStore {
 
   updateCompetition(
     competitionId: string,
-    patch: { status?: CompetitionStatus; finishedAt?: string; latestEvaluationId?: string; error?: string | null },
+    patch: {
+      status?: CompetitionStatus;
+      finishedAt?: string;
+      latestEvaluationId?: string;
+      error?: string | null;
+      mainDecision?: import("../core/types.js").CompetitionMainDecision;
+      retainedPartial?: import("../core/types.js").CompetitionRetainedPartial[];
+    },
   ): CompetitionRecord {
     let updated!: CompetitionRecord;
     this.transact(() => {
@@ -892,6 +1161,8 @@ export class StateStore {
         updatedAt: now(),
         ...(patch.finishedAt === undefined ? {} : { finishedAt: patch.finishedAt }),
         ...(patch.latestEvaluationId === undefined ? {} : { latestEvaluationId: patch.latestEvaluationId }),
+        ...(patch.mainDecision === undefined ? {} : { mainDecision: patch.mainDecision }),
+        ...(patch.retainedPartial === undefined ? {} : { retainedPartial: patch.retainedPartial }),
       };
       if ("error" in patch) {
         if (patch.error === null) {
@@ -1042,6 +1313,55 @@ export class StateStore {
         "SELECT record_json FROM integration_results WHERE task_id = ? ORDER BY created_at DESC",
       )
       .all(taskId) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) =>
+      parseRecord<IntegrationResultRecord>(row.record_json, "integration result"),
+    );
+  }
+
+  /**
+   * Bounded newest-first window of durable Integration results across all Tasks.
+   * Deterministic order: created_at DESC, id DESC. Read-only.
+   */
+  listRecentIntegrationResults(limit: number): IntegrationResultRecord[] {
+    const safeLimit = Number.isSafeInteger(limit) && limit > 0
+      ? Math.min(limit, 100)
+      : 40;
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM integration_results
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(safeLimit) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) =>
+      parseRecord<IntegrationResultRecord>(row.record_json, "integration result"),
+    );
+  }
+
+  /**
+   * Bounded newest-first Integration results whose durable receipt explicitly
+   * names the fixed forklight-self-upgrade delivery profile. Scope is applied
+   * before LIMIT so ordinary project Integrations cannot hide valid history.
+   * Missing, legacy, malformed, lookalike, or foreign delivery identity is
+   * ignored (not counted, not a break). Deterministic: created_at DESC, id DESC.
+   * Read-only; never rewrites results or inspects command text / paths.
+   */
+  listRecentSelfUpgradeIntegrationResults(limit: number): IntegrationResultRecord[] {
+    const safeLimit = Number.isSafeInteger(limit) && limit > 0
+      ? Math.min(limit, 100)
+      : 40;
+    const rows = this.db
+      .prepare(
+        `SELECT r.record_json AS record_json
+         FROM integration_results r
+         INNER JOIN integration_receipts ir ON ir.id = r.receipt_id
+         WHERE json_extract(ir.record_json, '$.deliveryPlan.profileId') = ?
+         ORDER BY r.created_at DESC, r.id DESC
+         LIMIT ?`,
+      )
+      .all(SELF_UPGRADE_DELIVERY_PROFILE_ID, safeLimit) as unknown as Array<{
+        record_json: string;
+      }>;
     return rows.map((row) =>
       parseRecord<IntegrationResultRecord>(row.record_json, "integration result"),
     );
@@ -1532,6 +1852,165 @@ export class StateStore {
     );
   }
 
+  // --- Cross-Worker Candidate handoff lineage ---
+
+  private insertCandidateHandoff(record: CandidateHandoffRecord): void {
+    // competition_id indexes Competition origin only; Goal-Task stores empty
+    // so we never fabricate a Competition id.
+    const competitionKey =
+      record.origin.kind === "competition" ? record.origin.competitionId : "";
+    this.db
+      .prepare(
+        `INSERT INTO candidate_handoffs
+         (id, source_revision_id, source_task_id, successor_task_id, competition_id,
+          status, record_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.sourceCandidateRevisionId,
+        record.sourceTaskId,
+        record.successorTaskId,
+        competitionKey,
+        record.status,
+        JSON.stringify(record),
+        record.createdAt,
+        record.updatedAt,
+      );
+  }
+
+  /** Atomically persist one handoff authorization + successor Task.
+   *  UNIQUE(source_revision_id) and UNIQUE(successor_task_id) reject duplicates. */
+  createCandidateHandoff(params: {
+    record: CandidateHandoffRecord;
+    task: TaskRecord;
+    creationEvent?: { summary: string; payload?: Record<string, unknown> };
+    authorizationEvent: { summary: string; payload?: Record<string, unknown> };
+  }): void {
+    this.transact(() => {
+      this.insertTask(params.task);
+      if (params.creationEvent !== undefined) {
+        this.insertEvent(
+          params.task.id,
+          undefined,
+          "task.created",
+          params.creationEvent.summary,
+          params.creationEvent.payload,
+        );
+      }
+      this.insertCandidateHandoff(params.record);
+      // Authorization evidence on the source Task (source status stays immutable).
+      this.insertEvent(
+        params.record.sourceTaskId,
+        undefined,
+        "candidate.handoff.authorized",
+        params.authorizationEvent.summary,
+        {
+          ...(params.authorizationEvent.payload ?? {}),
+          handoffId: params.record.id,
+          successorTaskId: params.record.successorTaskId,
+        },
+      );
+      // Mirror on the successor for Task Detail journey projection.
+      this.insertEvent(
+        params.task.id,
+        undefined,
+        "candidate.handoff.authorized",
+        params.authorizationEvent.summary,
+        {
+          ...(params.authorizationEvent.payload ?? {}),
+          handoffId: params.record.id,
+          successorTaskId: params.record.successorTaskId,
+          isSuccessor: true,
+        },
+      );
+    });
+  }
+
+  updateCandidateHandoff(record: CandidateHandoffRecord): CandidateHandoffRecord {
+    const result = this.db
+      .prepare(
+        `UPDATE candidate_handoffs
+         SET status = ?, record_json = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(record.status, JSON.stringify(record), record.updatedAt, record.id);
+    if (result.changes !== 1) {
+      throw new Error(`Candidate handoff ${record.id} was not found`);
+    }
+    return record;
+  }
+
+  getCandidateHandoff(id: string): CandidateHandoffRecord {
+    const row = this.db
+      .prepare(`SELECT record_json FROM candidate_handoffs WHERE id = ?`)
+      .get(id) as { record_json: string } | undefined;
+    if (row === undefined) throw new Error(`Candidate handoff ${id} was not found`);
+    return parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff");
+  }
+
+  getCandidateHandoffBySourceRevisionId(
+    sourceRevisionId: string,
+  ): CandidateHandoffRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT record_json FROM candidate_handoffs WHERE source_revision_id = ?`,
+      )
+      .get(sourceRevisionId) as { record_json: string } | undefined;
+    if (row === undefined) return undefined;
+    return parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff");
+  }
+
+  getCandidateHandoffBySuccessorTaskId(
+    successorTaskId: string,
+  ): CandidateHandoffRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT record_json FROM candidate_handoffs WHERE successor_task_id = ?`,
+      )
+      .get(successorTaskId) as { record_json: string } | undefined;
+    if (row === undefined) return undefined;
+    return parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff");
+  }
+
+  listCandidateHandoffsBySourceTaskId(sourceTaskId: string): CandidateHandoffRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM candidate_handoffs
+         WHERE source_task_id = ?
+         ORDER BY created_at, id`,
+      )
+      .all(sourceTaskId) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) =>
+      parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff"),
+    );
+  }
+
+  listCandidateHandoffsByCompetitionId(competitionId: string): CandidateHandoffRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM candidate_handoffs
+         WHERE competition_id = ?
+         ORDER BY created_at, id`,
+      )
+      .all(competitionId) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) =>
+      parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff"),
+    );
+  }
+
+  listCandidateHandoffs(): CandidateHandoffRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM candidate_handoffs
+         ORDER BY created_at, id`,
+      )
+      .all() as unknown as Array<{ record_json: string }>;
+    return rows.map((row) =>
+      parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff"),
+    );
+  }
+
   // --- Main remediation checks ---
 
   saveRemediationCheck(record: RemediationCheckRecord): void {
@@ -1721,5 +2200,213 @@ export class StateStore {
       }
     }
     return disposition as RemediationDisposition;
+  }
+
+  // --- Exact-revision Review Graph ---
+
+  /** Atomically persist a Review Graph, all assignments, linked read-only
+   *  reviewer Tasks, and candidate/reviewer audit events before any queueing. */
+  createReviewGraphExecution(params: {
+    graph: ReviewGraphRecord;
+    assignments: ReviewAssignmentRecord[];
+    reviewerTasks: TaskRecord[];
+    assignmentEvents: Array<{ summary: string; payload?: Record<string, unknown> }>;
+    reviewerCreationEvents: Array<{ summary: string; payload?: Record<string, unknown> }>;
+  }): void {
+    if (params.assignments.length < 1 || params.assignments.length > 3) {
+      throw new Error("Review graph must register 1–3 assignments");
+    }
+    if (
+      params.assignments.length !== params.reviewerTasks.length
+      || params.assignments.length !== params.assignmentEvents.length
+      || params.assignments.length !== params.reviewerCreationEvents.length
+    ) {
+      throw new Error("Review graph assignment/task/event counts must match");
+    }
+    if (params.graph.assignmentIds.length !== params.assignments.length) {
+      throw new Error("Review graph assignmentIds must match assignments");
+    }
+    for (let index = 0; index < params.assignments.length; index += 1) {
+      const assignment = params.assignments[index]!;
+      const reviewerTask = params.reviewerTasks[index]!;
+      if (assignment.graphId !== params.graph.id) {
+        throw new Error("Review assignment must belong to the graph");
+      }
+      if (assignment.reviewerTaskId !== reviewerTask.id) {
+        throw new Error("Review assignment must reference the reviewer Task");
+      }
+      if (assignment.candidateTaskId !== params.graph.candidateTaskId) {
+        throw new Error("Review assignment candidate must match the graph");
+      }
+      if (params.graph.assignmentIds[index] !== assignment.id) {
+        throw new Error("Review graph assignmentIds order must match assignments");
+      }
+    }
+    this.transact(() => {
+      this.db
+        .prepare(
+          `INSERT INTO review_graphs
+           (id, candidate_task_id, candidate_revision_id, status, record_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          params.graph.id,
+          params.graph.candidateTaskId,
+          params.graph.candidateRevisionId,
+          params.graph.status,
+          JSON.stringify(params.graph),
+          params.graph.createdAt,
+          params.graph.updatedAt,
+        );
+      for (let index = 0; index < params.assignments.length; index += 1) {
+        const assignment = params.assignments[index]!;
+        const reviewerTask = params.reviewerTasks[index]!;
+        const reviewerCreationEvent = params.reviewerCreationEvents[index]!;
+        const assignmentEvent = params.assignmentEvents[index]!;
+        this.insertTask(reviewerTask);
+        this.insertEvent(
+          reviewerTask.id,
+          undefined,
+          "task.created",
+          reviewerCreationEvent.summary,
+          reviewerCreationEvent.payload,
+        );
+        this.db
+          .prepare(
+            `INSERT INTO review_assignments
+             (id, graph_id, candidate_task_id, candidate_revision_id, reviewer_task_id,
+              reviewer_worker_profile_id, ordinal, status, record_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            assignment.id,
+            assignment.graphId,
+            assignment.candidateTaskId,
+            assignment.candidateRevisionId,
+            assignment.reviewerTaskId,
+            assignment.reviewerWorkerProfileId,
+            assignment.ordinal,
+            assignment.status,
+            JSON.stringify(assignment),
+            assignment.createdAt,
+            assignment.updatedAt,
+          );
+        this.insertEvent(
+          params.graph.candidateTaskId,
+          undefined,
+          "review.assignment.created",
+          assignmentEvent.summary,
+          assignmentEvent.payload,
+        );
+      }
+    });
+  }
+
+  getReviewGraph(graphId: string): ReviewGraphRecord {
+    const row = this.db
+      .prepare("SELECT record_json FROM review_graphs WHERE id = ?")
+      .get(graphId) as { record_json: string } | undefined;
+    if (!row) throw new Error(`Unknown review graph: ${graphId}`);
+    return parseRecord<ReviewGraphRecord>(row.record_json, "review graph");
+  }
+
+  getReviewGraphByCandidateTaskId(candidateTaskId: string): ReviewGraphRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT record_json FROM review_graphs
+         WHERE candidate_task_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(candidateTaskId) as { record_json: string } | undefined;
+    if (row === undefined) return undefined;
+    return parseRecord<ReviewGraphRecord>(row.record_json, "review graph");
+  }
+
+  getReviewGraphByCandidateRevisionId(candidateRevisionId: string): ReviewGraphRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT record_json FROM review_graphs
+         WHERE candidate_revision_id = ?
+         LIMIT 1`,
+      )
+      .get(candidateRevisionId) as { record_json: string } | undefined;
+    if (row === undefined) return undefined;
+    return parseRecord<ReviewGraphRecord>(row.record_json, "review graph");
+  }
+
+  listReviewGraphs(statuses?: ReviewGraphStatus[]): ReviewGraphRecord[] {
+    if (statuses === undefined || statuses.length === 0) {
+      const rows = this.db
+        .prepare("SELECT record_json FROM review_graphs ORDER BY created_at DESC")
+        .all() as unknown as Array<{ record_json: string }>;
+      return rows.map((row) => parseRecord<ReviewGraphRecord>(row.record_json, "review graph"));
+    }
+    const placeholders = statuses.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM review_graphs
+         WHERE status IN (${placeholders})
+         ORDER BY created_at DESC`,
+      )
+      .all(...statuses) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) => parseRecord<ReviewGraphRecord>(row.record_json, "review graph"));
+  }
+
+  getReviewAssignment(assignmentId: string): ReviewAssignmentRecord {
+    const row = this.db
+      .prepare("SELECT record_json FROM review_assignments WHERE id = ?")
+      .get(assignmentId) as { record_json: string } | undefined;
+    if (!row) throw new Error(`Unknown review assignment: ${assignmentId}`);
+    return parseRecord<ReviewAssignmentRecord>(row.record_json, "review assignment");
+  }
+
+  getReviewAssignmentByReviewerTaskId(reviewerTaskId: string): ReviewAssignmentRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT record_json FROM review_assignments WHERE reviewer_task_id = ?`,
+      )
+      .get(reviewerTaskId) as { record_json: string } | undefined;
+    if (row === undefined) return undefined;
+    return parseRecord<ReviewAssignmentRecord>(row.record_json, "review assignment");
+  }
+
+  listReviewAssignments(graphId: string): ReviewAssignmentRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM review_assignments
+         WHERE graph_id = ?
+         ORDER BY ordinal, created_at, id`,
+      )
+      .all(graphId) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) =>
+      parseRecord<ReviewAssignmentRecord>(row.record_json, "review assignment"),
+    );
+  }
+
+  /** Atomically update assignment + graph records after reconcile. */
+  updateReviewAssignmentAndGraph(
+    assignment: ReviewAssignmentRecord,
+    graph: ReviewGraphRecord,
+  ): void {
+    if (assignment.graphId !== graph.id) {
+      throw new Error("Review assignment must belong to the graph");
+    }
+    this.transact(() => {
+      this.db
+        .prepare(
+          `UPDATE review_assignments
+           SET status = ?, record_json = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(assignment.status, JSON.stringify(assignment), assignment.updatedAt, assignment.id);
+      this.db
+        .prepare(
+          `UPDATE review_graphs
+           SET status = ?, record_json = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(graph.status, JSON.stringify(graph), graph.updatedAt, graph.id);
+    });
   }
 }

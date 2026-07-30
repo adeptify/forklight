@@ -1,0 +1,169 @@
+version: 2
+name: Let a strictly bound amended remediation satisfy a Goal delivery milestone
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-goal-amended-remediation-delivery
+taskFamily: forklight-main-orchestration
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    A Goal integration milestone becomes satisfied when Main has repaired the
+    current source and a formally amended contradictory acceptance suite passes,
+    but only when ForkLight can re-prove the complete durable chain: exact current
+    Task and Attempt, latest failed verification, latest typed Main revise bound
+    to that verification, atomic passing remediation check, exact amendment and
+    compact disposition agreement, and no later evidence that makes the decision
+    stale. Goal, CLI, MCP, and Hub describe this as a Main-repaired delivery under
+    amended acceptance, never as exact Candidate Integration. Corrupt, legacy,
+    incomplete, stale, mismatched, or merely asserted records remain fail-closed.
+  presentation:
+    summary: 严格绑定并重新完整验证通过的“修订验收交付”可以完成 Goal，但必须明确标注，且绝不伪装成 Candidate 自动合入。
+    language: zh-CN
+  context:
+    - FL-D257 was discovered by the real Elsewhere Goal after its fourth source milestone was delivered through a formally amended contradictory-acceptance remediation, while the board remained 3/4 and correction-cap.
+    - Main remediation already validates amendment input against the latest verification and latest typed Main revise, preserves every originally passing command, atomically stores the full private check plus compact disposition, and labels acceptanceBasis amended-acceptance.
+    - Goal evidence already records remediation status, check id, and acceptance basis, but its gate deliberately accepts only original-acceptance remediation and rejects every amended record without checking the stronger durable evidence.
+    - Existing exact Candidate Integration and original-acceptance remediation behavior are authoritative and must remain unchanged.
+    - Main selected local Grok 4.5 because Grok is the preferred Worker for 2026-07-30 and 2026-07-31. No Competition, correction, retry, or adaptation is requested.
+  inScope:
+    - Add one canonical read-only predicate or evidence resolver for qualifying amended-acceptance remediation.
+    - Re-prove the disposition and private check belong to the same Task and check id, both are passing/complete, their createdAt and amendment count/reason agree, every rerun command passed, and no corrupt record is tolerated.
+    - Require the check amendment verification sequence to equal the latest independent verification event, and require that event to belong to the current Attempt.
+    - Require the latest typed Main Review to be revise, belong to the current Attempt, and bind the same latest verification sequence. A later accept/reject, later verification, changed Attempt, missing event envelope, or stale review must invalidate qualification.
+    - Require the durable remediation completion event for that exact check and ensure the qualifying Main revise predates it; never infer delivery from free text or timestamps alone.
+    - Let an integration Goal gate accept this qualifying evidence for succeeded, failed, or interrupted Tasks while preserving the Task machine status and without creating Candidate acceptance, Integration result/receipt, Worker run, correction, retry, adaptation, commit, or push.
+    - Extend the privacy-safe milestone projection with a compact delivery basis or equivalent signal, and make the Hub explain in English and Chinese that Main repaired current source and passed a formally amended suite. Do not display command text, private reason, paths, or logs.
+    - Add behavior regressions for the real positive path and every stale/corrupt/mismatched boundary. Keep existing exact Integration and original-acceptance paths green.
+  outOfScope:
+    - Treating every amended disposition as delivered, trusting a compact disposition without its private check and events, or accepting an arbitrary replacement command.
+    - Reopening amendment authoring rules, adding new reason codes, changing remediation execution, automatically applying a Candidate, or manufacturing an Integration receipt.
+    - Changing general Goal caps, handoff semantics, model routing, Worker profiles, provider adapters, project source outside ForkLight, or unrelated Hub design.
+    - Retrying a Worker or verifier to obtain a prettier Goal result, weakening tests, committing, pushing, or claiming Token savings.
+  executionSteps:
+    - Trace Goal gate evaluation, remediation Store validation, amendment binding, Main Review event order, Goal evidence digest/projection, daemon reconciliation, and Hub milestone rendering before editing.
+    - Implement one fail-closed read-only resolver that derives qualification only from authoritative stored records and ordered events.
+    - Reuse that resolver for integration-gate satisfaction and privacy-safe projection so displayed basis cannot disagree with scheduling truth.
+    - Update Goal milestone rendering and bilingual copy to distinguish exact Candidate Integration, original-acceptance Main repair, and amended-acceptance Main repair without technical prose in the primary explanation.
+    - Add focused tests, run focused acceptance once, repair only Candidate-caused failures, then run the full suite/build/syntax/diff checks once and stop.
+  deliverables:
+    - Strict amended-remediation Goal qualification with stale/corrupt evidence rejection.
+    - Truthful Goal scheduling/projection and bilingual Hub milestone explanation.
+    - Focused regressions proving no automatic Integration or Task-history rewrite.
+  modules:
+    - name: Durable remediation qualification
+      responsibility: Reconstruct whether the current Task has one complete, passing, fresh amended-remediation delivery chain.
+      consumes:
+        - Current Task and Attempt, ordered Task events, remediation disposition, private remediation checks, and amendment evidence.
+      produces:
+        - A compact qualifying delivery fact or no qualification.
+      boundaries:
+        - Read-only, fail-closed, no command output projection, no mutation, and no trust in a compact row alone.
+    - name: Goal gate and evidence projection
+      responsibility: Use the same qualifying fact to satisfy an integration milestone and expose its delivery basis without claiming Candidate Integration.
+      consumes:
+        - Milestone lineage, Task status, exact Integration evidence, original remediation evidence, and qualifying amended evidence.
+      produces:
+        - Stable satisfaction, evidence digest, plain reason, next action, and compact delivery basis.
+      boundaries:
+        - No automatic accept, Integration, downstream mutation beyond existing Goal readiness, or machine-status rewrite.
+    - name: Hub explanation
+      responsibility: Explain the milestone outcome to a non-technical user in the selected language.
+      consumes:
+        - Privacy-safe Goal milestone projection and delivery basis.
+      produces:
+        - A short label explaining that Main repaired and rechecked source under a corrected acceptance rule.
+      boundaries:
+        - No raw commands, internal paths, logs, private amendment reason, or English leakage in Chinese primary copy.
+  callChain:
+    - Main records a typed revise bound to the current Attempt and latest failed independent verification.
+    - Main submits one structured contradictory-acceptance amendment; ForkLight preserves passing commands, runs the complete amended suite in isolation, and atomically stores the passing check and disposition.
+    - Goal reconciliation resolves the effective milestone Task and re-proves the entire durable chain without mutation.
+    - If every binding is fresh, the integration milestone is satisfied as Main-repaired source delivery under amended acceptance; no Candidate Integration is created.
+    - Existing dependency readiness may then admit the already-declared dependent once, while Hub explains the actual delivery basis.
+  scenarios:
+    - name: Real failed Task is delivered under strict amended acceptance
+      given: The current failed Task has a latest failed verification, a fresh bound Main revise, and an atomic passing amended remediation outcome.
+      when: Goal reconciliation evaluates its integration milestone.
+      then: The milestone is satisfied, Task remains failed, no Integration record appears, and the delivery basis is amended acceptance.
+    - name: Compact disposition without private proof is rejected
+      given: An amended disposition exists but its check is missing, failed, mismatched, incomplete, or corrupt.
+      when: Goal reads the milestone.
+      then: Qualification returns false without mutation or leaked private content.
+    - name: Later evidence makes old remediation stale
+      given: A once-valid amended remediation is followed by another verification, Attempt, or Main accept/reject/revise that is not the review preceding that check.
+      when: Goal reconciles again.
+      then: The milestone no longer qualifies until Main produces a fresh complete delivery chain.
+    - name: Existing authorities remain distinct
+      given: One Task has exact Candidate Integration and another has original-acceptance Main remediation.
+      when: Their integration gates are evaluated.
+      then: Both retain their existing behavior and neither is relabelled as amended acceptance.
+    - name: User reads the Goal in Chinese
+      given: A milestone qualified through amended acceptance.
+      when: Hub renders Goal Detail in zh-CN.
+      then: It says Main repaired current source and rechecked it with a corrected acceptance rule, without exposing internal commands or claiming automatic merge.
+  risks:
+    - Trusting only the compact disposition would allow a forged or stale row to unlock work, so private check and ordered event binding are mandatory.
+    - Treating remediation as Candidate Integration would misstate provenance, so satisfaction reason and projected basis must keep those authorities separate.
+    - A later review or verification can invalidate Main intent, so qualification must be recalculated from current evidence rather than cached forever.
+    - Technical amendment terms can confuse users, so Hub primary copy must explain the action while preserving a secondary auditable basis.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 1000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 8
+  fileLimitMode: warn
+  changedLineLimit: 1000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/goal.ts
+    - src/core/main-remediation.ts
+    - src/state/store.ts
+    - src/core/types.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/goal.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - A qualifying amended remediation is derived from the exact current Task/Attempt, latest verification, latest bound Main revise, matching passing private check, matching compact disposition, exact completion event, and no stale later evidence.
+    - Missing, corrupt, failed, stale, mismatched, legacy, or merely asserted amended records remain fail-closed and never unlock a Goal.
+    - A qualifying delivery satisfies only the Goal integration milestone; it does not change Task status or create Candidate accept, Integration receipt/result, Worker run, retry, correction, adaptation, commit, or push.
+    - Exact Candidate Integration and original-acceptance remediation remain behavior compatible, and Goal evidence/projection truthfully distinguishes all three bases.
+    - Hub explains amended source delivery in English and Chinese without exposing commands, private reasons, paths, prompts, logs, or credentials.
+    - The complete repository remains green and no commit or push occurs.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/goal.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

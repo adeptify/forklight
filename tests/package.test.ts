@@ -20,6 +20,12 @@ test("package declares portable CLI and MCP entrypoints", async () => {
     forklight: "dist/src/cli.js",
     "forklight-mcp": "dist/src/mcp/main.js",
   });
+  const scripts = pkg.scripts as Record<string, string>;
+  assert.match(
+    scripts["bundle:clean"] ?? "",
+    /build-clean-run-bundle/,
+    "operators need one checked-in clean-user bundle command",
+  );
   const files = pkg.files as string[];
   assert.ok(
     files.includes("dist/build-identity.json"),

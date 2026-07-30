@@ -1,0 +1,123 @@
+version: 2
+name: Define Relay's versioned Gmail history cursor and pure sync decisions
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-history-cursor-contract
+taskFamily: relay-gmail-incremental-sync
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Relay has one small, versioned Gmail live-sync cursor and pure decision
+    helpers that distinguish first/full sync, incremental history sync, stale
+    history recovery, complete pagination, and unsafe/incomplete provider data.
+    The cursor is validated before use, contains only privacy-safe progress
+    facts, and cannot advance from partial or failed work. This milestone does
+    not call Gmail or change the user interface; it freezes the protocol that
+    later milestones consume.
+  presentation:
+    summary: 先把 Gmail 增量同步的“从哪里继续、什么时候重建、什么时候不能前进”定义清楚，后续 Worker 都按同一份规则实现。
+    language: zh-CN
+  context:
+    - Current Gmail live sync ignores its stored cursor and writes a placeholder historyId of live.
+    - Relay already persists connector cursor JSON transactionally and preserves it on typed sync failure.
+    - Google documents that history ids are increasing but not contiguous, history.list returns changes after startHistoryId, and stale/invalid history ids typically return HTTP 404 requiring a full sync.
+    - Google history.list is paginated and only a final response without nextPageToken proves the current historyId is safe to store.
+    - The existing Gmail adapter and OAuth scopes already include gmail.readonly; do not change authentication or scopes.
+    - Preserve all dirty Relay work. Use Grok 4.5 and do not commit or push.
+  inScope:
+    - Add one versioned Gmail live cursor type with a validated historyId, sync mode/provenance, and bounded timestamp or equivalent progress metadata; keep fixture cursor compatibility explicit.
+    - Add a total parser that accepts current valid cursor, recognizes missing/legacy/fixture cursor as requiring full sync, and rejects malformed, oversized, unsafe, or wrong-version live cursor without throwing secret-bearing raw JSON.
+    - Add pure typed decisions for first/full sync, incremental sync, stale-history full-resync requirement, page continuation, and final cursor eligibility.
+    - Add pure helpers that collect unique message ids from specific Gmail history change fields needed by Relay while ignoring generic duplicate message arrays. Do not delete Relay Items for Gmail deletions in this milestone.
+    - Define bounded constants for history page count, full-sync message count, and detail fetch count so later network code cannot loop or fan out without limit.
+    - Export the smallest API needed by the live adapter and application tests; avoid a second connector abstraction.
+    - Add focused table-driven tests for missing/current/legacy/malformed cursors, non-contiguous ids, duplicate history ids/messages, empty final history, stale marker, pagination limit, and privacy-safe errors.
+  outOfScope:
+    - Gmail HTTP calls, message detail parsing changes, application transaction changes, database migration, UI, automatic/background sync, push notifications, deletion of existing Relay Items, OAuth, docs, commit, or push.
+  executionSteps:
+    - Trace connector cursor persistence, Gmail/GitHub result types, current fixture/live cursors, and existing failure-preservation tests.
+    - Define a small Gmail-specific cursor/decision module or equally isolated pure section with closed inputs and outputs.
+    - Reuse existing safe path and result conventions; do not expose raw cursor JSON in public errors.
+    - Add focused behavior tests, then run full Relay verification once.
+  deliverables:
+    - Versioned Gmail live cursor parser/builder and bounded constants.
+    - Pure history-page/message-id/final-cursor decision helpers.
+    - Focused source-aligned regression tests.
+  modules:
+    - name: Gmail cursor contract
+      responsibility: Validate persisted progress and decide full versus incremental entry.
+      consumes: [unknown persisted cursor]
+      produces: [typed current cursor or bounded full-sync decision]
+      boundaries: [no HTTP, secrets, database writes, fixture breakage, or raw JSON errors]
+    - name: Gmail history page reducer
+      responsibility: Combine one bounded sequence of history pages into unique message ids and a final cursor eligibility decision.
+      consumes: [typed history page facts and pagination position]
+      produces: [unique message ids, continue/complete/fail decision, candidate history id]
+      boundaries: [no unbounded pagination, generic messages duplication, Item deletion, or cursor persistence]
+  callChain:
+    - Adapter reads an unknown persisted connector cursor.
+    - Cursor parser returns current incremental state or a bounded full-sync requirement.
+    - Future adapter code feeds typed history page facts into the reducer.
+    - Only a complete final page can produce a cursor candidate for the application success transaction.
+  scenarios:
+    - name: First sync
+      given: No Gmail cursor or a legacy placeholder cursor exists.
+      when: The parser runs.
+      then: It requests a bounded full sync and does not invent a history id.
+    - name: Complete incremental pages
+      given: A valid versioned cursor and several history pages with duplicate message ids.
+      when: Pages finish without nextPageToken.
+      then: Unique relevant ids and the final response historyId become eligible for the later success result.
+    - name: Unsafe progress
+      given: Malformed cursor data, a missing final historyId, or pagination beyond the fixed cap.
+      when: The decision helper runs.
+      then: It returns a closed failure/recovery decision and never marks a new cursor eligible.
+  risks:
+    - Treating the placeholder live cursor as real would call history.list with invalid evidence; legacy values must force full sync.
+    - Using the generic History.messages array duplicates specific change arrays; reducers must use only named change types.
+    - Returning a cursor before the final page could skip messages forever; cursor eligibility must require complete pagination.
+  changeBudget: { maxFiles: 5, maxDiffLines: 800 }
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 800
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/adapters/connectors/types.ts
+    - src/adapters/connectors/gmail.ts
+    - src/application/connector-sync.ts
+    - src/adapters/persistence/sqlite/repository.ts
+    - tests/connectors-and-product.test.ts
+    - tests/gmail-oauth.test.ts
+acceptance:
+  criteria:
+    - A versioned Gmail live cursor is parsed from unknown persistence without trusting legacy placeholders or exposing raw data; fixture behavior remains explicit.
+    - Pure helpers distinguish full, incremental, stale-recovery, continue, complete and bounded-failure decisions and only complete pagination can yield a new cursor candidate.
+    - Relevant history message ids are unique and derived from specific change fields; no Item deletion, HTTP, persistence, UI, auth or background sync is introduced.
+    - Bounded page/message/detail limits are source constants covered by edge tests.
+    - Focused tests, full Relay check and diff hygiene pass with no commit or push.
+  commands:
+    - node --test --import tsx tests/connectors-and-product.test.ts tests/gmail-oauth.test.ts
+    - npm run check
+    - git diff --check

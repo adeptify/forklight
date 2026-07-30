@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "Elsewhere approved experience redesign M0-M1",
+  "objective": "Deliver one coherent Now-to-confirmed-facts experience through four exact, reviewable milestones while Codex owns design and Grok implements within contract.",
+  "items": [
+    {
+      "id": "structured-intake",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/elsewhere-redesign-m0-structured-intake-grok.yaml",
+      "dependsOn": []
+    },
+    {
+      "id": "shell-drawer",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/elsewhere-redesign-m1-shell-drawer-grok.yaml",
+      "dependsOn": ["structured-intake"]
+    },
+    {
+      "id": "progressive-intake",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/elsewhere-redesign-m1-progressive-intake-grok.yaml",
+      "dependsOn": ["shell-drawer"]
+    },
+    {
+      "id": "fact-mirror-finish",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/elsewhere-redesign-m1-fact-mirror-finish-grok.yaml",
+      "dependsOn": ["progressive-intake"]
+    }
+  ]
+}
+

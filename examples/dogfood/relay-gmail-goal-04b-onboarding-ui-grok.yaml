@@ -1,0 +1,109 @@
+version: 2
+name: Turn Relay Gmail setup into a readable guided flow
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-onboarding-ui-continuation
+taskFamily: relay-gmail-production-readiness-continuation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    A first-time local user sees a short numbered Gmail setup path, one current state,
+    and one next action; browser authorization completion safely refreshes the opener,
+    while manual token binding stays in a closed advanced section.
+  presentation:
+    summary: 把 Gmail 配置从技术字段堆叠变成用户能跟着完成的一条路。
+    language: zh-CN
+  context:
+    - Safety, refresh, and truthful failure behavior are integrated before this Task starts.
+    - Current Settings mixes client fields, callback URL, token fallback, authorization URL, and raw statuses in one dense card.
+    - Primary UI must explain what happened and what to do next without authRef, PKCE, SecretStore, or callback-plumbing jargon.
+    - Use Grok 4.5. Do not commit or push.
+  inScope:
+    - Present a numbered recommended setup flow with concise Chinese explanations and one primary next action.
+    - Show coherent unconfigured, authorization-open, connected, needs-auth, and failure states.
+    - Put manual access-token binding inside a closed advanced disclosure.
+    - Add a same-origin, secret-free callback completion signal plus a bounded manual refresh fallback.
+    - Keep necessary client and redirect details secondary and copyable.
+    - Add UI/source contract tests for ordering, vocabulary, advanced fallback, state actions, and callback privacy.
+  outOfScope:
+    - Documentation, Google project creation, design-system rewrite, i18n framework, auto-send, dependencies, commit, or push.
+  executionSteps:
+    - Trace the wizard, settings/connectors placement, client methods, callback route, and existing UI tests.
+    - Define one presentation mapping from safe auth facts to current state and next action.
+    - Implement the ordered UI and closed advanced fallback with existing primitives.
+    - Add a closed callback signal containing status only, verify origin, and refresh once.
+    - Run focused and full acceptance once.
+  deliverables:
+    - Explanation-first Gmail wizard and safe completion bridge.
+    - UI/privacy regressions with green production build.
+  modules:
+    - name: Onboarding presentation
+      responsibility: Map safe auth facts into steps, current state, and next action.
+      consumes: [configured/bound state, redirect URI, in-progress state, safe failure]
+      produces: [ordered UI, primary action, advanced fallback]
+      boundaries: [no raw auth reference, token, PKCE jargon, or connector mutation]
+    - name: Completion bridge
+      responsibility: Notify the same-origin opener that authorization finished.
+      consumes: [server-side success or safe failure category]
+      produces: [closed status-only message and one status refresh]
+      boundaries: [no code, OAuth state, token, verifier, email content, or secret]
+  callChain:
+    - Settings shows the current Gmail state and numbered next step.
+    - User registers the displayed redirect and opens Google authorization.
+    - Callback completes server-side and sends a status-only same-origin signal.
+    - The opener refreshes auth status once and shows the next action.
+  scenarios:
+    - name: Recommended setup completes
+      given: A user has a Google OAuth client but no Gmail binding.
+      when: They follow the numbered flow.
+      then: The original window recognizes completion and shows connected without exposing secrets.
+    - name: Browser flow unavailable
+      given: The recommended path cannot be used.
+      when: The user opens advanced setup.
+      then: Manual token binding remains available without competing with the primary path.
+  risks:
+    - postMessage can leak data or trust another origin; use a closed payload and exact origin check.
+    - Dense forms can stay technically correct but unusable; contract tests must enforce the primary story.
+  changeBudget: { maxFiles: 7, maxDiffLines: 1000 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 7
+  fileLimitMode: warn
+  changedLineLimit: 1000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/components/ConnectorAuthWizard.tsx
+    - src/app/api/v1/connectors/gmail/oauth/callback/route.ts
+    - src/client/relay-client.ts
+    - src/app/settings/page.tsx
+    - src/app/connectors/page.tsx
+    - tests/user-chrome-copy.test.ts
+    - tests/boundary-and-mutation-path.test.ts
+acceptance:
+  criteria:
+    - First-time users see one ordered recommended path, one current state, and one next action; manual token binding is advanced.
+    - Callback signaling and browser surfaces carry only a closed status and no code/state/token/verifier/secret/raw auth reference.
+    - Primary UI avoids implementation jargon while secondary technical facts remain usable.
+    - Full Relay lint, tests, and production build pass without commit or push.
+  commands:
+    - node --test --import tsx tests/user-chrome-copy.test.ts tests/gmail-oauth.test.ts tests/boundary-and-mutation-path.test.ts
+    - npm run check
+    - git diff --check

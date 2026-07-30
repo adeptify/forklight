@@ -1,0 +1,132 @@
+version: 2
+name: Finish Relay Gmail setup as a user-readable onboarding path
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-onboarding-clarity
+taskFamily: relay-gmail-production-readiness
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    A first-time local user can understand and complete Gmail setup from Relay without
+    knowing PKCE, authRef, SecretStore, callback plumbing, or internal connector states.
+    The UI presents a short ordered path, recognizes browser completion, separates the
+    advanced token fallback, and the README documents the exact Google Console inputs
+    and safe default behavior.
+  presentation:
+    summary: 把 Gmail 配置从“技术字段罗列”变成新用户看得懂、能完成、失败后知道怎么恢复的一条引导路径。
+    language: zh-CN
+  context:
+    - This final Task starts after the safety, refresh, and truthful-sync milestones are integrated.
+    - Current Settings exposes Client ID, Client Secret, callback URL, raw token fallback, authorization URL, and several status messages in one dense card.
+    - Relay's UI goal is to explain what happened and what to do next, not expose implementation terminology.
+    - Main selected Grok 4.5 as default. Do not commit or push.
+  inScope:
+    - Present Gmail setup as a numbered primary flow with plain Chinese labels and concise explanations; put manual access-token binding in a closed advanced section.
+    - Make callback completion observable to the original Settings window through a safe same-origin browser signal or a bounded refresh action, without sending secrets through the browser message.
+    - Show one current state and one next action for unconfigured, authorization-open, connected, needs-auth, and failure cases.
+    - Remove raw implementation jargon from the primary story while keeping necessary technical details available secondarily.
+    - Update README and env example with exact Google OAuth application type, authorized redirect URI, required scopes/permissions, local-only security behavior, and recovery steps.
+    - Add component/source contract tests for the ordered flow, advanced fallback, callback signal privacy, and docs/env accuracy.
+  outOfScope:
+    - A full design-system rewrite, browser automation, Google Cloud project creation, additional connector providers, internationalization framework, auto-send mail, new dependencies, commit, or push.
+  executionSteps:
+    - Trace the Settings/Connectors placement, client methods, callback page, auth status, README, env example, and current UI contract tests.
+    - Define the smallest ordered state presentation and reuse existing Button/input primitives.
+    - Add a secret-free completion signal and refresh the bound state once.
+    - Update docs and run focused plus full acceptance once.
+  deliverables:
+    - Explanation-first Gmail setup UI with bounded completion feedback and advanced fallback.
+    - Accurate out-of-box documentation and UI/privacy regressions.
+  modules:
+    - name: Gmail onboarding presentation
+      responsibility: Turn auth facts into one ordered state, explanation, and next action.
+      consumes:
+        - Bound/configured state, redirect URI, in-progress state, callback completion, and safe error category.
+      produces:
+        - A short setup sequence, primary action, secondary technical details, and recovery guidance.
+      boundaries:
+        - No token values, authRef/PKCE jargon in the primary story, connector business mutation, or new design system.
+    - name: Browser completion bridge
+      responsibility: Tell the opener only that the same-origin Gmail authorization finished so it can refresh status.
+      consumes:
+        - Secret-free callback success/failure and opener origin.
+      produces:
+        - One bounded status signal or manual refresh fallback.
+      boundaries:
+        - No code, state, token, email body, verifier, or credential in postMessage/query/storage.
+    - name: Setup documentation
+      responsibility: Let a new user configure Google's OAuth application and recover without reading source.
+      consumes:
+        - Actual env names, redirect path, scopes, default draft-only behavior, and local security boundary.
+      produces:
+        - Copy-pastable README/env guidance consistent with shipped behavior.
+      boundaries:
+        - No undocumented production promises or automatic send/integration claims.
+  callChain:
+    - User opens Settings and sees whether Gmail is ready plus the next numbered step.
+    - Relay shows the exact redirect URI to register, then opens Google authorization.
+    - Callback completes server-side and signals only completion to the opener.
+    - Settings refreshes status and explains that Gmail is ready; sync remains a separate explicit user action.
+    - If anything fails, one recovery action leads back to a new authorization attempt.
+  scenarios:
+    - name: First-time setup completes
+      given: The user has a Google OAuth client but no Gmail binding.
+      when: They follow the numbered steps and approve in the browser.
+      then: Settings recognizes completion, shows connected, and never displays or transports a secret.
+    - name: User needs manual fallback
+      given: Browser authorization is unavailable.
+      when: They open advanced setup.
+      then: Token binding remains available without competing with or confusing the recommended path.
+  risks:
+    - A postMessage bridge can leak data or trust another origin; the payload must be closed and origin-checked.
+    - Dense setup forms can remain technically correct but unusable; contract tests should enforce the ordered primary story and hidden advanced fallback.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 1200
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 8
+  fileLimitMode: warn
+  changedLineLimit: 1200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/components/ConnectorAuthWizard.tsx
+    - src/app/api/v1/connectors/gmail/oauth/callback/route.ts
+    - src/client/relay-client.ts
+    - src/app/settings/page.tsx
+    - src/app/connectors/page.tsx
+    - README.md
+    - .env.example
+    - tests/user-chrome-copy.test.ts
+acceptance:
+  criteria:
+    - A first-time user sees one ordered recommended Gmail path, one current state, and one next action; manual token binding is visibly advanced.
+    - Callback signaling and all browser/API surfaces carry no token, verifier, secret, raw auth reference, or OAuth state value.
+    - README and env example exactly match shipped local setup, redirect, default draft behavior, and recovery.
+    - Relay's complete lint, tests, and production build remain green without commit or push.
+  commands:
+    - node --test --import tsx tests/user-chrome-copy.test.ts tests/gmail-oauth.test.ts tests/boundary-and-mutation-path.test.ts
+    - npm run check
+    - git diff --check

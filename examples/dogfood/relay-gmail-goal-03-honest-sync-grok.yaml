@@ -1,0 +1,121 @@
+version: 2
+name: Make Relay Gmail live-sync failures honest and recoverable
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-honest-sync-status
+taskFamily: relay-gmail-production-readiness
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    When Gmail credentials exist, a failed live sync can no longer silently import
+    demo mail and look successful. Relay preserves the last good data/cursor, records
+    a truthful connector state, returns one readable recovery action, and continues to
+    use fixtures only when the user has not enabled live Gmail.
+  presentation:
+    summary: 消除“真实同步失败却偷偷展示演示邮件”的假成功；保留已有数据，并告诉用户失败在哪里、下一步怎么做。
+    language: zh-CN
+  context:
+    - This Task starts after session safety and token refresh are integrated.
+    - The current Gmail connector catches every live-list exception and falls back to fixture items; the application can then mark the connector connected from an earlier health result.
+    - Fixture mode is still valuable for an out-of-the-box demo when no live credential exists.
+    - Main selected Grok 4.5 as default. Do not commit or push.
+  inScope:
+    - Distinguish explicit fixture mode from credentialed live mode in the connector result contract with the smallest compatible shape.
+    - In live mode, propagate authentication, network, and provider failures as typed secret-free outcomes instead of returning fixtures.
+    - In the application sync use case, update connector status truthfully, preserve the previous successful cursor/item state on failure, and emit a readable activity/recovery fact without swallowing the error.
+    - Keep no-credential fixture sync working and clearly labeled.
+    - Add tests for live success, needs-auth, provider/network failure, preserved cursor/data, fixture mode, and no secret/error-stack leakage.
+  outOfScope:
+    - Retry schedules, backoff queues, background automation, changing GitHub behavior unless required by the shared contract, UI redesign, new dependencies, or commit/push.
+  executionSteps:
+    - Trace connector result types, Gmail adapter, application sync transaction, API/store consumption, and fixture tests.
+    - Define the smallest authoritative success/failure contract and one application mutation path.
+    - Preserve prior state on failure and prove no fixture item is ingested when live Gmail fails.
+    - Run focused and full acceptance once.
+  deliverables:
+    - Honest Gmail live/fixture sync behavior and durable connector status.
+    - Regression coverage for failure preservation and readable recovery.
+  modules:
+    - name: Connector sync result boundary
+      responsibility: Distinguish real live success, demo fixture success, and typed failure without secret-bearing content.
+      consumes:
+        - Credential mode, usable-token outcome, Gmail responses, and prior cursor.
+      produces:
+        - A normalized sync result or typed safe failure.
+      boundaries:
+        - No hidden fixture substitution in credentialed mode and no UI-specific wording in the adapter.
+    - name: Application sync authority
+      responsibility: Apply one successful sync transaction or record one truthful failure while preserving prior good data.
+      consumes:
+        - Connector metadata, prior cursor/items, health, and adapter result/failure.
+      produces:
+        - Updated connector state/events or a readable API failure.
+      boundaries:
+        - No partial item ingest on failure, no duplicate mutation route, and no raw stack/secret output.
+  callChain:
+    - User requests connector sync through the existing local API and application use case.
+    - Application resolves the Gmail connector and its explicit mode.
+    - Gmail returns live items, fixture items only without credentials, or a typed failure.
+    - Application commits one successful batch or records failure without changing the last good cursor/items.
+    - UI receives a readable state and next action through existing refresh paths.
+  scenarios:
+    - name: Credentialed Gmail fails
+      given: Gmail is configured live and its list request fails.
+      when: The user syncs.
+      then: No demo items are imported, last good state remains, connector shows error or needs-auth, and recovery is readable.
+    - name: Unconfigured Gmail demonstrates safely
+      given: No Gmail credential exists.
+      when: The user syncs the default product.
+      then: Fixture items remain available and are explicitly represented as demo mode rather than live success.
+  risks:
+    - Changing a shared result type can unintentionally break GitHub, so preserve compatibility or update the shared adapter tests narrowly.
+    - Failure events can leak provider payloads; store only closed categories and bounded readable messages.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 1000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 8
+  fileLimitMode: warn
+  changedLineLimit: 1000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/adapters/connectors/types.ts
+    - src/adapters/connectors/gmail.ts
+    - src/adapters/connectors/github.ts
+    - src/application/connector-sync.ts
+    - src/application/services.ts
+    - src/app/api/v1/connectors/[id]/sync/route.ts
+    - tests/connectors-and-product.test.ts
+    - tests/gmail-oauth.test.ts
+acceptance:
+  criteria:
+    - Credentialed Gmail failures never return/import fixtures or advance the prior good cursor and connector state is truthful.
+    - No-credential demo mode still works, while live success and failure remain distinguishable without internal jargon or secrets.
+    - Relay's complete lint, tests, and production build remain green without commit or push.
+  commands:
+    - node --test --import tsx tests/gmail-oauth.test.ts tests/connectors-and-product.test.ts tests/persistence-and-services.test.ts
+    - npm run check
+    - git diff --check

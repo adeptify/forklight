@@ -1,0 +1,198 @@
+version: 2
+name: Count final delivery only from Main or delivery evidence
+project: /Users/yijunwang/code/forklight
+taskClass: m3-reviewed-final-delivery-evidence
+taskFamily: capability-statistics
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: capability-statistics
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求今天与明天默认使用 Grok；本任务由现有生产数据中的明确 reject 反例触发，边界确定，无需 Competition。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Make “accepted final delivery” mean evidence that Main accepted or that ForkLight
+    durably delivered, rather than treating every machine-successful Task as accepted.
+    Keep machine result, independent behavior, Main decision, remediation delivery,
+    Integration, and missing evidence separate. Routing may prefer a Worker on accepted
+    delivery only when every candidate has enough comparable final-delivery outcomes;
+    machine success without Main/delivery evidence stays unavailable, not success or
+    synthetic failure. This remains read-only advice and never starts Competition.
+  presentation:
+    summary: 机器检查通过只说明 Candidate 可评审；只有 Main 接受、Main 修复后核验交付或真实合入，才算最终交付被接受。
+    language: zh-CN
+  context:
+    - Current summaryFor and deriveRoutingEvidence count task.status=succeeded as acceptedDelivery even when Main never reviewed it, latest Main decision is revise, or Main explicitly rejected it.
+    - >-
+      The current ordinary history has 149 machine-successful Tasks: 88 latest
+      Main accept, 48 no review, 12 latest revise, and 1 explicit reject. The
+      rejected Task 5e5ad6a1-0cfb-4e64-814b-cd3e9faa8ff4 is currently counted as
+      an accepted delivery despite no Integration or remediation.
+    - Existing Hub copy already says acceptedDelivery is “Main-verified accepted final delivery”; the arithmetic contradicts the user-facing meaning.
+    - Legacy applied Integration is durable delivery evidence even when an old Task predates exact Main Review binding. Verified remediation disposition is also final delivery evidence and must stay task-unique.
+  inScope:
+    - >-
+      Define one privacy-safe final-delivery outcome with three states: accepted,
+      not-accepted, unavailable.
+    - Accepted evidence is a verified remediation disposition, a current Main accept bound to the latest Attempt/verification and current Candidate Revision when revision history exists, or an applied Integration when there is no fresher contradictory Main decision.
+    - A current Main reject or revise is not accepted. A relevant model-quality machine failure without later accepted delivery is not accepted. A machine-successful Task with no current Main/delivery evidence is unavailable rather than accepted or failed.
+    - Stale Main decisions, missing/malformed bindings, external failures, policy-only results, and legacy ambiguity stay unavailable unless durable Integration/remediation proves delivery.
+    - Add accepted-delivery comparable sample count, accepted count, not-accepted count, unavailable count, and rate. Keep every Task task-unique when multiple accepted evidence sources overlap.
+    - Make the acceptedDelivery routing factor participate only when every candidate reaches the configured minimum using comparable accepted-delivery samples. Add one stable unavailable reason and preserve strict/flexible missing-evidence behavior.
+    - Use the same outcome resolver for provider/model statistics and routing evidence so the Hub cannot show two meanings for “final delivery.”
+    - >-
+      Update Hub provider statistics and per-candidate routing cards with plain
+      English/Chinese counts: accepted out of comparable outcomes, plus outcomes
+      not yet knowable. Technical evidence may remain folded.
+    - Add a regression using the real shape “machine succeeded + latest Main reject + no Integration/remediation” and prove it is 0 accepted of 1 comparable outcome, never 1 of 1.
+  outOfScope:
+    - Changing Task machine status, independent verification, first-pass evidence, correction churn, failure classification, Main Review recording, remediation/Integration authority, sample thresholds, weights, Competition, automatic Worker selection, historical database backfill, pricing, Token claims, unrelated Hub redesign, commit, or push.
+  executionSteps:
+    - Trace summaryFor, deriveRoutingEvidence, latestMainReview/current revision binding, remediation disposition, Integration evidence, acceptedDelivery factor planning, and Hub renderers before editing.
+    - Implement one canonical delivery-outcome resolver with explicit evidence precedence and no free-text inference.
+    - Thread bounded aggregate counts through provider statistics and full Worker routing evidence without exposing Task ids, reasons, paths, prompts, or logs.
+    - Gate only the acceptedDelivery factor on its own candidate-wide comparable sample coverage; do not block other usable factors in flexible mode.
+    - Render explanation-first bilingual facts and add deterministic regressions for accept, reject, revise, no review, stale decision, remediation, applied legacy Integration, and overlapping evidence.
+    - Run focused tests, JavaScript syntax, the full project check, and diff hygiene once.
+  deliverables:
+    - Task-unique Main/delivery-backed final-delivery statistics and routing evidence.
+    - A factor-specific comparability gate that prevents unavailable final decisions from becoming model scores.
+    - Hub copy that tells users how many outcomes Main actually accepted and how many remain unavailable.
+    - Deterministic tests; no Provider request, Competition, mutation of historical evidence, commit, or push.
+  modules:
+    - name: Final-delivery evidence resolver
+      responsibility: Resolve accepted, not-accepted, or unavailable from durable Main, remediation, Integration, machine, and revision evidence.
+      consumes:
+        - Terminal Task, ordered events, latest Attempt/verification, Candidate Revision, remediation disposition, and applied Integration presence.
+      produces:
+        - One privacy-safe task-unique final-delivery outcome.
+      boundaries:
+        - No reason text inference, no machine-success shortcut, no history mutation, and no stale decision reuse.
+    - name: Statistics and routing factor
+      responsibility: Aggregate comparable delivery outcomes and score only when every candidate has enough samples.
+      consumes:
+        - Final-delivery outcomes, task class/family scope, Worker identity, and configured minimum sample count.
+      produces:
+        - Accepted/sample/not-accepted/unavailable counts, rate, and available-or-omitted acceptedDelivery factor.
+      boundaries:
+        - Does not alter other factor arithmetic, route automatically, or exclude a model.
+    - name: Hub explanation
+      responsibility: Explain the Main-backed final-delivery evidence before technical scoring details.
+      consumes:
+        - Provider summary counts and candidate delivery aggregates.
+      produces:
+        - Bilingual accepted-of-comparable and unavailable evidence facts.
+      boundaries:
+        - No internal event codes as primary copy and no claim that machine success equals final delivery.
+  callChain:
+    - StateStore supplies Tasks, events, Attempts, dispositions, and Integration results to StatisticsService.
+    - The final-delivery resolver produces one outcome per terminal Task.
+    - computeStatistics and deriveRoutingEvidence aggregate the same outcome without double counting.
+    - provideRoutingAdvice checks accepted-delivery sample coverage before applying its configured weight.
+    - Hub renders the aggregate meaning while Main remains the decision owner.
+  scenarios:
+    - name: Machine success explicitly rejected
+      given: Independent checks passed but the latest current Main decision is reject and no later delivery evidence exists.
+      when: final-delivery evidence is aggregated.
+      then: It is zero accepted of one comparable outcome and cannot inflate the model recommendation.
+    - name: Machine success waiting for Main
+      given: Independent checks passed but no Main decision, remediation, or Integration exists.
+      when: evidence is aggregated.
+      then: It increases unavailable count and does not enter the accepted-delivery denominator.
+    - name: Main accepted exact Candidate
+      given: A current accept matches the latest Attempt, verification, and current Candidate Revision.
+      when: evidence is aggregated.
+      then: It is one accepted of one comparable outcome even before Integration.
+    - name: Main repair delivered
+      given: Machine outcome failed or later changed but a verified remediation disposition exists.
+      when: evidence is aggregated.
+      then: It is one task-unique accepted delivery; overlapping accept or Integration does not double count.
+    - name: Legacy Integration proves delivery
+      given: An old Task has no modern bound Main Review but has an applied Integration and no fresher contradictory decision.
+      when: evidence is aggregated.
+      then: It is accepted while the legacy Main-decision details remain unavailable.
+    - name: Candidate set lacks comparable delivery decisions
+      given: At least one candidate has fewer accepted-delivery samples than configured.
+      when: routing runs.
+      then: Flexible mode visibly omits only acceptedDelivery; strict mode remains undecided; no Competition starts without intent.
+  risks:
+    - Counting machine success as accepted rewards unreviewed or rejected work; lock the real reject shape in tests.
+    - Requiring only modern revision binding would erase truthful legacy Integrations; accept durable applied Integration without inventing a historical Main reason.
+    - A stale accept can outlive a later Candidate or verification; require current binding before using it.
+    - Missing review must not become a zero that unfairly penalizes a model; carry an explicit unavailable count and factor-specific coverage gate.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1100
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1100
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - src/core/model-routing.ts
+    - src/core/candidate-revision.ts
+    - src/daemon/coordinator.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/statistics.test.ts
+    - tests/model-routing.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Machine success alone is never accepted final delivery; current Main reject is a comparable non-acceptance.
+    - Main accept, verified remediation, and legacy applied Integration are accepted once per Task with explicit precedence.
+    - Missing/stale/external evidence is unavailable, not a synthetic failure or success.
+    - Accepted-delivery scoring requires candidate-wide comparable sample coverage and preserves strict/flexible semantics.
+    - Provider statistics, routing candidate cards, and bilingual copy use the same Main-backed meaning.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts tests/model-routing.test.ts tests/hub-ui-assets.test.ts
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - npm run check
+    - git diff --check

@@ -4,16 +4,31 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import {
+  defaultAdvancedPolicyFields,
+  defaultEnforcementCapability,
+} from "../src/core/advanced-policy.js";
+import { captureCandidateRevision } from "../src/core/candidate-revision.js";
+import { reverifyCandidate } from "../src/core/candidate-reverification.js";
 import { taskPaths } from "../src/core/config.js";
 import {
   preflightIntegration,
   applyIntegration,
 } from "../src/core/integration.js";
 import { recordMainReview } from "../src/core/main-review.js";
-import type { IntegrationSettings } from "../src/core/settings.js";
+import {
+  createReviewGraph,
+  reconcileReviewAssignment,
+  REVIEWER_TASK_NOT_INTEGRATABLE,
+  PENDING_REVIEW_BLOCKS_INTEGRATION,
+  STALE_MAIN_ACCEPT_AFTER_REVIEW,
+} from "../src/core/review-graph.js";
+import { SettingsService, type IntegrationSettings } from "../src/core/settings.js";
 import type {
   AttemptRecord,
   DeliverySpec,
+  EffectivePolicySnapshot,
+  ProvenanceSource,
   TaskRecord,
   TaskSpec,
   VerificationResult,
@@ -1283,6 +1298,126 @@ test("preflight size rejection adds recovery guidance and default-business prove
   }
 });
 
+test("Integration verifies Elsewhere-shaped file: sibling SDK without mutating source dependency", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-local-pkg-"));
+  const store = new StateStore(root);
+  try {
+    const app = path.join(root, "app");
+    const sdk = path.join(root, "adeptify", "client-core", "sdk");
+    await mkdir(app, { recursive: true });
+    await mkdir(sdk, { recursive: true });
+    const originalSdk = "export const sdkVersion = 1;\n";
+    await writeFile(path.join(sdk, "package.json"), JSON.stringify({
+      name: "@adeptify/client-core",
+      version: "1.0.0",
+    }));
+    await writeFile(path.join(sdk, "index.js"), originalSdk);
+    await writeFile(
+      path.join(app, "package.json"),
+      `${JSON.stringify({
+        name: "elsewhere-app",
+        version: "1.0.0",
+        dependencies: {
+          "@adeptify/client-core": "file:../adeptify/client-core/sdk",
+        },
+      }, null, 2)}\n`,
+    );
+    await writeFile(path.join(app, "readme.md"), "# hello\n\nThis is the original text.\n");
+
+    // Acceptance proves the isolated verification cwd can resolve the sibling
+    // at the declared relative path (the Integration failure mode Elsewhere hit).
+    const acceptanceCommands = [
+      "node -e \"const fs=require('node:fs');const p=require('node:path');const t=p.resolve('..','adeptify','client-core','sdk','index.js');if(!fs.existsSync(t)){console.error('missing sibling sdk');process.exit(1);}const body=fs.readFileSync(t,'utf8');if(!body.includes('sdkVersion')){console.error('bad sdk');process.exit(1);}\"",
+    ];
+    const taskSpec = spec(app, acceptanceCommands);
+    const taskHome = path.join(root, "state");
+    const paths = taskPaths(taskHome, "task-local-pkg");
+    await prepareWorkspace(taskSpec, paths);
+
+    // Sibling mirror exists for workspace commands; baseline stays free of it.
+    const workspaceMirror = path.join(paths.root, "adeptify", "client-core", "sdk", "index.js");
+    assert.equal(await readFile(workspaceMirror, "utf8"), originalSdk);
+    await assert.rejects(() => readFile(path.join(paths.baseline, "adeptify", "client-core", "sdk", "index.js")));
+
+    await writeFile(
+      path.join(paths.workspace, "readme.md"),
+      "# hello\n\nThis is the changed text.\n",
+    );
+    await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+    const integrationDiff = await readFile(paths.diff, "utf8");
+    assert.doesNotMatch(integrationDiff, /adeptify|client-core|sdkVersion/);
+
+    const now = new Date().toISOString();
+    const task: TaskRecord = {
+      id: "task-local-pkg",
+      name: taskSpec.name,
+      status: "succeeded",
+      sourcePath: app,
+      taskFile: "/nonexistent/task.yaml",
+      spec: taskSpec,
+      paths,
+      sessionId: "test-session",
+      currentAttemptId: "attempt-1",
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.createTask(task);
+    store.createAttempt({
+      id: "attempt-1",
+      taskId: task.id,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: task.sessionId,
+      rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      runtimeBudgetUsd: taskSpec.runtime.maxBudgetUsd,
+    });
+    store.addEvent(
+      task.id,
+      "attempt-1",
+      "verification.completed",
+      "Independent verification passed",
+      {
+        passed: true,
+        behaviorPassed: true,
+        policyPassed: true,
+        sourceCompatible: true,
+        commands: acceptanceCommands.map((command) => ({
+          command,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        })),
+        diffPath: paths.diff,
+        sourceUnchanged: true,
+      } satisfies VerificationResult,
+    );
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Sibling SDK candidate independently verified",
+      confirm: true,
+    });
+
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.deepEqual(receipt.rejectionReasons, []);
+    const result = await applyIntegration(store, task.id, receipt.id, INTEGRATION_DEFAULTS);
+    assert.equal(result.status, "applied");
+    assert.equal(
+      result.stages?.find((stage) => stage.stage === "source-verified")?.status,
+      "passed",
+    );
+    assert.match(await readFile(path.join(app, "readme.md"), "utf8"), /changed text/);
+    // Original external SDK bytes remain immutable through Integration.
+    assert.equal(await readFile(path.join(sdk, "index.js"), "utf8"), originalSdk);
+  } finally {
+    store.close();
+  }
+});
+
 test("preflight non-size rejection emits no recovery guidance", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "fl-int-noguide-"));
   const store = new StateStore(root);
@@ -1479,5 +1614,226 @@ test("explicit Task generated paths keep recreated output out of integration evi
     assert.equal(receipt.recoveryGuidance, undefined);
   } finally {
     store.close();
+  }
+});
+
+test("preflight accepts only after succeeded+Main-revise reverify and fresh accept of repaired revision", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-reverify-"));
+  const store = new StateStore(root);
+  try {
+    const sourceDir = path.join(root, "source");
+    const taskHome = path.join(root, "state");
+    await mkdir(sourceDir);
+    await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
+    const markerPath = path.join(root, ".int-reverify-marker");
+    await writeFile(markerPath, "pass\n");
+    const command = `test -f ${markerPath}`;
+    const paths = taskPaths(taskHome, "task-reverify");
+    const taskSpec = spec(sourceDir, [command]);
+    await prepareWorkspace(taskSpec, paths);
+    await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nRevision A.\n");
+    await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+
+    const policyValues = { ...defaultAdvancedPolicyFields(), maxMainReverifications: 1 };
+    const provenance = Object.fromEntries(
+      Object.keys(policyValues).map((key) => [key, "global" as ProvenanceSource]),
+    ) as Record<keyof typeof policyValues, ProvenanceSource>;
+    const effectivePolicy: EffectivePolicySnapshot = {
+      profileId: "test-profile",
+      values: policyValues,
+      provenance,
+      enforcementCapability: defaultEnforcementCapability(),
+    };
+    const task: TaskRecord = {
+      id: "task-reverify",
+      name: taskSpec.name,
+      status: "succeeded",
+      sourcePath: sourceDir,
+      taskFile: "/nonexistent/task.yaml",
+      spec: taskSpec,
+      paths,
+      sessionId: "session-reverify",
+      currentAttemptId: "attempt-1",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      effectivePolicy,
+    };
+    store.createTask(task);
+    const attempt: AttemptRecord = {
+      id: "attempt-1",
+      taskId: task.id,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: task.sessionId,
+      rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+      startedAt: task.createdAt,
+      finishedAt: task.updatedAt,
+      exitCode: 0,
+    };
+    store.createAttempt(attempt);
+    const verification: VerificationResult = {
+      passed: true,
+      behaviorPassed: true,
+      policyPassed: true,
+      sourceCompatible: true,
+      commands: [{ command, exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+      diffPath: paths.diff,
+      patches: {
+        business: {
+          path: paths.diff,
+          filesChanged: 1,
+          changedLines: 2,
+          affectedPaths: ["readme.md"],
+        },
+        generated: { path: paths.diff, filesChanged: 0, changedLines: 0, affectedPaths: [] },
+        integration: {
+          path: paths.diff,
+          filesChanged: 1,
+          changedLines: 2,
+          affectedPaths: ["readme.md"],
+        },
+      },
+      sourceUnchanged: true,
+    };
+    const verificationEvent = store.addEvent(
+      task.id,
+      attempt.id,
+      "verification.completed",
+      "Independent verification passed",
+      verification,
+    );
+    const revisionA = await captureCandidateRevision(
+      store,
+      store.getTask(task.id),
+      attempt,
+      verificationEvent.sequence,
+      true,
+      ["readme.md"],
+      1,
+      2,
+    );
+    const revise = recordMainReview(store, task.id, {
+      decision: "revise",
+      reason: "Semantic repair needed",
+      confirm: true,
+    });
+    assert.equal(revise.candidateRevisionId, revisionA.id);
+
+    // Main repairs retained workspace without a Worker.
+    await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nRevision B repaired.\n");
+    await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+
+    const reverify = await reverifyCandidate(
+      store,
+      { taskId: task.id, reason: "reverify repaired candidate", confirm: true },
+      1,
+      30_000,
+    );
+    assert.equal(reverify.status, "passed");
+    assert.equal(store.getTask(task.id).status, "succeeded");
+    assert.equal(store.listAttempts(task.id).length, 1);
+
+    const blocked = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(blocked.rejectionReasons.some((reason) => reason.includes("Main agent review acceptance is required")));
+
+    const accept = recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Accept repaired revision B",
+      confirm: true,
+    });
+    assert.equal(accept.verificationEventSequence, reverify.verificationEventSequence);
+    assert.notEqual(accept.candidateRevisionId, revisionA.id);
+
+    const allowed = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.equal(allowed.rejectionReasons.length, 0);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reviewer Task is permanently non-integratable and pending review blocks Candidate", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-review-"));
+  const store = new StateStore(root);
+  const settings = new SettingsService(store);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"], true);
+    const events = store.listEvents(task.id);
+    const verification = events.find((e) => e.type === "verification.completed")!;
+    const attempt = store.getAttempt(task.currentAttemptId!);
+    const revision = await captureCandidateRevision(
+      store,
+      store.getTask(task.id),
+      attempt,
+      verification.sequence,
+      true,
+      ["readme.md"],
+      1,
+      2,
+    );
+    // Re-record accept bound to the modern revision.
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Accept exact revision before judge",
+      confirm: true,
+    });
+
+    const profileId = settings.get().workerProfiles.defaultProfileId;
+    const created = await createReviewGraph(store, settings.get(), {
+      candidateTaskId: task.id,
+      reviewerWorkerProfileId: profileId,
+      reason: "Integration gate check",
+      confirm: true,
+    });
+    const pending = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(pending.rejectionReasons.some((r) => r.includes(PENDING_REVIEW_BLOCKS_INTEGRATION)));
+
+    const reviewerReceipt = await preflightIntegration(
+      store,
+      created.reviewerTaskId,
+      INTEGRATION_DEFAULTS,
+    );
+    assert.ok(reviewerReceipt.rejectionReasons.includes(REVIEWER_TASK_NOT_INTEGRATABLE));
+
+    const now = new Date().toISOString();
+    store.createAttempt({
+      id: "reviewer-attempt",
+      taskId: created.reviewerTaskId,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: store.getTask(created.reviewerTaskId).sessionId,
+      rawLogPath: path.join(store.getTask(created.reviewerTaskId).paths.logs, "a.jsonl"),
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      resultText: JSON.stringify({
+        schemaVersion: 1,
+        reviewedRevisionId: revision.id,
+        proposedDisposition: "reject",
+        summary: "Judge rejects for integration gate test",
+        findings: [],
+      }),
+    });
+    store.setTaskStatus(created.reviewerTaskId, "succeeded", {
+      finishedAt: now,
+      currentAttemptId: "reviewer-attempt",
+    });
+    reconcileReviewAssignment(
+      store,
+      store.listReviewAssignments(created.graph.id)[0]!.id,
+    );
+    const stale = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(stale.rejectionReasons.some((r) => r.includes(STALE_MAIN_ACCEPT_AFTER_REVIEW)));
+
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Main overrides judge after reading findings",
+      confirm: true,
+    });
+    const fresh = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.equal(fresh.rejectionReasons.length, 0);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

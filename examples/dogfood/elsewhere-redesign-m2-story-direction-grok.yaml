@@ -1,0 +1,211 @@
+version: 2
+name: Elsewhere turns reviewed evidence into one bounded story direction
+project: /Users/yijunwang/code/elsewhere
+taskClass: elsewhere-m2-reviewed-story-direction
+taskFamily: product-ai-contract-workflow
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: product-ai-contract-workflow
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: user-specified
+    note: 一骏要求 2026-07-30 与 2026-07-31 默认使用 Grok 4.5；这是已有体验方案内、输入输出和安全边界明确的领域 Contract，不需要 Competition。Main 保留产品语义、文案和后续 UI 设计决定。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Elsewhere can persist a person's relevance decision for each sourced world fact,
+    then ask its finite Product Function Runtime for exactly one traceable StoryDirective.
+    The directive may connect confirmed personal facts only to world items the person kept;
+    it keeps unknowns and forbidden outcomes explicit, survives interruption, and becomes an
+    optional grounded input to the existing compose and review functions. Private, unavailable,
+    or all-rejected world context still produces an honest personal-only direction rather than
+    inventing history or blocking the journey.
+  presentation:
+    summary: 用户先决定哪些时代材料与自己有关，Elsewhere 再把确认过的个人事实和保留的材料连接成一个可审查的故事起点。
+    language: zh-CN
+  context:
+    - Experience redesign M2 already persists a conservative ContextAssessment and a sourced WorldContextSnapshot with official-source Demo evidence, cache, conflicts, and failure degradation.
+    - Existing generation deliberately ignores WorldSpine. A world page must not be shipped before reviewed evidence can feed one bounded, reviewable StoryDirective; otherwise the UI would imply a connection that the story does not use.
+    - Existing Journey AI uses finite App-owned Product Function Contracts through client-core, not Agent ReAct. Preserve that architecture and the current compose-review-letter recovery chain.
+    - WorldSpineItem already has optional userDisposition. Journey schema v1 and JourneyStatus must remain unchanged.
+    - The worktree is heavily modified accepted work. Preserve unrelated changes and touch only declared focus paths.
+  inScope:
+    - Add backward-compatible PersonalWorldIntersection and StoryDirective domain types with exact personal-fact IDs, optional exact kept-world-item IDs, a bounded plausible contact, opportunity/constraint when supported, an explicit guardrail, required fact IDs, permitted possibilities, unresolved unknown IDs, forbidden outcomes, generation time, and basis timestamps/IDs that bind the directive to current inputs.
+    - Add a JourneyWorkflow method that atomically sets one ready WorldSpine item's disposition to relevant, irrelevant, or reported_incorrect. Reject unknown item IDs, non-ready snapshots, unconfirmed facts, and wrong status; preserve source text and timestamps; clear any stale StoryDirective after a disposition changes.
+    - Add JourneyAi.planStoryDirection plus one App-owned Product Function Contract. Its request contains the confirmed FactSpine, fork statement, locale, and only WorldSpine items explicitly marked relevant. It never receives rejected/incorrect items, raw interview answers, ContextAssessment reason/query, owner ID, credentials, current location, or unavailable error details.
+    - Require every ready WorldSpine item to have an explicit disposition before planning. If world context is skipped, unavailable, atmosphere-only, or every item is rejected, plan a personal-only direction with zero world item IDs; do not require fake world evidence.
+    - Validate every returned userAnchorId/requiredFactId/unresolvedUnknownId against the current FactSpine and every worldItemId against the explicitly relevant set. Reject duplicate, missing, rejected, incorrect, stale, or invented IDs and reject a world-backed intersection when no relevant items exist.
+    - >-
+      Keep output bounded: one premise, one starting point, 1-4 intersections, 1-8 permitted possibilities, 1-12 forbidden outcomes, and no alternative menu, probability, score, predicted company/job/income/relationship/success, or instruction to the user.
+    - Persist one StoryDirective and its AiRunReference atomically while keeping status fact_review. Reuse an exact-basis directive without another model call; a changed FactSpine, world assessment, relevant item set, or disposition invalidates it. Provider failure/cancel preserves all prior confirmed facts and world decisions and follows existing recoverable AI failure semantics.
+    - Extend ComposeJourneyInput and ReviewJourneyInput with an optional StoryDirective. When present, both Product Function prompts and validators must require the story to respect required facts, permitted possibilities, unknowns, forbidden outcomes, and only the selected sourced world facts. Legacy journeys without a directive remain generatable exactly as before.
+    - Add deterministic Demo planning for all five acceptance fixtures. The strong Hangzhou sample may reference only kept official world item IDs; private/unrelated samples remain personal-only. Demo output must be visibly fixture-specific and contain no fabricated personal outcome.
+    - Add deterministic tests for partial review rejection, exact ID validation, all-rejected/private/unavailable personal-only paths, stale invalidation, exact-basis cache reuse, retry/cancel preservation, Product Function registration/input filtering, generation threading, legacy compatibility, and five Demo fixtures.
+  outOfScope:
+    - World page UI, story-direction preview UI, App.tsx navigation, CSS, animation, user-facing copy, screenshots, current-world permissions, live historical Provider, browsing, source ranking, or changing the three official Demo records.
+    - Writing the full redesigned story, changing scene count, redesigning the reader or letter, adding another AI review call, Agent ReAct, background retries, multiple directions, branching universes, Competition, another Worker, automatic adaptation, commit, or push.
+    - Treating policy intent as personal opportunity, sending rejected world facts to a model, defaulting an unreviewed item to relevant, or making existing generation require a directive for legacy records.
+  executionSteps:
+    - Trace JourneyAi contracts, strict validators, Core Product Function registration, Demo AI, workflow recovery, and current WorldContextSnapshot tests before editing.
+    - Add traceable domain values and the atomic per-item disposition workflow first, including invalidation and exact input-basis helpers.
+    - Define the bounded planStoryDirection input/output Contract, strict ID/reference validation, Core adapter method, and fixture-specific Demo implementation.
+    - Add prepareStoryDirection workflow caching and recoverable persistence, then thread an optional directive into compose/review without changing legacy behavior.
+    - Add focused behavioral tests and run the complete Elsewhere checks once. Return unclear product prose or UI choices to Main rather than inventing screens.
+  deliverables:
+    - Persisted, explicit relevance decisions for sourced world items.
+    - One finite, traceable StoryDirective Product Function with strict input/output boundaries.
+    - Recoverable workflow cache and optional generation grounding.
+    - Five-fixture Demo and regression evidence for world-backed and personal-only directions.
+  modules:
+    - name: World evidence review state
+      responsibility: Persist one explicit disposition without changing the sourced fact itself.
+      consumes:
+        - A fact-review Journey, current world item ID, and one allowed disposition.
+      produces:
+        - A new encrypted Journey revision with the exact item disposition and no stale directive.
+      boundaries:
+        - No silent default, source edit, model call, status change, or rejected-item leakage.
+    - name: Story direction Product Function
+      responsibility: Connect confirmed personal anchors to only user-kept world facts as one bounded possible starting direction.
+      consumes:
+        - Locale, fork, confirmed FactSpine, and explicitly relevant sourced items.
+      produces:
+        - One traceable StoryDirective whose references validate against current inputs.
+      boundaries:
+        - No raw interview, query, unavailable details, current location, personal prediction, score, or alternative menu.
+    - name: Story direction workflow
+      responsibility: Enforce complete review, exact-basis reuse, invalidation, recovery, and atomic persistence.
+      consumes:
+        - Current confirmed personal/world state and one finite AI call.
+      produces:
+        - Complete, cancelled, or recoverable failed WorkflowResult without losing prior work.
+      boundaries:
+        - No retry loop, status change, duplicate AI run, or stale directive reuse.
+    - name: Optional generation grounding
+      responsibility: Carry an existing directive through compose and grounding review while retaining legacy compatibility.
+      consumes:
+        - Existing generation fields plus optional StoryDirective.
+      produces:
+        - Existing AlternateJourney and review results.
+      boundaries:
+        - No change to scene count, current letter contract, or requirement for old records.
+  callChain:
+    - A future World page calls JourneyWorkflow.setWorldItemDisposition for each explicit choice.
+    - A future direction step calls JourneyWorkflow.prepareStoryDirection after all ready items are reviewed.
+    - The workflow derives an exact basis, filters to relevant items only, and reuses an exact cached directive or calls JourneyAi.planStoryDirection once.
+    - The Product Function output passes schema plus exact-reference validation before encrypted Journey persistence.
+    - Existing generate optionally passes the persisted directive to compose and review; legacy records without it keep the old call chain.
+  scenarios:
+    - name: Kept Hangzhou evidence creates a traceable direction
+      given: The strong fixture has three ready official items and the person explicitly keeps two while rejecting one.
+      when: Story direction is prepared.
+      then: The Provider receives only the two kept items, all returned world IDs belong to those two, rejected evidence is absent from input/output, and one directive is cached.
+    - name: Private journey stays personal-only
+      given: Context is skipped as irrelevant with no WorldSpine.
+      when: Story direction is prepared.
+      then: The finite planner receives an empty world-item list, returns intersections with no world IDs, and generation remains available.
+    - name: Unreviewed evidence cannot leak
+      given: A ready WorldSpine has at least one item without a disposition.
+      when: Planning is requested.
+      then: The workflow fails before the Provider call with a stable recoverable code and preserves the Journey.
+    - name: All evidence rejected is still a valid path
+      given: Every ready world item is irrelevant or reported incorrect.
+      when: Planning runs.
+      then: It creates a personal-only directive, sends zero world facts, and does not retry retrieval or planning.
+    - name: Exact basis avoids duplicate cost
+      given: A persisted directive matches FactSpine confirmation, world assessment, and relevant item IDs.
+      when: Planning is called again and then one disposition changes.
+      then: The first call returns the cached record with zero Provider calls; the disposition change removes the directive before any later explicit re-plan.
+  risks:
+    - A model may restate an official policy as a promised personal outcome; references, guardrails, forbidden outcomes, and generation review must keep the distinction explicit.
+    - Unreviewed or rejected evidence may accidentally reach a prompt; build the selected-world input in one tested helper and expose no wider object.
+    - New AI input may break legacy generation; StoryDirective stays optional and legacy tests must compare exact old inputs.
+    - A visually plausible direction may use invented IDs; strict input-aware validation must fail closed before persistence.
+  changeBudget:
+    maxFiles: 14
+    maxDiffLines: 2200
+
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 14
+  fileLimitMode: warn
+  changedLineLimit: 2200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - src-tauri/target
+  generatedPaths:
+    - dist/**
+    - src-tauri/target/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/domain/journey/types.ts
+    - src/services/journey-ai/
+    - src/services/journey-workflow/journey-workflow.ts
+    - src/core-adapter/create-core-product-journey-ai.ts
+    - src/demo/create-demo-runtime.ts
+    - tests/services/journey-ai-contracts.test.ts
+    - tests/services/journey-ai-contract-validation.test.ts
+    - tests/services/journey-workflow.test.ts
+    - tests/core-adapter/core-product-journey-ai.test.ts
+    - tests/demo/create-demo-runtime.test.ts
+acceptance:
+  criteria:
+    - Only explicitly relevant, official sourced world items may reach planning or generation; unreviewed, rejected, incorrect, stale, or invented IDs fail closed.
+    - StoryDirective is one bounded, traceable possibility with explicit unknowns and forbidden outcomes, never a prediction or personal success claim.
+    - Private, unavailable, atmosphere-only, and all-rejected paths produce honest personal-only directions and remain generatable.
+    - Exact-basis caching, disposition invalidation, Provider failure/cancel recovery, AI run persistence, and legacy schema-v1 generation are deterministic.
+    - Focused contracts/workflow/adapter/Demo tests, complete Elsewhere check, production build, and diff hygiene pass from the current 175-test baseline.
+  commands:
+    - pnpm vitest run tests/services/journey-ai-contracts.test.ts tests/services/journey-ai-contract-validation.test.ts tests/services/journey-workflow.test.ts tests/core-adapter/core-product-journey-ai.test.ts tests/demo/create-demo-runtime.test.ts
+    - pnpm check
+    - pnpm build
+    - git diff --check

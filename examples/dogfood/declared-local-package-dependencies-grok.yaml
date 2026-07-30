@@ -1,0 +1,158 @@
+version: 2
+name: Preserve declared local package dependencies in isolated verification
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-declared-local-package-dependencies
+taskFamily: forklight-workspace-isolation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+contract:
+  outcome: >-
+    ForkLight can prepare, reverify, remediate, and Integration-verify a Node project
+    whose root package.json explicitly declares a relative file: or link: dependency
+    outside that project directory. Only those manifest-declared package roots are
+    mirrored into the bounded isolation container; arbitrary external paths remain
+    inaccessible. Candidate business diffs and the original dependency source remain
+    unchanged.
+  presentation:
+    summary: 修复相邻本地 SDK 项目的隔离验收：只复制 package.json 明确声明的本地依赖，代码正确时不再因为临时目录缺少兄弟项目而回滚。
+    language: zh-CN
+  context:
+    - Elsewhere declares @adeptify/client-core as file:../adeptify/adeptify-next/client-core/ts/sdk. Its accepted Candidate e2726546-07de-4e78-9ff0-8dcaf8bcd25a passed every independent command in the retained workspace, but Integration copied the patched project to /tmp/fl-verify-* without the declared sibling SDK. pnpm then failed before behavior verification and ForkLight correctly rolled source back.
+    - ForkLight already has src/workspace/dependency-materializer.ts for excluded runtime directories such as node_modules. Extend one canonical isolation authority instead of adding one-off Elsewhere paths or package-manager commands.
+    - Current copyForVerification returns a bare temporary project. A relative dependency can require a sibling destination, so the temporary verification lifecycle must own and clean one container containing both project and declared mirrors.
+    - Preserve every current uncommitted source change. Do not commit or push. Use Grok 4.5 once; no competition or automatic retry loop.
+  inScope:
+    - >-
+      Read only the root package.json dependency maps needed for runtime/build
+      resolution and discover relative file: and link: values deterministically.
+    - Resolve each declaration relative to the original source project, require an accessible directory package root with package.json, and copy it with copy-on-write clone preference plus ordinary-copy fallback.
+    - Recreate the same relative relationship from the isolated destination project while proving every destination stays inside an explicit per-run isolation container.
+    - Materialize declared local packages for ordinary Task workspace preparation, retained Candidate reverify, and isolated Integration/Main-remediation verification.
+    - Change temporary verification layout if needed so the returned project cwd is distinct from its owned cleanup container; update every caller so no sibling mirror is leaked.
+    - Keep the immutable baseline dependency-free and exclude mirrors from Candidate manifests, patches, affected paths, Integration source writes, privacy projections, and Worker accounting.
+    - Fail closed with bounded, non-secret errors for absolute file/link targets, destination traversal outside the isolation container, missing/unreadable targets, non-directory targets, missing target package.json, malformed source package.json, or conflicting destinations.
+    - Deduplicate repeated declarations of the same source/destination and use stable ordering. Do not follow package dependencies recursively in this version.
+    - Add deterministic tests covering an Elsewhere-shaped ../sibling/sdk declaration in workspace preparation and Integration verification, source immutability, no Candidate diff pollution, cleanup ownership, duplicate declarations, and each fail-closed boundary above.
+  outOfScope:
+    - >-
+      Hard-coded Elsewhere/Adeptify paths, arbitrary directory allowlists,
+      npm/pnpm/yarn install, lockfile rewriting, package.json rewriting,
+      recursive dependency graph installation, remote tarballs, workspace:
+      protocol, absolute file paths, home-directory copying, credentials, UI
+      work, Provider logic, Task retry, Competition, commit, or push.
+  executionSteps:
+    - Trace prepareWorkspace, ensureWorkspaceDependencyMirrors, copyForVerification, Integration, Main remediation, reverify, patch generation, and their current cleanup ownership.
+    - Define one typed result that distinguishes the command cwd from the isolation container to delete; keep backward compatibility only where it does not hide cleanup ownership.
+    - Extend the canonical dependency materializer with manifest-declared local package discovery, strict source/destination validation, stable deduplication, and local clone/copy.
+    - Wire the same behavior into new workspace preparation, legacy retained workspaces, Integration verification, and Main remediation verification without changing Candidate authority.
+    - Prove the exact Elsewhere relative shape in tests, then run focused and complete repository verification once.
+  deliverables:
+    - Canonical manifest-declared local package materializer with bounded isolation semantics.
+    - Updated workspace/reverify/integration/remediation callers with correct lifecycle cleanup.
+    - Regression evidence for the real sibling-SDK shape and unsafe-path rejection.
+  modules:
+    - name: Declared local dependency authority
+      responsibility: Discover and safely mirror only root-manifest relative file/link package roots into a named isolation container.
+      consumes:
+        - Original source project, destination project, isolation container, root package.json, and filesystem metadata.
+      produces:
+        - Stable materialized dependency records or one bounded fail-closed error before commands run.
+      boundaries:
+        - No arbitrary external path, absolute target, recursive install, lockfile/package mutation, external symlink, credential, or product-source write.
+    - name: Verification environment lifecycle
+      responsibility: Own the isolated project cwd and every sibling dependency mirror as one disposable container across Integration and Main remediation.
+      consumes:
+        - Source project, configured excludes, and the canonical materializer.
+      produces:
+        - Command cwd plus exact cleanup root; callers always remove the full root in finally.
+      boundaries:
+        - No leaked sibling mirror, source mutation, relaxed Integration gate, or automatic acceptance.
+    - name: Candidate isolation regression evidence
+      responsibility: Prove workspace commands can resolve an Elsewhere-shaped sibling SDK without changing Candidate or source dependency bytes.
+      consumes:
+        - Temporary project/sibling fixtures, package manifests, preparation, patch, reverify, and Integration verification paths.
+      produces:
+        - Deterministic focused tests and complete-suite evidence.
+      boundaries:
+        - No network, real package install, private absolute path in public projections, huge fixture, or timing assumption.
+  callChain:
+    - Main registers a Task for a project whose package.json names file:../sibling/sdk.
+    - Preparation copies only business source into baseline and workspace, then the authority mirrors the declared SDK to the equivalent relative destination inside the Task run root.
+    - Worker/verifier commands run from workspace and resolve the declared SDK; baseline and Candidate patch never include the mirror.
+    - Integration applies an accepted Candidate to source, creates one temporary container with project/ plus the equivalent sibling mirror, runs all original commands from project/, and deletes the complete container.
+    - A failure at discovery, validation, copying, or verification remains explicit and rolls source back through the existing Integration gate.
+  scenarios:
+    - name: Elsewhere-shaped dependency succeeds
+      given: app/package.json declares file:../adeptify/client-core/sdk and that sibling is a valid package directory.
+      when: ForkLight prepares and later Integration-verifies the app.
+      then: both command environments contain the declared sibling at the expected relative path, acceptance can run, and no dependency file enters the Candidate patch.
+    - name: Source dependency remains immutable
+      given: a mirrored local package file exists in the isolated container.
+      when: its isolated copy changes or the container is deleted.
+      then: the original external package bytes and metadata used for source verification stay unchanged.
+    - name: Manifest tries to escape the owned container
+      given: package.json declares enough parent traversal that the equivalent destination would leave the explicit Task or verification container.
+      when: materialization is planned.
+      then: ForkLight fails before any acceptance command and exposes a bounded reason without copying the path.
+    - name: Temporary verification completes or throws
+      given: Integration or Main remediation owns a project cwd and sibling mirror in one temporary container.
+      when: verification passes, fails, times out, or setup throws.
+      then: the caller deletes the complete owned container and never leaves the mirror beside /tmp.
+  risks:
+    - A manifest is project-controlled input; destination containment and target package-root validation must happen before copying anything.
+    - Returning only a project cwd can make callers delete too little; cleanup ownership must be explicit and tested.
+    - Copying external packages can expose unrelated content; this version copies only explicit direct package roots, validates package.json, and does not recurse.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1500
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1200000
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1500
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workspace/dependency-materializer.ts
+    - src/workspace/copy.ts
+    - src/core/integration-verification-copy.ts
+    - src/core/integration.ts
+    - src/core/main-remediation.ts
+    - src/core/candidate-reverification.ts
+    - src/core/verifier.ts
+    - tests/workspace.test.ts
+    - tests/integration.test.ts
+acceptance:
+  criteria:
+    - Relative file/link package roots explicitly declared by root package.json are mirrored at the expected relative location inside one bounded isolation container for prepare, reverify, Integration, and remediation.
+    - Absolute, escaping, malformed, missing, non-package, and conflicting declarations fail closed before commands; duplicate declarations are deterministic.
+    - Baseline, Candidate diff, source dependency, Integration authority, and cleanup guarantees remain unchanged.
+    - ForkLight's focused tests, complete suite/build, Hub syntax, and diff hygiene remain green.
+  commands:
+    - node --test --import tsx tests/workspace.test.ts tests/integration.test.ts tests/main-remediation.test.ts tests/candidate-reverification.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

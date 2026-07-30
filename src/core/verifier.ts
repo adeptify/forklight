@@ -13,6 +13,10 @@ import { createPathPolicy } from "../workspace/path-policy.js";
 import { writeWorkspacePatchReport } from "../workspace/patch.js";
 import { verifierProcessEnvironment } from "../workspace/verifier-git.js";
 import {
+  ensureWorkspaceDependencyMirrors,
+  RUNTIME_DEPENDENCY_DIRECTORIES,
+} from "../workspace/dependency-materializer.js";
+import {
   sizePolicyFromSnapshot,
 } from "./advanced-policy.js";
 import { assessContractInfeasibility } from "./contract-infeasible.js";
@@ -208,6 +212,23 @@ export async function executeVerificationPass(
   attemptId: string,
   timeoutMs?: number,
 ): Promise<{ verification: VerificationResult; summary: string }> {
+  // Old retained Candidates may still carry the historical external
+  // node_modules symlink. Upgrade every verification entry point here so
+  // ordinary correction/resume and no-Worker reverification share the same
+  // command-ready isolation boundary. Also materialize root-manifest declared
+  // relative file:/link: package roots into the Task isolation container.
+  // Newly prepared local mirrors are a no-op.
+  const excluded = new Set(task.spec.workspace.exclude);
+  const dependencyNames = RUNTIME_DEPENDENCY_DIRECTORIES.filter((name) =>
+    excluded.has(name),
+  );
+  await ensureWorkspaceDependencyMirrors(
+    task.spec.project,
+    task.paths.workspace,
+    dependencyNames,
+    task.paths.root,
+  );
+
   const commands: VerificationCommandResult[] = [];
   const { env: verifierEnvironment, shellGitPrefix } = await verifierProcessEnvironment(task);
   for (const command of task.spec.acceptance.commands) {

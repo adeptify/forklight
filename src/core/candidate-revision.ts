@@ -526,6 +526,36 @@ export function isLatestMainReviewRevise(
     && review.verificationEventSequence === latestVerificationSeq;
 }
 
+/** A Competition Candidate may use the ordinary structured-correction engine
+ * only when Main has explicitly recorded a Competition-level revise for this
+ * exact Task, Attempt, verification event, CandidateRevision, and patch
+ * digest. This preserves the standalone correction authority while closing
+ * the old blanket ban without turning machine comparison into retry authority. */
+export function hasExactCompetitionMainRevise(
+  store: StateStore,
+  taskId: string,
+  latestAttemptId: string,
+  latestVerificationSeq: number,
+  latestRevision: CandidateRevision,
+): boolean {
+  const competitionId = store.getCompetitionByCandidateTaskId(taskId);
+  if (competitionId === undefined) return true;
+  const competition = store.getCompetition(competitionId);
+  const candidate = store
+    .getCompetitionCandidates(competitionId)
+    .find((entry) => entry.taskId === taskId);
+  const decision = competition.mainDecision;
+  return candidate !== undefined
+    && decision !== undefined
+    && decision.decision === "revise"
+    && decision.candidateId === candidate.id
+    && decision.taskId === taskId
+    && decision.attemptId === latestAttemptId
+    && decision.verificationEventSequence === latestVerificationSeq
+    && decision.candidateRevisionId === latestRevision.id
+    && decision.acceptedPatchDigest === latestRevision.patchDigest;
+}
+
 // --- Correction eligibility ---
 
 /** Canonical read-only correction eligibility shared by daemon, MCP, and Hub.
@@ -554,22 +584,15 @@ export function resolveCorrectionEligibility(
     if (task.status !== "succeeded") {
       return { eligible: false, category: "not-failed-or-interrupted", allowance };
     }
-    // Succeeded hard stops: integration history and competition are
-    // rejection reasons that must fire before shared checks.
+    // Succeeded hard stop: delivered work cannot be corrected in place.
     if (store.listIntegrationResults(taskId).length > 0) {
       return { eligible: false, category: "not-failed-or-interrupted", allowance };
-    }
-    if (store.getCompetitionByCandidateTaskId(taskId) !== undefined) {
-      return { eligible: false, category: "competition-candidate", allowance };
     }
     // All remaining checks (revision, allowance, diff, and Main Review binding)
     // live in the shared path below so allowance fires before review proof.
   }
 
   // --- Shared checks for all correction-eligible statuses ---
-  if (store.getCompetitionByCandidateTaskId(taskId) !== undefined) {
-    return { eligible: false, category: "competition-candidate", allowance };
-  }
   const attempts = store.listAttempts(taskId);
   if (attempts.some((a) => a.status === "running")) {
     return { eligible: false, category: "running-attempt", allowance };
@@ -650,6 +673,23 @@ export function resolveCorrectionEligibility(
     }
   }
 
+  // Standalone Tasks arrive here directly. Competition Candidates need one
+  // additional, exact Competition-level Main revise; a ranking result, Task
+  // review alone, stale revise, accept, or reject never authorizes a Worker.
+  if (!hasExactCompetitionMainRevise(
+    store,
+    taskId,
+    latestAttempt.id,
+    latestVerificationSequence(events),
+    latestRevision,
+  )) {
+    return {
+      eligible: false,
+      category: "competition-main-revise-required",
+      allowance,
+    };
+  }
+
   return {
     eligible: true,
     category: "eligible",
@@ -669,6 +709,8 @@ export function describeCorrectionRejection(
       return "correction requires a failed or interrupted Task";
     case "competition-candidate":
       return "correction rejected: competition candidates cannot be corrected";
+    case "competition-main-revise-required":
+      return "correction rejected: Competition Main must revise this exact Candidate Revision first";
     case "running-attempt":
       return "correction rejected: Task has a running Attempt";
     case "no-revision":

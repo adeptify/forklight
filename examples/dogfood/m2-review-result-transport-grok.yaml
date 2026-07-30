@@ -1,0 +1,164 @@
+version: 2
+name: Preserve usable judge JSON across Grok and Claude result transport
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-review-result-transport-v1
+taskFamily: forklight-main-orchestration
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Read-only Review Graph judges can produce usable structured evidence through
+    both Grok Build and Claude Code runtimes. Reviewer prompts no longer append a
+    generic coding-summary instruction that conflicts with the required JSON.
+    Grok terminal handling reconstructs bounded text deltas when the final end
+    event contains only EndTurn. Review parsing accepts exactly one bounded JSON
+    object even when a runtime wraps it in a Markdown fence or short prose, while
+    still scanning the entire reply for unsafe content and strictly validating
+    identity, revision, schema, fields, paths, sizes, and values. It never retries,
+    guesses, accepts multiple objects, or changes an already terminal review.
+  presentation:
+    summary: 修复裁判明明给出有效 JSON 却被传输层丢失或被通用收尾文案污染的问题，不放松结构与安全校验，也不重跑历史裁判。
+    language: zh-CN
+  context:
+    - Live graph adb2e3cf-8d7a-4d79-83a7-46f71397b027 assigned Grok and MiniMax to the same immutable Candidate.
+    - Grok raw streaming text deltas concatenate to one valid review JSON, but the final end event contains only stopReason EndTurn and the saved resultText became EndTurn.
+    - MiniMax resultText contains one valid fenced review JSON plus prose and the generic coding summary requested by buildWorkerPrompt; strict raw-object parsing rejected it as malformed-json.
+    - The graph correctly failed as insufficient-evidence and must remain historical evidence. Do not reparse, mutate, or retry those terminal assignments.
+    - Preserve all current uncommitted M2 and Goal changes. Use Grok 4.5 for this implementation; do not commit or push.
+  inScope:
+    - Add an explicit prompt appendix or equivalent internal signal that lets Review Graph reviewer Tasks replace the generic final coding-summary instruction with strict review JSON output instructions in both Claude Code and Grok Build adapters.
+    - Identify reviewer Tasks through their durable internal taskFile namespace or another explicit non-user-content marker; do not infer from task name, provider, model, allowEdits, or natural-language contract text.
+    - Make Grok streaming normalization or the Grok adapter accumulate bounded text deltas in order and use the assembled text as terminal resultText only when the terminal event has no meaningful result and reports a normal EndTurn.
+    - Explicit terminal result/message/text data must remain authoritative over accumulated deltas. Error, cancellation, connectivity redaction, interruption, watchdog, and non-zero exit semantics must remain unchanged.
+    - Bound accumulated terminal text in memory. Overflow must fail closed or yield an unusable review; never silently keep an arbitrary suffix that could look like a complete result.
+    - Change review JSON extraction to accept one bounded object surrounded by optional whitespace, Markdown fence, or prose. Scan the entire original resultText for credentials and enforce the total reply length before extraction.
+    - Reject missing objects, malformed JSON, multiple or ambiguous JSON objects, extra schema fields, stale revisions, wrong identities, unsafe paths/content, oversized results/findings, and invalid values with existing typed failure codes where possible.
+    - Keep the stored usable ReviewResult as the canonical validated object only; never project or persist ignored wrapper prose as Review Graph evidence.
+    - Update tests for reviewer prompt output, Grok delta reconstruction and precedence, bounded overflow, fenced/prose single-object acceptance, multiple-object rejection, unsafe wrapper rejection, and existing strict schema/privacy behavior.
+  outOfScope:
+    - Re-running or mutating the historical failed judges, automatically retrying reviewers, relaxing schema fields, accepting arbitrary JSON fragments, majority voting, Main decisions, Integration, Provider changes, broad prompt redesign, commits, pushes, or UI redesign.
+    - Treating normal EndTurn as useful content, hiding runtime errors, changing Grok connectivity classification, or exposing raw logs and wrapper prose in Hub/MCP/CLI.
+  executionSteps:
+    - Trace buildWorkerPrompt call sites, reviewer Task durable markers, Claude/Grok prompt construction, Grok streaming events, terminal precedence, resultText persistence, and Review Graph parsing tests before editing.
+    - Add one explicit reviewer terminal-output override shared by both runtime prompt builders without changing ordinary Task prompts.
+    - Add bounded ordered Grok text-delta reconstruction with explicit terminal precedence and fail-closed overflow.
+    - Replace raw-object-only review extraction with one-object bounded extraction while keeping whole-reply safety scanning and strict object validation.
+    - Add focused regressions reproducing the exact Grok EndTurn and MiniMax fenced/prose shapes from live dogfood.
+    - Run focused tests, full tests, build, Hub syntax, and diff check once. Stop after one Candidate; no retry loop.
+  deliverables:
+    - Conflict-free reviewer prompt behavior for Claude Code and Grok Build.
+    - Bounded Grok terminal text reconstruction that preserves actual review JSON instead of EndTurn.
+    - Safe unique-object review extraction that retains useful evidence without accepting ambiguity.
+    - Executable regressions reproducing both live failure shapes.
+  modules:
+    - name: Reviewer terminal-output contract
+      responsibility: Replace the generic coding summary only for durably identified Review Graph reviewer Tasks.
+      consumes:
+        - TaskRecord taskFile namespace, runtime prompt appendices, and strict review output requirements.
+      produces:
+        - A Claude/Grok prompt ending with one unambiguous raw JSON instruction.
+      boundaries:
+        - No natural-language inference, ordinary Task prompt change, Provider routing change, or automatic retry.
+    - name: Grok terminal result reconstruction
+      responsibility: Preserve ordered bounded text deltas as the result when a normal terminal event carries only EndTurn.
+      consumes:
+        - Grok text stream events, explicit terminal fields, exit state, and configured safe bound.
+      produces:
+        - One authoritative terminal resultText or a fail-closed overflow outcome.
+      boundaries:
+        - Explicit terminal content wins; errors, cancellation, connectivity, watchdog, and interruption remain authoritative.
+    - name: Safe review object extraction
+      responsibility: Extract and validate exactly one review JSON object from a bounded whole reply while rejecting ambiguity and unsafe wrappers.
+      consumes:
+        - Original resultText, expected revision and reviewer identity, schema and safety limits.
+      produces:
+        - One canonical ReviewResult or an existing typed failure code.
+      boundaries:
+        - No multiple-object choice, schema relaxation, wrapper projection, raw-log exposure, guessing, or retry.
+  callChain:
+    - ForkLight creates a reviewer Task with a durable internal Review Graph taskFile marker.
+    - The selected runtime builds a prompt whose final instruction requires exactly one JSON object and omits the generic coding summary.
+    - The judge emits runtime events; Grok text deltas are accumulated within a hard bound while Claude may return one fenced or prose-wrapped object.
+    - Terminal handling selects explicit meaningful result content first, otherwise the complete bounded Grok text assembly for normal EndTurn.
+    - Review parsing scans the entire reply for unsafe content, extracts exactly one JSON object, and applies the unchanged strict schema, identity, revision, path, and size checks.
+    - Reconciliation stores only canonical ReviewResult evidence or a typed failure; Main remains final authority and nothing retries automatically.
+  scenarios:
+    - name: Grok JSON followed by EndTurn
+      given: Ordered Grok text deltas form one valid review JSON and the terminal event only reports stopReason EndTurn.
+      when: The adapter finishes normally.
+      then: The saved resultText is the assembled JSON, not EndTurn, and strict review parsing can use it.
+    - name: MiniMax fenced JSON plus summary prose
+      given: One bounded valid review JSON is wrapped in a Markdown fence with short prose before and after.
+      when: Review parsing runs.
+      then: The canonical object is accepted if the whole reply is safe and no second object exists; wrapper prose is not stored as ReviewResult evidence.
+    - name: Ambiguous or unsafe wrapper
+      given: A reply contains two JSON objects, credential-shaped wrapper text, malformed braces, or exceeds the total limit.
+      when: Review parsing runs.
+      then: It fails closed with a typed unusable result and does not choose, retry, or mutate the Candidate.
+    - name: Explicit terminal result wins
+      given: Grok emitted text deltas and a terminal result event with a meaningful result string.
+      when: The adapter completes.
+      then: The explicit terminal result remains authoritative and the delta buffer does not replace it.
+  risks:
+    - Naive first-brace/last-brace slicing can accept two objects or braces in prose, so extraction must prove one complete parseable object and reject ambiguity.
+    - Unbounded text accumulation can create memory pressure, so the buffer needs a hard limit and fail-closed overflow behavior.
+    - Applying reviewer-specific prompts by allowEdits=false would change unrelated read-only Tasks, so the durable internal taskFile marker is the boundary.
+    - Relaxing wrapper syntax must not relax review schema or whole-reply credential checks.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 900
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 600000
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task.ts
+    - src/core/review-graph.ts
+    - src/events/grok-normalize.ts
+    - src/workers/grok.ts
+    - src/workers/claude.ts
+    - tests/review-graph.test.ts
+    - tests/worker-runtime.test.ts
+    - tests/task.test.ts
+acceptance:
+  criteria:
+    - Reviewer Tasks in both runtimes end with strict JSON instructions and never receive the conflicting generic coding-summary instruction; ordinary Task prompts remain unchanged.
+    - Grok ordered text deltas survive a normal EndTurn as bounded terminal resultText while meaningful explicit terminal content, errors, cancellation, interruption, watchdog, and connectivity evidence retain precedence.
+    - One safe bounded review object wrapped in fence/prose is accepted canonically, but ambiguity, unsafe wrapper content, malformed JSON, extra fields, stale identity/revision, unsafe paths, and oversize still fail closed.
+    - Historical terminal review assignments are not changed or retried, the complete repository stays green, and no commit or push occurs.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/review-graph.test.ts tests/worker-runtime.test.ts tests/task.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js && node --check src/hub/public/i18n.js
+    - git diff --check

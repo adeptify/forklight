@@ -4,7 +4,9 @@ import { isTerminalTaskStatus } from "./task-progress.js";
 import {
   buildCandidateGapContract,
   computeGapContractDigest,
+  hasExactCompetitionMainRevise,
   isLatestMainReviewRevise,
+  resolveLatestRevision,
   latestVerificationSequence,
 } from "./candidate-revision.js";
 import {
@@ -24,7 +26,7 @@ const REASON_MAX_LENGTH = 1000;
 
 /** Authorization kind discriminator for grant events.
  *  Legacy events without a kind field remain valid generic-extra grants. */
-type AuthorizationKind = "extra" | "correction";
+type AuthorizationKind = "extra" | "correction" | "restart-recovery";
 
 interface ValidatedGrant {
   targetOrdinal: number;
@@ -35,6 +37,7 @@ interface ValidatedGrant {
   candidateRevisionId?: string;
   gapContractDigest?: string;
   gapContract?: CandidateGapContract;
+  handoffId?: string;
   eventSequence: number;
   kind: AuthorizationKind;
 }
@@ -78,6 +81,7 @@ function expectedBudgetMode(budget: number | null): string {
 
 function resolveKind(payload: Record<string, unknown>): AuthorizationKind {
   if (payload.kind === "correction") return "correction";
+  if (payload.kind === "restart-recovery") return "restart-recovery";
   // Legacy events without a kind field, or explicit "extra", are generic extra.
   if (payload.kind === undefined || payload.kind === "extra") return "extra";
   throw new Error("authorization history is corrupt: unknown grant kind");
@@ -92,6 +96,7 @@ function resolveGrantState(
 ): {
   extraConsumed: number;
   correctionConsumed: number;
+  restartRecoveryConsumed: number;
   pendingGrant: ValidatedGrant | null;
 } {
   const grants: ValidatedGrant[] = [];
@@ -134,6 +139,19 @@ function resolveGrantState(
       )
     ) {
       throw new Error("authorization history is corrupt: malformed correction grant payload");
+    }
+    if (
+      kind === "restart-recovery"
+      && (
+        p.reason !== "handoff-daemon-restart"
+        || typeof p.priorAttemptId !== "string"
+        || p.priorAttemptId.length === 0
+        || typeof p.handoffId !== "string"
+        || p.handoffId.length === 0
+        || p.handoffId.length > 100
+      )
+    ) {
+      throw new Error("authorization history is corrupt: malformed restart recovery grant");
     }
     if (!p.reason.trim()) {
       throw new Error("authorization history is corrupt: malformed grant event payload");
@@ -180,6 +198,10 @@ function resolveGrantState(
           gapContract,
         }),
       } : {}),
+      ...(kind === "restart-recovery" ? {
+        priorAttemptId: p.priorAttemptId as string,
+        handoffId: p.handoffId as string,
+      } : {}),
       eventSequence: event.sequence,
       kind,
     });
@@ -212,6 +234,9 @@ function resolveGrantState(
   const correctionConsumed = grants.filter(
     (g) => g.kind === "correction" && attemptOrdinals.has(g.targetOrdinal),
   ).length;
+  const restartRecoveryConsumed = grants.filter(
+    (g) => g.kind === "restart-recovery" && attemptOrdinals.has(g.targetOrdinal),
+  ).length;
 
   const pending = grants.filter((g) => !attemptOrdinals.has(g.targetOrdinal));
 
@@ -228,6 +253,7 @@ function resolveGrantState(
   return {
     extraConsumed,
     correctionConsumed,
+    restartRecoveryConsumed,
     pendingGrant: pending[0] ?? null,
   };
 }
@@ -243,11 +269,89 @@ export function resolvePendingGrantExecutionOptions(
   const events = store.listEvents(taskId);
   const attemptOrdinals = new Set(store.listAttempts(taskId).map((a) => a.ordinal));
   const { pendingGrant } = resolveGrantState(events, attemptOrdinals, configuredMaxAttempts);
-  if (!pendingGrant || pendingGrant.kind !== "extra") return null;
+  if (
+    !pendingGrant
+    || (pendingGrant.kind !== "extra" && pendingGrant.kind !== "restart-recovery")
+  ) return null;
   return {
     maximumOrdinal: pendingGrant.targetOrdinal,
     maxBudgetUsdOverride: pendingGrant.maxBudgetUsd,
     authorizationEventSequence: pendingGrant.eventSequence,
+  };
+}
+
+/**
+ * Authorize at most one system recovery Attempt for a handoff successor that
+ * was interrupted before independent verification. This is continuity after
+ * Daemon loss, not a model-quality retry and not part of maxExtraAttempts.
+ */
+export function authorizeHandoffRestartRecovery(
+  store: StateStore,
+  taskId: string,
+  handoffId: string,
+  configuredMaxAttempts: number,
+): AttemptExecutionOptions | null {
+  const task = store.getTask(taskId);
+  if (task.status !== "interrupted" && task.status !== "failed") return null;
+  const attempts = store.listAttempts(taskId);
+  if (attempts.length === 0) return null;
+  const latest = attempts.reduce((left, right) => (
+    right.ordinal > left.ordinal ? right : left
+  ));
+  if (latest.status !== "interrupted") return null;
+
+  const events = store.listEvents(taskId);
+  if (events.some((event) => (
+    event.attemptId === latest.id
+    && (event.type === "verification.completed" || event.type === "candidate.revision.captured")
+  ))) return null;
+
+  const attemptOrdinals = new Set(attempts.map((attempt) => attempt.ordinal));
+  const { pendingGrant, restartRecoveryConsumed } = resolveGrantState(
+    events,
+    attemptOrdinals,
+    configuredMaxAttempts,
+  );
+  if (pendingGrant !== null) {
+    if (
+      pendingGrant.kind === "restart-recovery"
+      && pendingGrant.handoffId === handoffId
+      && pendingGrant.priorAttemptId === latest.id
+    ) {
+      return {
+        maximumOrdinal: pendingGrant.targetOrdinal,
+        maxBudgetUsdOverride: pendingGrant.maxBudgetUsd,
+        authorizationEventSequence: pendingGrant.eventSequence,
+      };
+    }
+    return null;
+  }
+  if (restartRecoveryConsumed >= 1) return null;
+
+  const targetOrdinal = latest.ordinal + 1;
+  const budget = task.spec.runtime.maxBudgetUsd;
+  const event = store.addEvent(
+    taskId,
+    latest.id,
+    "attempt.authorization.granted",
+    `One handoff restart recovery authorized for ordinal ${targetOrdinal}`,
+    {
+      kind: "restart-recovery",
+      additionalAttempts: 1,
+      targetOrdinal,
+      maxBudgetUsd: budget,
+      budgetMode: budget === null
+        ? "uncapped-for-authorized-attempt"
+        : "capped-for-authorized-attempt",
+      reason: "handoff-daemon-restart",
+      priorAttemptId: latest.id,
+      handoffId,
+    },
+  );
+  return {
+    maximumOrdinal: targetOrdinal,
+    maxBudgetUsdOverride: budget,
+    authorizationEventSequence: event.sequence,
   };
 }
 
@@ -482,11 +586,35 @@ export function authorizeMainCorrection(
     }
   }
 
-  // Check competition membership — fail closed
-  if (store.getCompetitionByCandidateTaskId(taskId) !== undefined) {
-    throw new Error(
-      "correction rejected: competition candidates with terminal comparison evidence cannot be corrected",
+  // Competition Candidates use the same bounded correction authority, but
+  // only after an exact Competition-level Main revise. No machine result or
+  // Task-level review alone can cross this boundary.
+  const competitionId = store.getCompetitionByCandidateTaskId(taskId);
+  if (competitionId !== undefined) {
+    const competitionEvents = store.listEvents(taskId);
+    const competitionAttempts = store.listAttempts(taskId);
+    const latestAttempt = competitionAttempts.reduce<AttemptRecord | undefined>(
+      (latest, candidate) => latest === undefined || candidate.ordinal > latest.ordinal
+        ? candidate
+        : latest,
+      undefined,
     );
+    const latestRevision = resolveLatestRevision(competitionEvents);
+    if (
+      latestAttempt === undefined
+      || latestRevision === undefined
+      || !hasExactCompetitionMainRevise(
+        store,
+        taskId,
+        latestAttempt.id,
+        latestVerificationSequence(competitionEvents),
+        latestRevision,
+      )
+    ) {
+      throw new Error(
+        "correction rejected: Competition Main must revise this exact Candidate Revision first",
+      );
+    }
   }
 
   // Resolve durable grant history

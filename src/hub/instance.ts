@@ -6,6 +6,7 @@
  * server proves the stored token + nonce. It never signals the recorded PID.
  */
 
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -19,6 +20,7 @@ import {
 import { get } from "node:http";
 import { createConnection } from "node:net";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { compareBuildIdentity, isBuildIdentity, type BuildIdentity } from "../core/build-identity.js";
 
 const SCHEMA_VERSION = 1;
@@ -31,6 +33,26 @@ const DEFAULT_PROBE_MS = 1_000;
 const MAX_PROBE_BYTES = 4_096;
 const TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
 const NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/;
+
+/** Default bounded readiness window after one detached Hub launch. */
+export const DEFAULT_HUB_STARTUP_TIMEOUT_MS = 30_000;
+export const MIN_HUB_STARTUP_TIMEOUT_MS = 1_000;
+export const MAX_HUB_STARTUP_TIMEOUT_MS = 60_000;
+export const DEFAULT_HUB_REPLACE_GRACE_MS = 7_000;
+export const HUB_STARTUP_POLL_INTERVAL_MS = 100;
+
+/** Privacy-safe: no home, token, nonce, path, or raw child output. */
+export const HUB_STARTUP_CHILD_EXITED_MESSAGE =
+  "ForkLight Hub process exited before becoming ready";
+/** Timeout: do not invite an immediate second launch; the exact child may still start. */
+export const HUB_STARTUP_TIMEOUT_MESSAGE =
+  "ForkLight Hub did not become ready within the startup timeout; "
+  + "check hub status before another lifecycle action because the launched process may still become ready";
+export const HUB_STARTUP_OWNERSHIP_CHANGED_MESSAGE =
+  "ForkLight Hub ownership changed; no additional process was launched or signalled";
+/** Fixed public category for replacement proof failure — never forward internal text. */
+export const HUB_STARTUP_REPLACE_FAILED_MESSAGE =
+  "ForkLight Hub owner replacement failed";
 
 export interface HubOwnerClaim {
   readonly schemaVersion: 1;
@@ -805,4 +827,426 @@ export function releaseHubInstance(home: string, claim: HubOwnerClaim): void {
   if (currentClaim.value !== undefined && sameClaim(currentClaim.value, claim)) {
     removeIfUnchanged(claimPath(home), currentClaim.raw);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Detached Hub restart: one background child + bounded authenticated readiness
+// ---------------------------------------------------------------------------
+
+/** Observed child from a single detached Hub launch attempt. */
+export interface HubChildHandle {
+  readonly pid: number;
+  readonly exited: boolean;
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
+}
+
+/** Closed success/failure surface for detached restart. Incapable of carrying
+ *  token, nonce, path, environment, URL fragment, or raw child output. */
+export type DetachedHubRestartState = "current" | "ready" | "failed";
+
+export type DetachedHubRestartReplacement =
+  | "none-needed"
+  | "replaced"
+  | "started"
+  | "not-started";
+
+export type DetachedHubRestartNextAction =
+  | "use-existing-hub"
+  | "use-new-hub"
+  | "investigate";
+
+export interface DetachedHubRestartResult {
+  readonly ok: boolean;
+  readonly state: DetachedHubRestartState;
+  readonly pid?: number;
+  readonly port?: number;
+  readonly replacement: DetachedHubRestartReplacement;
+  readonly nextAction: DetachedHubRestartNextAction;
+  /** Privacy-safe closed reason on failure only. */
+  readonly reason?: string;
+}
+
+export interface DetachedHubRestartOptions {
+  readonly runIdentity: BuildIdentity;
+  /** Explicit CLI port. When omitted, a replaced owner keeps its prior port. */
+  readonly port?: number;
+  readonly startupTimeoutMs?: number;
+  readonly graceTimeoutMs?: number;
+  readonly pollIntervalMs?: number;
+  readonly probeTimeoutMs?: number;
+  /** Test seam: replace discovery. Production uses discoverOrClaimHub. */
+  readonly discover?: (home: string) => Promise<HubDiscovery>;
+  /** Test seam: replace exact-owner replacement. */
+  readonly replace?: (
+    home: string,
+    target: HubReplacementTarget,
+    options: HubDiscoveryOptions & { graceTimeoutMs: number },
+  ) => Promise<ReplaceHubResult>;
+  /** Test seam: replace the single detached launch. */
+  readonly launch?: (home: string, port: number | undefined) => HubChildHandle;
+  /** Test seam: replace authenticated status inspection. */
+  readonly inspect?: (home: string) => Promise<HubInspectionStatus>;
+  /** Test seam: release a start claim the parent must not keep. */
+  readonly releaseClaim?: (home: string, claim: HubOwnerClaim) => void;
+  readonly nowMs?: () => number;
+  readonly sleepMs?: (ms: number) => Promise<void>;
+}
+
+/** Validate a detached Hub readiness timeout (1000–60000 ms). */
+export function resolveHubStartupTimeoutMs(
+  value: unknown = DEFAULT_HUB_STARTUP_TIMEOUT_MS,
+): number {
+  if (
+    typeof value !== "number"
+    || !Number.isSafeInteger(value)
+    || value < MIN_HUB_STARTUP_TIMEOUT_MS
+    || value > MAX_HUB_STARTUP_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `Hub startup timeout must be an integer from ${MIN_HUB_STARTUP_TIMEOUT_MS} to ${MAX_HUB_STARTUP_TIMEOUT_MS}`,
+    );
+  }
+  return value;
+}
+
+/** Resolve the current CLI entry argv (no shell, no credentials). */
+export function hubCliLaunchArguments(moduleUrl: string = import.meta.url): {
+  executable: string;
+  args: string[];
+  mode: "dist" | "source-dev";
+} {
+  const modulePath = fileURLToPath(moduleUrl);
+  const hubDirectory = path.dirname(modulePath);
+  const srcDirectory = path.dirname(hubDirectory);
+  if (modulePath.endsWith(".ts")) {
+    return {
+      executable: process.execPath,
+      args: [
+        "--disable-warning=ExperimentalWarning",
+        "--import",
+        "tsx",
+        path.join(srcDirectory, "cli.ts"),
+      ],
+      mode: "source-dev",
+    };
+  }
+  return {
+    executable: process.execPath,
+    args: [
+      "--disable-warning=ExperimentalWarning",
+      path.join(srcDirectory, "cli.js"),
+    ],
+    mode: "dist",
+  };
+}
+
+/**
+ * Start exactly one detached Hub child with the current CLI.
+ * Child always receives `--no-open` so only the parent decides browser open.
+ * Stdio is ignored so the parent never captures the Hub token or raw output.
+ */
+export function launchDetachedHubProcess(
+  home: string,
+  port?: number,
+): HubChildHandle {
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(home, 0o700);
+  } catch {
+    // Best effort; ensurePrivateHome will normalize again in the child.
+  }
+  const launch = hubCliLaunchArguments();
+  const args = [...launch.args, "hub", "--no-open"];
+  if (port !== undefined && Number.isSafeInteger(port) && port > 0 && port <= 65_535) {
+    args.push("--port", String(port));
+  }
+  const child = spawn(launch.executable, args, {
+    detached: true,
+    env: { ...process.env, FORKLIGHT_HOME: home },
+    stdio: "ignore",
+  });
+  let exited = false;
+  let exitCode: number | null = null;
+  let signalCode: NodeJS.Signals | null = null;
+  child.once("exit", (code, signal) => {
+    exited = true;
+    exitCode = code;
+    signalCode = signal;
+  });
+  child.once("error", () => {
+    exited = true;
+  });
+  child.unref();
+  if (child.pid === undefined) {
+    throw new Error("Unable to start ForkLight Hub process");
+  }
+  return {
+    pid: child.pid,
+    get exited() {
+      return exited;
+    },
+    get exitCode() {
+      return exitCode;
+    },
+    get signalCode() {
+      return signalCode;
+    },
+  };
+}
+
+/**
+ * Read the open URL only after readiness is proven for the expected owner.
+ * Callers may open a browser; they must never put this value in JSON output.
+ */
+export function resolveHubOpenUrl(
+  home: string,
+  expectedPid: number,
+  expectedPort: number,
+): string | undefined {
+  const descriptor = readRecord(descriptorPath(home), parseDescriptor).value;
+  if (descriptor === undefined) return undefined;
+  if (descriptor.pid !== expectedPid || descriptor.port !== expectedPort) return undefined;
+  if (typeof descriptor.token !== "string" || !TOKEN_RE.test(descriptor.token)) return undefined;
+  return hubUrl(descriptor.port, descriptor.token);
+}
+
+function failedDetachedResult(
+  reason: string,
+  replacement: DetachedHubRestartReplacement = "not-started",
+): DetachedHubRestartResult {
+  return {
+    ok: false,
+    state: "failed",
+    replacement,
+    nextAction: "investigate",
+    reason,
+  };
+}
+
+/**
+ * Explicit detached Hub restart coordinator.
+ *
+ * Proves discovery, replaces only a previously frozen owner, launches exactly
+ * one current CLI child, then waits by read-only authenticated status until
+ * the child owns a current-build Hub, the child exits, ownership changes, or
+ * the bounded deadline expires. Never relaunches and never signals an unproven
+ * process after the single launch.
+ */
+export async function restartHubDetached(
+  home: string,
+  options: DetachedHubRestartOptions,
+): Promise<DetachedHubRestartResult> {
+  const runIdentity = options.runIdentity;
+  if (!isBuildIdentity(runIdentity)) {
+    return failedDetachedResult("a valid build comparator is required to restart Hub");
+  }
+
+  const startupTimeoutMs = resolveHubStartupTimeoutMs(
+    options.startupTimeoutMs ?? DEFAULT_HUB_STARTUP_TIMEOUT_MS,
+  );
+  const graceTimeoutMs = options.graceTimeoutMs ?? DEFAULT_HUB_REPLACE_GRACE_MS;
+  const pollIntervalMs = typeof options.pollIntervalMs === "number"
+    && Number.isSafeInteger(options.pollIntervalMs)
+    && options.pollIntervalMs > 0
+    ? options.pollIntervalMs
+    : HUB_STARTUP_POLL_INTERVAL_MS;
+  const probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_MS;
+  const discover = options.discover
+    ?? ((target: string) => discoverOrClaimHub(target, {
+      runIdentity,
+      probeTimeoutMs,
+      pollIntervalMs,
+    }));
+  const replace = options.replace ?? replaceHubOwner;
+  const launch = options.launch ?? launchDetachedHubProcess;
+  const inspect = options.inspect
+    ?? ((target: string) => inspectHubStatus(target, {
+      runIdentity,
+      probeTimeoutMs,
+    }));
+  const releaseClaim = options.releaseClaim ?? releaseHubInstance;
+  const nowMs = options.nowMs ?? Date.now;
+  const sleepMs = options.sleepMs ?? sleep;
+
+  const discovery = await discover(home);
+
+  if (discovery.kind === "reuse") {
+    // Already current by discovery. Confirm with two authenticated status
+    // probes that the same owner (pid+port) remains current. Never launch.
+    const first = await inspect(home);
+    if (
+      first.state !== "current"
+      || first.pid === undefined
+      || first.port === undefined
+      || first.port !== discovery.port
+    ) {
+      return {
+        ok: false,
+        state: "failed",
+        replacement: "not-started",
+        nextAction: "investigate",
+        reason: HUB_STARTUP_OWNERSHIP_CHANGED_MESSAGE,
+        ...(first.pid !== undefined ? { pid: first.pid } : {}),
+        ...(first.port !== undefined ? { port: first.port } : { port: discovery.port }),
+      };
+    }
+    const confirmedPid = first.pid;
+    const confirmedPort = first.port;
+    const second = await inspect(home);
+    if (
+      second.state !== "current"
+      || second.pid !== confirmedPid
+      || second.port !== confirmedPort
+    ) {
+      return {
+        ok: false,
+        state: "failed",
+        replacement: "not-started",
+        nextAction: "investigate",
+        reason: HUB_STARTUP_OWNERSHIP_CHANGED_MESSAGE,
+        pid: confirmedPid,
+        port: confirmedPort,
+      };
+    }
+    return {
+      ok: true,
+      state: "current",
+      pid: confirmedPid,
+      port: confirmedPort,
+      replacement: "none-needed",
+      nextAction: "use-existing-hub",
+    };
+  }
+
+  let replacement: DetachedHubRestartReplacement = "not-started";
+  let preferredPort: number | undefined = options.port;
+
+  if (discovery.kind === "stale-owner" || discovery.kind === "legacy-owner") {
+    const priorPort = discovery.port;
+    if (preferredPort === undefined) preferredPort = priorPort;
+    const replaceResult = await replace(home, discovery.replacement, {
+      graceTimeoutMs,
+      probeTimeoutMs,
+      pollIntervalMs,
+    });
+    if (!replaceResult.success) {
+      // Fixed public category only — never forward variable internal reason text.
+      return {
+        ok: false,
+        state: "failed",
+        replacement: "not-started",
+        nextAction: "investigate",
+        reason: HUB_STARTUP_REPLACE_FAILED_MESSAGE,
+      };
+    }
+    replacement = "replaced";
+  } else if (discovery.kind === "start") {
+    // discoverOrClaimHub acquired a parent claim; release it so the child can own.
+    releaseClaim(home, discovery.claim);
+    replacement = "started";
+  } else {
+    return failedDetachedResult("ForkLight Hub discovery returned an unexpected state");
+  }
+
+  // Exactly one launch after replacement completes (or clean-home release).
+  const child = launch(home, preferredPort);
+  const deadline = nowMs() + startupTimeoutMs;
+
+  while (nowMs() < deadline) {
+    if (child.exited) {
+      return {
+        ok: false,
+        state: "failed",
+        pid: child.pid,
+        ...(preferredPort !== undefined ? { port: preferredPort } : {}),
+        replacement,
+        nextAction: "investigate",
+        reason: HUB_STARTUP_CHILD_EXITED_MESSAGE,
+      };
+    }
+
+    const status = await inspect(home);
+
+    if (status.state === "current") {
+      if (status.pid === child.pid) {
+        return {
+          ok: true,
+          state: "ready",
+          pid: status.pid,
+          ...(status.port !== undefined ? { port: status.port } : {}),
+          replacement,
+          nextAction: "use-new-hub",
+        };
+      }
+      // A different process owns a current Hub — ownership race; do not signal.
+      return {
+        ok: false,
+        state: "failed",
+        pid: child.pid,
+        ...(status.port !== undefined ? { port: status.port } : {}),
+        replacement,
+        nextAction: "investigate",
+        reason: HUB_STARTUP_OWNERSHIP_CHANGED_MESSAGE,
+      };
+    }
+
+    if (
+      (status.state === "different-build" || status.state === "legacy")
+      && status.pid !== undefined
+      && status.pid !== child.pid
+    ) {
+      return {
+        ok: false,
+        state: "failed",
+        pid: child.pid,
+        ...(status.port !== undefined ? { port: status.port } : {}),
+        replacement,
+        nextAction: "investigate",
+        reason: HUB_STARTUP_OWNERSHIP_CHANGED_MESSAGE,
+      };
+    }
+
+    if (
+      status.state === "unverified"
+      && status.reason !== undefined
+      && /ownership changed/i.test(status.reason)
+    ) {
+      return {
+        ok: false,
+        state: "failed",
+        pid: child.pid,
+        replacement,
+        nextAction: "investigate",
+        reason: HUB_STARTUP_OWNERSHIP_CHANGED_MESSAGE,
+      };
+    }
+
+    const remaining = deadline - nowMs();
+    if (remaining <= 0) break;
+    await sleepMs(Math.min(pollIntervalMs, remaining));
+  }
+
+  if (child.exited) {
+    return {
+      ok: false,
+      state: "failed",
+      pid: child.pid,
+      ...(preferredPort !== undefined ? { port: preferredPort } : {}),
+      replacement,
+      nextAction: "investigate",
+      reason: HUB_STARTUP_CHILD_EXITED_MESSAGE,
+    };
+  }
+
+  // Child may still become ready after the deadline — do not invite direct retry.
+  return {
+    ok: false,
+    state: "failed",
+    pid: child.pid,
+    ...(preferredPort !== undefined ? { port: preferredPort } : {}),
+    replacement,
+    nextAction: "investigate",
+    reason: `${HUB_STARTUP_TIMEOUT_MESSAGE} (${startupTimeoutMs}ms)`,
+  };
 }

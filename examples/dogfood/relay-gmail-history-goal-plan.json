@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "name": "Relay Gmail durable incremental sync",
+  "objective": "Ship a truthful restart-safe Gmail full-to-incremental sync journey with bounded stale-history recovery, readable UI, one heterogeneous implementation milestone, independent review, and safe Integration at every dependency boundary.",
+  "items": [
+    {
+      "id": "cursor-contract",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-history-01-cursor-grok.yaml",
+      "dependsOn": []
+    },
+    {
+      "id": "live-history-adapter",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-history-02-live-minimax.yaml",
+      "dependsOn": ["cursor-contract"]
+    },
+    {
+      "id": "explicit-recovery",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-history-03-recovery-grok.yaml",
+      "dependsOn": ["live-history-adapter"]
+    },
+    {
+      "id": "recovery-ui",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-history-04-ui-grok.yaml",
+      "dependsOn": ["explicit-recovery"]
+    },
+    {
+      "id": "restart-e2e-docs",
+      "task": "/Users/yijunwang/code/forklight/examples/dogfood/relay-gmail-history-05-e2e-grok.yaml",
+      "dependsOn": ["recovery-ui"]
+    }
+  ]
+}

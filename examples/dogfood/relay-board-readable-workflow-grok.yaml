@@ -1,0 +1,172 @@
+version: 2
+name: Make Relay Board explain each item's current stage and next action
+project: /Users/yijunwang/code/relay
+taskClass: relay-board-readable-workflow
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+contract:
+  outcome: >-
+    Relay's Board lets a non-technical user understand each column, each item's
+    real current stage, and the useful next action without relying on raw English
+    workflow labels or hiding distinct states inside a generic column.
+  presentation:
+    summary: 把看板从英文状态和移动按钮列表，变成能直接看懂“现在发生了什么、下一步做什么”的工作视图，同时不改变真实状态机。
+    language: zh-CN
+  context:
+    - >-
+      The current Board uses English primary column titles (`Inbox`, `Assigned`,
+      `Running`, `Done`) while the rest of the product is primarily Chinese.
+    - >-
+      Several real Item states collapse into one Board column: inbox/triaged/snoozed,
+      assigned/pending_approval, running, and done. The card currently hides that distinction.
+    - >-
+      Existing `board`, `moveItem`, `runtimes`, and `selectItem` values remain
+      authoritative. This Task is presentation-only and must not duplicate or change transition authority.
+    - >-
+      Column migration is an existing product behavior. Keep it available, but label
+      destinations and consequences in plain Chinese rather than raw workflow codes.
+    - >-
+      The Relay worktree contains unrelated Gmail, connector, application, and store
+      changes. Preserve all of them and edit only the three declared focus paths.
+    - >-
+      Follow `AGENTS.md`, `docs/DEVELOPMENT.md`, `docs/ARCHITECTURE.md`, and the local
+      Next.js 16 Client Component guide before editing.
+  inScope:
+    - Add one pure Board presentation module that maps every current ItemStatus and Priority to bounded Chinese display values.
+    - For each visible card, provide a truthful stage explanation and one useful next-action label based only on the Item's current status and whether a matching assigned Runtime name exists.
+    - Replace English primary column titles and migration labels with plain Chinese; raw status identifiers must not be the main copy.
+    - Keep the existing open-item and move-item call paths. Do not silently mutate an Item while merely rendering the Board.
+    - Give empty columns a meaningful explanation of what belongs there instead of the single word `空`.
+    - Add focused behavior tests covering all current ItemStatus values, all Priority values, missing Runtime data, column labels, and forbidden overclaim wording.
+  outOfScope:
+    - Changing Domain types, `boardColumnOf`, transition legality, store or API behavior, persistence, Assignment/Job lifecycle, connectors, Gmail, ForkLight execution, drag-and-drop, filters, pagination, localization frameworks, or navigation structure.
+    - Inventing failure causes, approval outcomes, Worker progress, delivery, integration, deployment, or completion beyond the current Item status.
+    - Editing any file outside the three focus paths, adding dependencies, broad redesign, commit, or push.
+  executionSteps:
+    - Read the binding project instructions, current Board page, Item/BoardColumn types, transition mapping, and relevant local Next.js Client Component guide.
+    - Design one small pure presentation boundary with exhaustive ItemStatus and Priority handling plus safe fallbacks for out-of-contract historical values.
+    - Wire the existing Board page to the presentation output while preserving `selectItem`, `/inbox` navigation, and `moveItem` as the only action call paths.
+    - Add deterministic behavior tests for meaning and non-overclaim; do not use giant snapshots or source-text-only checks as the main proof.
+    - Run the focused test, targeted ESLint, complete test suite, production build, and diff hygiene once. Report unrelated baseline issues without expanding scope or looping.
+  deliverables:
+    - Plain-language Chinese Board columns, card stages, next actions, priorities, migration labels, and useful empty-column explanations.
+    - A pure Board presentation module and focused regression tests for every current status and priority.
+  modules:
+    - name: Board presentation
+      responsibility: Turn existing Item status, priority, and optional Runtime display name into short truthful Chinese display values.
+      consumes:
+        - ItemStatus, Priority, BoardColumn, and an optional already-known Runtime name.
+      produces:
+        - Column copy, stage, explanation, priority label, next action, and migration label values.
+      boundaries:
+        - Pure functions only; no React, store, API, filesystem, lifecycle mutation, hidden payload reading, or external calls.
+    - name: Board page
+      responsibility: Render the existing authoritative Board data so the user can understand current work and invoke the existing open or move actions.
+      consumes:
+        - Existing board columns, items, runtimes, and pure presentation output.
+      produces:
+        - Readable columns and cards with existing navigation and migration actions intact.
+      boundaries:
+        - No duplicate transition rules, direct API calls, automatic moves, connector behavior, or state invention.
+    - name: Board presentation regressions
+      responsibility: Prove complete status/priority coverage, safe fallbacks, and non-overclaim behavior independently of React rendering.
+      consumes:
+        - Representative current and out-of-contract historical presentation inputs.
+      produces:
+        - Deterministic assertions protecting user meaning and exhaustive mappings.
+      boundaries:
+        - No live server, Provider call, browser automation, dependency addition, or giant snapshot.
+  callChain:
+    - Existing Relay application and repository produce authoritative Item records and legal state transitions.
+    - The existing store groups Items into Board columns and supplies Items, Runtimes, `selectItem`, and `moveItem` to the Client Component.
+    - The pure Board presentation module maps only safe existing facts into user-facing copy.
+    - The Board page renders those values; opening still selects the Item and navigates to `/inbox`, while migration still calls the existing `moveItem` path exactly once.
+  scenarios:
+    - name: Collapsed inbox states stay distinguishable
+      given: The same Board column contains one inbox Item, one triaged Item, and one snoozed Item.
+      when: The cards render.
+      then: Each card explains its real stage in Chinese and gives an appropriate next action without exposing raw status identifiers.
+    - name: Approval is not ordinary assignment
+      given: An Item has status `pending_approval` and an assigned Runtime name.
+      when: Its card renders in the assigned column.
+      then: It says approval is still required, does not claim execution started, and keeps the Runtime name as supporting context rather than the stage itself.
+    - name: Running does not overclaim completion
+      given: An Item has status `running`.
+      when: Its card renders.
+      then: It says work is in progress and points to progress details without claiming success, review, integration, or deployment.
+    - name: Missing Runtime remains readable
+      given: An assigned Item has no matching Runtime record.
+      when: Its card renders.
+      then: The card remains useful and does not show undefined, a missing-runtime machine label, or invented assignee text.
+    - name: Column is empty
+      given: One Board column contains no Items.
+      when: The Board renders.
+      then: The empty state explains what will appear there instead of showing only `空`.
+    - name: Existing actions keep one call path
+      given: A user opens a card or chooses a destination column.
+      when: The action runs.
+      then: Opening uses the existing select-and-navigate path and migration uses the existing `moveItem` path without a second state mutation path.
+  risks:
+    - Presentation could accidentally become a second lifecycle authority, so it may describe but never decide or mutate status.
+    - Friendly copy could overclaim execution or delivery, so every stage is bounded to the exact current Item status.
+    - Column migration can have real consequences, so destination labels must say the resulting user-visible stage clearly and must not trigger on render.
+    - The worktree is heavily modified, so focus-path enforcement and independent diff review are required before Integration.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 1000
+provider:
+  name: xai
+  model: grok-4.5
+  endpoint: https://api.x.ai/v1
+  keychainService: forklight.xai.api-key
+  pricingRoute: xai-local-sign-in
+runtime:
+  name: grok-build
+  executable: grok
+  effort: high
+  maxBudgetUsd: null
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - .next
+    - dist
+  generatedPaths:
+    - .next/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/app/board/page.tsx
+    - src/components/board-presentation.ts
+    - tests/board-presentation.test.ts
+acceptance:
+  criteria:
+    - Every current ItemStatus and Priority has truthful plain-Chinese presentation, with safe historical fallbacks and no raw workflow code as primary copy.
+    - The Board distinguishes collapsed states, explains one useful next action, uses readable Chinese column/migration labels, and keeps Runtime context optional.
+    - Existing open and move call paths remain intact; no store, API, Domain, persistence, connector, or lifecycle behavior changes.
+    - Focused tests cover all statuses, priorities, missing Runtime data, out-of-contract historical inputs, empty-column copy, and forbidden review/integration/deployment overclaims.
+    - Focused tests, targeted ESLint, the complete Relay test suite, production build, and diff hygiene pass without commit or push.
+  commands:
+    - node --import tsx --test tests/board-presentation.test.ts
+    - npx eslint src/app/board/page.tsx src/components/board-presentation.ts tests/board-presentation.test.ts --max-warnings=0
+    - npm test
+    - npm run build
+    - git diff --check

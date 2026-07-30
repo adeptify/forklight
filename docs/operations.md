@@ -69,7 +69,10 @@ spend ceiling.
 ```bash
 forklight status <task-id>
 forklight list
-forklight stats                    # query per-provider/model outcomes
+forklight stats                    # query per-provider/model aggregates (human)
+forklight stats --json             # compact JSON (no per-Task failure rows)
+forklight stats --json --deep-audit  # full local failure evidence (requires --json)
+# --deep-audit without --json is rejected before any daemon statistics fetch
 ```
 
 The Hub control center provides the browser UI (configure + operate):
@@ -327,6 +330,14 @@ forklight integration wait <operation-id> --timeout-ms 60000
 forklight integration history <task-id>
 ```
 
+**Observation only.** `integration status`, `wait`, and `history` never start,
+restart, or replace a daemon. They talk only to an already-running daemon. If
+the daemon is temporarily unavailable (for example during an activation handoff
+socket gap) or has been stopped, these commands fail fast with guidance to
+retry the same observation later. Use `forklight daemon start` or
+`forklight daemon restart` when you explicitly need a lifecycle change;
+preflight and confirmed apply keep their existing startup behavior.
+
 The `--confirm` flag is required. The operation re-verifies every receipt claim
 (digests, affected files, patch), creates a backup, and records four durable
 stages:
@@ -342,6 +353,15 @@ backup. If artifact build or activation fails, the source and failure evidence
 are retained so the operator can inspect the exact stage. A wait timeout returns
 `outcome-unknown`; it does not rewrite the operation as failed. Re-query by
 `operationId`.
+
+**Disconnected wait is safe to re-query.** If a CLI, MCP, or Hub client closes
+or times out while `integration wait` is still pending, only that response is
+lost. The daemon keeps running, the already-started Integration continues, and
+durable state is unchanged. Reconnect and query the same `operationId` with
+`forklight integration status` or another wait. This is **not** the same as a
+genuinely killed daemon process after a partial stage such as `source-applied`;
+resuming stages after a process crash is still a separate, unimplemented
+recovery path.
 
 Tasks without a delivery specification record build and activation as
 `not-applicable`. ForkLight never creates a Git commit or pushes a branch.
@@ -474,7 +494,7 @@ mutation bypass.
 | Hub UI | `forklight hub` | **No** for browse; supervise actions need confirm |
 | Hub status (read-only) | `forklight hub status` | **No** — read-only, never claims, replaces, or signals |
 | Integration preflight | `forklight integration preflight` | **No** |
-| Integration status/wait/history | `forklight integration status` | **No** |
+| Integration status/wait/history | `forklight integration status` / `wait` / `history` | **No** — observation only; never starts a daemon |
 | Health check | `forklight health` | **No** |
 
 ## Actions that mutate the source project
@@ -504,6 +524,30 @@ forklight daemon start
 ```
 
 On macOS the default is `~/Library/Application Support/ForkLight`.
+
+### Daemon start readiness
+
+`forklight daemon start` and `forklight daemon restart` use one bounded readiness
+window after a single launch:
+
+```bash
+forklight daemon start
+forklight daemon start --startup-timeout-ms 60000
+forklight daemon restart --startup-timeout-ms 60000
+```
+
+- Default readiness deadline is **30 seconds** (`1000`–`600000` ms when set).
+- If a matching daemon is already healthy, start returns immediately and does
+  not spawn a second process.
+- Otherwise ForkLight launches **exactly one** child, then polls only that child
+  and the health endpoint until ready, the child exits, or the deadline expires.
+- Slow durable recovery (for example after self-upgrade) is allowed to finish
+  inside the configured window; readiness past the old fixed five-second probe
+  loop is not reported as a failed start while the child is still progressing.
+- Child exit and readiness timeout are distinct, privacy-safe failures. Neither
+  path auto-relaunches. A timed-out child is not killed automatically.
+- Integration `status` / `wait` / `history` remain observation-only and never
+  enter this startup supervisor.
 
 ## Quick verification (offline smoke)
 

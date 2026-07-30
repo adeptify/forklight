@@ -73,7 +73,10 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_candidate_reverify",
         "forklight_compete_submit",
         "forklight_competition_compare",
+        "forklight_competition_handoff",
         "forklight_competition_list",
+        "forklight_competition_main_decision",
+        "forklight_competition_retained_partial",
         "forklight_competition_status",
         "forklight_correct",
         "forklight_correction_eligibility",
@@ -83,6 +86,12 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_direct_codex_publication_preview",
         "forklight_direct_codex_publication_register",
         "forklight_direct_codex_review",
+        "forklight_goal_advance",
+        "forklight_goal_list",
+        "forklight_goal_status",
+        "forklight_goal_stop",
+        "forklight_goal_submit",
+        "forklight_goal_task_handoff",
         "forklight_health",
         "forklight_inspect",
         "forklight_integration_apply",
@@ -100,6 +109,8 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_provider_status",
         "forklight_remediation_verify", // optional amendment: structured failed-command replacements only
         "forklight_resume",
+        "forklight_review_graph_create",
+        "forklight_review_graph_status",
         "forklight_settings_get",
         "forklight_settings_reset",
         "forklight_settings_update",
@@ -1320,6 +1331,35 @@ test("MCP statistics exposes filtered local evidence and explicit sample sizes",
     costUsd: 0.4,
     turns: 5,
   });
+  const failed = {
+    id: "statistics-failed",
+    name: "statistics failed",
+    status: "failed",
+    sourcePath: "/source",
+    taskFile: "/task-failed.yaml",
+    spec: { provider: { name: "minimax", model: "m3" } } as TaskRecord["spec"],
+    paths: {} as TaskRecord["paths"],
+    sessionId: "statistics-failed-session",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    error: "HTTP 401: MCP deep audit diagnostic",
+  } satisfies TaskRecord;
+  store.createTask(failed);
+  store.createAttempt({
+    id: "statistics-failed-attempt",
+    taskId: failed.id,
+    ordinal: 1,
+    status: "failed",
+    sessionId: failed.sessionId,
+    rawLogPath: "/log",
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    exitCode: 1,
+    costUsd: 0.1,
+    turns: 1,
+  });
   store.close();
 
   const daemon = new ForkLightDaemon(home, 0);
@@ -1333,10 +1373,32 @@ test("MCP statistics exposes filtered local evidence and explicit sample sizes",
       name: "forklight_statistics",
       arguments: { provider: "minimax" },
     });
-    const summaries = (result.structuredContent as { summaries?: ProviderModelSummary[] }).summaries;
+    const summaries = (result.structuredContent as { summaries?: Array<Record<string, unknown>> })
+      .summaries;
     assert.equal(summaries?.[0]?.model, "m3");
-    assert.equal(summaries?.[0]?.sampleSize, 1);
-    assert.equal(summaries?.[0]?.costSampleSize, 1);
+    assert.equal(summaries?.[0]?.sampleSize, 2);
+    assert.equal(summaries?.[0]?.costSampleSize, 2);
+    assert.equal("failures" in (summaries?.[0] ?? {}), false);
+    const compactText = JSON.stringify(result.structuredContent);
+    assert.doesNotMatch(
+      compactText,
+      /"taskId"|"attemptId"|"diagnostic"|MCP deep audit diagnostic|statistics-failed/,
+    );
+
+    const deep = await client.callTool({
+      name: "forklight_statistics",
+      arguments: { provider: "minimax", deepAudit: true },
+    });
+    const deepSummaries = (deep.structuredContent as {
+      summaries?: ProviderModelSummary[];
+    }).summaries;
+    assert.equal(deepSummaries?.[0]?.sampleSize, 2);
+    assert.equal(deepSummaries?.[0]?.failures.length, 1);
+    assert.equal(deepSummaries?.[0]?.failures[0]?.taskId, "statistics-failed");
+    assert.equal(
+      deepSummaries?.[0]?.failures[0]?.diagnostic,
+      "HTTP 401: MCP deep audit diagnostic",
+    );
 
     const empty = await client.callTool({
       name: "forklight_statistics",
@@ -1653,6 +1715,237 @@ test("inlineTask + parseTaskSpec keep explicit null against finite default (FL-D
 });
 
 // --- Compact Integration MCP response tests ---
+
+// --- M3: MCP taskClass / taskFamily / routingDecision admission ---
+
+/** Default resolved Worker identity under cloneDefaults (deepseek / flash / claude-code / high / default). */
+const DEFAULT_FROZEN_WORKER = {
+  provider: "deepseek",
+  model: "deepseek-v4-flash",
+  runtime: "claude-code" as const,
+  effort: "high" as const,
+  workerProfileId: "default",
+};
+
+function routingDecisionFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    taskFamily: "main-orchestration-metadata",
+    shortlist: [
+      DEFAULT_FROZEN_WORKER,
+      {
+        provider: "qwen",
+        model: "qwen3.7-plus",
+        runtime: "claude-code",
+        effort: "high",
+      },
+    ],
+    selectedWorker: DEFAULT_FROZEN_WORKER,
+    selectedBecause: {
+      code: "user-specified",
+      note: "User prefers this Worker for the current Task class.",
+    },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: {
+      scope: "none",
+      exactSampleCounts: {
+        "deepseek\0deepseek-v4-flash\0claude-code\0high": 0,
+        "qwen\0qwen3.7-plus\0claude-code\0high": 0,
+      },
+    },
+    ...overrides,
+  };
+}
+
+test("MCP tool discovery describes taskClass, taskFamily, and routingDecision", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-rd-schema-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tools = await client.listTools();
+    for (const name of ["forklight_validate", "forklight_submit"] as const) {
+      const tool = tools.tools.find((t) => t.name === name);
+      assert.ok(tool, `${name} registered`);
+      const props = (tool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+      assert.ok("taskClass" in props, `${name} exposes taskClass`);
+      assert.ok("taskFamily" in props, `${name} exposes taskFamily`);
+      assert.ok("routingDecision" in props, `${name} exposes routingDecision`);
+      // Nested shape may be inlined or $ref-encoded; require the snapshot field names somewhere.
+      const schemaText = JSON.stringify(tool!.inputSchema);
+      for (const key of [
+        "shortlist",
+        "selectedWorker",
+        "selectedBecause",
+        "competition",
+        "evidenceSnapshot",
+        "exactSampleCounts",
+      ]) {
+        assert.ok(schemaText.includes(key), `${name} schema describes ${key}`);
+      }
+    }
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("inlineTask + parseTaskSpec preserve exact routing metadata without inference", async () => {
+  const { inlineTask } = await import("../src/mcp/server.js");
+  const { cloneDefaults } = await import("../src/core/settings.js");
+  const { parseTaskSpec } = await import("../src/core/task.js");
+  const settings = structuredClone(cloneDefaults());
+  const routingDecision = routingDecisionFixture();
+  const input = qualityContractArgs("/project", {
+    taskClass: "m3-mcp-routing-decision-admission",
+    taskFamily: "main-orchestration-metadata",
+    routingDecision,
+  });
+  const inline = inlineTask(input as Parameters<typeof inlineTask>[0], settings);
+  assert.equal(inline.taskClass, "m3-mcp-routing-decision-admission");
+  assert.equal(inline.taskFamily, "main-orchestration-metadata");
+  assert.deepEqual(inline.routingDecision, routingDecision);
+
+  const omitted = inlineTask(
+    qualityContractArgs("/project") as Parameters<typeof inlineTask>[0],
+    settings,
+  );
+  assert.equal("taskClass" in omitted, false);
+  assert.equal("taskFamily" in omitted, false);
+  assert.equal("routingDecision" in omitted, false);
+
+  const spec = parseTaskSpec(inline, "/project", {
+    contractQuality: settings.contractQuality,
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    completionPolicy: settings.completionPolicy,
+    workerProfiles: settings.workerProfiles,
+    modelCatalog: settings.modelCatalog,
+  });
+  assert.equal(spec.taskClass, "m3-mcp-routing-decision-admission");
+  assert.equal(spec.taskFamily, "main-orchestration-metadata");
+  assert.ok(spec.routingDecision);
+  assert.equal(spec.routingDecision!.selectedWorker.provider, "deepseek");
+  assert.equal(spec.routingDecision!.selectedWorker.model, "deepseek-v4-flash");
+  assert.equal(spec.routingDecision!.selectedWorker.runtime, "claude-code");
+  assert.equal(spec.routingDecision!.selectedWorker.effort, "high");
+  assert.equal(spec.routingDecision!.competition.intent, "none");
+  assert.equal(spec.routingDecision!.evidenceSnapshot.scope, "none");
+  assert.equal(spec.provider.name, spec.routingDecision!.selectedWorker.provider);
+  assert.equal(spec.provider.model, spec.routingDecision!.selectedWorker.model);
+  assert.equal(spec.runtime.name, spec.routingDecision!.selectedWorker.runtime);
+  assert.equal(spec.runtime.effort, spec.routingDecision!.selectedWorker.effort);
+});
+
+test("MCP validate/submit preserve routingDecision; identity drift and omit stay compatible", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-rd-admit-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const routingDecision = routingDecisionFixture();
+    const withMeta = qualityContractArgs(home, {
+      taskClass: "m3-mcp-routing-decision-admission",
+      taskFamily: "main-orchestration-metadata",
+      routingDecision,
+    });
+
+    const valid = await client.callTool({
+      name: "forklight_validate",
+      arguments: withMeta,
+    });
+    assert.equal(valid.isError, undefined, toolErrorText(valid));
+    assert.equal((valid.structuredContent as { passed?: boolean }).passed, true);
+
+    // Identity drift: selectedWorker is Grok but resolved Worker is default DeepSeek.
+    const drift = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(home, {
+        taskClass: "m3-mcp-routing-decision-admission",
+        taskFamily: "main-orchestration-metadata",
+        routingDecision: routingDecisionFixture({
+          shortlist: [{
+            provider: "xai",
+            model: "grok-4.5",
+            runtime: "grok-build",
+            effort: "high",
+            workerProfileId: "local-grok-builder",
+          }],
+          selectedWorker: {
+            provider: "xai",
+            model: "grok-4.5",
+            runtime: "grok-build",
+            effort: "high",
+            workerProfileId: "local-grok-builder",
+          },
+        }),
+      }),
+    });
+    assert.equal(drift.isError, true, "identity drift must fail before admission");
+    assert.match(toolErrorText(drift), /does not match resolved Task provider|routingDecision/);
+
+    // Malformed competition: consider without triggers — rejected by parseTaskSpec.
+    const malformed = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(home, {
+        taskClass: "m3-mcp-routing-decision-admission",
+        routingDecision: routingDecisionFixture({
+          competition: { intent: "consider", triggers: [] },
+        }),
+      }),
+    });
+    assert.equal(malformed.isError, true, "malformed competition metadata must fail before admission");
+    assert.match(toolErrorText(malformed), /triggers must be non-empty/);
+
+    // Legacy omission remains compatible.
+    const legacy = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(home),
+    });
+    assert.equal(legacy.isError, undefined, toolErrorText(legacy));
+    assert.equal((legacy.structuredContent as { passed?: boolean }).passed, true);
+
+    // Submit persists the exact snapshot on the stored Task.
+    const submit = await client.callTool({
+      name: "forklight_submit",
+      arguments: withMeta,
+    });
+    assert.equal(submit.isError, undefined, toolErrorText(submit));
+    const taskId = String((submit.structuredContent as { taskId?: string }).taskId);
+    const stored = await daemonRequest<TaskRecord>("status", { taskId }, home);
+    assert.equal(stored.spec.taskClass, "m3-mcp-routing-decision-admission");
+    assert.equal(stored.spec.taskFamily, "main-orchestration-metadata");
+    assert.ok(stored.spec.routingDecision);
+    assert.deepEqual(stored.spec.routingDecision, routingDecision);
+    assert.equal(stored.spec.provider.name, routingDecision.selectedWorker.provider);
+    assert.equal(stored.spec.provider.model, routingDecision.selectedWorker.model);
+    assert.equal(stored.spec.runtime.name, routingDecision.selectedWorker.runtime);
+    assert.equal(stored.spec.runtime.effort, routingDecision.selectedWorker.effort);
+    assert.equal(stored.spec.workerProfileId, routingDecision.selectedWorker.workerProfileId);
+
+    // Legacy submit invents nothing.
+    const legacySubmit = await client.callTool({
+      name: "forklight_submit",
+      arguments: qualityContractArgs(home, { name: "legacy-omit-routing" }),
+    });
+    assert.equal(legacySubmit.isError, undefined, toolErrorText(legacySubmit));
+    const legacyId = String((legacySubmit.structuredContent as { taskId?: string }).taskId);
+    const legacyStored = await daemonRequest<TaskRecord>("status", { taskId: legacyId }, home);
+    assert.equal(legacyStored.spec.taskClass, undefined);
+    assert.equal(legacyStored.spec.taskFamily, undefined);
+    assert.equal(legacyStored.spec.routingDecision, undefined);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
 
 test("MCP validates the same optional Main-authored presentation shape as YAML Tasks", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-presentation-"));

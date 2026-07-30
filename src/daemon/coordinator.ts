@@ -49,6 +49,30 @@ import {
 } from "../core/provider-probe.js";
 import { assertWorkPlan, type WorkPlan } from "../core/plan.js";
 import {
+  computeSelfUpgradeEvidence,
+  parseRequiredStreakCount,
+  SELF_UPGRADE_RESULT_WINDOW,
+  type SelfUpgradeEvidenceProjection,
+} from "../core/self-upgrade-evidence.js";
+import {
+  advanceGoalRecords,
+  assertGoal,
+  assertGoalCorrectionAllowed,
+  assertGoalReviewAllowed,
+  buildGoalRecords,
+  evaluateMilestoneGate,
+  goalAdmissionBlocked,
+  markGoalCapReached,
+  projectGoal,
+  reconcileGoalRecords,
+  resolveEffectiveMilestoneLineage,
+  stopGoalRecords,
+  type GoalAdvanceResult,
+  type GoalRegistrationResult,
+  type GoalView,
+  type LoadedGoal,
+} from "../core/goal.js";
+import {
   buildTaskRecord,
   checkReviseEligibility,
   correctTask,
@@ -66,12 +90,26 @@ import {
   CompetitionService,
   rankingPolicy,
   type CandidateOverride,
+  type CompetitionCreateOptions,
   type RankingPolicyOverride,
+  type WorkerReadinessVerifier,
 } from "../core/competition.js";
+import {
+  CandidateHandoffError,
+  executeCandidateHandoff,
+  executeGoalTaskHandoff,
+  projectCandidateHandoff,
+  recoverCandidateHandoffs,
+  resolveHandoffViewForTask,
+  type CandidateHandoffRequest,
+  type GoalTaskHandoffRequest,
+} from "../core/candidate-handoff.js";
 import { loadTaskSpec, parseTaskSpec } from "../core/task.js";
 import { isoTimestamp as timestamp, sleepMs as sleep } from "../core/time.js";
 import { providerReadiness } from "../core/providers.js";
 import { listWorkerAdapters } from "../workers/registry.js";
+import { resolveWorkerReadiness } from "../core/worker-readiness.js";
+import type { RuntimeName } from "../core/runtime-names.js";
 import {
   resolveReadiness,
   type DependencyDecision,
@@ -80,6 +118,7 @@ import { BoardService, type PlanBoard, type PlanBoardSummary } from "../core/boa
 import {
   StatisticsService,
   type ProviderModelSummary,
+  type RoutingEvidenceCoverage,
   type StatisticsFilter,
 } from "../core/statistics.js";
 import {
@@ -163,12 +202,20 @@ import {
   describeCorrectionRejection,
   validateStructuredCorrectionInput,
 } from "../core/candidate-revision.js";
-import type { CorrectionEligibility } from "../core/types.js";
+import type { CorrectionEligibility, ReviewGraphView } from "../core/types.js";
+import {
+  createReviewGraph,
+  getReviewGraphStatus,
+  reconcileAllReviewGraphs,
+  reconcileReviewGraphForTask,
+} from "../core/review-graph.js";
 
 export interface PlanRegistrationResult {
   planId: string;
   taskIdsByItemId: Record<string, string>;
 }
+
+export type { GoalRegistrationResult, GoalView, GoalAdvanceResult };
 
 /**
  * One bounded stale-preview reason shared by the daemon and Hub. A bound
@@ -386,35 +433,230 @@ export class DaemonCoordinator {
     return this.store.getTask(task.id);
   }
 
-  async submitCompetitionFile(taskFile: string, candidates: CandidateOverride[]): Promise<CompetitionRecord> {
+  async submitCompetitionFile(
+    taskFile: string,
+    candidates: CandidateOverride[],
+    options: CompetitionCreateOptions = {},
+  ): Promise<CompetitionRecord> {
     const settings = this.settings.get();
     const loaded = await loadTaskSpec(taskFile, taskPolicy(settings));
-    return this.submitCompetition(loaded.spec, loaded.taskFile, candidates);
+    return this.submitCompetition(loaded.spec, loaded.taskFile, candidates, options);
   }
 
   async submitInlineCompetition(
     rawTask: unknown,
     baseDirectory: string,
     candidates: CandidateOverride[],
+    options: CompetitionCreateOptions = {},
   ): Promise<CompetitionRecord> {
     const settings = this.settings.get();
     const spec = parseTaskSpec(rawTask, baseDirectory, taskPolicy(settings));
-    return this.submitCompetition(spec, "forklight://mcp/inline-competition-task", candidates);
+    return this.submitCompetition(spec, "forklight://mcp/inline-competition-task", candidates, options);
   }
 
   async submitCompetition(
     contractSpec: TaskSpec,
     contractTaskFile: string,
     candidates: CandidateOverride[],
+    options: CompetitionCreateOptions = {},
   ): Promise<CompetitionRecord> {
     const coordinator = new CompetitionCoordinator(this.store, this.settings);
+    // The daemon always supplies the canonical Worker readiness verifier so
+    // every selected Profile is provably launchable before any workspace
+    // preparation. Client-supplied options never override it.
+    const admissionOptions: CompetitionCreateOptions = {
+      ...options,
+      readinessVerifier: this.buildCompetitionReadinessVerifier(),
+    };
     const { competition, taskIds } = await coordinator.create(
       contractSpec,
       contractTaskFile,
       candidates,
+      admissionOptions,
     );
     for (const taskId of taskIds) this.queueTask(taskId);
     return competition;
+  }
+
+  /** Build the canonical Worker readiness verifier for Competition admission.
+   *  Reuses resolveWorkerReadiness (model, pairing, authentication, runtime,
+   *  permissions) so admission is all-or-nothing: one not-launchable Profile
+   *  rejects the whole Competition before any Task, event, snapshot, workspace,
+   *  or Provider call is created. */
+  private buildCompetitionReadinessVerifier(): WorkerReadinessVerifier {
+    return (profileIds: readonly string[]): void => {
+      const settings = this.settings.get();
+      const providers = providerReadiness(settings.providerDefaults, this.providerAuthInspector);
+      const runtimes: Partial<Record<RuntimeName, { ok: boolean }>> = {};
+      for (const adapter of listWorkerAdapters()) {
+        const doctor = adapter.doctor();
+        if (!(doctor instanceof Promise)) {
+          runtimes[adapter.name] = { ok: doctor.ok };
+        }
+      }
+      const results = resolveWorkerReadiness({
+        workerProfiles: settings.workerProfiles,
+        providerDefaults: settings.providerDefaults,
+        providers: providers.providers,
+        runtimes,
+        ...(settings.modelCatalog === undefined ? {} : { modelCatalog: settings.modelCatalog }),
+      });
+      const byId = new Map(results.map((r) => [r.workerId, r]));
+      for (const id of profileIds) {
+        const result = byId.get(id);
+        if (result === undefined) {
+          throw new Error(`Competition candidate references an unknown Worker Profile: ${id}`);
+        }
+        if (!result.canLaunch) {
+          throw new Error(
+            `Competition candidate Worker Profile is not launchable: ${id} (${result.reason})`,
+          );
+        }
+      }
+    };
+  }
+
+  /** Record a Competition-level Main decision (accept/revise/reject) bound to
+   *  one exact Candidate Revision. An explicit derivation of the chosen
+   *  candidate Task's latest Main Review; never auto-retries, auto-accepts, or
+   *  auto-integrates. Only `accept` makes the exact revision the final choice
+   *  eligible for Integration (which still requires explicit confirmation). */
+  competitionMainDecision(
+    competitionId: string,
+    candidateId: string,
+    decision: "accept" | "revise" | "reject",
+    reason: string,
+    confirm: true,
+  ): import("../core/types.js").CompetitionMainDecision {
+    if (confirm !== true) throw new Error("competition_main_decision requires explicit confirm: true");
+    return new CompetitionCoordinator(this.store, this.settings).recordMainDecision(
+      competitionId,
+      candidateId,
+      decision,
+      reason,
+    );
+  }
+
+  /** Record bounded retained-partial evidence for one non-selected Candidate.
+   *  Stores reusable paths and remaining gaps for later M2 handoff only; never
+   *  starts a Worker, retry, successor, or Integration. */
+  competitionRetainedPartial(
+    competitionId: string,
+    candidateId: string,
+    reusablePaths: unknown,
+    remainingGaps: unknown,
+    confirm: true,
+  ): import("../core/types.js").CompetitionRetainedPartial {
+    if (confirm !== true) throw new Error("competition_retained_partial requires explicit confirm: true");
+    return new CompetitionCoordinator(this.store, this.settings).recordRetainedPartial(
+      competitionId,
+      candidateId,
+      reusablePaths,
+      remainingGaps,
+    );
+  }
+
+  /** Explicit confirmed one-hop handoff of one exact retained Candidate to one
+   *  different saved Worker Profile. Creates exactly one durable successor Task
+   *  from the current project snapshot with selected-path import only. Never
+   *  mutates the source Task, auto-selects a Worker, retries, accepts, or
+   *  integrates. Preparation failure launches no Worker. */
+  async competitionHandoff(
+    request: CandidateHandoffRequest,
+  ): Promise<import("../core/types.js").CandidateHandoffView> {
+    if (request.confirm !== true) {
+      throw new CandidateHandoffError(
+        "confirm-required",
+        "competition_handoff requires explicit confirm: true",
+      );
+    }
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    const view = await executeCandidateHandoff(
+      this.store,
+      this.settings.get(),
+      request,
+      this.handoffReadiness(),
+    );
+    await this.queuePreparedHandoffSuccessor(view);
+    return view;
+  }
+
+  /**
+   * Explicit confirmed direct Goal-Task handoff: retain selected whole-file
+   * paths and bounded gaps from one exact normal Goal milestone Candidate and
+   * hand them to one different saved Worker Profile. Never creates a
+   * Competition, mutates the source Task, auto-selects, retries, accepts,
+   * integrates, commits, or pushes.
+   */
+  async goalTaskHandoff(
+    request: GoalTaskHandoffRequest,
+  ): Promise<import("../core/types.js").CandidateHandoffView> {
+    if (request.confirm !== true) {
+      throw new CandidateHandoffError(
+        "confirm-required",
+        "goal_task_handoff requires explicit confirm: true",
+      );
+    }
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    const view = await executeGoalTaskHandoff(
+      this.store,
+      this.settings.get(),
+      request,
+      this.handoffReadiness(),
+    );
+    await this.queuePreparedHandoffSuccessor(view);
+    // Handoff is one authoritative evidence change for the Goal.
+    if (view.originKind === "goal-task" && view.goalId !== undefined) {
+      try {
+        this.reconcileGoal(view.goalId);
+      } catch {
+        // Goal projection refresh is best-effort; durable handoff already committed.
+      }
+    } else if (view.sourceTaskId) {
+      this.reconcileGoalsForTask(view.sourceTaskId);
+    }
+    return view;
+  }
+
+  private handoffReadiness(): {
+    canLaunch: (profileId: string) => { ok: boolean; reason?: string };
+  } {
+    return {
+      canLaunch: (profileId) => {
+        try {
+          this.buildCompetitionReadinessVerifier()([profileId]);
+          return { ok: true };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { ok: false, reason: message };
+        }
+      },
+    };
+  }
+
+  private async queuePreparedHandoffSuccessor(
+    view: import("../core/types.js").CandidateHandoffView,
+  ): Promise<void> {
+    // Queue only after successful preparation. Failed preparation leaves a
+    // durable failed record and never launches a Worker.
+    if (view.status !== "prepared") return;
+    try {
+      this.enqueue({ taskId: view.successorTaskId, resuming: false });
+    } catch {
+      this.store.addEvent(
+        view.successorTaskId,
+        undefined,
+        "task.ready",
+        "Handoff successor persisted and will be recovered from the durable queue",
+        { handoffId: view.id },
+      );
+    }
+  }
+
+  /** Privacy-safe handoff projection for a Task (source or successor). */
+  candidateHandoffForTask(taskId: string): import("../core/types.js").CandidateHandoffView | undefined {
+    this.store.getTask(taskId);
+    return resolveHandoffViewForTask(this.store, taskId);
   }
 
   competitionStatus(competitionId: string): Record<string, unknown> {
@@ -422,6 +664,7 @@ export class DaemonCoordinator {
     const candidateRecords = this.store.getCompetitionCandidates(competitionId);
     const candidates = candidateRecords.map((record) => {
       const task = this.store.getTask(record.taskId);
+      const review = latestMainReview(this.store.listEvents(record.taskId));
       return {
         candidateId: record.id,
         taskId: record.taskId,
@@ -429,6 +672,12 @@ export class DaemonCoordinator {
         providerName: record.providerName,
         modelName: record.modelName,
         taskStatus: task.status,
+        // Frozen Worker identity resolved at admission. Absent on legacy
+        // records - Hub reports the historical identity as unavailable.
+        ...(record.identity === undefined ? {} : { identity: record.identity }),
+        // Candidate Task-level Main Review decision (canonical authority).
+        // Absent when Main has not reviewed this candidate yet.
+        ...(review === undefined ? {} : { mainReviewDecision: review.decision }),
         ...(task.startedAt === undefined ? {} : { taskStartedAt: task.startedAt }),
         ...(task.finishedAt === undefined ? {} : { taskFinishedAt: task.finishedAt }),
         ...(task.error === undefined ? {} : { error: task.error }),
@@ -445,7 +694,83 @@ export class DaemonCoordinator {
       evaluation = evals.length > 0 ? evals[evals.length - 1] : undefined;
     }
 
-    return { competition, candidates, progress, ...(evaluation === undefined ? {} : { evaluation }) };
+    const mainDecision = competition.mainDecision;
+    let mainDecisionCurrent = false;
+    if (mainDecision !== undefined) {
+      const decidedCandidate = candidateRecords.find(
+        (candidate) => candidate.id === mainDecision.candidateId,
+      );
+      if (decidedCandidate !== undefined) {
+        const decidedEvents = this.store.listEvents(decidedCandidate.taskId);
+        const latestRevision = resolveLatestRevision(decidedEvents);
+        const latestReview = latestMainReview(decidedEvents);
+        mainDecisionCurrent = latestRevision !== undefined
+          && latestReview !== undefined
+          && mainDecision.taskId === decidedCandidate.taskId
+          && mainDecision.attemptId === latestReview.attemptId
+          && mainDecision.verificationEventSequence === latestReview.verificationEventSequence
+          && mainDecision.candidateRevisionId === latestRevision.id
+          && mainDecision.acceptedPatchDigest === latestRevision.patchDigest;
+      }
+    }
+    // The machine recommendation is a comparison only - never a final Winner.
+    // A final choice exists only when Main has accepted an exact Candidate
+    // Revision at the Competition level.
+    const machineComparison = {
+      kind: "machine-comparison" as const,
+      state: evaluation === undefined
+        ? "waiting"
+        : (evaluation as Record<string, unknown>).recommendation === undefined
+          ? "no-deliverable"
+          : "recommendation",
+      waitingForMain: evaluation !== undefined && !mainDecisionCurrent,
+      ...(evaluation === undefined ? {} : { recommendation: (evaluation as Record<string, unknown>).recommendation }),
+    };
+    const finalChoice = mainDecisionCurrent && mainDecision?.decision === "accept"
+      ? {
+          candidateId: mainDecision.candidateId,
+          taskId: mainDecision.taskId,
+          ...(mainDecision.candidateRevisionId === undefined ? {} : { candidateRevisionId: mainDecision.candidateRevisionId }),
+          ...(mainDecision.acceptedPatchDigest === undefined ? {} : { acceptedPatchDigest: mainDecision.acceptedPatchDigest }),
+        }
+      : undefined;
+    const nextAction = progress.terminal < progress.total
+      ? "wait-for-candidates"
+      : evaluation === undefined
+        ? "compare"
+        : !mainDecisionCurrent
+          ? "main-review"
+          : mainDecision?.decision === "accept"
+            ? "integration"
+            : mainDecision?.decision === "revise"
+              ? "correct-candidate"
+              : "stopped";
+
+    return {
+      competition,
+      candidates,
+      progress,
+      // Bounded Main reason. Absent on legacy records - never inferred.
+      ...(competition.reason === undefined ? {} : { reason: competition.reason }),
+      ...(competition.legacy ? { legacy: true } : {}),
+      ...(competition.retainedPartial === undefined ? {} : { retainedPartial: competition.retainedPartial }),
+      ...(mainDecision === undefined ? {} : { mainDecision }),
+      mainDecisionCurrent,
+      machineComparison,
+      ...(finalChoice === undefined ? {} : { finalChoice }),
+      nextAction,
+      ...(evaluation === undefined ? {} : { evaluation }),
+      // Privacy-safe handoff projections for this Competition (source identities only).
+      handoffs: this.store.listCandidateHandoffsByCompetitionId(competitionId).map((record) => {
+        let successorTaskStatus: TaskStatus | undefined;
+        try {
+          successorTaskStatus = this.store.getTask(record.successorTaskId).status;
+        } catch {
+          successorTaskStatus = undefined;
+        }
+        return projectCandidateHandoff(record, successorTaskStatus);
+      }),
+    };
   }
 
   competitionCompare(
@@ -579,6 +904,135 @@ export class DaemonCoordinator {
     const settings = this.settings.get();
     const report = await assertWorkPlan(planFile, taskPolicy(settings));
     return this.submitPlan(report.plan);
+  }
+
+  /**
+   * Atomically freeze one Goal over a four-to-eight Task Plan, then queue
+   * only dependency-ready work through the ordinary Plan scheduler.
+   */
+  submitGoal(loaded: LoadedGoal): GoalRegistrationResult {
+    const plan = loaded.plan;
+    const planId = plan.planFile;
+    const createdAt = timestamp();
+    const home = path.dirname(this.store.databasePath);
+    const taskIdsByItemId: Record<string, string> = {};
+    const registrations: StagedTaskRegistration[] = [];
+    const items: PlanItemRecord[] = [];
+
+    plan.items.forEach((item, itemIndex) => {
+      const taskId = randomUUID();
+      const effectivePolicy = this.resolveEffectivePolicy(item.task);
+      taskIdsByItemId[item.id] = taskId;
+      registrations.push({
+        task: buildTaskRecord({
+          spec: item.task,
+          taskFile: item.taskFile,
+          home,
+          id: taskId,
+          sessionId: randomUUID(),
+          createdAt,
+          ...(effectivePolicy === undefined ? {} : { effectivePolicy }),
+        }),
+        creationEvent: {
+          summary: `Task created: ${item.task.name}`,
+          payload: {
+            provider: item.task.provider.name,
+            model: item.task.provider.model,
+            runtime: item.task.runtime.name,
+            sourcePath: item.task.project,
+            goalFile: loaded.goalFile,
+          },
+        },
+      });
+      items.push({
+        id: item.id,
+        planId,
+        taskId,
+        itemIndex,
+        taskFile: item.taskFile,
+      });
+    });
+
+    const dependencies: DependencyRecord[] = plan.items.flatMap((item) =>
+      item.dependsOn.map((dependsOnItemId) => ({
+        planId,
+        itemId: item.id,
+        dependsOnItemId,
+      })),
+    );
+    const planRecord: PlanRecord = {
+      id: planId,
+      name: plan.name,
+      objective: plan.objective,
+      planFile: plan.planFile,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const { goal, milestones } = buildGoalRecords({
+      loaded,
+      planId,
+      taskIdsByItemId,
+      createdAt,
+    });
+
+    this.store.createPlanExecutionWithGoal(
+      registrations,
+      planRecord,
+      items,
+      dependencies,
+      goal,
+      milestones,
+    );
+    // Queue only after durable registration; Goal gates apply on admission.
+    for (const taskId of Object.values(taskIdsByItemId)) this.queueTask(taskId);
+    this.reconcileGoal(goal.id);
+    return { goalId: goal.id, planId, taskIdsByItemId };
+  }
+
+  async submitGoalFile(goalFile: string): Promise<GoalRegistrationResult> {
+    const settings = this.settings.get();
+    const loaded = await assertGoal(goalFile, taskPolicy(settings));
+    return this.submitGoal(loaded);
+  }
+
+  goalStatus(goalId: string): GoalView {
+    // Read-only inspect still reconciles durable milestone projections so
+    // Main sees current evidence without treating the poll as new evidence.
+    this.reconcileGoal(goalId, { fromStatusPoll: true });
+    return projectGoal(this.store, goalId);
+  }
+
+  listGoals(limit = 50): GoalView[] {
+    return this.store.listGoals(limit).map((goal) => {
+      this.reconcileGoal(goal.id, { fromStatusPoll: true });
+      return projectGoal(this.store, goal.id);
+    });
+  }
+
+  advanceGoal(goalId: string, confirm: true): GoalAdvanceResult {
+    if (confirm !== true) throw new Error("goal advance requires confirm: true");
+    this.store.getGoal(goalId);
+    const result = advanceGoalRecords(this.store, goalId);
+    // Reconcile may unlock dependents only when evidence actually changed.
+    if (result.newEvidence) {
+      this.reconcilePlans();
+    }
+    // Explicit no-new-evidence cap is a durable terminal stop: prune queued
+    // (not active) work so admission control matches the Goal label.
+    if (goalAdmissionBlocked(this.store.getGoal(goalId))) {
+      this.pruneGoalBlockedQueuedJobs();
+    }
+    return result;
+  }
+
+  stopGoal(goalId: string, confirm: true): GoalView {
+    if (confirm !== true) throw new Error("goal stop requires confirm: true");
+    const view = stopGoalRecords(this.store, goalId, true);
+    // Stop is durable admission control only; do not kill active Workers.
+    // Jobs that were queued before the stop are not active yet, so remove
+    // them now and leave a truthful waiting record for Main.
+    this.pruneGoalBlockedQueuedJobs();
+    return view;
   }
 
   resume(
@@ -744,6 +1198,20 @@ export class DaemonCoordinator {
       throw new Error(`Task ${taskId} is already queued or running`);
     }
 
+    // Goal-level correction cap rejects before any durable mutation.
+    const goalForCorrection = this.store.getGoalByTaskId(taskId);
+    if (goalForCorrection !== undefined) {
+      try {
+        assertGoalCorrectionAllowed(goalForCorrection);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/correction cap/i.test(message)) {
+          markGoalCapReached(this.store, goalForCorrection.id, "correction-cap");
+        }
+        throw error;
+      }
+    }
+
     const latestRevision = resolveLatestRevision(this.store.listEvents(taskId));
     const structuredRequested = candidateRevisionId !== undefined
       || reusablePaths !== undefined
@@ -800,6 +1268,19 @@ export class DaemonCoordinator {
       execution.maximumBudgetUsd,
     );
 
+    if (goalForCorrection !== undefined) {
+      const now = timestamp();
+      const goal = this.store.getGoal(goalForCorrection.id);
+      this.store.saveGoal({
+        ...goal,
+        counters: {
+          ...goal.counters,
+          correctionRounds: goal.counters.correctionRounds + 1,
+        },
+        updatedAt: now,
+      }, this.store.getGoalMilestones(goal.id));
+    }
+
     const queued = prepareMainCorrectionTask(this.store, taskId);
     this.enqueue({
       taskId,
@@ -815,7 +1296,11 @@ export class DaemonCoordinator {
     reason: string,
     confirm: true,
   ): MainReviewDecision {
-    return recordMainReview(this.store, taskId, { decision, reason, confirm });
+    const result = recordMainReview(this.store, taskId, { decision, reason, confirm });
+    // Fresh Main Review is authoritative Goal evidence; unlock gates once.
+    this.reconcileGoalsForTask(taskId);
+    this.reconcilePlans();
+    return result;
   }
 
   status(taskId: string): TaskRecord {
@@ -982,6 +1467,7 @@ export class DaemonCoordinator {
         verifiedBehavior: settings.modelRouting.weights.verifiedBehavior,
         modelQualityFailure: settings.modelRouting.weights.modelQualityFailure,
         correctionChurn: settings.modelRouting.weights.correctionChurn,
+        firstPassSuccess: settings.modelRouting.weights.firstPassSuccess ?? 0.5,
         officialCost: settings.modelRouting.weights.officialCost,
         duration: settings.modelRouting.weights.duration,
         budgetReliability: settings.modelRouting.weights.budgetReliability ?? 0,
@@ -1043,6 +1529,28 @@ export class DaemonCoordinator {
     return getPortfolioEconomicsSummary(this.store, filter);
   }
 
+  /** Read-only portfolio coverage of classification + Main-authored
+   *  Worker-selection evidence on terminal ordinary Tasks. Never mutates,
+   *  never calls a Provider, never scores a model, and never counts Review
+   *  Graph reviewer Tasks as implementation samples. */
+  routingEvidenceCoverage(): RoutingEvidenceCoverage {
+    return new StatisticsService(this.store).routingEvidenceCoverage();
+  }
+
+  /**
+   * Canonical consecutive self-upgrade streak evidence. Read-only:
+   * never starts Integration, never mutates state, never loads command
+   * streams or Provider data. Only durable results whose receipt names the
+   * exact forklight-self-upgrade delivery profile enter the streak window.
+   */
+  selfUpgradeEvidence(required?: number): SelfUpgradeEvidenceProjection {
+    const requiredCount = parseRequiredStreakCount(required);
+    const results = this.store.listRecentSelfUpgradeIntegrationResults(
+      SELF_UPGRADE_RESULT_WINDOW,
+    );
+    return computeSelfUpgradeEvidence(results, requiredCount);
+  }
+
   taskTimeline(
     taskId: string,
     limit: number,
@@ -1081,6 +1589,29 @@ export class DaemonCoordinator {
     const attempts = this.store.listAttempts(taskId);
     const events = this.store.listEvents(taskId);
     const remediationDisposition = this.store.getRemediationDisposition(taskId);
+    const competitionId = this.store.getCompetitionByCandidateTaskId(taskId);
+    let competitionContext: Record<string, unknown> | undefined;
+    if (competitionId !== undefined) {
+      const status = this.competitionStatus(competitionId);
+      const competition = status.competition as CompetitionRecord;
+      const candidates = status.candidates as Array<Record<string, unknown>>;
+      const candidate = candidates.find((entry) => entry.taskId === taskId);
+      competitionContext = {
+        competitionId,
+        name: competition.name,
+        legacy: competition.legacy === true,
+        ...(competition.reason === undefined ? {} : { reason: competition.reason }),
+        ...(candidate === undefined ? {} : { candidate }),
+        candidates,
+        machineComparison: status.machineComparison,
+        ...(status.mainDecision === undefined ? {} : { mainDecision: status.mainDecision }),
+        mainDecisionCurrent: status.mainDecisionCurrent === true,
+        ...(status.retainedPartial === undefined ? {} : { retainedPartial: status.retainedPartial }),
+        ...(status.finalChoice === undefined ? {} : { finalChoice: status.finalChoice }),
+        nextAction: status.nextAction,
+      };
+    }
+    const reviewGraph = getReviewGraphStatus(this.store, taskId);
     return {
       task,
       attempts,
@@ -1094,6 +1625,8 @@ export class DaemonCoordinator {
         ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
       }),
       diff,
+      ...(competitionContext === undefined ? {} : { competitionContext }),
+      ...(reviewGraph === undefined ? {} : { reviewGraph }),
     };
   }
 
@@ -1197,6 +1730,9 @@ export class DaemonCoordinator {
       })
       .finally(() => {
         this.activeIntegrations.delete(context.operationId);
+        // Integration apply (with or without activation) is Goal gate evidence.
+        this.reconcileGoalsForTask(taskId);
+        this.reconcilePlans();
       });
     this.activeIntegrations.set(context.operationId, execution);
     return buildIntegrationOperationView(this.store, context, true);
@@ -1367,6 +1903,8 @@ export class DaemonCoordinator {
         : "Integration source retained after runtime activation failure",
       record,
     );
+    this.reconcileGoalsForTask(taskId);
+    this.reconcilePlans();
     return buildIntegrationOperationView(this.store, context, false);
   }
 
@@ -1536,12 +2074,54 @@ export class DaemonCoordinator {
       this.enqueue({ taskId: task.id, resuming: false }, true);
       recovered.push(task.id);
     }
+    // Cross-Worker handoff: finish authorized/preparing materialization once,
+    // then queue the same prepared successor without creating a second handoff.
+    try {
+      const handoffRecovery = await recoverCandidateHandoffs(this.store);
+      for (const taskId of handoffRecovery.queueTaskIds) {
+        if (this.active.has(taskId) || this.queue.some((job) => job.taskId === taskId)) continue;
+        const task = this.store.getTask(taskId);
+        const attemptCount = this.store.listAttempts(taskId).length;
+        const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts
+          ?? this.settings.get().execution.maxAttempts;
+        const maxExtraAttempts = task.effectivePolicy?.values.maxExtraAttempts
+          ?? this.settings.get().execution.maxExtraAttempts;
+        const recoveryOptions = resolvePendingGrantExecutionOptions(
+          this.store,
+          taskId,
+          baseMaxAttempts,
+          maxExtraAttempts,
+        );
+        this.enqueue({
+          taskId,
+          resuming: attemptCount > 0,
+          ...(recoveryOptions === null ? {} : { executionOptions: recoveryOptions }),
+        }, true);
+        recovered.push(taskId);
+      }
+    } catch {
+      // Corrupt handoff evidence remains inspectable; unrelated recovery continues.
+    }
     this.reconcilePlans();
     // Reconcile any running competitions whose candidates are now all terminal
     for (const comp of this.store.listCompetitions("running")) {
       new CompetitionCoordinator(this.store, this.settings).reconcile(comp.id);
     }
+    // Re-queue stranded read-only reviewer Tasks that were durably registered
+    // but not yet running when the daemon stopped.
+    for (const task of this.store.listTasks(["queued"])) {
+      if (this.store.getReviewAssignmentByReviewerTaskId(task.id) === undefined) continue;
+      if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) continue;
+      this.enqueue({ taskId: task.id, resuming: false }, true);
+      recovered.push(task.id);
+    }
+    // Turn terminal reviewer resultText into validated evidence exactly once.
+    reconcileAllReviewGraphs(this.store);
     this.recoverIntegrationOperations();
+    // Reconstruct Goal supervision from durable records without duplicating work.
+    for (const goal of this.store.listGoals(100)) {
+      this.reconcileGoal(goal.id);
+    }
     return recovered;
   }
 
@@ -1843,10 +2423,119 @@ export class DaemonCoordinator {
     );
   }
 
-  /** Authorize and execute one bounded candidate reverification. The Task stays
-   *  "failed" throughout verification (never enters a crash-recoverable Worker
-   *  state); on pass only the Task status moves to "succeeded" and the failed
-   *  Attempt is preserved. Requires no running/queued Worker job. */
+  /** Explicitly assign 1–3 saved Worker Profiles as independent read-only judges
+   *  for the current exact Candidate Revision. Registers all reviewer Tasks
+   *  durably before queueing. Idempotent for the same revision + ordered set.
+   *  One multi-judge graph consumes one Goal review round. */
+  async createReviewGraph(input: {
+    taskId: string;
+    reviewerWorkerProfileId?: string;
+    reviewerWorkerProfileIds?: string[];
+    reason: string;
+    confirm: true;
+  }): Promise<{
+    graph: ReviewGraphView;
+    reviewerTaskId: string;
+    reviewerTaskIds: string[];
+    created: boolean;
+  }> {
+    if (input.confirm !== true) throw new Error("review graph requires confirm: true");
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    // Goal-level review cap rejects before any durable mutation.
+    const goalForReviewCap = this.store.getGoalByTaskId(input.taskId);
+    if (goalForReviewCap !== undefined) {
+      try {
+        assertGoalReviewAllowed(goalForReviewCap);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/review cap/i.test(message)) {
+          markGoalCapReached(this.store, goalForReviewCap.id, "review-cap");
+        }
+        throw error;
+      }
+    }
+    const result = await createReviewGraph(this.store, this.settings.get(), {
+      candidateTaskId: input.taskId,
+      ...(input.reviewerWorkerProfileIds === undefined
+        ? {}
+        : { reviewerWorkerProfileIds: input.reviewerWorkerProfileIds }),
+      ...(input.reviewerWorkerProfileId === undefined
+        ? {}
+        : { reviewerWorkerProfileId: input.reviewerWorkerProfileId }),
+      reason: input.reason,
+      confirm: true,
+    });
+    if (result.created) {
+      if (goalForReviewCap !== undefined) {
+        const now = timestamp();
+        const goal = this.store.getGoal(goalForReviewCap.id);
+        this.store.saveGoal({
+          ...goal,
+          counters: {
+            ...goal.counters,
+            reviewRounds: goal.counters.reviewRounds + 1,
+          },
+          updatedAt: now,
+        }, this.store.getGoalMilestones(goal.id));
+      }
+      // Queue only after durable registration of every assignment/task.
+      for (const reviewerTaskId of result.reviewerTaskIds) {
+        try {
+          this.queueTask(reviewerTaskId);
+        } catch {
+          // Durable registration survives; recovery will re-queue.
+          this.store.addEvent(
+            reviewerTaskId,
+            undefined,
+            "task.ready",
+            "Reviewer Task persisted and will be recovered from the durable queue",
+          );
+        }
+      }
+    } else {
+      // Resume any existing non-terminal reviewer Task that was stranded.
+      for (const reviewerTaskId of result.reviewerTaskIds) {
+        const reviewer = this.store.getTask(reviewerTaskId);
+        if (
+          (reviewer.status === "queued" || reviewer.status === "interrupted")
+          && !this.active.has(reviewer.id)
+          && !this.queue.some((job) => job.taskId === reviewer.id)
+        ) {
+          this.enqueue({
+            taskId: reviewer.id,
+            resuming: reviewer.status === "interrupted",
+          }, true);
+        } else {
+          // Still reconcile terminal evidence if the Task already finished.
+          reconcileReviewGraphForTask(this.store, reviewerTaskId);
+        }
+      }
+    }
+    const graph = getReviewGraphStatus(this.store, input.taskId);
+    if (graph === undefined) {
+      throw new Error("review graph status missing after create");
+    }
+    return {
+      graph,
+      reviewerTaskId: result.reviewerTaskId,
+      reviewerTaskIds: result.reviewerTaskIds,
+      created: result.created,
+    };
+  }
+
+  /** Privacy-safe Review Graph status for a Candidate Task. Reconciles terminal
+   *  reviewer evidence first. Never exposes private packet or raw result text. */
+  reviewGraphStatus(taskId: string): ReviewGraphView | undefined {
+    this.store.getTask(taskId);
+    return getReviewGraphStatus(this.store, taskId);
+  }
+
+  /** Authorize and execute one bounded candidate reverification. Never enters a
+   *  crash-recoverable Worker state. Failed path: on pass the Task moves to
+   *  "succeeded" while the Attempt is preserved. Succeeded+Main-revise path:
+   *  Task and Attempt status are preserved on both pass and failure. A fresh
+   *  Main accept is always required before Integration. Requires no
+   *  running/queued Worker job. */
   async reverifyCandidate(
     taskId: string,
     reason: string,
@@ -1862,6 +2551,7 @@ export class DaemonCoordinator {
     const settings = this.settings.get();
     const verificationTimeoutMs = settings.integration.verificationTimeoutMs;
     const task = this.store.getTask(taskId);
+    const priorStatus = task.status;
     const maxMainReverifications = maxMainReverificationsFromSnapshot(task.effectivePolicy);
     const result = await reverifyCandidate(
       this.store,
@@ -1870,11 +2560,15 @@ export class DaemonCoordinator {
       verificationTimeoutMs,
     );
     const finalTask = this.store.getTask(taskId);
-    // A successful reverification changes a failed plan prerequisite to
-    // succeeded without going through the normal Worker completion path.
+    // A successful reverification that newly moves a failed plan prerequisite
+    // to succeeded does not go through the normal Worker completion path.
     // Reconcile immediately so waiting/blocked dependents are not stranded
     // until an unrelated event or daemon restart happens to wake them.
-    if (finalTask.status === "succeeded") this.reconcilePlans();
+    // Succeeded-path reverifications keep the prior status and need no wake.
+    if (priorStatus !== "succeeded" && finalTask.status === "succeeded") {
+      this.reconcileGoalsForTask(taskId);
+      this.reconcilePlans();
+    }
     return projectCandidateReverificationResult(result, finalTask.status);
   }
 
@@ -2007,15 +2701,51 @@ export class DaemonCoordinator {
     const item = this.store.getPlanItemByTaskId(taskId);
     if (!item) return undefined;
     const dependencyIds = this.store.getDirectDependencies(item.planId, item.itemId);
+    const itemStatuses = this.store.getPlanItemStatuses(item.planId);
     const statuses = new Map(
-      this.store.getPlanItemStatuses(item.planId).map((status) => [status.itemId, status.taskStatus]),
+      itemStatuses.map((status) => [status.itemId, status.taskStatus]),
     );
+    const statusByItem = new Map(itemStatuses.map((status) => [status.itemId, status]));
+    // Goal-supervised Plans combine ordinary readiness with milestone gates.
+    // Non-Goal Plans omit gateSatisfaction so behavior stays byte-compatible.
+    const goal = this.store.getGoalByPlanId(item.planId);
+    let gateSatisfaction: Map<string, boolean> | undefined;
+    // Goal-supervised Plans use effective Task status (handoff successor when
+    // authoritative) so a failed source does not permanently block downstream
+    // after a successful successor completes the milestone gate.
+    const effectiveStatuses = new Map<string, TaskStatus | undefined>(
+      dependencyIds.map((dependencyId) => [dependencyId, statuses.get(dependencyId)]),
+    );
+    if (goal !== undefined) {
+      gateSatisfaction = new Map();
+      for (const dependencyId of dependencyIds) {
+        const milestone = this.store.getGoalMilestone(goal.id, dependencyId);
+        const dep = statusByItem.get(dependencyId);
+        if (milestone === undefined) {
+          // Machine-only fallback when milestone row is missing (should not happen).
+          gateSatisfaction.set(dependencyId, dep?.taskStatus === "succeeded");
+          continue;
+        }
+        const lineage = resolveEffectiveMilestoneLineage(this.store, milestone);
+        if (lineage.effectiveTask?.status !== undefined) {
+          effectiveStatuses.set(dependencyId, lineage.effectiveTask.status);
+        }
+        const evidence = evaluateMilestoneGate(
+          this.store,
+          milestone.gate,
+          lineage.effectiveTaskId ?? dep?.taskId ?? milestone.taskId,
+          lineage.effectiveTask?.status ?? dep?.taskStatus,
+        );
+        gateSatisfaction.set(dependencyId, evidence.satisfied);
+      }
+    }
     return {
       ...item,
       decision: resolveReadiness(
         item.itemId,
         dependencyIds,
-        new Map(dependencyIds.map((dependencyId) => [dependencyId, statuses.get(dependencyId)])),
+        effectiveStatuses,
+        gateSatisfaction,
       ),
     };
   }
@@ -2048,6 +2778,27 @@ export class DaemonCoordinator {
       throw new Error(`Task ${job.taskId} is already queued or running`);
     }
     if (!bypassDependencies) {
+      // Stopped/failed/completed Goals block future Task admission only.
+      const goal = this.store.getGoalByTaskId(job.taskId);
+      if (goalAdmissionBlocked(goal)) {
+        const task = this.store.getTask(job.taskId);
+        if (task.status === "queued" || task.status === "waiting" || task.status === "blocked") {
+          const detail = goal?.reasonCode === "main-stop"
+            ? "Goal stopped; future Task admission is blocked"
+            : `Goal ${goal?.status ?? "closed"}; future Task admission is blocked`;
+          if (task.status !== "waiting" || task.error !== detail) {
+            this.store.setTaskStatus(job.taskId, "waiting", { error: detail, finishedAt: null });
+            this.store.addEvent(
+              job.taskId,
+              task.currentAttemptId,
+              "task.waiting",
+              detail,
+              { goalId: goal?.id, reasonCode: goal?.reasonCode },
+            );
+          }
+        }
+        return;
+      }
       const dependency = this.dependencyDecision(job.taskId);
       if (dependency && dependency.decision.kind !== "ready") {
         this.persistDependencyDecision(
@@ -2086,6 +2837,34 @@ export class DaemonCoordinator {
         this.enqueue({ taskId: item.taskId, resuming: false });
       }
     }
+    // Keep Goal projections current after plan queue decisions.
+    for (const goal of this.store.listGoals(100)) {
+      this.reconcileGoal(goal.id);
+    }
+  }
+
+  private reconcileGoal(
+    goalId: string,
+    options: { fromStatusPoll?: boolean; now?: string } = {},
+  ): void {
+    // Status polling reconciles projections but must not invent progress:
+    // evidence digest only changes from authoritative persisted facts.
+    void options.fromStatusPoll;
+    const result = reconcileGoalRecords(this.store, goalId, {
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+    // Terminal Goals block future admission. Prune queued (not active) jobs
+    // on every path that can discover a stop — recovery, status poll, or
+    // ordinary plan reconciliation — without killing in-flight Workers.
+    if (goalAdmissionBlocked(result.goal)) {
+      this.pruneGoalBlockedQueuedJobs();
+    }
+  }
+
+  private reconcileGoalsForTask(taskId: string): void {
+    const goal = this.store.getGoalByTaskId(taskId);
+    if (goal === undefined) return;
+    this.reconcileGoal(goal.id);
   }
 
   private reconcileCompetitions(finishedTaskId: string): void {
@@ -2095,7 +2874,39 @@ export class DaemonCoordinator {
     coordinator.reconcile(competitionId);
   }
 
+  private reconcileReviewGraphs(finishedTaskId: string): void {
+    reconcileReviewGraphForTask(this.store, finishedTaskId);
+  }
+
+  /**
+   * Remove queued (not active) jobs whose Goal has become terminal. Active
+   * Workers are deliberately untouched; this is future-admission control.
+   */
+  private pruneGoalBlockedQueuedJobs(): void {
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+      const job = this.queue[index]!;
+      const goal = this.store.getGoalByTaskId(job.taskId);
+      if (!goalAdmissionBlocked(goal)) continue;
+      this.queue.splice(index, 1);
+      const task = this.store.getTask(job.taskId);
+      if (!["queued", "waiting", "blocked"].includes(task.status)) continue;
+      const detail = goal?.reasonCode === "main-stop"
+        ? "Goal stopped; future Task admission is blocked"
+        : `Goal ${goal?.status ?? "closed"}; future Task admission is blocked`;
+      if (task.status === "waiting" && task.error === detail) continue;
+      this.store.setTaskStatus(job.taskId, "waiting", { error: detail, finishedAt: null });
+      this.store.addEvent(
+        job.taskId,
+        task.currentAttemptId,
+        "task.waiting",
+        detail,
+        { goalId: goal?.id, reasonCode: goal?.reasonCode },
+      );
+    }
+  }
+
   private pump(): void {
+    this.pruneGoalBlockedQueuedJobs();
     const globalCap = this.maxConcurrencyOverride ?? this.settings.get().execution.maxConcurrency;
     while (!this.closing && this.active.size < globalCap && this.queue.length > 0) {
       // Find the next eligible job respecting per-profile concurrency caps
@@ -2154,8 +2965,10 @@ export class DaemonCoordinator {
         })
         .finally(() => {
           this.active.delete(job.taskId);
+          this.reconcileGoalsForTask(job.taskId);
           this.reconcilePlans();
           this.reconcileCompetitions(job.taskId);
+          this.reconcileReviewGraphs(job.taskId);
           this.pump();
         });
       this.active.set(job.taskId, execution);

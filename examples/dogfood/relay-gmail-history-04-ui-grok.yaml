@@ -1,0 +1,133 @@
+version: 2
+name: Explain Gmail incremental sync and recovery on the Connectors page
+project: /Users/yijunwang/code/relay
+taskClass: relay-gmail-history-recovery-ui
+taskFamily: relay-gmail-incremental-sync
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+
+contract:
+  outcome: >-
+    Relay's Gmail card tells a normal user what just happened during sync,
+    whether existing data is safe, and the single next action. Normal sync is
+    the primary path. When Gmail history is stale, the card explains that Relay
+    kept prior Items and offers an explicit two-step “rebuild sync progress”
+    action; it does not imply deleting mail, relinking the account, automatic
+    retry, background sync, or success before the server confirms. Technical
+    cursor/history codes stay out of primary copy.
+  presentation:
+    summary: 连接页不再只显示“错误”；它会说明旧数据仍在、为什么需要重建同步进度，以及用户下一步点什么。
+    language: zh-CN
+  context:
+    - The integrated application/API now supports normal versus explicit rebuild sync and returns closed failure categories/actions.
+    - Current Connectors page fires sync without awaiting or showing per-connector progress/result; a failure becomes an unhandled promise and the card stays generic error.
+    - Gmail browser authorization UI is already a guided flow. Preserve it and avoid adding a second configuration form.
+    - >-
+      Rebuild must be explicit and truthful: it keeps prior Relay Items/cursor
+      until complete success and does not change Gmail itself.
+    - Use Grok 4.5. Preserve dirty Relay work and do not commit or push.
+  inScope:
+    - >-
+      Add one pure presentation mapper for Gmail sync states: idle/never synced,
+      syncing, incremental success, full/rebuild success, stale-history action
+      required, auth required, retryable network/provider failure, and unknown
+      safe fallback.
+    - Extend the client/store action to return a bounded typed sync result and a closed error code/action without exposing arbitrary server/provider text. Keep existing callers compatible.
+    - Make each connector card own or consume per-connector in-flight/result state so one sync does not disable or overwrite every card.
+    - Show one prominent current conclusion, one short explanation, what was preserved, and one next action. Keep item count and last successful sync visible but secondary.
+    - Normal Gmail action remains “立即同步”. A stale-history result changes the primary action to “重建同步进度”; first click opens a small inline confirmation explaining that existing Relay Items remain and Gmail mail is not deleted, second explicit confirmation calls rebuild once.
+    - During a request, disable only that connector action and use a stable progress label. On success refresh real connector data once. On failure keep the server-truth card and show the safe recovery action without raw exception/code/HTTP payload.
+    - Auth-required action points back to the existing Gmail authorization wizard; generic network/provider failure offers normal retry, not rebuild unless the closed code is stale history.
+    - Ensure keyboard focus, button labels, disclosure semantics, wrapping, contrast, mobile 390px layout, and reduced-motion-safe behavior; no modal or toast-only result.
+    - Add mapper/component/source-contract tests for every state, single request, no unhandled promise, confirmation binding, stale-versus-auth action, preserved-data copy, no jargon/overclaim, and bilingual/privacy boundaries already used in the repo.
+  outOfScope:
+    - Provider/API/application semantics, automatic/background sync, retry timers, push notifications, OAuth redesign, connector database fields, deleting Items/mail, redesigning the whole page/app shell, docs, commit, or push.
+  executionSteps:
+    - Trace Connectors page, store/client error handling, API error envelope, existing UI primitives and Gmail wizard presentation before editing.
+    - Define the pure sync presentation and closed client result/error shape first.
+    - Wire card-local execution and inline rebuild confirmation without duplicating application policy.
+    - Run focused tests and lint, then full check once; Main will perform desktop and 390px browser audit before Integration.
+  deliverables:
+    - Pure Gmail sync/recovery presentation mapper.
+    - Awaited per-connector normal/rebuild UI flow with inline confirmation.
+    - Readable state/error/recovery tests and accessible responsive card behavior.
+  modules:
+    - name: Sync presentation
+      responsibility: Translate closed server facts into one user conclusion, explanation, preservation statement and action.
+      consumes: [connector facts, in-flight state, typed sync result or closed failure]
+      produces: [plain-language labels, action kind and confirmation requirement]
+      boundaries: [no policy mutation, provider text, cursor/history jargon, invented success, or automatic retry]
+    - name: Connector card interaction
+      responsibility: Execute one awaited normal or confirmed rebuild request and render the mapper result accessibly.
+      consumes: [presentation, typed store action and existing connector card]
+      produces: [per-card progress, confirmation, refreshed truth and one next action]
+      boundaries: [no global disable, duplicate request, toast-only result, OAuth duplication, mail/Item deletion, or modal complexity]
+  callChain:
+    - Connector card derives presentation from persisted connector plus local request outcome.
+    - User starts normal sync or explicitly confirms a stale-history rebuild.
+    - Store/client calls the closed API mode once and refreshes server truth once.
+    - Presentation shows confirmed success or the exact safe next action without replacing prior success facts.
+  scenarios:
+    - name: Normal incremental success
+      given: Gmail is connected and a valid cursor exists.
+      when: User clicks 立即同步 and the server succeeds.
+      then: Only the Gmail card shows progress, then reports imported/deduped result and retains the normal next action.
+    - name: Stale history needs confirmation
+      given: Normal sync reports the closed stale-history category.
+      when: The result appears.
+      then: The card says existing Items remain, offers 重建同步进度, explains its boundary inline, and calls nothing until explicit confirm.
+    - name: Auth or network failure
+      given: The server reports auth-required or retryable failure.
+      when: Sync ends.
+      then: The card points to authorization or normal retry respectively and never offers the wrong rebuild/delete implication.
+  risks:
+    - Throwing a plain Error loses the closed failure category; client error transport must remain typed and bounded.
+    - Refreshing immediately can erase a useful local failure explanation; merge server truth with the last safe operation result until the next action.
+    - A generic “reset” label sounds destructive; use “重建同步进度” and explicitly say existing Items and Gmail mail remain.
+  changeBudget: { maxFiles: 8, maxDiffLines: 1300 }
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 900000
+  workerStopGraceMs: 10000
+  fileLimit: 8
+  fileLimitMode: warn
+  changedLineLimit: 1300
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, .next]
+  generatedPaths: [.next/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/app/connectors/page.tsx
+    - src/components/ConnectorAuthWizard.tsx
+    - src/client/relay-client.ts
+    - src/lib/store.tsx
+    - src/components/ui.tsx
+    - src/lib/labels.ts
+    - tests/user-chrome-copy.test.ts
+    - tests/boundary-and-mutation-path.test.ts
+acceptance:
+  criteria:
+    - Gmail card awaits one per-connector normal/rebuild request, disables only itself during work, refreshes once, and never creates an unhandled promise or duplicate call.
+    - Each closed state shows one conclusion, preservation truth and next action; stale history alone offers an explicit two-step rebuild while auth and network/provider failures use their correct paths.
+    - Rebuild copy says existing Relay Items and Gmail mail remain, never claims background sync, deletion, auto-retry or success before server confirmation, and keeps technical codes secondary/hidden.
+    - Keyboard/disclosure/focus, desktop and 390px wrapping, contrast and no-horizontal-overflow expectations are covered; existing Gmail auth wizard remains intact.
+    - Focused tests/lint, full Relay check and diff hygiene pass with no commit or push.
+  commands:
+    - node --test --import tsx tests/user-chrome-copy.test.ts tests/boundary-and-mutation-path.test.ts tests/connectors-and-product.test.ts
+    - npx eslint src/app/connectors/page.tsx src/client/relay-client.ts src/lib/store.tsx
+    - npm run check
+    - git diff --check

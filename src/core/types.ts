@@ -40,6 +40,11 @@ export type EventType =
   | "checkpoint.skipped"
   | "attempt.authorization.granted"
   | "main-review.completed"
+  | "competition.main-decision.completed"
+  | "competition.retained-partial.completed"
+  | "candidate.handoff.authorized"
+  | "candidate.handoff.prepared"
+  | "candidate.handoff.failed"
   | "integration.preflight.completed"
   | "integration.operation.started"
   | "integration.operation.recovered"
@@ -61,7 +66,10 @@ export type EventType =
   | "candidate.revision.capture.failed"
   | "candidate.reverification.authorized"
   | "candidate.reverification.started"
-  | "candidate.reverification.completed";
+  | "candidate.reverification.completed"
+  | "review.assignment.created"
+  | "review.assignment.completed"
+  | "review.assignment.failed";
 
 export interface ProviderSpec {
   name: "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai";
@@ -412,9 +420,9 @@ export interface MainReviewDecision {
   reason: string;
   attemptId: string;
   verificationEventSequence: number;
-  /** Candidate revision id bound to this accept decision. */
+  /** Candidate revision id bound when modern revision evidence exists. */
   candidateRevisionId?: string;
-  /** SHA-256 patch digest from the accepted CandidateRevision. */
+  /** SHA-256 patch digest from the bound CandidateRevision (accept/revise/reject). */
   acceptedPatchDigest?: string;
 }
 
@@ -644,6 +652,93 @@ export interface PlanItemStatus {
   taskStatus?: TaskStatus;
 }
 
+// --- Durable Goal supervision over Plan Tasks ---
+
+/** Evidence required before a Goal milestone unlocks dependents. */
+export type GoalMilestoneGate = "machine" | "main-accept" | "integration";
+
+export type GoalStatus =
+  | "running"
+  | "waiting"
+  | "completed"
+  | "stopped"
+  | "failed";
+
+/** Closed privacy-safe stop/wait reason codes. Never carry private content. */
+export type GoalReasonCode =
+  | "main-stop"
+  | "correction-cap"
+  | "review-cap"
+  | "no-new-evidence-cap"
+  | "duration-exceeded"
+  | "no-progress"
+  | "milestone-failed"
+  | "waiting-machine"
+  | "waiting-main-accept"
+  | "waiting-integration"
+  | "waiting-task"
+  | "goal-completed"
+  | "none";
+
+export type GoalNextActionCode =
+  | "wait-for-worker"
+  | "main-accept"
+  | "main-review"
+  | "integrate"
+  | "correct-or-decide"
+  | "advance"
+  | "stop-or-decide"
+  | "none"
+  | "resume-task";
+
+/** Frozen Goal orchestration policy. Explicit null means unlimited. */
+export interface GoalPolicy {
+  maxDurationMs: number | null;
+  noProgressTimeoutMs: number | null;
+  maxCorrectionRounds: number;
+  maxReviewRounds: number;
+  maxNoNewEvidenceCycles: number;
+}
+
+export interface GoalCounters {
+  correctionRounds: number;
+  reviewRounds: number;
+  noNewEvidenceCycles: number;
+}
+
+export interface GoalRecord {
+  id: string;
+  version: 1;
+  name: string;
+  objective: string;
+  planId: string;
+  goalFile: string;
+  policy: GoalPolicy;
+  status: GoalStatus;
+  reasonCode: GoalReasonCode;
+  /** Plain-language English wait/stop explanation. */
+  reason: string;
+  evidenceDigest: string;
+  evidenceAt: string;
+  counters: GoalCounters;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  stoppedAt?: string;
+}
+
+export interface GoalMilestoneRecord {
+  goalId: string;
+  itemId: string;
+  taskId?: string;
+  gate: GoalMilestoneGate;
+  itemIndex: number;
+  satisfied: boolean;
+  reasonCode: GoalReasonCode;
+  reason: string;
+  updatedAt: string;
+}
+
 export type CompetitionStatus = "pending" | "running" | "completed";
 export type RankingFactor = "verification" | "diffFocus" | "retries" | "cost" | "duration" | "delivery";
 
@@ -841,6 +936,45 @@ export interface CompetitionRecord {
   finishedAt?: string;
   latestEvaluationId?: string;
   error?: string;
+  /** Bounded Main reason this Competition exists. Absent on legacy records
+   *  that predate reasoned admission; never inferred or backfilled. */
+  reason?: CompetitionReason;
+  /** True for legacy explicit CLI/MCP Competition submissions that predate
+   *  reasoned admission and full per-candidate identity snapshots. Hub must
+   *  report reason/identity unavailable rather than fabricate either. */
+  legacy?: boolean;
+  /** Competition-level Main decision bound to one exact Candidate Revision.
+   *  An explicit derivation of the chosen candidate Task's Main Review - the
+   *  Task-level Main Review remains the canonical exact-revision authority. */
+  mainDecision?: CompetitionMainDecision;
+  /** Bounded retained-partial evidence for non-selected Candidates. Stores
+   *  reusable paths and remaining gaps for later M2 handoff; never starts a
+   *  retry, successor, or Integration. */
+  retainedPartial?: CompetitionRetainedPartial[];
+}
+
+/** Bounded Main reason a Competition is worth running more than once.
+ *  Intent and triggers are separate from evidence uncertainty. */
+export interface CompetitionReason {
+  intent: "none" | "consider" | "required";
+  triggers: CompetitionTrigger[];
+  /** Plain-language explanation of why a second (or further) Worker run is
+   *  worth the cost. Bounded non-empty string. */
+  note: string;
+}
+
+/** Frozen Worker identity resolved from one saved Worker Profile at Competition
+ *  admission. provider + model + runtime + effort is the comparable identity;
+ *  workerProfileId is provenance only. Absent on legacy candidate records. */
+export interface CompetitionCandidateIdentity {
+  provider: string;
+  model: string;
+  runtime: string;
+  effort: string;
+  /** Worker Profile id that produced this identity at admission. */
+  workerProfileId?: string;
+  /** Soft per-candidate budget frozen at admission. */
+  maxBudgetUsd: number | null;
 }
 
 export interface CompetitionCandidateRecord {
@@ -850,6 +984,172 @@ export interface CompetitionCandidateRecord {
   ordinal: number;
   providerName: string;
   modelName: string;
+  /** Frozen resolved Worker identity. Absent on legacy records - Hub reports
+   *  the historical execution identity as unavailable rather than inferred. */
+  identity?: CompetitionCandidateIdentity;
+}
+
+/** Competition-level Main decision kind. accept = final choice; revise =
+ *  Main requests one bounded same-Candidate correction (executed through the
+ *  existing correction authority, never automatically); reject = no retry;
+ *  retained-partial is recorded separately on the Competition record. */
+export type CompetitionMainDecisionKind = "accept" | "revise" | "reject";
+
+/** Competition-level Main decision bound to one exact Candidate Revision.
+ *  It is an explicit derivation of the chosen candidate Task's latest Main
+ *  Review: the referenced attemptId, verificationEventSequence, and candidate
+ *  revision must match that Task-level Main Review exactly. */
+export interface CompetitionMainDecision {
+  decision: CompetitionMainDecisionKind;
+  candidateId: string;
+  taskId: string;
+  attemptId: string;
+  verificationEventSequence: number;
+  /** Candidate revision id bound to this decision (present when the candidate
+   *  Task has revision evidence). */
+  candidateRevisionId?: string;
+  /** SHA-256 patch digest from the accepted CandidateRevision. */
+  acceptedPatchDigest?: string;
+  reason: string;
+  createdAt: string;
+}
+
+/** Bounded retained-partial evidence for one non-selected Candidate.
+ *  Reusable paths are validated against that Candidate's revision affected
+ *  set; remaining gaps describe what a future M2 successor would still need.
+ *  Stores evidence only - it never starts a Worker, retry, or handoff. */
+export interface CompetitionRetainedPartial {
+  candidateId: string;
+  taskId: string;
+  reusablePaths: string[];
+  remainingGaps: GapEntry[];
+  /** Exact CandidateRevision id frozen when Main retained the evidence.
+   *  Absent on legacy retained-partial entries that predate exact binding. */
+  candidateRevisionId?: string;
+}
+
+// --- Cross-Worker Candidate handoff (one hop) ---
+
+/** Durable preparation/authorization status for one explicit cross-Worker handoff.
+ *  Live successor Task status is projected separately and is never called a retry. */
+export type CandidateHandoffStatus =
+  | "authorized"
+  | "preparing"
+  | "prepared"
+  | "failed";
+
+/** Bounded closed-reason / failure codes for handoff projections. */
+export type CandidateHandoffFailureCode =
+  | "stale-revision"
+  | "missing-retained"
+  | "missing-revision"
+  | "same-profile"
+  | "profile-not-launchable"
+  | "final-choice"
+  | "duplicate-handoff"
+  | "source-is-successor"
+  | "unsafe-path"
+  | "materialization-failed"
+  | "apply-mismatch"
+  | "confirm-required"
+  | "reason-invalid"
+  | "profile-unknown"
+  | "not-goal-task"
+  | "goal-terminal"
+  | "source-not-eligible";
+
+/** Bounded next-action codes for privacy-safe handoff projections. */
+export type CandidateHandoffNextAction =
+  | "wait-for-successor"
+  | "review-successor"
+  | "inspect-failure"
+  | "choose-different-profile"
+  | "retain-fresh-candidate"
+  | "none";
+
+/**
+ * Discriminated origin for one durable handoff. Competition and Goal-Task
+ * paths share successor materialization but validate admission independently.
+ * Never fabricate Competition ids for Goal-Task origins.
+ */
+export type CandidateHandoffOrigin =
+  | {
+      kind: "competition";
+      competitionId: string;
+      sourceCandidateId: string;
+    }
+  | {
+      kind: "goal-task";
+      goalId: string;
+      itemId: string;
+    };
+
+/** Versioned durable handoff record. Never stores raw patch, prompts, logs,
+ *  credentials, endpoints, absolute private artifact paths, or unbounded text. */
+export interface CandidateHandoffRecord {
+  schemaVersion: 1;
+  id: string;
+  status: CandidateHandoffStatus;
+  origin: CandidateHandoffOrigin;
+  sourceTaskId: string;
+  sourceCandidateRevisionId: string;
+  /** Full SHA-256 of the exact source Candidate Diff (not projected in full). */
+  sourcePatchDigest: string;
+  gapContractDigest: string;
+  reusablePathCount: number;
+  remainingGapCount: number;
+  /** Validated relative paths retained for the successor (bounded, safe). */
+  reusablePaths: string[];
+  remainingGaps: GapEntry[];
+  destinationWorkerProfileId: string;
+  destinationIdentity: FrozenWorkerIdentity;
+  successorTaskId: string;
+  /** Bounded Main reason for this handoff (1–1000 chars). */
+  reason: string;
+  createdAt: string;
+  updatedAt: string;
+  preparedAt?: string;
+  failedAt?: string;
+  failureCode?: CandidateHandoffFailureCode;
+  nextAction: CandidateHandoffNextAction;
+}
+
+/** Privacy-safe handoff projection for CLI/MCP/Hub. Digest is prefix-only.
+ *  Origin-specific ids appear only when applicable. */
+export interface CandidateHandoffView {
+  id: string;
+  status: CandidateHandoffStatus;
+  originKind: CandidateHandoffOrigin["kind"];
+  /** Present only for Competition origin. */
+  competitionId?: string;
+  /** Present only for Competition origin. */
+  sourceCandidateId?: string;
+  /** Present only for Goal-Task origin. */
+  goalId?: string;
+  /** Present only for Goal-Task origin (Plan item id). */
+  itemId?: string;
+  sourceTaskId: string;
+  sourceCandidateRevisionId: string;
+  sourceDigestPrefix: string;
+  gapContractDigestPrefix: string;
+  reusablePathCount: number;
+  remainingGapCount: number;
+  reusablePaths: string[];
+  remainingGaps: GapEntry[];
+  destinationWorkerProfileId: string;
+  destinationIdentity: FrozenWorkerIdentity;
+  successorTaskId: string;
+  reason: string;
+  createdAt: string;
+  updatedAt: string;
+  preparedAt?: string;
+  failedAt?: string;
+  failureCode?: CandidateHandoffFailureCode;
+  nextAction: CandidateHandoffNextAction;
+  /** Live successor Task status when the successor still exists. */
+  successorTaskStatus?: TaskStatus;
+  /** True when this projection describes a handoff successor Task (not a retry). */
+  isSuccessor?: boolean;
 }
 
 export interface CompetitionFactorScore {
@@ -1345,6 +1645,7 @@ export type CorrectionEligibilityCategory =
   | "eligible"
   | "not-failed-or-interrupted"
   | "competition-candidate"
+  | "competition-main-revise-required"
   | "running-attempt"
   | "no-revision"
   | "no-latest-attempt-revision"
@@ -1367,4 +1668,192 @@ export interface CorrectionEligibility {
     source: ProvenanceSource;
   };
   latestRevision?: CandidateRevisionSummary;
+}
+
+// --- Exact-revision Review Graph (1–3 independent read-only judges) ---
+
+/** Graph lifecycle. Pending/running block Candidate Integration; terminal
+ *  evidence requires a fresher Main Review before Integration. */
+export type ReviewGraphStatus = "pending" | "running" | "completed" | "failed";
+
+/** Per-assignment lifecycle for one explicit reviewer Worker Task. */
+export type ReviewAssignmentStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed";
+
+/** Judge-proposed disposition. Evidence only — never an automatic Main decision. */
+export type ReviewDisposition = "accept" | "revise" | "reject";
+
+export type ReviewFindingSeverity = "info" | "warning" | "error";
+
+/** Typed failure when reviewer output is unusable or the Task fails closed. */
+export type ReviewResultFailureCode =
+  | "missing-result"
+  | "malformed-json"
+  | "schema-violation"
+  | "stale-revision"
+  | "wrong-identity"
+  | "oversized"
+  | "unsafe-content"
+  | "extra-fields"
+  | "reviewer-task-failed";
+
+/** Aggregate evidence state across independent judges. Never a vote or verdict. */
+export type ReviewAggregationState =
+  | "pending"
+  | "single-opinion"
+  | "agreement"
+  | "disagreement"
+  | "insufficient-evidence";
+
+/** One bounded finding with relative-path evidence only. */
+export interface ReviewFinding {
+  severity: ReviewFindingSeverity;
+  /** Safe relative path evidence (never absolute). */
+  evidencePath: string;
+  affectedBehavior: string;
+  recommendation: string;
+}
+
+/** Strict structured judge result accepted from terminal resultText. */
+export interface ReviewResult {
+  schemaVersion: 1;
+  reviewedRevisionId: string;
+  proposedDisposition: ReviewDisposition;
+  summary: string;
+  findings: ReviewFinding[];
+}
+
+/** Durable graph binding one exact Candidate Revision to 1–3 reviewer assignments. */
+export interface ReviewGraphRecord {
+  schemaVersion: 1;
+  id: string;
+  candidateTaskId: string;
+  candidateRevisionId: string;
+  attemptId: string;
+  attemptOrdinal: number;
+  verificationEventSequence: number;
+  patchDigest: string;
+  status: ReviewGraphStatus;
+  /** Always 1 in this slice; reserved for future multi-round reviews. */
+  round: 1;
+  /** Number of independent judges registered for this exact revision (1–3). */
+  maxAssignments: 1 | 2 | 3;
+  assignmentIds: string[];
+  createdAt: string;
+  updatedAt: string;
+  /** Candidate Task event sequence when every assignment became terminal. */
+  terminalEvidenceSequence?: number;
+  /** Private packet path under the Candidate Task root — never projected. */
+  privatePacketPath?: string;
+}
+
+/** One explicit reviewer assignment linked to a read-only Worker Task. */
+export interface ReviewAssignmentRecord {
+  id: string;
+  graphId: string;
+  ordinal: number;
+  candidateTaskId: string;
+  candidateRevisionId: string;
+  reviewerWorkerProfileId: string;
+  reviewerTaskId: string;
+  status: ReviewAssignmentStatus;
+  reason: string;
+  frozenIdentity: FrozenWorkerIdentity;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  /** Present only when structured parse succeeded. */
+  result?: ReviewResult;
+  /** Present only when the assignment failed closed. */
+  failureCode?: ReviewResultFailureCode;
+  /** Private packet path — never projected. */
+  privatePacketPath?: string;
+}
+
+/** Privacy-safe finding for Hub/MCP/CLI. */
+export interface ReviewFindingView {
+  severity: ReviewFindingSeverity;
+  evidencePath: string;
+  affectedBehavior: string;
+  recommendation: string;
+}
+
+/** Privacy-safe structured result for control surfaces. */
+export interface ReviewResultView {
+  schemaVersion: 1;
+  reviewedRevisionId: string;
+  proposedDisposition: ReviewDisposition;
+  summary: string;
+  findings: ReviewFindingView[];
+}
+
+/** Privacy-safe assignment projection. Never includes packet path, raw patch,
+ *  raw resultText, absolute paths, credentials, or prompts. */
+export interface ReviewAssignmentView {
+  id: string;
+  ordinal: number;
+  status: ReviewAssignmentStatus;
+  reviewerWorkerProfileId: string;
+  reviewerTaskId: string;
+  frozenIdentity: FrozenWorkerIdentity;
+  reason: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  resultUsable: boolean;
+  result?: ReviewResultView;
+  failureCode?: ReviewResultFailureCode;
+}
+
+/** Privacy-safe multi-judge aggregation. Describes evidence only — never a vote. */
+export interface ReviewAggregationView {
+  total: number;
+  pending: number;
+  usable: number;
+  unusable: number;
+  dispositionCounts: {
+    accept: number;
+    revise: number;
+    reject: number;
+  };
+  state: ReviewAggregationState;
+  /** Short plain-language explanation of agreement, disagreement, or gaps. */
+  explanation: string;
+}
+
+/** Privacy-safe graph projection for Task Detail / CLI / MCP. */
+export interface ReviewGraphView {
+  schemaVersion: 1;
+  id: string;
+  candidateTaskId: string;
+  candidateRevisionId: string;
+  attemptOrdinal: number;
+  verificationEventSequence: number;
+  digestPrefix: string;
+  status: ReviewGraphStatus;
+  round: 1;
+  maxAssignments: 1 | 2 | 3;
+  assignments: ReviewAssignmentView[];
+  aggregation: ReviewAggregationView;
+  createdAt: string;
+  updatedAt: string;
+  terminalEvidenceSequence?: number;
+  /** True when a pending/running review blocks Integration. */
+  blocksIntegration: boolean;
+  /** True when terminal review requires a fresher Main decision. */
+  requiresFreshMainReview: boolean;
+  /** Plain-language next action for Main (not an automatic decision). */
+  nextAction: string;
+  /** Stable localization key for control surfaces. */
+  nextActionCode:
+    | "wait-for-judge"
+    | "fresh-main-review-usable"
+    | "fresh-main-review-unusable"
+    | "fresh-main-review-disagreement"
+    | "integrated"
+    | "ready-for-integration"
+    | "main-decision";
 }
