@@ -85,6 +85,28 @@ function generatedPathPatterns(value: unknown): string[] | undefined {
   return [...new Set(patterns)];
 }
 
+/** Snapshot exclusions are global path-segment names, not relative paths or
+ * glob patterns. Reject unsupported spellings at Task admission so a typo such
+ * as `src-tauri/target` cannot silently trigger a multi-gigabyte scan. */
+function snapshotExcludeNames(value: unknown): string[] {
+  const names = stringArray(value, "task.workspace.exclude");
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index]!;
+    if (
+      name === "."
+      || name === ".."
+      || name.includes("/")
+      || name.includes("\\")
+      || /[*?\[\]]/.test(name)
+    ) {
+      throw new Error(
+        `task.workspace.exclude[${index}] must be one directory or file name, not a path or glob; for example, use target instead of src-tauri/target`,
+      );
+    }
+  }
+  return names;
+}
+
 const object = requireObject;
 const stringValue = requireNonEmptyString;
 const stringArray = requireStringArray;
@@ -661,7 +683,7 @@ export function parseTaskSpec(
     },
     workspace: {
       exclude: Array.from(
-        new Set([...DEFAULT_EXCLUDES, ...stringArray(workspace.exclude, "task.workspace.exclude")]),
+        new Set([...DEFAULT_EXCLUDES, ...snapshotExcludeNames(workspace.exclude)]),
       ),
       ...(generatedPaths === undefined ? {} : { generatedPaths }),
     },

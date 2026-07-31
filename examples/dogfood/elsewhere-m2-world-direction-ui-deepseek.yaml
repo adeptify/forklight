@@ -1,0 +1,199 @@
+version: 2
+name: Elsewhere completes the reviewed world-to-direction journey
+project: /Users/yijunwang/code/elsewhere
+taskClass: elsewhere-m2-world-direction-ui
+taskFamily: product-experience-flow
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+routingDecision:
+  taskFamily: product-experience-flow
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: Codex 已冻结交互、视觉、双语文案与状态边界；DeepSeek 负责沿现有 React/TypeScript 架构实现和补测试，不获得重新设计产品或扩大范围的权限。相邻 GLM Hub 任务缓存读取成本很高，本轮不为轮换或竞争再开第二个模型。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    After confirming personal facts, a person can review sourced wider-world
+    evidence when it is substantively useful, explicitly keep or reject every
+    item, understand one traceable story direction, and then enter the existing
+    bounded story generation without mistaking evidence for a prediction.
+  presentation:
+    summary: 个人事实确认后，用户能看懂时代材料来自哪里、逐条决定是否相关，再确认唯一一个故事起点；失败时明确哪些内容仍已保存。
+    language: zh-CN
+  context:
+    - Follow docs/experience-redesign-m2-world-direction-ui-contract.md as the Main-owned product, interaction, visual, copy, and finish authority.
+    - Follow PRODUCT.md and DESIGN.md. This extends the established Quiet Guided Journal and Living Correspondence Desk; it does not create a new visual world.
+    - Current accepted work already implements ContextAssessment, WorldContextSnapshot, item dispositions, StoryDirective, workflow persistence, Product Function validation, and Demo evidence. Preserve every existing uncommitted source change.
+    - Current App jumps directly from FactMirror confirmation to legacy generation. Replace only that missing journey segment.
+    - Main owns visual judgment. If the contract is ambiguous, implement the narrower truthful behavior instead of inventing a dashboard, research report, or alternate visual direction.
+  inScope:
+    - Extend the App surface state and reopen projection so confirmed fact-review journeys resume at the correct stable world review, world recovery, direction preparation, or exact-basis direction preview without automatically starting a Provider call.
+    - "After a new FactSpine confirmation, use the existing workflow in this order: persist confirmation; skip the world screen for irrelevant/private; prepare world context only for eligible roles; show ready driver/constraint evidence for explicit review; keep atmosphere personal-only; show honest recovery for unavailable/empty/conflicting/unconfigured substantive context."
+    - Add one world preparation surface with honest bounded copy and cancellation back to the confirmed mirror. Do not claim specific source search activity or fake progress.
+    - "Add one accessible WorldSpine review component: continuous ruled archive surface, period/place, exact source fact, source-title-first disclosure, explicit HTTPS external action, and a labelled three-choice radio group per item. Persist every choice immediately through setWorldItemDisposition and expose a short saved live region."
+    - Disable the direction action until every displayed item has an explicit disposition. Relevant items remain clear; irrelevant and reported-incorrect items remain readable and reversible with truthful status copy.
+    - Add one story-direction preparation/recovery surface and one exact-basis preview. Preview readable premise and starting point plus a compact trace resolved to human personal facts, kept source facts/titles, plausible contacts, and guardrails; never expose internal IDs, arrays, scores, model terms, or forbidden-outcome internals.
+    - Begin from the preview through the existing generate workflow. Direction failure preserves confirmed facts and world decisions and offers one explicit retry plus personal-facts-only generation with no automatic loop.
+    - Author independent Chinese and English copy; maintain heading focus, fieldset/radio semantics, aria-expanded source disclosure, live status, keyboard reachability, reduced motion, 200% zoom viability, and the 860x640 floor.
+    - Update the existing App direction comment so it truthfully includes the M2 extension and the required FINISH line from the Main design process.
+    - Add focused behavioral tests for new confirmation flow, stable reopen routing, ready review, persisted disposition, incomplete review gate, private/atmosphere skip, unavailable recovery, exact-basis preview, direction failure recovery, and legacy generation compatibility.
+  outOfScope:
+    - Domain types, AI/Product Function contracts, validators, historical retrieval rules, Provider adapters, Core SDK, Journey schema/status, repository format, Demo source records, story/letter redesign, production historical Provider, current-world permissions, release signing, other Apps, commit, or push.
+    - Multiple directions, scores, prediction language, AI research report, model-thinking display, automatic retry, background Provider call on reopen, direct Provider calls from UI, local duplicate persistence, source editing, source ranking, or changing a disposition without workflow persistence.
+    - Broad shell/navigation/settings/archive redesign, new design tokens, new dependencies, rounded-card dashboard patterns, pills, gradients, glass, decorative row staggering, or unbounded polish loops.
+  executionSteps:
+    - Trace App surface routing, confirm/generate/reopen behavior, existing copy and styles, workflow methods, and Demo fixture data before editing.
+    - Add pure view projection helpers and focused tests for stable screen choice before wiring async actions.
+    - Implement feature components and explicit intents; keep persistence, validation, and Provider calls in JourneyWorkflow.
+    - Wire App orchestration with operation epoch/cancellation protection and no automatic calls on reopen.
+    - Extend the existing visual system and copy, then run the stored acceptance suite once and report any unrelated baseline failure separately.
+  deliverables:
+    - Stable world preparation, evidence review/recovery, direction preparation/preview/recovery, and existing-generation handoff.
+    - Plain bilingual copy and established-world responsive styling.
+    - Behavioral regression coverage for all declared paths.
+  modules:
+    - name: Journey surface projection
+      responsibility: Choose the truthful stable screen from one current JourneyRecord.
+      consumes:
+        - Fact confirmation, ContextAssessment, WorldContextSnapshot, item dispositions, and exact-basis StoryDirective.
+      produces:
+        - One closed UI surface code and explicit next user action.
+      boundaries:
+        - Pure projection only; no Provider call, persistence, internal error text, or stale directive display.
+    - name: World evidence review
+      responsibility: Let the person understand and explicitly classify each sourced environmental fact.
+      consumes:
+        - Ready current WorldSpine and localized copy.
+      produces:
+        - Explicit disposition intents, retry intent, personal-only intent, edit-personal intent, and pause intent.
+      boundaries:
+        - Does not edit evidence, infer relevance, call Providers, expose queries/reason codes, or default a choice.
+    - name: Story direction preview
+      responsibility: Explain one current exact-basis direction and the human-readable evidence trace before generation.
+      consumes:
+        - Current StoryDirective, confirmed FactSpine, and relevant WorldSpine items.
+      produces:
+        - Begin, review-world, edit-personal, and pause intents.
+      boundaries:
+        - Does not plan another direction, expose internal IDs/arrays, imply probability, or generate the story.
+    - name: App orchestration
+      responsibility: Sequence existing workflow calls with cancellation and durable recovery.
+      consumes:
+        - Explicit feature intents and WorkflowResult values.
+      produces:
+        - Updated JourneyRecord, stable surface, short human error/recovery copy, and existing generation handoff.
+      boundaries:
+        - No direct Provider call, duplicate domain validation, background retry, or work on reopen.
+  callChain:
+    - FactMirror emits a confirmed FactSpine; App calls confirmFactSpine once and reads the resulting ContextAssessment.
+    - Eligible explicit continuation calls prepareWorldContext once; ready substantive evidence opens review, while skipped/atmosphere/unavailable paths stay honest and bounded.
+    - Each review change calls setWorldItemDisposition and replaces the visible record with the saved revision.
+    - Explicit continue calls prepareStoryDirection once; complete exact-basis output opens preview, failure opens recovery, and cancellation returns to a stable saved screen.
+    - Explicit Begin calls the existing generate workflow with the current record; no UI module composes model input.
+  scenarios:
+    - name: Sourced Hangzhou path
+      given: Confirmed facts produce ready driver or constraint evidence.
+      when: The person reviews every item and keeps a subset.
+      then: Every choice is persisted, only the kept facts appear in the direction trace, and Begin uses the existing grounded generation path.
+    - name: Private or atmosphere path
+      given: Context is irrelevant/private or atmosphere-only.
+      when: Facts are confirmed.
+      then: No independent world review appears and the direction remains visibly personal-only without fabricated archive symmetry.
+    - name: Unavailable substantive context
+      given: The assessment expected useful world material but preparation is unavailable, empty, conflicting, or unconfigured.
+      when: The recovery surface opens.
+      then: It says personal facts are saved, exposes no technical reason, and offers one explicit retry or personal-only continuation.
+    - name: Reopen is stable
+      given: The App opens a fact-review Journey with partially reviewed evidence, a current directive, or a prior recoverable failure.
+      when: The record is selected from the archive.
+      then: The correct stable screen appears with zero automatic workflow or Provider calls.
+    - name: Direction failure preserves work
+      given: Every evidence choice is saved but planning fails.
+      when: Recovery is shown.
+      then: The person may retry once or continue through legacy personal-only generation; confirmed facts and decisions remain intact.
+  risks:
+    - Reopen logic can accidentally spend model Tokens; screen projection must remain pure and explicit continuation must own every call.
+    - A source fact can look like a personal prediction; composition and copy must keep the archive edge distinct from personal paper and repeat the forecast boundary.
+    - Async disposition saves can race; serialize or disable the affected controls and retain operation-epoch protection.
+    - Trace rendering can leak IDs or invalid stale data; resolve only current exact references and omit anything unresolved.
+    - At 860x640 a sticky action can clip evidence or focus; keep the register scroll owner explicit and test realistic bilingual lengths.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 2200
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 12
+  fileLimitMode: warn
+  changedLineLimit: 2200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - target
+  generatedPaths:
+    - dist/**
+    - src-tauri/target/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/App.tsx
+    - src/app/copy.ts
+    - src/styles.css
+    - src/features/
+    - tests/app/App.test.tsx
+    - tests/features/
+    - tests/demo/m0-m1-walkthrough.test.ts
+acceptance:
+  criteria:
+    - Stable screen projection and archive reopen never start a Provider call; each async call follows one explicit user intent and preserves confirmed work.
+    - Ready substantive evidence requires persisted explicit choices for every displayed item before direction planning; private, atmosphere, unavailable, and all-rejected paths stay honest and generatable.
+    - Direction preview resolves only current human-readable personal/source trace and never exposes IDs, scores, raw arrays, model terms, queries, reason codes, or prediction language.
+    - Chinese and English surfaces preserve heading focus, radio-group semantics, source disclosure, live save status, keyboard access, reduced motion, 200% text zoom viability, and 860x640 reachability.
+    - Existing M0-M1 shell, archive, FactMirror, generation, story, letter, settings, legacy records, and accepted backend work remain compatible.
+  commands:
+    - pnpm vitest run tests/app/App.test.tsx tests/demo/m0-m1-walkthrough.test.ts
+    - pnpm check
+    - pnpm build
+    - git diff --check

@@ -852,6 +852,33 @@ test("generated path patterns are snapped and unsafe patterns are rejected", () 
   }
 });
 
+test("workspace excludes fail fast unless every entry is one path-segment name", () => {
+  const parsed = parseTaskSpec(
+    contractSpec({ workspace: { exclude: ["target", "coverage", "target"] } }),
+    process.cwd(),
+  );
+  assert.ok(parsed.workspace.exclude.includes("target"));
+  assert.ok(parsed.workspace.exclude.includes("coverage"));
+  assert.equal(parsed.workspace.exclude.filter((name) => name === "target").length, 1);
+
+  for (const exclude of [
+    "src-tauri/target",
+    "src-tauri\\target",
+    "**/target/**",
+    "target*",
+    ".",
+    "..",
+  ]) {
+    assert.throws(
+      () => parseTaskSpec(
+        contractSpec({ workspace: { exclude: [exclude] } }),
+        process.cwd(),
+      ),
+      /task\.workspace\.exclude\[0\].*one directory or file name.*use target instead of src-tauri\/target/,
+    );
+  }
+});
+
 test("delivery commands preserve order and reject unsafe shapes", () => {
   const parsed = parseTaskSpec(
     contractSpec({

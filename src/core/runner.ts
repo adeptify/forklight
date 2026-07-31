@@ -549,6 +549,12 @@ export async function executeAttempt(
     forwarding.dispose();
   }
 
+  // Worker child has exited. Drop the live PID immediately so status polling
+  // (reconcileTask) cannot treat a finished Worker as a disappeared running
+  // process while this attempt records terminal evidence or enters verification.
+  // Failed/interrupted paths also clear workerPid; this closes the success-path race.
+  store.updateTask(task.id, { workerPid: null });
+
   const workerFinishedAt = timestamp();
   const maxDurationMs = task.effectivePolicy?.values.maxDurationMs ?? null;
   if (
@@ -901,8 +907,16 @@ export async function correctTask(
   );
 }
 
+/**
+ * Status-poll supervision: if a running Task still has a live Worker PID and
+ * that process is gone, mark interrupted. Never mutates verifying/terminal
+ * Tasks and never starts a retry. Callers that enter verification must clear
+ * workerPid (and set verifying) so a finished Worker cannot be interrupted here.
+ */
 export function reconcileTask(store: StateStore, taskId: string): TaskRecord {
   const task = store.getTask(taskId);
+  // Only supervise live Worker execution. Independent verification and every
+  // non-running status are durable and must not be interrupted by a status poll.
   if (task.status !== "running" || task.workerPid === undefined) return task;
   try {
     process.kill(task.workerPid, 0);

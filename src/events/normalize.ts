@@ -7,6 +7,12 @@ import type {
 
 type JsonObject = Record<string, unknown>;
 
+/** Throttle interval for high-frequency Claude processing markers (ms).
+ *  The first marker emits immediately; subsequent markers inside this window
+ *  are dropped before Store writes. This is internal backpressure — it never
+ *  stops the Worker or resets the no-progress watchdog. */
+export const CLAUDE_PROCESSING_THROTTLE_MS = 15_000;
+
 function asObject(value: unknown): JsonObject | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
@@ -86,6 +92,21 @@ function parseTokenUsage(root: JsonObject): AttemptTokenUsage | undefined {
 export class ClaudeEventNormalizer {
   private readonly tools = new Map<string, string>();
   private readonly completedTools = new Set<string>();
+  /** Deterministic clock seam: returns milliseconds since epoch. */
+  private readonly clock: () => number;
+  /** Throttle interval for processing markers (ms). */
+  private readonly processingThrottleMs: number;
+  /** Timestamp (from clock) of the last emitted processing marker, or -1 if none. */
+  private lastProcessingEmittedAt: number;
+
+  constructor(input?: {
+    clock?: () => number;
+    processingThrottleMs?: number;
+  }) {
+    this.clock = input?.clock ?? (() => Date.now());
+    this.processingThrottleMs = input?.processingThrottleMs ?? CLAUDE_PROCESSING_THROTTLE_MS;
+    this.lastProcessingEmittedAt = -1;
+  }
 
   parseLine(line: string): NormalizedWorkerEvent[] {
     let root: JsonObject;
@@ -118,6 +139,8 @@ export class ClaudeEventNormalizer {
 
     if (type === "assistant") return this.parseAssistant(root);
     if (type === "user") return this.parseToolResults(root);
+
+    if (type === "system" && root.subtype === "thinking_tokens") return this.parseProcessing(root);
 
     if (type === "result") {
       const isError = root.is_error === true;
@@ -231,6 +254,8 @@ export class ClaudeEventNormalizer {
         events.push({
           type: "worker.message",
           summary: truncate(block.text.trim(), 500),
+          // Closed activity marker only; stage classification must not need prose.
+          payload: { activityKind: "model-response" },
         });
       }
     }
@@ -261,5 +286,29 @@ export class ClaudeEventNormalizer {
       });
     }
     return events;
+  }
+
+  /**
+   * Emit a closed model-processing marker for Claude system thinking_tokens.
+   * Rate-limited: the first marker emits immediately; subsequent markers inside
+   * the throttle interval are dropped before Store writes. Token estimates and
+   * raw payload fields are never stored.
+   */
+  private parseProcessing(_root: JsonObject): NormalizedWorkerEvent[] {
+    const now = this.clock();
+    if (
+      this.lastProcessingEmittedAt >= 0
+      && now - this.lastProcessingEmittedAt < this.processingThrottleMs
+    ) {
+      return [];
+    }
+    this.lastProcessingEmittedAt = now;
+    return [
+      {
+        type: "worker.message",
+        summary: "Model is actively processing",
+        payload: { activityKind: "model-processing" },
+      },
+    ];
   }
 }

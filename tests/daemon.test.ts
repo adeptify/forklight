@@ -9,6 +9,7 @@ import type {
   PlanItemRecord,
   PlanRecord,
   TaskRecord,
+  TaskStatus,
   VerificationResult,
 } from "../src/core/types.js";
 import type { PlanBoard, PlanBoardSummary } from "../src/core/board.js";
@@ -415,6 +416,55 @@ const TEST_PROVIDER_AUTH_READY: ProviderAuthInspector = {
   hasReadableKeychainValue: () => true,
   hasLocalGrokSignIn: () => true,
 };
+
+test("Main-direct coordinator start, observe, and close use one non-Task record", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-main-direct-coordinator-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const taskCountBefore = store.listTasks().length;
+    const started = await coordinator.mainDirectStart({
+      taskClass: "small-coordinator-fix",
+      taskFamily: "maintenance",
+      reason: "small-clear-change",
+      note: "Main can repair this bounded issue directly.",
+      consideredWorkerProfileIds: [],
+      confirm: true,
+    });
+    assert.equal(started.status, "open");
+    assert.equal(store.listTasks().length, taskCountBefore);
+    assert.deepEqual(coordinator.mainDirectStatus(started.id), started);
+    assert.equal(coordinator.mainDirectList().length, 1);
+    assert.equal(coordinator.mainDirectAggregate().openCount, 1);
+
+    const closeInput = {
+      id: started.id,
+      outcome: "completed",
+      verification: "passed",
+      note: "Independent checks passed.",
+      confirm: true,
+    };
+    const closed = coordinator.mainDirectComplete(closeInput);
+    assert.equal(closed.status, "completed");
+    assert.equal(closed.verification, "passed");
+    assert.deepEqual(coordinator.mainDirectComplete(closeInput), closed, "identical replay is idempotent");
+    assert.throws(
+      () => coordinator.mainDirectComplete({
+        ...closeInput,
+        outcome: "abandoned",
+        verification: undefined,
+        note: "Conflicting replay.",
+      }),
+      /already completed/,
+    );
+    assert.equal(coordinator.mainDirectAggregate().completedPassedCount, 1);
+    assert.equal(store.listTasks().length, taskCountBefore);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -2358,6 +2408,12 @@ test("routing_evidence_coverage returns privacy-safe aggregate via the daemon", 
     assert.equal(coverage.withCompleteRoutingDecisionCount, 1);
     assert.equal(coverage.distinctTaskClassCount, 1);
     assert.equal(coverage.distinctTaskFamilyCount, 1);
+    assert.equal(coverage.singleWorkerDecisionCount, 1);
+    assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+    assert.equal(coverage.comparableExactClassDecisionCount, 0);
+    assert.equal(coverage.comparableTaskFamilyDecisionCount, 0);
+    assert.equal(coverage.unknownMultiWorkerDecisionCount, 0);
+    assert.equal(coverage.unusableDecisionCount, 0);
 
     const json = JSON.stringify(coverage);
     assert.ok(!json.includes("private Main reason"));
@@ -2385,6 +2441,12 @@ test("routing_evidence_coverage empty store returns zero denominators", async ()
     assert.equal(coverage.withCompleteRoutingDecisionCount, 0);
     assert.equal(coverage.distinctTaskClassCount, 0);
     assert.equal(coverage.distinctTaskFamilyCount, 0);
+    assert.equal(coverage.singleWorkerDecisionCount, 0);
+    assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+    assert.equal(coverage.comparableExactClassDecisionCount, 0);
+    assert.equal(coverage.comparableTaskFamilyDecisionCount, 0);
+    assert.equal(coverage.unknownMultiWorkerDecisionCount, 0);
+    assert.equal(coverage.unusableDecisionCount, 0);
   } finally {
     await daemon.close();
   }
@@ -4453,6 +4515,162 @@ function rootSnapshot(overrides: Partial<AdvancedPolicyFields> = {}): EffectiveP
 test("model_routing is registered as read-only and validates bounded inputs", () => {
   assert.equal(requiresMatchingBuildIdentity("model_routing"), false);
 });
+
+test("list_history_page is registered as read-only", () => {
+  assert.equal(requiresMatchingBuildIdentity("list_history_page"), false);
+});
+
+test("daemon list_history_page rejects malformed optional fields instead of treating them as absent", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-history-page-boundary-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    for (const params of [
+      { query: 123 },
+      { cursor: 123 },
+      { cursor: "" },
+    ]) {
+      await assert.rejects(
+        daemonRequest("list_history_page", params, home),
+        /History continuation is invalid/,
+      );
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("listHistoryPage returns canonical History only and pages deterministically", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-history-page-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings);
+  try {
+    const baseTask = (id: string, status: TaskStatus, updatedAt: string): TaskRecord => ({
+      id,
+      name: id,
+      status,
+      sourcePath: "/private/source",
+      taskFile: `/tmp/${id}.yaml`,
+      spec: {
+        version: 1,
+        name: id,
+        project: "/tmp/proj",
+        goal: "g",
+        constraints: [],
+        provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "fk" },
+        runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: null },
+        workspace: { exclude: [] },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+        acceptance: { commands: ["true"] },
+      },
+      paths: {
+        root: "/x", baseline: "/x", workspace: "/x",
+        logs: "/x", claudeConfig: "/x", diff: "/x",
+      },
+      sessionId: `s-${id}`,
+      createdAt: updatedAt,
+      updatedAt,
+    } as TaskRecord);
+
+    // Repaired failed delivery -> History / repaired-delivered (machine failed).
+    const repaired = baseTask("hist-repaired", "failed", "2026-07-30T09:00:00.000Z");
+    store.createTask(repaired);
+    store.saveRemediationDisposition(repaired.id, {
+      status: "verified-repaired-delivered",
+      checkId: "check-1",
+      createdAt: "2026-07-30T09:30:00.000Z",
+    });
+    // Worker passed, awaiting Main -> Now, never History.
+    const awaiting = baseTask("now-awaiting", "succeeded", "2026-07-30T11:00:00.000Z");
+    store.createTask(awaiting);
+    store.addEvent(awaiting.id, "attempt-1", "verification.completed", "passed", {
+      passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
+      commands: [], diffPath: "/x/diff.patch", sourceUnchanged: false,
+    });
+
+    const first = coordinator.listHistoryPage({ limit: 10 });
+    assert.equal(first.totalCount, 1);
+    assert.equal(first.items.length, 1);
+    assert.equal(first.items[0]!.taskId, "hist-repaired");
+    assert.equal(first.items[0]!.boardScope, "history");
+    assert.equal(first.items[0]!.boardReason, "repaired-delivered");
+    assert.equal(first.hasMore, false);
+    assert.equal(first.nextCursor, undefined);
+    // Machine-terminal Task awaiting Main never appears in History.
+    assert.ok(!first.items.some((s) => s.taskId === "now-awaiting"));
+
+    // Safe search matches provider/model and returns the canonical surface.
+    const byProvider = coordinator.listHistoryPage({ limit: 10, query: "deepseek" });
+    assert.equal(byProvider.items.length, 1);
+    assert.equal(byProvider.items[0]!.boardScope, "history");
+    // A query that matches no safe summary field returns nothing.
+    const none = coordinator.listHistoryPage({ limit: 10, query: "minimax" });
+    assert.equal(none.items.length, 0);
+    assert.equal(none.totalCount, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test("listHistoryPage fails closed on an out-of-range limit and cross-query cursor", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-history-page-validation-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings);
+  const TS = "2026-07-30T10:00:00.000Z";
+  const baseTask = (id: string, provider: string): TaskRecord => ({
+    id,
+    name: id,
+    status: "failed",
+    sourcePath: "/private/source",
+    taskFile: `/tmp/${id}.yaml`,
+    spec: {
+      version: 1, name: id, project: "/tmp/proj", goal: "g", constraints: [],
+      provider: { name: provider, model: `${provider}-m`, keychainService: "fk" },
+      runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: null },
+      workspace: { exclude: [] }, worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+      acceptance: { commands: ["true"] },
+    },
+    paths: { root: "/x", baseline: "/x", workspace: "/x", logs: "/x", claudeConfig: "/x", diff: "/x" },
+    sessionId: `s-${id}`,
+    createdAt: TS, updatedAt: TS,
+  } as TaskRecord);
+  // Twelve canonical History Tasks (repaired-delivered) sharing one timestamp.
+  for (let i = 0; i < 12; i += 1) {
+    const id = `glm-${i.toString().padStart(2, "0")}`;
+    store.createTask(baseTask(id, "glm"));
+    store.saveRemediationDisposition(id, {
+      status: "verified-repaired-delivered",
+      checkId: `check-${i}`,
+      createdAt: "2026-07-30T10:30:00.000Z",
+    });
+  }
+  try {
+    // Out-of-range limit fails closed with the fixed privacy-safe reason.
+    assert.throws(() => coordinator.listHistoryPage({ limit: 9 }), /History continuation is invalid/);
+    // First page of the "glm" search issues a continuation cursor.
+    const pageOne = coordinator.listHistoryPage({ limit: 10, query: "glm" });
+    assert.equal(pageOne.items.length, 10);
+    assert.equal(pageOne.totalCount, 12);
+    assert.ok(pageOne.nextCursor, "a continuation cursor is issued for a multi-page result");
+    const glmCursor = pageOne.nextCursor;
+    // The same cursor used with a different query is rejected.
+    assert.throws(
+      () => coordinator.listHistoryPage({ limit: 10, query: "deepseek", cursor: glmCursor }),
+      /History continuation is invalid/,
+    );
+    // The same cursor used with the same query (different casing) continues.
+    const pageTwo = coordinator.listHistoryPage({ limit: 10, query: "GLM", cursor: glmCursor });
+    assert.equal(pageTwo.items.length, 2);
+    assert.equal(pageTwo.hasMore, false);
+    const seen = new Set([...pageOne.items, ...pageTwo.items].map((s) => s.taskId));
+    assert.equal(seen.size, 12, "no duplication across the two pages");
+  } finally {
+    store.close();
+  }
+});
+
 
 test("model_routing coordinator rejects empty taskClass and fewer than 2 candidates", () => {
   const store = new StateStore(path.join(tmpdir(), "fl-mr-"));

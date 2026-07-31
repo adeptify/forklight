@@ -1,0 +1,197 @@
+version: 2
+name: Show follow-up verification on terminal Tasks without hiding machine truth
+project: ../..
+taskClass: post-terminal-operation-observability
+taskFamily: supervision
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+routingDecision:
+  taskFamily: supervision
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: Exact and family evidence are absent and the configured routing policy did not trigger Competition. Main selects one DeepSeek Worker for this coherent Core/CLI/Hub slice based on recent bounded usable delivery. This is not a permanent model verdict.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    A terminal Task keeps its machine result while every supervision surface
+    truthfully shows an open Candidate reverification or Main repair check, so
+    Main does not mistake the old terminal status for current inactivity and
+    start duplicate work.
+  presentation:
+    summary: 原任务的成功或失败事实保持不变；如果正在复验 Candidate 或验证 Main 修复，Board、Task Detail 和 wait 会明确告诉用户这是本地后续检查，不会再次调用 Worker。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-post-terminal-operation-observability-contract.md.
+    - Task.status intentionally remains terminal during Candidate reverification and Main remediation verification, but current liveStage and wait return terminal immediately and hide those operations.
+    - Existing durable start/completion events are sufficient to rebuild truthful operation state after daemon restart; no schema or new event type is required.
+    - Candidate reverification may emit verification command, verification completion, and revision events before its own completion. None of those intermediate events closes the operation.
+  inScope:
+    - Extend the canonical closed live-stage projection with Candidate reverification and Main repair verification on terminal Tasks, derived only from ordered durable event types and sequence.
+    - Preserve raw Task status, finishedAt, Board lane, headline result, failure category, Main decision, and final-delivery semantics while projecting active or quiet follow-up work.
+    - Make canonical progress activity follow the live-stage observation when full event evidence proves an open follow-up operation.
+    - Make CLI and MCP wait consume the canonical live-stage projection so terminal wait does not return while a follow-up operation is open.
+    - Carry the canonical stage through compact inspection and human wait output without exposing private evidence.
+    - Add plain independent Chinese and English Hub wording and focused regression coverage for replay, completion, quiet/crash truth, wait, Board, and Task Detail.
+  outOfScope:
+    - Do not mutate Task status, Attempt, Main Review, Candidate, remediation disposition, Integration, admission, or verification semantics.
+    - Do not start or resume a Worker, Provider, retry, Goal, Competition, polling loop, or background recovery.
+    - Do not infer process liveness after silence, invent ETA/progress, parse event summary/payload prose, or claim direct Main Token savings.
+    - Do not expose commands, output, prompts, paths, errors, credentials, endpoints, private reasons, or Provider identity.
+    - Do not add an event type, database field/table, dependency, endpoint, or second lifecycle reducer.
+    - Do not change settings, budgets, timeouts, file/line limits, Quality policy, routing, economics, commit, or push.
+  executionSteps:
+    - Trace terminal live-stage replay, Candidate and remediation durable event order, CLI/MCP wait reads, Board/Task Detail rendering, and existing tests before editing.
+    - Add one fail-closed ordered-event reducer for open post-terminal operations and extend the existing closed stage/evidence/next vocabularies minimally.
+    - Thread the canonical projection into wait snapshots and outputs; latest-only callers must remain conservative rather than guess.
+    - Update Board and Task Detail to prioritize the follow-up activity line while preserving the original result placement and badge.
+    - Run the focused suite once, repair only Candidate-caused failures, then run the full suite/build/syntax/diff checks once.
+  deliverables:
+    - Restart-safe canonical follow-up operation projection for both existing local verification flows.
+    - CLI and MCP wait behavior that waits for the follow-up completion or caller timeout.
+    - Human-readable bilingual Board and Task Detail explanation without changing machine truth.
+    - Regression tests for open, intermediate, quiet/crash, closed, ordinary terminal, and latest-only cases.
+  modules:
+    - name: Core follow-up operation replay
+      responsibility: Detect an open terminal-Task verification from ordered durable start and completion events.
+      consumes:
+        - Task status plus ordered event type, sequence, and timestamp evidence.
+      produces:
+        - Closed live-stage, observation, evidence, meaning, and next-action codes.
+      boundaries:
+        - No text parsing, payload exposure, Task mutation, process-liveness claim, retry, or Provider call.
+    - name: Supervision wait
+      responsibility: Wait for canonical terminal truth rather than raw Task status alone.
+      consumes:
+        - Task progress cursor and canonical live-stage projection from local Store or daemon Decision View.
+      produces:
+        - Changed, terminal, or timeout outcome plus bounded current-stage evidence.
+      boundaries:
+        - No polling-policy change, operation recovery, command execution, or Worker invocation.
+    - name: Hub explanation
+      responsibility: Explain the current local follow-up check while leaving the original Task result prominent and unchanged.
+      consumes:
+        - Canonical closed live-stage codes already carried by Task surfaces.
+      produces:
+        - Plain Board and Task Detail Chinese/English wording and existing activity badge.
+      boundaries:
+        - No lifecycle recomputation, hidden raw data, new lane, or false Token/time claim.
+  callChain:
+    - A Task reaches succeeded, failed, or interrupted and keeps that machine result.
+    - Main explicitly starts an existing Candidate reverification or remediation verification operation.
+    - Existing durable start evidence opens the follow-up stage; intermediate Candidate verification events do not close it.
+    - Core projects the stage; CLI/MCP wait and Hub consume the same bounded projection.
+    - Existing completion evidence closes the operation and restores the Task terminal stage.
+  scenarios:
+    - name: Failed Candidate is being rechecked
+      given: A failed Task has candidate.reverification.started after its latest candidate.reverification.completed.
+      when: Status, wait, Board, or Task Detail reads the Task.
+      then: Machine failure and failed lane remain, while current activity says the retained Candidate is being rechecked without another Worker.
+    - name: Candidate intermediate evidence remains open
+      given: Verification command, verification completion, or revision-capture evidence follows the Candidate recheck start but its completion event is absent.
+      when: Core replays the ordered events.
+      then: The Candidate recheck stage remains open and uses only safe event-time observation.
+    - name: Main repair is being checked
+      given: A terminal Task has remediation.check.started after its latest remediation.check.completed.
+      when: The same supervision surfaces read it.
+      then: They show local Main repair verification without changing the original result or implying a Worker call.
+    - name: Started operation becomes quiet
+      given: A follow-up start has no completion and its latest relevant evidence is older than the quiet window.
+      when: Progress is projected or terminal wait reaches caller timeout.
+      then: It reports no new completion evidence and timeout, never failure, retry, cancellation, or process-liveness certainty.
+    - name: Follow-up completes
+      given: The matching completion event follows the latest start.
+      when: Progress is rebuilt after restart.
+      then: The operation is closed and the canonical stage returns to the Task current terminal result.
+    - name: Latest-only caller lacks proof
+      given: A terminal Task is projected without ordered history.
+      when: Its latest event is individually ambiguous.
+      then: It stays terminal and does not invent an open follow-up operation.
+  risks:
+    - Replacing Task status with a running state would hide machine truth and move the Board lane; keep follow-up work only in the canonical activity projection.
+    - Treating quiet as a crash would trigger duplicate cost; quiet must remain missing evidence only.
+    - Candidate command events are shared with ordinary verification; only a prior unmatched Candidate start may place them inside the follow-up operation.
+    - Wait callers without full ordered evidence could guess from one event; require the canonical projection from Store or Decision View.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1200
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 1200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/task-progress.ts
+    - src/cli/supervision.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub/public
+    - tests
+acceptance:
+  criteria:
+    - Open Candidate and Main repair verification stages are derived only from unmatched durable starts on terminal Tasks; completion restores the current terminal result.
+    - Original Task status, Board lane, headline result, failure category, Main decision, and final-delivery semantics remain unchanged.
+    - Active versus quiet is event-age observation only; silence never becomes failure, retry, recovery, or permission to invoke a Worker.
+    - CLI and MCP terminal wait consume canonical stage evidence and wait for completion or caller timeout instead of returning immediately on raw terminal status.
+    - Board and Task Detail independently explain in plain Chinese and English that this is local follow-up verification without another Worker.
+    - Latest-only and ordinary terminal projections remain conservative and backward-compatible.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-surface.test.ts tests/cli-supervision.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

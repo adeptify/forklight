@@ -447,6 +447,142 @@ function seedCompletedIntegration(home: string): {
   return { taskId, operationId, receiptId };
 }
 
+function seedCliTaskSurfaceEvidence(home: string): {
+  deliveredTaskId: string;
+  repairedTaskId: string;
+  awaitingTaskId: string;
+} {
+  const store = new StateStore(home);
+  const timestamp = "2026-07-31T03:30:00.000Z";
+  const paths = {
+    root: "/state/task",
+    baseline: "/state/task/baseline",
+    workspace: "/state/task/workspace",
+    logs: "/state/task/logs",
+    claudeConfig: "/state/task/claude",
+    diff: "/state/task/diff.patch",
+  };
+  const task = (id: string, status: TaskRecord["status"]): TaskRecord => ({
+    id,
+    name: id,
+    status,
+    sourcePath: "/source",
+    taskFile: `/task-${id}.yaml`,
+    spec: {
+      provider: { name: "deepseek", model: "deepseek-v4-pro[1M]" },
+      runtime: { name: "claude-code" },
+    } as TaskRecord["spec"],
+    paths,
+    sessionId: `session-${id}`,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+  });
+
+  const deliveredTaskId = "cli-surface-delivered";
+  const operationId = "cli-surface-operation";
+  const receiptId = "cli-surface-receipt";
+  store.createTask(task(deliveredTaskId, "succeeded"));
+  store.addEvent(
+    deliveredTaskId,
+    undefined,
+    "integration.operation.started",
+    "integration started",
+    { operationId, taskId: deliveredTaskId, receiptId },
+  );
+  store.saveIntegrationReceipt({
+    id: receiptId,
+    taskId: deliveredTaskId,
+    patchDigest: "d".repeat(64),
+    affectedFiles: ["src/cli.ts"],
+    rejectionReasons: [],
+    sourceEvidence: {},
+    createdAt: timestamp,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    consumed: true,
+  });
+  store.saveIntegrationResult({
+    id: operationId,
+    receiptId,
+    taskId: deliveredTaskId,
+    status: "applied",
+    appliedAt: timestamp,
+    createdAt: timestamp,
+    stages: [
+      { stage: "source-applied", status: "passed" },
+      { stage: "source-verified", status: "passed" },
+      { stage: "artifact-built", status: "not-applicable" },
+      { stage: "runtime-activated", status: "not-applicable" },
+    ],
+  });
+
+  const repairedTaskId = "cli-surface-repaired";
+  store.createTask(task(repairedTaskId, "failed"));
+  store.saveRemediationDisposition(repairedTaskId, {
+    status: "verified-repaired-delivered",
+    checkId: "cli-surface-remediation",
+    createdAt: timestamp,
+  });
+
+  const awaitingTaskId = "cli-surface-awaiting";
+  store.createTask(task(awaitingTaskId, "succeeded"));
+  store.addEvent(awaitingTaskId, undefined, "verification.completed", "verification passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: paths.diff,
+    sourceUnchanged: false,
+  });
+  store.close();
+  return { deliveredTaskId, repairedTaskId, awaitingTaskId };
+}
+
+test("CLI status/list preserve canonical Main, remediation, and Integration placement", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-task-surface-"));
+  const seeded = seedCliTaskSurfaceEvidence(home);
+  try {
+    const status = await runCli(home, ["status", seeded.deliveredTaskId, "--json"]);
+    assert.equal(status.code, 0, status.stderr);
+    const statusBody = JSON.parse(status.stdout) as Record<string, unknown>;
+    assert.equal(statusBody.decisionStage, "delivered");
+    assert.equal(statusBody.boardScope, "history");
+    assert.equal(statusBody.boardReason, "delivered");
+
+    const list = await runCli(home, ["list", "--json"]);
+    assert.equal(list.code, 0, list.stderr);
+    const rows = JSON.parse(list.stdout) as Array<Record<string, unknown>>;
+    const byId = new Map(rows.map((row) => [row.taskId, row]));
+    assert.deepEqual(
+      [
+        byId.get(seeded.deliveredTaskId)?.decisionStage,
+        byId.get(seeded.deliveredTaskId)?.boardScope,
+        byId.get(seeded.deliveredTaskId)?.boardReason,
+      ],
+      ["delivered", "history", "delivered"],
+    );
+    assert.deepEqual(
+      [
+        byId.get(seeded.repairedTaskId)?.boardScope,
+        byId.get(seeded.repairedTaskId)?.boardReason,
+      ],
+      ["history", "repaired-delivered"],
+    );
+    assert.deepEqual(
+      [
+        byId.get(seeded.awaitingTaskId)?.decisionStage,
+        byId.get(seeded.awaitingTaskId)?.boardScope,
+        byId.get(seeded.awaitingTaskId)?.boardReason,
+      ],
+      ["awaiting-main-review", "now", "awaiting-main"],
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
 test("Integration status/history/wait succeed against an existing daemon without lifecycle mutation", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-int-observer-active-"));
   const seeded = seedCompletedIntegration(home);

@@ -1,0 +1,180 @@
+version: 2
+name: Explain whether routing history can actually compare Workers
+project: ../..
+taskClass: routing-decision-comparison-readiness
+taskFamily: capability-statistics
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+routingDecision:
+  taskFamily: capability-statistics
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: Exact evidence is absent and routing returns unknown with no Competition trigger. Main selects one DeepSeek Worker because recent cross-layer delivery was usable after bounded repair, while adjacent GLM Hub Tasks used substantially more turns and cache. This is not a permanent verdict.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Hub explains whether complete routing history actually contained a fair
+    multi-Worker comparison at decision time, instead of treating a 30-record
+    count as proof that ForkLight already knows which model is best.
+  presentation:
+    summary: 让用户看懂“30 条选择记录”里，哪些只是 Main 单 Worker判断，哪些真的有跨 Worker 可比证据，哪些仍然未知。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-routing-decision-readiness-contract.md.
+    - Current routing coverage reports terminal/type/family/complete-decision counts but cannot say whether any complete decision compared two or more Workers with sufficient evidence.
+    - Every modern routingDecision already freezes its shortlist and decision-time evidence scope, so this product question can be answered from Task metadata without re-reading logs or recomputing routing history.
+    - The existing Insights route is page-polled; adding event/Attempt scans would regress the recently shipped bounded Hub refresh work and is forbidden.
+  inScope:
+    - Extend the canonical routing-evidence coverage projection with mutually exclusive decision-time readiness counts for single-Worker, comparable multi-Worker, unknown multi-Worker, and unusable complete decisions.
+    - Split comparable multi-Worker decisions into exact-class and task-family sub-counts without exposing raw labels or Worker identities.
+    - Keep all new counts derived only from terminal ordinary Task metadata and frozen routingDecision fields already loaded by listTasks.
+    - Carry the same detached read-only projection through the existing Daemon and Hub route.
+    - Rework the existing bilingual Insights card so a beginner understands traceability versus actual fair-comparison evidence and why a single Worker can be an intentional cost-saving choice.
+    - Add focused Core, Daemon, and Hub regression coverage including malformed stored shapes and arithmetic invariants.
+  outOfScope:
+    - Do not recompute current family readiness, score or rank models, change routing recommendations, alter Competition policy, or start a Worker/Competition from the coverage surface.
+    - Do not read events, Attempts, Integration history, Candidate diffs, logs, prompts, paths, costs, Tokens, private Main reasons, or Provider endpoints for the new projection.
+    - Do not change Task parsing/admission, routingDecision schema, settings, polling cadence, economics, retries, corrections, adaptation, Integration, commit, or push.
+    - Do not create a new endpoint, dependency, database table, cache, background job, or second Hub state machine.
+  executionSteps:
+    - Trace the existing coverage projection, daemon bridge, Hub renderer, bilingual copy, and tests before editing.
+    - Define one fail-closed classifier over stored routingDecision metadata and prove its four outcomes are mutually exclusive.
+    - Extend the existing aggregate without changing legacy eligibility or exposing labels/identities.
+    - Make Hub lead with what the counts prove and cannot prove; keep exact/family detail secondary.
+    - Run the focused suite once, repair only Candidate-caused failures, then run the complete suite/build/syntax/diff checks once.
+  deliverables:
+    - Canonical decision-time comparison-readiness counts with arithmetic invariants.
+    - Existing Daemon/Hub coverage route carrying the new facts without extra database work.
+    - Plain bilingual Insights explanation that prevents 30 complete records from becoming a false model-ranking claim.
+    - Regression tests for legacy, malformed, single, exact, family, unknown, and privacy boundaries.
+  modules:
+    - name: Coverage classifier
+      responsibility: Classify each complete terminal ordinary routing decision by what its frozen shortlist and evidence scope proved at creation time.
+      consumes:
+        - Task metadata, taskClass, taskFamily, routingDecision shortlist, and evidenceSnapshot scope.
+      produces:
+        - Mutually exclusive aggregate readiness counts and exact/family comparable sub-counts.
+      boundaries:
+        - No event history, model score, current-family inference, private reason, or mutation.
+    - name: Insights explanation
+      responsibility: Explain traceability, fair comparison, intentional single-Worker selection, and unknown evidence in beginner-readable language.
+      consumes:
+        - The canonical aggregate projection from the existing daemon route.
+      produces:
+        - One compact Chinese/English evidence story with technical detail secondary.
+      boundaries:
+        - Does not recompute classification, name a winner, or imply Competition ran.
+  callChain:
+    - Task creation freezes Main's shortlist and decision-time evidence scope.
+    - A terminal ordinary Task enters the existing metadata-only coverage cohort.
+    - Core classifies the complete decision into exactly one readiness bucket.
+    - Daemon forwards the detached aggregate through routing_evidence_coverage.
+    - Hub explains what the portfolio can and cannot support before showing model statistics.
+  scenarios:
+    - name: Intentional single Worker
+      given: A complete Task has one frozen shortlisted Worker.
+      when: Insights reads coverage.
+      then: It counts as single-Worker judgment and never as comparable or unknown multi-Worker evidence.
+    - name: Comparable exact evidence
+      given: A complete Task considered two Workers and froze exact-class scope.
+      when: Coverage is projected.
+      then: It counts once as comparable multi-Worker and once in the exact sub-count.
+    - name: Comparable family evidence
+      given: A complete Task considered two Workers and froze task-family scope.
+      when: Coverage is projected.
+      then: It counts once as comparable multi-Worker and once in the family sub-count.
+    - name: Multi-Worker remains unknown
+      given: A complete Task considered two Workers and froze scope none.
+      when: Hub explains the result.
+      then: It says Main had no fair comparison evidence and does not imply a tie or Competition.
+    - name: Malformed durable shape
+      given: A stored object has complete labels and a routingDecision object but lacks a usable shortlist or scope.
+      when: Coverage is computed.
+      then: It enters unusable once, does not throw, and does not enter another readiness bucket.
+  risks:
+    - Counting scope without requiring at least two identities would call a single candidate a comparison; shortlist cardinality is mandatory.
+    - Recomputing evidence from event history on every Insights poll would regress Hub efficiency; metadata-only behavior needs an executable test seam.
+    - Copy could turn readiness into a leaderboard; bilingual tests must reject winner, best-model, automatic-choice, and Competition-ran claims.
+  changeBudget:
+    maxFiles: 7
+    maxDiffLines: 1000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 7
+  fileLimitMode: warn
+  changedLineLimit: 1000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - src/daemon/coordinator.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/statistics.test.ts
+    - tests/daemon.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Every complete decision enters exactly one readiness bucket; comparable exact and family sub-counts sum to comparable multi-Worker decisions.
+    - Comparable requires at least two frozen shortlisted Workers plus exact-class or task-family scope; single Worker and scope none never become comparison evidence.
+    - The projection remains terminal ordinary Task metadata-only, read-only, privacy-safe, and available through the existing daemon and Hub route.
+    - Hub explains traceable records versus fair comparison in plain Chinese and English without model ranking, automatic authority, or a claim that Competition ran.
+    - Existing coverage, routing, Competition, economics, polling, Task lifecycle, and settings behavior remain unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts tests/daemon.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

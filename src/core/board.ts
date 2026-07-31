@@ -11,6 +11,23 @@ export interface BoardDependency {
   state: BoardDependencyState;
 }
 
+/** Bounded named dependency for human-readable Plan card position. */
+export interface NamedDependency {
+  itemId: string;
+  taskId?: string;
+  taskName?: string;
+  taskStatus?: TaskStatus;
+  state: BoardDependencyState;
+}
+
+/** Bounded named dependent (reverse edge) for what-this-unlocks copy. */
+export interface NamedDependent {
+  itemId: string;
+  taskId?: string;
+  taskName?: string;
+  taskStatus?: TaskStatus;
+}
+
 export interface BoardItem {
   itemId: string;
   itemIndex: number;
@@ -19,8 +36,14 @@ export interface BoardItem {
   taskName?: string;
   taskStatus?: TaskStatus;
   error?: string;
+  /** Raw dependency edges (backward-compatible). */
   dependencies: BoardDependency[];
+  /** Raw reverse edges as item IDs (backward-compatible). */
   requiredBy: string[];
+  /** Bounded named dependency references for human-readable position. */
+  namedDependencies: NamedDependency[];
+  /** Bounded named dependent references for what-this-unlocks. */
+  namedRequiredBy: NamedDependent[];
 }
 
 export interface BoardProgress {
@@ -129,6 +152,36 @@ export class BoardService {
           state: dependencyState(dependency?.taskStatus),
         } satisfies BoardDependency;
       });
+      // Bounded named projection for readable Plan card position and what-this-unlocks.
+      // Names are sanitised (max 200 chars, control characters stripped) and fall
+      // closed to a generic label when missing or malformed.
+      const sanitiseName = (raw: string | undefined): string | undefined => {
+        if (raw === undefined) return undefined;
+        const cleaned = raw.slice(0, 200).replace(/[\x00-\x1f\x7f]/g, "").trim();
+        return cleaned.length === 0 ? undefined : cleaned;
+      };
+      const namedDependencies: NamedDependency[] = dependencies.map((dep) => {
+        const depTask = dep.taskId === undefined ? undefined : this.store.getTask(dep.taskId);
+        const safeName = sanitiseName(depTask?.name);
+        return {
+          itemId: dep.itemId,
+          ...(dep.taskId === undefined ? {} : { taskId: dep.taskId }),
+          ...(safeName === undefined ? {} : { taskName: safeName }),
+          ...(dep.taskStatus === undefined ? {} : { taskStatus: dep.taskStatus }),
+          state: dep.state,
+        };
+      });
+      const namedRequiredBy: NamedDependent[] = (directDependents.get(item.id) ?? []).map((depId) => {
+        const depStatus = statuses.get(depId);
+        const depTask = depStatus?.taskId === undefined ? undefined : this.store.getTask(depStatus.taskId);
+        const safeName = sanitiseName(depTask?.name);
+        return {
+          itemId: depId,
+          ...(depStatus?.taskId === undefined ? {} : { taskId: depStatus.taskId }),
+          ...(safeName === undefined ? {} : { taskName: safeName }),
+          ...(depStatus?.taskStatus === undefined ? {} : { taskStatus: depStatus.taskStatus }),
+        };
+      });
       const boardItem: BoardItem = {
         itemId: item.id,
         itemIndex: item.itemIndex,
@@ -139,6 +192,8 @@ export class BoardService {
         ...(task?.error === undefined ? {} : { error: task.error }),
         dependencies,
         requiredBy: directDependents.get(item.id) ?? [],
+        namedDependencies,
+        namedRequiredBy,
       };
       columns[boardColumnForStatus(status?.taskStatus)].push(boardItem);
     }

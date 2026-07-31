@@ -704,6 +704,12 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
               task,
               cursor: buildProgressCursor(task, latestEvent),
               ...(latestEvent === undefined ? {} : { latestEvent }),
+              // Carry the canonical live-stage projection from the Decision View so
+              // wait can detect open post-terminal follow-up operations and continue
+              // polling instead of returning terminal immediately.
+              ...(decision.progress.liveStage === undefined
+                ? {}
+                : { liveStage: decision.progress.liveStage }),
             };
           };
           const result = await waitForTask(
@@ -2076,6 +2082,138 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         result,
         `Direct Codex publication version ${(result.summary as Record<string, unknown>).version} registered for ${(result.publication as Record<string, unknown>).directCodexProfileId}.`,
       );
+    },
+  );
+
+  // --- Main-direct execution decisions ---
+
+  server.registerTool(
+    "forklight_main_direct_start",
+    {
+      title: "Start a Main-direct execution decision",
+      description:
+        "Record that Main has decided to handle work directly without launching a ForkLight Worker. Immutable once created. Requires explicit confirm true. Never creates a Task, launches a Worker, or probes a Provider.",
+      inputSchema: z.object({
+        confirm: z.literal(true).describe("Explicit confirmation. Must be true."),
+        taskClass: z.string().min(1).max(80).describe("Stable task classification"),
+        taskFamily: z.string().min(1).max(80).optional().describe("Optional stable task family"),
+        reason: z.enum([
+          "small-clear-change",
+          "urgent-fix",
+          "workers-unavailable",
+          "user-requested",
+          "main-judgment",
+        ]).describe("Why Main chose direct handling"),
+        note: z.string().min(1).max(300).describe("Bounded Main-authored explanation"),
+        consideredWorkerProfileIds: z.array(z.string()).max(4).default([])
+          .describe("0-4 Worker Profile ids Main actually considered"),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "main_direct_start",
+        { ...input, consideredWorkerProfileIds: input.consideredWorkerProfileIds ?? [] },
+        home,
+      );
+      return textAndData(
+        result,
+        `Main-direct decision ${result.id} started for ${result.taskClass}. Status: ${result.status}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_direct_complete",
+    {
+      title: "Complete or abandon a Main-direct execution decision",
+      description:
+        "Close a Main-direct decision as completed or abandoned. Idempotent: identical replay returns the existing result. Requires explicit confirm true. Never starts a Worker.",
+      inputSchema: z.object({
+        confirm: z.literal(true).describe("Explicit confirmation. Must be true."),
+        id: z.string().min(1).describe("The Main-direct decision id from start"),
+        outcome: z.enum(["completed", "abandoned"]).describe("completed or abandoned"),
+        verification: z.enum(["passed", "failed", "unavailable"]).optional()
+          .describe("Local verification result (required when outcome is completed)"),
+        note: z.string().min(1).max(300).describe("Bounded Main-authored closing explanation"),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "main_direct_complete",
+        input as unknown as Record<string, unknown>,
+        home,
+      );
+      const status = result.status as string;
+      return textAndData(
+        result,
+        `Main-direct decision ${result.id} closed as ${status}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_direct_status",
+    {
+      title: "Read one Main-direct decision status",
+      description:
+        "Read-only status of one Main-direct execution decision. No Worker and no Task involved.",
+      inputSchema: z.object({
+        id: z.string().min(1).describe("Main-direct decision id"),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "main_direct_status",
+        input as unknown as Record<string, unknown>,
+        home,
+      );
+      return textAndData(result);
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_direct_list",
+    {
+      title: "List all Main-direct execution decisions",
+      description:
+        "Read-only list of all Main-direct execution decisions. Never starts a Worker.",
+      inputSchema: z.object({}).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async () => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<readonly Record<string, unknown>[]>(
+        "main_direct_list",
+        undefined,
+        home,
+      );
+      return textAndData(result);
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_direct_aggregate",
+    {
+      title: "Main-direct execution decision aggregate",
+      description:
+        "Read-only aggregate counts for Main-direct execution decisions. Separate from Worker Task statistics.",
+      inputSchema: z.object({}).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async () => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "main_direct_aggregate",
+        undefined,
+        home,
+      );
+      return textAndData(result);
     },
   );
 

@@ -1,0 +1,193 @@
+version: 2
+name: Finish live Worker stages with truthful human copy
+project: /Users/yijunwang/code/forklight
+taskClass: worker-live-stage-human-copy
+taskFamily: worker-runtime-observability
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: volcengine-glm52-1m
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: worker-runtime-observability
+  shortlist:
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: volcengine
+    model: glm-5.2[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: volcengine-glm52-1m
+  selectedBecause:
+    code: main-judgment
+    note: 核心由 Grok 实现且已由 DeepSeek审查；这次是 Codex 已冻结的窄语义与文案收口，用 GLM 验证另一 Claude-compatible Worker，不做竞争。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    The newly shipped canonical live-stage projection no longer says a Worker
+    is waiting for the model after the Worker has already completed. It exposes
+    one explicit Worker-finished/checks-starting stage and the Hub explains
+    active progress, ordinary waiting, completion, quiet observation, and next
+    steps in natural English and Chinese without internal phrases such as
+    durable event. No lifecycle, retry, Provider, policy, or visual-layout
+    behavior changes.
+  presentation:
+    summary: 补齐“Worker 已完成，正在准备验收”的真实阶段，并把新状态文案改成人话，避免模型明明结束了还显示“等待模型”。
+    language: zh-CN
+  context:
+    - The accepted live-stage core now ships and has completed source apply, verification, build, daemon activation, and Hub replacement with matched identity.
+    - Main review found that worker.completed currently maps to waiting-for-model until verification.started, which is a brief but false claim.
+    - The current generic meaning says normal waiting even while the model is responding, a tool is running, verification is active, or execution already completed.
+    - The next-step copy says durable event, an internal implementation phrase that does not help ordinary users understand what will happen.
+    - Codex owns this copy and interaction contract; the Worker implements it without redesigning the Hub.
+  inScope:
+    - Add one closed live-stage code meaning the Worker has finished and ForkLight is preparing independent checks.
+    - Map worker.completed to that stage in full event replay and latest-event fallback; terminal Task status and actual verification evidence must still take precedence.
+    - Add one closed next-step code for waiting for independent verification to begin.
+    - "Make the meaning sentence stage-aware: active model/tool/verification work says progress is normal; queued/preparing/model-waiting says waiting is normal; completed says Worker work is finished; quiet always says only that no new update is visible; failed/interrupted still requires explicit failure evidence."
+    - Replace durable-event wording with ordinary next-visible-update wording in both languages.
+    - Keep the compact board line and expanded Task Detail line driven only by canonical closed codes.
+    - Add focused tests for the post-Worker pre-verification window, terminal/verification precedence, stage-aware bilingual meaning, and absence of the new technical phrase.
+  outOfScope:
+    - Runtime event production, Provider calls, retries, corrections, timeouts, policy, process supervision, Task status, persistence migration, archive/history, broad information architecture, visual redesign, other Hub copy, other Apps, commit, or push.
+    - Reopening the accepted PID-race implementation or changing existing normalizer payloads.
+  executionSteps:
+    - Trace the accepted live-stage types, worker.completed reducer branch, latest-only fallback, Hub mapping, and focused tests.
+    - Add the minimum closed stage and next code with exact precedence tests.
+    - Apply the frozen English and Chinese meaning categories without parsing prose or recomputing lifecycle in JavaScript.
+    - Run focused core/UI tests, full check, build, syntax, and diff hygiene once.
+  deliverables:
+    - Truthful Worker-finished/checks-starting stage in canonical projection.
+    - Stage-aware human meaning and next-step copy in English and Chinese.
+    - Regression tests proving precedence and removal of technical phrasing.
+  modules:
+    - name: Live-stage vocabulary and reducer
+      responsibility: Represent the post-Worker pre-verification window without claiming another model response is pending.
+      consumes:
+        - Durable worker.completed, verification, terminal status, and latest-event evidence.
+      produces:
+        - Closed worker-finished stage plus wait-for-verification-start next code.
+      boundaries:
+        - No new event, persistence field, Provider state, retry, process probe, ETA, or free-text inference.
+    - name: Human presentation mapping
+      responsibility: Explain active progress, normal waiting, completion, quiet observation, and attention in natural selected-language copy.
+      consumes:
+        - Closed stage, observation, meaning, and next codes only.
+      produces:
+        - Compact board and expanded Task Detail sentences.
+      boundaries:
+        - No UI lifecycle recomputation, layout redesign, raw event names, or internal implementation jargon.
+    - name: Focused regressions
+      responsibility: Protect the newly identified semantic and copy boundaries.
+      consumes:
+        - Live-stage event fixtures and both Hub languages.
+      produces:
+        - Deterministic tests for the transition and user wording.
+      boundaries:
+        - No live Provider request, daemon mutation, browser mutation, commit, or push.
+  callChain:
+    - Worker completes and stores the existing worker.completed evidence.
+    - Core reducer projects worker-finished with independent checks as the next expected step.
+    - verification.started replaces it with verifying; terminal Task status replaces it with completed, failed, or interrupted.
+    - Hub translates the closed stage and next codes, then chooses a stage-appropriate normal/waiting/completed/quiet meaning sentence.
+  scenarios:
+    - name: Worker finished before checks start
+      given: A running Task has worker.completed as its latest durable evidence and no verification event yet.
+      when: Full replay or latest-only progress is projected.
+      then: It says the Worker finished and checks are starting, never waiting for the model.
+    - name: Verification precedence
+      given: verification.started follows worker.completed.
+      when: Progress is replayed.
+      then: The current stage says independent verification is running.
+    - name: Terminal precedence
+      given: The Task is succeeded, failed, or interrupted after the same Worker history.
+      when: Progress is projected.
+      then: Terminal status remains authoritative and no transitional wording survives.
+    - name: Active work meaning
+      given: The model is responding, a tool is running, or independent checks are running with recent evidence.
+      when: English or Chinese Hub copy renders.
+      then: It says progress is normal, not that waiting is normal.
+    - name: Quiet observation
+      given: Any non-terminal stage has no recent event beyond the quiet window.
+      when: Hub copy renders.
+      then: It says no new update is visible and does not claim failure or trigger a retry.
+    - name: Ordinary next update
+      given: A legacy or quiet Task waits for more evidence.
+      when: English or Chinese next-step copy renders.
+      then: It asks the user to wait for the next visible update without saying durable event or 持久事件.
+  risks:
+    - Reusing waiting-for-model after Worker completion is false; give the transition its own closed stage.
+    - A single generic normal-waiting sentence creates contradictions for active and terminal stages; choose meaning copy from the canonical stage category.
+    - Fixing only full replay would leave compact list/status surfaces wrong; cover latest-only fallback too.
+    - Expanding into a broad Hub rewrite would mix this safe correction with the next information-architecture milestone; keep the diff narrow.
+  changeBudget:
+    maxFiles: 6
+    maxDiffLines: 420
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 6
+  fileLimitMode: warn
+  changedLineLimit: 420
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/task-progress.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/task-surface.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - worker.completed projects a truthful Worker-finished/checks-starting stage in full and latest-only paths.
+    - Verification and terminal evidence keep precedence over the transition.
+    - English and Chinese meaning text fits active progress, waiting, completion, quiet, and explicit failure without contradiction.
+    - New live-stage copy contains neither durable event nor 持久事件 and remains driven only by closed codes.
+    - Focused tests, full check, build, JavaScript syntax, and diff validation pass.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-surface.test.ts tests/hub-ui-assets.test.ts
+    - npm run check
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check

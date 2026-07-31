@@ -43,6 +43,27 @@ test("normalizes tool lifecycle and terminal result without token noise", () => 
   assert.equal(started[0]?.type, "worker.tool.started");
   assert.match(started[0]?.summary ?? "", /Read.*app\.ts/);
 
+  const modelText = normalizer.parseLine(
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [{ type: "text", text: "I will inspect the file next." }],
+      },
+    }),
+  );
+  assert.equal(modelText[0]?.type, "worker.message");
+  assert.equal(
+    (modelText[0]?.payload as { activityKind?: string } | undefined)?.activityKind,
+    "model-response",
+    "Claude text blocks emit structured model-activity for live-stage",
+  );
+  // Stage classification must not need the prose content.
+  assert.ok(modelText[0]?.summary);
+  assert.equal(
+    typeof (modelText[0]?.payload as { activityKind?: string }).activityKind,
+    "string",
+  );
+
   const completed = normalizer.parseLine(
     JSON.stringify({
       type: "user",
@@ -258,7 +279,7 @@ test("runtimeCostEstimateUsd mirrors costUsd and is absent without cost", () => 
   assert.equal(noCost?.runtimeCostEstimateUsd, undefined);
 });
 
-test("assistant and thinking_tokens events produce no billable terminal usage", () => {
+test("assistant produces no billable terminal usage", () => {
   const normalizer = new ClaudeEventNormalizer();
   // Assistant stream rows may carry per-row usage but must not drive terminal totals.
   const assistant = normalizer.parseLine(
@@ -272,16 +293,6 @@ test("assistant and thinking_tokens events produce no billable terminal usage", 
     }),
   );
   for (const event of assistant) assert.equal(event.terminal, undefined);
-
-  // System thinking_tokens estimates are runtime subsets of output; never billed separately.
-  const thinking = normalizer.parseLine(
-    JSON.stringify({
-      type: "system",
-      subtype: "thinking_tokens",
-      estimated_tokens: 42,
-    }),
-  );
-  assert.deepEqual(thinking, []);
 
   // Terminal result output_tokens is the complete billed total — no thinking appended.
   const result = normalizer.parseLine(
@@ -407,4 +418,92 @@ test("non-error subtype with is_error false stays completed", () => {
   );
   assert.equal(events[0]?.type, "worker.completed");
   assert.equal(events[0]?.terminal?.isError, false);
+});
+
+// --- Claude thinking_tokens → model-processing marker ---
+
+test("thinking_tokens emits closed model-processing marker with no token estimate or raw payload", () => {
+  const normalizer = new ClaudeEventNormalizer();
+  const events = normalizer.parseLine(
+    JSON.stringify({
+      type: "system",
+      subtype: "thinking_tokens",
+      estimated_tokens: 74083,
+    }),
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.type, "worker.message");
+  const payload = events[0]?.payload as Record<string, unknown> | undefined;
+  assert.equal(payload?.activityKind, "model-processing");
+  // Token estimates and raw payload fields must never enter durable events.
+  assert.equal(payload?.estimated_tokens, undefined);
+  assert.equal(payload?.estimatedTokens, undefined);
+  assert.equal(payload?.thinkingTokens, undefined);
+  // No terminal / billing evidence.
+  assert.equal(events[0]?.terminal, undefined);
+  // Summary is a fixed human-readable string, not a runtime estimate.
+  assert.ok(typeof events[0]?.summary === "string");
+  assert.ok(!events[0]?.summary?.includes("74083"));
+});
+
+test("thinking_tokens throttle: emits first marker immediately, then at most one per interval", () => {
+  let clock = 0;
+  const normalizer = new ClaudeEventNormalizer({
+    clock: () => clock,
+    processingThrottleMs: 15_000,
+  });
+  // First call: emit immediately.
+  const first = normalizer.parseLine(
+    JSON.stringify({ type: "system", subtype: "thinking_tokens", estimated_tokens: 1 }),
+  );
+  assert.equal(first.length, 1);
+  assert.equal((first[0]?.payload as Record<string, unknown>)?.activityKind, "model-processing");
+
+  // Just inside the 15-second window: dropped.
+  clock = 14_999;
+  const inside = normalizer.parseLine(
+    JSON.stringify({ type: "system", subtype: "thinking_tokens", estimated_tokens: 2 }),
+  );
+  assert.deepEqual(inside, []);
+
+  // Exactly at the boundary: emitted.
+  clock = 15_000;
+  const boundary = normalizer.parseLine(
+    JSON.stringify({ type: "system", subtype: "thinking_tokens", estimated_tokens: 3 }),
+  );
+  assert.equal(boundary.length, 1);
+
+  // Just beyond the next boundary: emitted.
+  clock = 30_001;
+  const later = normalizer.parseLine(
+    JSON.stringify({ type: "system", subtype: "thinking_tokens", estimated_tokens: 4 }),
+  );
+  assert.equal(later.length, 1);
+
+  // Tens of thousands of lines inside one interval: at most one durable event.
+  const throttled = new ClaudeEventNormalizer({
+    clock: () => 0,
+    processingThrottleMs: 15_000,
+  });
+  let emitted = 0;
+  // Emulate 74083 thinking_tokens lines.
+  for (let i = 0; i < 74083; i += 1) {
+    const events = throttled.parseLine(
+      JSON.stringify({ type: "system", subtype: "thinking_tokens", estimated_tokens: 42 }),
+    );
+    emitted += events.length;
+  }
+  assert.equal(emitted, 1, "74083 lines produce at most 1 durable event within one interval");
+});
+
+test("thinking_tokens processing marker does not override no-progress watchdog or retry policy", () => {
+  const normalizer = new ClaudeEventNormalizer();
+  const events = normalizer.parseLine(
+    JSON.stringify({ type: "system", subtype: "thinking_tokens", estimated_tokens: 10 }),
+  );
+  // Processing marker is a worker.message with a closed activityKind — it is
+  // never a tool lifecycle event that resets the watchdog.
+  assert.equal(events[0]?.type, "worker.message");
+  assert.notEqual(events[0]?.type, "worker.tool.started");
+  assert.notEqual(events[0]?.type, "worker.tool.completed");
 });

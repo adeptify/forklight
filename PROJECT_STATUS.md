@@ -1,6 +1,6 @@
 # ForkLight Project Status
 
-Last updated: 2026-07-30
+Last updated: 2026-07-31
 
 ## Product boundary
 
@@ -60,33 +60,317 @@ and Elsewhere, using the user's current active-project rule; NovelRPGPlay is not
 mandatory. M1 stays open only because an independent new macOS user, disposable
 VM, or genuinely new Mac has not yet completed the install → configure → first
 Task → understand → review → integrate → restart journey.
-M3 is now the active product stage. It currently has **20 strict new-format
-selection records toward the first 30** and still needs 30–50 natural,
-classified samples plus comparable candidate cohorts rather than retroactive
-guesses. Until then, routing remains explainable advice: Main can override it,
-missing evidence does not trigger Competition, and no model is permanently
-excluded after one failure. M4 exact-pair evidence and M5 external users remain
-open. The automatic M0 upgrade chain remains proved.
+M3 is now the active product stage. It currently has **33 strict new-format
+selection records, beyond the first 30-sample floor**. The portfolio now says
+what those records can actually support: 13 are single-Worker decisions, 20
+considered multiple Workers without comparable same-scope evidence, and 0 are
+yet fair comparable cohorts. M3 therefore still needs natural, classified
+samples plus comparable candidate cohorts rather than retroactive guesses.
+Until then, routing remains explainable advice: Main can override it, missing
+evidence does not trigger Competition, and no model is permanently excluded
+after one failure. M4 exact-pair evidence and M5 external users remain open.
+The automatic M0 upgrade mechanism remains proved. Its current
+consecutive proof streak is **3/3 ready** after the latest complete self-upgrade;
+the earlier source-verification rollback remains in immutable history and is not
+rewritten away.
 After every self-build, a long-lived Main must still re-check its MCP identity
 before mutation; the matched CLI remains the safe fallback while a client
 reload is pending.
 
-**Latest M0 runtime truth (2026-07-30 21:56 CST):** the canonical read-only
-`forklight upgrade status --required 3 --json` reports **3/3 ready**, with newest
-qualifying operation `cd562157-5a99-43d7-9131-b58916c493ce` and no break in the
-required window. CLI and formal Daemon match build
-`54e8000750c90888bc8b901112ab3ed3e0ecc802883c6463a1344685cc50b21e`, source digest
-`fb83beff5a869e41e677f3dc8f7a7eac800139dc5af4fdb59e447e3f0c908779`.
-The detached Hub restart reused the same port `58675` with PID `15882`; Hub status
-is `current`, with no second listener created. The latest self-upgrade also fixes
-the evidence boundary: only an Integration receipt carrying the exact durable
-`forklight-self-upgrade` Delivery Profile identity can add to or break this streak.
-Ordinary Elsewhere, Relay, or other App integrations are neutral, while an exact-
-profile failure still stops the count. The original M0 consecutive self-upgrade
-exit is therefore complete again. Physical-process kill recovery from an
-intermediate Integration stage remains a separate resilience capability, not
-evidence rewritten into this 3/3 result. Each long-lived Main must still use its
-own MCP health identity or the matched CLI until its host reloads.
+**Latest M3 Main-direct decision slice (2026-07-31):** DeepSeek Task
+`8825e122-038c-4843-a50a-06e94d1adb54` implemented
+`docs/m3-main-direct-execution-decision-contract.md`. ForkLight can now record,
+before work starts, why Main deliberately chose not to launch a Worker. The
+durable record freezes the task type/family, one closed reason, a bounded note,
+zero to four actually considered Worker Profiles, their local readiness, and
+the relevant exact/family evidence available at that moment. It is a separate
+two-stage lifecycle: explicit start, then one atomic completed/abandoned close.
+It does not create a Task, Attempt, Workspace, Provider probe, Competition, or
+model outcome, and it never turns zero ForkLight Worker Attempts into a claim
+of zero Main Token, time, cost, or proven savings.
+
+The first DeepSeek Attempt used 153 turns and delivered the main shape but
+failed TypeScript, fixtures, UI wording, and several semantic boundaries. Main
+kept the Candidate and authorized the single configured same-Candidate
+correction. The second 86-turn Attempt reduced the machine failure to one test
+and three TypeScript errors, but Main review still found raw terminal counts,
+missing family evidence, non-canonical auth readiness, and a mutable close.
+Main repaired those bounded gaps in the isolated Candidate and used the one
+authorized zero-Worker reverification. All six original acceptance commands
+passed; the complete repository, production build, both Hub syntax checks and
+diff hygiene were green. Main accepted revision
+`ae498015-c175-47b7-8e7f-bdb515a665cb`, digest
+`f23ea0d2a6e43e47d0b4034cbcc49039cb3ea08531c4e3364ceefd4e951bb5e4`.
+
+Integration `20d00974-6991-4356-8b00-378acaa528ad` passed source apply,
+six-command source verification, artifact build and runtime activation in
+17ms / 119,301ms / 4,573ms / 4,443ms. CLI and Daemon now match build
+`d0104d9a7a0679d97d444a7479de53eb8583044406eeeafa432fdffde4437451`;
+Hub PID `61260` is current on port `58675`; M0 remains **3/3 ready**. The first
+honest production use was opened before this status-file update as decision
+`4050d182-a692-49c9-9cf6-3611088d58a8`, with DeepSeek and Volcengine GLM
+recorded as considered and evidence scope `none`. No historical prose was
+backfilled.
+
+The two Worker Attempts used **42,171,072 gross Tokens** and reconciled exactly.
+DeepSeek's official quote totals **USD 0.31024171**; runtime estimates total
+USD 24.05908. The low-confidence 35,667,465–41,105,685 Token boundary range is
+Worker-side volume minus orchestration exchange, not measured Main Token
+savings. Exact-pair Direct Codex evidence is still missing. The current routing
+coverage is `317 terminal / 203 class / 85 family / 33 complete`, split into
+`13 single / 0 comparable / 20 unknown multi / 0 unusable`. No commit or push.
+
+**Latest M3 Worker activity truth slice (2026-07-31):** DeepSeek Task
+`ef79d43e-29cd-45f6-a3e7-94fa4b3c9454` implemented
+`docs/m3-worker-model-processing-observability-contract.md`. ForkLight now
+distinguishes four user-meaningful facts instead of collapsing them into
+“running”: the Worker process has started, the model runtime is still actively
+processing, a visible model response has arrived, and a tool is executing.
+Runtime processing markers are coalesced to at most one durable event every 15
+seconds. Their public summary is fixed, carries no raw reasoning prose, and
+cannot override an open tool, verification, or terminal outcome. Hub explains
+the new state in plain English and Chinese without claiming that useful output
+already exists or that a Provider network request is definitely in flight.
+
+The single 88-turn Worker Attempt produced a useful 11-file base Candidate but
+failed one precedence assertion. Main retained it and found four additional
+semantic edges: late processing could overwrite verification, a legacy Grok
+test still used the old state, Grok thought summaries could retain raw prose,
+and Grok processing was not throttled. Main repaired the same isolated
+Candidate, added the dedicated Hub meaning, and used zero-Worker reverification
+instead of starting another Attempt. All six original acceptance commands
+passed; the focused review set passed **215/215** and the complete repository
+passed **2,001/2,001**. Main accepted revision
+`cfd061c5-2530-4cec-9dd3-9b52d9bc0ec1`, digest
+`aeebca40f690538ed8db025d9f84d6147c7c61e323505e90fac3c8a7b3f063c0`.
+Integration `d8edb852-859a-4800-a6a8-d0104bdd1c1a` passed source apply,
+six-command source verification, artifact build, and runtime activation.
+
+The Attempt used **6,820,551 gross Worker Tokens**, including **6,692,096
+cache-read input Tokens**. DeepSeek reported an official quoted cost of
+**USD 0.093336413**; the runtime estimate was USD 4.595203. Usage reconciliation
+matched exactly. The 5,346,980–6,579,719 Token boundary range means those Tokens
+stayed on the Worker side of the orchestration boundary; it is low-confidence
+and is **not** a measured direct-Codex saving because the exact-pair baseline is
+missing. The authoritative projection is now `314 terminal / 200 class / 82
+family / 30 complete`, so the first M3 sample floor is reached by a natural
+product Task. M3 remains active for sample diversity and comparable cohorts.
+Real Hub dogfood shows the Task as the first item in 25/126 loaded History with
+verified delivery and runtime activation. Its Chinese and English Task Detail
+both lead with Main input, Worker claim, independent checks, and final delivery;
+the browser console is clean. Because the Task was already terminal after the
+new build activated, this pass did not manufacture a second billable Task just
+to stage the live processing badge; deterministic event/Hub tests cover that
+transition until the next natural active Task. No commit or push.
+
+**Latest M3 comparison-readiness slice (2026-07-31):** DeepSeek Task
+`2d95e5ed-1f93-4daf-90ec-87a8f5faca3c` implemented
+`docs/m3-routing-decision-readiness-contract.md`. The existing count of complete
+Worker-selection records is no longer presented as proof that ForkLight knows
+which model is best. Core now classifies each immutable decision-time record
+into exactly one of four buckets: one Worker, comparable multiple Workers,
+multiple Workers without comparable evidence, or unreadable history. A fair
+comparison requires at least two distinct frozen Worker identities and an
+exact-task or task-family evidence scope; malformed, partial, duplicate, or
+missing-scope records fail closed instead of being narrowed or guessed.
+
+The one 75-turn Worker Attempt produced a useful base Candidate but failed the
+UI source-style boundary. Main retained its six files, repaired the fail-closed
+classifier and bilingual copy, and did not launch a correction Worker. The one
+authorized zero-Worker Candidate reverify caught a remaining wording assertion
+and consumed its bounded allowance; Main fixed that final sentence, verified
+the exact Candidate at **2,018/2,018**, then safely applied the six files only
+after each source file exactly matched its Task baseline. A ForkLight Main
+remediation check reran all six original commands and passed 6/6, recording
+`verified-repaired-delivered` while preserving the original machine-failed
+Worker result. This is intentional evidence separation, not a rewritten green
+Attempt. Final delivery is 6 files / 704 changed lines, with no correction,
+retry, adaptation, Competition, commit, or push.
+
+Real portfolio projection is now `315 terminal / 201 class / 83 family / 31
+complete`; readiness is `13 single / 0 comparable / 18 unknown multi / 0
+unusable`. Real Hub browser QA passed in English and Chinese, shows the same
+numbers and limitations, and has no console errors. The Attempt used
+**5,622,247 gross Worker Tokens** and DeepSeek quoted **USD 0.095490127**; usage
+reconciliation matched. The low-confidence 4,016,547–5,359,978 Token boundary
+range only measures Worker-side workload separated from orchestration exchange.
+Direct-Codex savings remain unavailable because the exact-pair baseline is
+missing. M3 remains active: the next evidence goal is to accumulate natural
+same-scope cohorts, not to manufacture comparisons or rerun this Task.
+
+**Latest M3 durable Task History slice (2026-07-31):** Volcengine GLM Task
+`e739f892-2311-4733-b792-ca0b068dd090` implemented
+`docs/m3-hub-durable-history-pagination-contract.md`. The existing recent Task
+feed stays bounded to 50 and keeps its page-scoped polling behavior. A separate,
+explicit History read model now searches all canonical delivered/stopped Tasks,
+loads 25 at a time, and is never automatically polled. Search covers only safe
+summary facts (name, status, Provider, model, runtime); cursor paging is
+deterministic, query-bound, and rejects a missing or stale anchor rather than
+silently restarting the result set.
+
+GLM used one 145-turn base Attempt plus one 22-turn same-Candidate correction.
+Main then found three semantic edges that the machine suite had not exposed:
+retry after a failed new search could reuse the prior query's cursor, malformed
+optional daemon fields were treated as absent, and a structurally valid forged
+cursor did not prove its exact issuing anchor. Main repaired those bounded edges
+in the retained Candidate and used zero-Worker reverification; all six original
+acceptance commands passed. Main accepted revision
+`dc5884d3-e9be-4011-bf14-b748a4116a85`, digest
+`48ab74a3efa1a547d5acad63f8c37f94779ed9366a8efceb4c22d4e9c3c66f81`.
+Integration `90addb30-8873-4359-a7a5-56c06fb3a3d7` passed source apply,
+source verification, artifact build, and runtime activation.
+
+Real Hub dogfood found **125** canonical History records: first load 25/125,
+Load more 50/125, and an exact Task-name search 1/1. Desktop and 390px layouts
+are readable with no horizontal overflow. The first browser pass also exposed
+one presentation mismatch: before History loaded, its scope chip showed the
+number of closed Tasks inside the recent 50 as though that were the archive
+total. Main fixed the chip to omit the badge until History loads, then show the
+authoritative total. Focused Hub coverage is 116/116; the complete repository
+check is **1,992/1,992**, with build, JavaScript syntax, and diff hygiene green.
+
+The two Worker Attempts used **41,784,497 gross Worker Tokens** (41,098,688
+cache-read input) and runtime estimates totaling **USD 28.639989**. The
+subscription plan exposes no per-request official price. Usage reconciliation
+is 2/2 with zero delta. The low-confidence 36,744,776–40,956,357 Token boundary
+range is not a direct-Codex counterfactual; Main Token savings remain
+unavailable. The authoritative Hub projection now reports `313 terminal / 199
+class / 81 family / 29 complete`, so M3 reaches **29/30** through a natural
+product Task rather than a manufactured sample. No commit or push.
+
+**Latest M0 runtime truth (2026-07-31 07:25 CST):** the canonical read-only
+`forklight upgrade status --required 3 --json` reports **3/3 ready**. Latest
+qualifying operation `d8edb852-859a-4800-a6a8-d0104bdd1c1a` completed source
+apply, fresh 6/6 verification, artifact build, and runtime activation at
+`2026-07-30T23:25:33.216Z`. The earlier failed exact-profile operation remains
+the historical break; later complete qualifying upgrades rebuilt the streak
+rather than rewriting it.
+
+CLI and Daemon now match build
+`68e9971f05e00fc538d1dcb4364cf4556135db81a394c3d0f8005ee18efe7c82`, source
+digest `5eebced0292dca9f7b9413154b6d6590734e91b4a95704e924cd52828ae0349c`.
+Daemon PID is `77255`; the detached Hub restart reused port `58675` with PID
+`93421`, and Hub status is `current`. Only an Integration receipt carrying the exact durable
+`forklight-self-upgrade` Delivery Profile identity can add to or break this
+streak. Ordinary App integrations remain neutral. Physical-process kill
+recovery from an intermediate Integration stage remains a separate resilience
+capability. Each long-lived Main must still use its own MCP health identity or
+the matched CLI until its host reloads.
+
+**Latest M3 Hub execution-efficiency slice (2026-07-31):** DeepSeek Task
+`ae26a404-f038-4483-af72-a7a6e971d3ec` replaced the one-size-fits-all Hub poll
+with a visible-page request plan. A hidden browser tab now starts zero polls;
+settings-oriented pages read only shared status and health (2 requests per
+cycle), Tasks / Plans / Goals / Competitions use 3, Insights uses 5, and the
+evidence-rich Overview uses 8. The previous loop issued the same 12 requests
+on every page. Tab changes and visibility return refresh immediately, while
+overlapping triggers collapse to one in-flight batch plus at most one pending
+follow-up. A 401 stops the loop, and one failed page endpoint retains prior
+evidence with an explicit stale state instead of clearing it or claiming live.
+
+DeepSeek used one base Attempt plus one authorized same-Candidate correction;
+Main then fixed one deterministic test parser and the remaining stale-status
+truth gap without another Worker. Zero-Worker Candidate reverification passed
+5/5, including the complete **1,975/1,975** test suite, build, Hub JavaScript
+syntax, and diff hygiene. Main accepted revision
+`3248fc9b-7bb5-42ba-b37c-05238a3ee908`, digest prefix `17e1c07a`.
+Integration `2ff96e97-202f-4ef3-932a-53285630b34c` passed all four stages and
+activated the runtime above. The Task adds the 28th strict routing record.
+Its two Attempts used **11,997,348 gross Worker Tokens**, including
+**11,807,616 cache-read input Tokens**. Official quoted DeepSeek cost totals
+**USD 0.155575053**; runtime estimates total **USD 8.242768**. Usage
+reconciliation is 2/2 with zero delta. The reported 10,150,931–11,695,775
+Token boundary range is low-confidence workload separation, not proof of Main
+Token savings; the exact direct-Codex baseline is still missing. No commit or
+push.
+
+**Latest M3 Main-direct efficiency decision (2026-07-31):** the Hub polling
+dogfood exposed a deterministic Task-admission waste: `workspace.exclude`
+matches one directory/file name per path segment, but a path-shaped value such
+as `src-tauri/target` was silently accepted and therefore failed to exclude a
+2.4GB build tree. Main deliberately did not delegate this small, fully
+specified parser fix. Task admission now rejects paths, backslash paths, globs,
+`.` and `..` before workspace scanning or Worker launch, and explains to use
+`target` instead. Valid names remain deduplicated and unchanged. Configuration
+documentation records the same rule. Focused Task parsing is **100/100** and
+the complete repository check is **1,976/1,976** with build and diff hygiene
+green. Daemon and Hub were rebuilt and restarted on the current identity above.
+This consumed zero Worker/model Tokens, creates no synthetic 29th M3 routing
+record, and does not alter the 3/3 Integration-backed self-upgrade streak.
+
+**Latest M3 Hub information-architecture slice (2026-07-31):** DeepSeek Task
+`4afdcd84-1068-4f0a-87ec-6252a0386d4c` implemented the first operations-first
+Hub slice under `docs/m3-hub-human-information-architecture-contract.md`. Main
+retained the Candidate, issued one bounded correction, repaired one over-broad
+diagnostic filter, and used zero-Worker reverification. Final accepted revision
+`4d9de8e4-d4f4-4202-8701-4ea0286f3607`, digest prefix `370200f`, passed all six
+acceptance commands and was delivered by the successful self-upgrade above.
+
+Overview now leads with live state, attention, and active work; configuration,
+version, Goals, Plans, and system status are compact secondary sections. Task
+Detail leads with four questions: what Main asked, what Worker returned, what
+independent checks found, and what was finally delivered or should happen next.
+Failure summaries remove harness noise and private run-workspace prefixes while
+preserving the first concrete project diagnostic. Browser dogfood on a real
+failed Gmail Task now shows
+`src/adapters/connectors/gmail.ts:96:21: ERROR: Expected ">" but found ";"`
+instead of `^`, npm script headers, or an internal workspace path.
+
+Focused Hub tests are **195/195**. The final full run built successfully and
+passed **1,942/1,944**; its only two failures were elapsed-time assertions in
+`tests/daemon-cli.test.ts` under the heavily loaded full suite. That unchanged
+file passed **14/14** alone, including the relevant case in 934ms. Main did not
+loop full-suite retries to manufacture a green number. Hub and Daemon are
+running the final build above. No commit or push.
+
+**Latest M3 Hub Now/History slice (2026-07-31):** Volcengine GLM Task
+`fbee9c6c-3d1c-4d08-9126-55ef20a88ea9` implemented
+`docs/m3-hub-now-history-information-architecture-contract.md`. Board placement
+comes from canonical Core evidence instead of guessing from UI status text.
+`Now` contains work still needing action, Main review, correction, Integration,
+or failure resolution; `History` contains only durable delivered or stopped
+outcomes and explicitly describes itself as recent loaded history, not a
+complete archive. Default scope is Now, with Now / History / All available in
+both Chinese and English.
+
+Attempt 1 passed every check except one trailing blank line. Main removed only
+that line and used zero-Worker reverification, then found two semantic gaps:
+verified repaired delivery did not outrank an older Main rejection, and Hub
+validated placement tokens without validating their legal pair. One authorized
+same-Candidate correction fixed both and added regression tests. Main accepted
+revision `0a8c8ceb-391f-4aa4-bab8-f48a56c29261`, digest prefix `18831cd`.
+Integration `72e66729-fbc6-4ff8-8192-fc994c946bfb` passed all four stages and
+activated the current build above. Final focused plus full checks passed
+**1,961/1,961**, with build, Hub JavaScript syntax, and diff hygiene also green.
+
+Real browser dogfood confirmed `Now 10 / History 40 / All 50`: machine-passed
+Tasks still awaiting Main or Integration remain in Now; the new Task and
+verified repaired deliveries appear under Delivered in History. Chinese,
+English, desktop, and 390px layouts are readable, and the Hub console has no App
+errors. The Task used 2 Attempts and **35,627,650 gross Worker Tokens**, of which
+**35,097,344 were cache-read input**. Runtime estimates total **USD 23.547822**;
+the Provider did not quote official per-request cost. Usage reconciliation is
+2/2 with zero delta. Direct-Codex savings remain unavailable because no exact
+counterfactual baseline exists; the low-confidence boundary-reduction range is
+not presented as Main Token savings. No commit or push.
+
+**Latest M3 real-product dogfood (Elsewhere M2 UI, 2026-07-31):** DeepSeek Task
+`c3b636f3-3ada-478a-8b8d-f2fad6916ce6` implemented the missing reviewed
+world-to-direction experience in an isolated Candidate while Main retained product, visual, and Integration authority. Two bounded Attempts
+produced the reusable implementation; Main corrected only the remaining deterministic tests, persistence-truth and reopen/call-timing gaps,
+trace mapping, plain-language copy, and one finish-review contrast blocker. A zero-Worker reverification then passed all four original commands.
+
+Main accepted revision `0b1eaf57-b2c1-480c-9c2c-33a7f8a98646`, digest prefix
+`4f8b5cef0968`. Integration `aa8e53f6-f8df-422a-9598-a39e102b2989` safely
+stacked 11 UI/test/design files over 15 existing Elsewhere backend/test/status changes and passed source apply plus 4/4 source verification.
+The source tree then passed Core boundary, strict TypeScript, full **196/196**, production build, diff hygiene, and Rust **5/5**. Final product
+review covered English/Chinese, truthful persisted-save feedback, zero-call reopen, explicit first-call timing, personal/source separation, and
+1440×900 plus 860×640 layouts. No commit or push.
+
+The two Attempts used **22,908,894 gross Worker Tokens**, of which **22,640,256** were cache-read input; official quoted Provider cost totals
+**USD 0.246182073**, while runtime estimates total **USD 14.835898**. The retained-Candidate reverification invoked no Worker and added zero
+Worker Tokens/model-runtime cost. ForkLight can report only a low-confidence Main/Worker boundary estimate here; without an exact direct-Codex
+counterfactual it still cannot claim how many Main Tokens were saved.
 
 **Latest M1 real-task portfolio truth (2026-07-30):** three completed durable
 Goals provide **13 distinct delivered user outcomes**: Relay Gmail production
@@ -217,9 +501,15 @@ the isolated workspace. One zero-Worker reverification then passed 4/4 original
 commands, including focused 53/53, full 183/183, build, and diff hygiene. Main
 accepted exact revision `c4daf5a5-bab7-4218-8a42-82472a8027d1`, digest
 `3dc9ae7106d5def184158447b47aebd2f3f04264013ae2d4ab02f525cec0215e`.
-Client-Core SDK RC currently freezes the Elsewhere source, so this is an accepted
-selection/result-judgment sample awaiting Integration, not a delivered user
-outcome. The Candidate remains durable; no source apply, commit, or push occurred.
+The Candidate was later integrated to Elsewhere by operation
+`c09f453a-dc00-4ee0-b101-2f84013139a4` and passed focused 53/53, full 183/183,
+Rust 5/5, typecheck, build, and diff hygiene. The Client-Core SDK source-stability
+RC released the Elsewhere freeze at 2026-07-31 02:20 CST. A fresh preflight then
+correctly rejected duplicate application because the exact 14-file Candidate was
+already present; Main did not write it twice. Post-release verification again
+passed focused 53/53, full 183/183, Rust 5/5, typecheck, build, and diff hygiene.
+The delivered work is preserved at a stable next-snapshot checkpoint. No commit
+or push occurred.
 
 Two real Grok self-upgrade Tasks closed a quality/efficiency gap without
 Competition or whole-task retry. Task `305f3f3b-d2d7-4179-984e-2213ed88f370`
@@ -1468,6 +1758,37 @@ and source digest
 Hub remains available locally on port `53542`. No commit or push has been
 performed.
 
+**Latest M3 Main-direct routing correction (2026-07-31):** live dogfood found
+that local CLI `status` and `list` omitted the Main Review, remediation, and
+Integration evidence already used by Daemon/MCP/Hub. The omission made every
+recent terminal Task fail open to `Now / needs-review`, including activated
+ForkLight Tasks and a failed Worker Task whose retained Candidate Main had
+already repaired and delivered. That false queue could cause a reconnecting
+Main to repeat review, remediation, or Worker work.
+
+This was a small, bounded caller-wiring defect with an already-canonical
+Daemon implementation, so Main deliberately did **not** spend another external
+Worker Attempt. One shared CLI projection now consumes the same ordered events,
+Attempts, Integration results, remediation disposition, and Decision Stage for
+both commands. A functional CLI regression proves three distinct outcomes:
+activated/delivered work enters History, verified repaired delivery enters
+History while preserving the original machine failure, and genuine
+awaiting-Main work remains in Now. The focused regression, strict TypeScript,
+complete repository test suite, production build, and diff hygiene all passed.
+
+Live history now reports Task `67d1e9f5-7a67-4942-a3a9-546d94d6391d` as
+`activated / history`, Task `2d95e5ed-1f93-4daf-90ec-87a8f5faca3c` as
+`machine-failed / repaired-delivered / history`, and a real pending review as
+`awaiting-main-review / now`. Daemon and CLI match build
+`5df9e52240f1996dad5ad646cc0092588f5d09c4208dbdbc12e8c2bf7e1f704b`,
+source digest
+`1b440cfd38b94463024500ee470912bb7babd7c1197bab51fce37b1d7960dfe4`;
+Daemon PID is `35887`, detached Hub PID is `41633` on port `58675`, and the Hub
+HTTP surface is live. This repair used **zero Worker/model Tokens**. It is also
+a concrete M3 evidence gap: ForkLight can explain why it selected a Worker, but
+does not yet persist a first-class “Main handled this directly” routing record.
+No commit or push.
+
 ### External limits (never claimed fixed)
 
 - Not published to npm as a public package; license still unlicensed until
@@ -1629,8 +1950,16 @@ evidence rather than another implementation retry.
    (presentation-only) stalled after five minutes of silence, without inventing
    a new machine status or changing kanban lanes. A presentation-only name/
    stage filter is shipped so dense boards can be narrowed without mutating
-   Tasks. Still open: archive/history and lineage grouping; distinguish
-   Provider request in-flight from process-alive stream activity.
+   Tasks. The next information-architecture slice is also shipped: the Board
+   defaults to canonical `Now`, separates recent durable `History`, keeps
+   awaiting-Main and awaiting-Integration work visible, and groups historical
+   outcomes into Delivered / Stopped without pretending to be a complete
+   archive. Durable archive pagination/search is shipped. Runtime processing,
+   visible model response, tool execution, verification, and terminal outcome
+   are now separate bounded states with plain bilingual explanations. Still
+   open: lineage grouping and, where a runtime exposes trustworthy evidence,
+   a separate Provider request/retry state; process activity alone must never
+   be relabeled as network in-flight.
 5. **Selective model routing:** the privacy-safe advisory core, settings,
    CLI/MCP path, Hub policy/evidence view, failure classification, correction
    churn, official-cost comparability, uncertainty gate, and configurable
@@ -1745,7 +2074,7 @@ evidence rather than another implementation retry.
    resolved-scope wording regression with zero Worker execution. Do not backfill
    legacy selection reasons or launch work to increase the count. Next evidence targets are therefore
    parallel open exits: M1 clean new-Mac journey (the real-project portfolio is
-   already 13/10); M3 30–50 real classified samples (20 strict records today);
+   already 13/10); M3 30–50 real classified samples (28 strict records today);
    M4 exact-pair Direct Codex baselines; and M5 external users. A natural live
    judge disagreement remains useful open evidence and must not be manufactured.
 6. **M4 exact-pair evidence audit (2026-07-29):** two version-1 profile
@@ -3026,6 +3355,37 @@ Codex App、5 个属于 Grok TUI，不具备“孤儿”证据，因此未终止
 identity guard 或 matched CLI。物理 kill 后中间阶段续跑仍是独立 resilience backlog，不改写本次 3/3。
 无 commit / push。
 
+## 2026-07-31 M3：Plan 依赖与 Task 来路已改成人话，并完成真实自升级
+
+Task `10bc361c-b199-4ab5-a070-dc92341e413d` 使用 `deepseek-v4-pro[1M]`，落实
+`docs/m3-hub-readable-dependency-lineage-contract.md`。Plan 里的每个步骤现在直接说明为什么可开始、在等谁、
+被什么阻塞，以及完成后会解锁什么；Task Detail 只在存在真实 Plan / handoff 证据时显示“此任务所处的位置”，
+并把跨 Worker handoff 解释为承接已有成果，不写成重试。Task 到 Plan 的关系由一个 Store-backed Daemon 查询
+直接获取，不再扫描前十个 Plan 猜测，也没有改变调度、重试或 Integration 语义。
+
+Grok 预备 Task `393016c3-f852-4724-8420-7bdceeacd9c1` 在模型调用前因 ForkLight 无法读取 xAI 本地认证而失败，
+没有 Candidate 和模型成本；Main 保留这条失败证据，未重试，随后按可用性切到 DeepSeek。DeepSeek 第一 Attempt
+产出主体，但 focused 失败 4 条且 TypeScript build 不通过；Main 同时发现 N+1 Plan 扫描、内部 ID 进入主文案、
+名字边界和空心 source-presence 测试，只授权一次同 Candidate 结构化 correction。第二 Attempt 修复语义后仅剩
+一个测试中的 unused binding；Main 删除这一行，并用零 Worker Token 的 Candidate reverification 跑原六条命令。
+
+最终 focused **161/161**、full **1,952/1,952**、build、两个 Hub 脚本 syntax 与 diff hygiene 全绿。Main
+接受 revision `9f0ce168-3662-4e68-9dcc-b8e9953740e4`，digest
+`2c2d4fb5bdb67b5bec25a8731ff9202760b72f5d186bd70a489057c83ebb5b7b`。自动 Integration
+`8ea5b4e2-93cd-403f-b119-9da9bc525563` 四阶段全部 passed：19ms / 236,925ms / 30,386ms /
+10,507ms。Main 随后移除“名字缺失时拿内部 item / plan ID 当备用名”的最后边角，补行为断言后 focused
+**161/161** 与 build 再次通过；没有启动第三次 Worker 循环。
+
+真实 Hub dogfood 已验证：Plan 卡片显示“就绪 / 等待中 / 完成后解锁”的中文原因，Task Detail 显示所属 Plan、
+第几步和下一项；独立检查、Main 决策和交付仍保持原有层级。当前 daemon PID `34190`、Hub
+`36599@58675`，source、artifact、daemon 三层身份一致，build
+`ed6039b92c280740780e8e49da3f80fe66cbd4adfcd3ab546a843720fedd8d34`。权威自升级连续证据为 **2/3**。
+
+两次 DeepSeek Attempt 的 official cost 合计 **USD 0.169844561**，runtime estimate 合计约
+**USD 9.390771**；Worker gross Token **14,434,503**，89 条 orchestration receipts 给出的边界缩减区间为
+**7,063,818–13,220,607 Tokens（低置信度）**。这只说明 Worker 计算留在支线、没有全部进入 Main 交换边界；
+缺少同任务 direct Codex 基线，因此 **不能**宣称节约了多少 Main Token。无 commit / push。
+
 ## 2026-07-30 M1：一条命令生成可复核 clean-user bundle
 
 Task `aabdc502-6660-45b7-b13d-542c0123fc04` 按 Grok-first 只使用 Grok 4.5，把原先人工复制的
@@ -3113,3 +3473,38 @@ Integration 也纳入“ForkLight 自升级”序列，因为普通 App 没有 a
 
 本次 Grok runtime estimate 约 USD 0.79965，usage/official Worker Token 不可用；复用原 Candidate 没有新增
 Worker/model Token，但因无 exact-pair Direct Codex baseline，仍不声明 Main Token 节约。无 commit / push。
+
+## 2026-07-31 M3：terminal Task 的后续复验现在可见，不再诱发重复执行
+
+Task `67d1e9f5-7a67-4942-a3a9-546d94d6391d` 使用 `deepseek-v4-pro[1M]`，按
+`docs/m3-post-terminal-operation-observability-contract.md` 补上真实 dogfood 暴露的监督缺口：一个 Task 的
+机器结果已经是 `failed` 或 `succeeded` 时，Candidate reverification 和 Main repair verification 仍可能在本地
+执行。现在 Core 从已有 start/completion durable events 重建唯一打开的后续检查；Task status、finishedAt、失败分类、
+Main 决策、Board lane 和主结果 badge 全部保持原样，只让 `liveStage` 与 `activity` 说明当前本地检查。安静只表示
+暂时没有新的完成记录，不会被升级为失败、恢复、重试或新的 Worker。
+
+CLI 本地 wait 读取完整事件并消费同一投影；MCP wait 复用 Decision View 的投影。`--until terminal` 只有在原 Task
+已经 terminal 且后续检查也闭合时才返回，打开检查崩溃而没有 completion 时只会等待到调用者给定 timeout。
+latest-only 调用者没有完整历史时继续保守采用原 terminal 结果，不从一条 start 猜测进程仍活着。Hub Board 保留原列
+和 badge，Task summary 与 Task Detail 用独立中英文说明“正在本地复验保留的 Candidate / 验证 Main 修复，不会再次
+调用 Worker”，并明确原任务结果没有改变。
+
+Worker 1 Attempt / 80 turns，主体实现可用；第一次 focused 验收因两个新 wait 测试的模拟时钟没有随 `sleep` 推进而
+无限空转。Main 识别出隔离测试进程 CPU 满载后，只终止两次必然重复卡住的验收命令，保留 Candidate 和机器失败证据，
+没有放宽时长、Token 或重试参数，也没有启动第二个 Worker。Main 修复模拟时钟、TypeScript exact optional 写法、
+Candidate 中间验收事件的活动时间，以及 Hub 对旧 decision wording 的显示优先级。零 Worker Token 的 Candidate
+reverification 随后 6/6 通过：focused **199/199**、full **2,039/2,039**、build、两份 Hub syntax 与 diff hygiene
+全部绿色。Main 接受 revision `115516c2-c25d-461e-b957-5f7a8946507d`，digest
+`5f5b7b7436020a8db92601d112a516f46004d0f167f4e3040190a5fecaf1196c`。
+
+自动 Integration `bcd1b382-18f7-439b-aed5-3115d1d7cb34` 四阶段全部通过：source-applied 13ms、
+source-verified 79,826ms、artifact-built 4,991ms、runtime-activated 4,706ms。CLI / daemon build
+`42a8643b8f031b31c430098221ff714ef2b5acdfcf5d38f37d636d06c9808bb4`、source digest
+`4cd9f05896d336346f365fed5b7fa5df87ddaa5084d1153dc820d3a2b6036602`，identity matched；旧 Hub 被安全替换为
+`3602@58675`，`hub status=current`，线上静态资源包含新的中英文阶段文案，浏览器页面 console 无 warning/error。
+权威自升级 streak 为 **3/3 ready**。
+
+Worker gross Token **10,363,825**，其中 cache read **10,154,240**；usage reconciliation matched。
+DeepSeek official cost **USD 0.146995055**，runtime estimate USD 6.999365。29 条 receipts 给出的边界缩减范围为
+9,107,605–10,158,283 Tokens（低置信度），但 exact-pair Direct Codex baseline 仍缺失，不能称为实际 Main Token
+节约。Candidate reverify 明确新增 Worker/model Token 为 0，但仍有本地验收时间和 Main exchange。无 commit / push。

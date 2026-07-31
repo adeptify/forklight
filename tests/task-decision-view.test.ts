@@ -373,6 +373,101 @@ test("Decision View progress becomes quiet when the last event is stale (FL-D83)
   assert.equal(view.progress.activity, "quiet");
   assert.equal(view.progress.lastEventAt, "2026-07-24T00:00:00.000Z");
   assert.equal(view.progress.latestEventSequence, 2);
+  assert.equal(view.progress.liveStage?.observation, "quiet");
+  assert.equal(view.progress.liveStage?.stage, "legacy-running");
+  assert.equal(view.progress.liveStage?.meaning, "normal");
+});
+
+test("Decision View liveStage follows tool open/close and verification precedence", () => {
+  const running = task("running");
+  const openTool = buildTaskDecisionView({
+    task: running,
+    attempts: [attempt],
+    events: [
+      event(1, "worker.started"),
+      event(2, "worker.message", { activityKind: "model-response" }),
+      event(3, "worker.tool.started", { toolUseId: "tool-9", tool: "Edit" }),
+    ],
+    integrationResults: [],
+    nowMs: Date.parse(now) + 1_000,
+  });
+  assert.equal(openTool.progress.liveStage?.stage, "using-tool");
+  assert.equal(openTool.progress.liveStage?.next, "wait-for-tool-result");
+
+  const closedTool = buildTaskDecisionView({
+    task: running,
+    attempts: [attempt],
+    events: [
+      event(1, "worker.started"),
+      event(2, "worker.tool.started", { toolUseId: "tool-9", tool: "Edit" }),
+      event(3, "worker.tool.completed", { toolUseId: "tool-9", tool: "Edit" }),
+    ],
+    integrationResults: [],
+    nowMs: Date.parse(now) + 1_000,
+  });
+  assert.equal(closedTool.progress.liveStage?.stage, "waiting-for-model");
+
+  const verifying = buildTaskDecisionView({
+    task: task("verifying"),
+    attempts: [attempt],
+    events: [
+      event(1, "worker.completed"),
+      event(2, "verification.started"),
+    ],
+    integrationResults: [],
+    nowMs: Date.parse(now) + 1_000,
+  });
+  assert.equal(verifying.progress.liveStage?.stage, "verifying");
+  assert.equal(verifying.progress.liveStage?.evidence, "verification");
+});
+
+test("Decision View liveStage distinguishes model-processing from model-responding", () => {
+  const running = task("running");
+  // Processing marker projects model-processing, not model-responding or waiting.
+  const processing = buildTaskDecisionView({
+    task: running,
+    attempts: [attempt],
+    events: [
+      event(1, "worker.started"),
+      event(2, "worker.message", { activityKind: "model-processing" }),
+    ],
+    integrationResults: [],
+    nowMs: Date.parse(now) + 1_000,
+  });
+  assert.equal(processing.progress.liveStage?.stage, "model-processing");
+  assert.equal(processing.progress.liveStage?.evidence, "model-activity");
+  assert.equal(processing.progress.liveStage?.meaning, "normal");
+  assert.equal(processing.progress.liveStage?.next, "wait-for-next-model-step");
+
+  // Subsequent model-response transitions from processing to responding.
+  const responding = buildTaskDecisionView({
+    task: running,
+    attempts: [attempt],
+    events: [
+      event(1, "worker.started"),
+      event(2, "worker.message", { activityKind: "model-processing" }),
+      event(3, "worker.message", { activityKind: "model-response" }),
+    ],
+    integrationResults: [],
+    nowMs: Date.parse(now) + 1_000,
+  });
+  assert.equal(responding.progress.liveStage?.stage, "model-responding");
+
+  // Tool opened during processing stays using-tool.
+  const toolDuringProcessing = buildTaskDecisionView({
+    task: running,
+    attempts: [attempt],
+    events: [
+      event(1, "worker.started"),
+      event(2, "worker.message", { activityKind: "model-processing" }),
+      event(3, "worker.tool.started", { toolUseId: "t1", tool: "Edit" }),
+      event(4, "worker.message", { activityKind: "model-processing" }),
+    ],
+    integrationResults: [],
+    nowMs: Date.parse(now) + 1_000,
+  });
+  assert.equal(toolDuringProcessing.progress.liveStage?.stage, "using-tool");
+  assert.notEqual(toolDuringProcessing.progress.liveStage?.stage, "model-processing");
 });
 
 test("Decision View progress is terminal for finished tasks (FL-D83)", () => {

@@ -1,0 +1,209 @@
+version: 2
+name: Hub puts human conclusions before system evidence
+project: /Users/yijunwang/code/forklight
+taskClass: hub-human-information-architecture
+taskFamily: hub-product-comprehension
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: hub-product-comprehension
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: xai-grok-builder
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: Codex 已通过真实 Hub 页面冻结信息架构、文案与视觉边界；DeepSeek 负责按 contract 实现并覆盖安全的失败摘要，不自行重做产品方向或启动竞争。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    The ForkLight Hub keeps all existing operational and technical evidence but
+    presents live state, what needs attention, what happened, and the next
+    action before setup narration or internal records. Task Detail clearly
+    separates Main input, original Worker output, independent result, and final
+    output, and verification failures show one safe concrete diagnostic instead
+    of stopping at a failed-command count.
+  presentation:
+    summary: 让 Hub 先把“发生了什么、是否正常、现在要做什么”讲清楚，同时保留完整过程和技术证据；失败任务要展示安全、具体的首条报错，而不是只说检查没过。
+    language: zh-CN
+  context:
+    - Follow docs/m3-hub-human-information-architecture-contract.md as the Main-owned product and interaction authority.
+    - Codex inspected the authenticated live Hub. Overview currently puts a generic four-slot page story, setup, version journey, upgrade streak, and completed sample before actionable work.
+    - Successful and failed Task Detail both repeat the same outcome across hero, a seven-step Overview story, and retained-Candidate evidence.
+    - The failed Gmail Task says two checks failed but the normal Checks tab exposes no safe stderr/stdout summary, leaving an ordinary user unable to distinguish a code failure from configuration or policy.
+    - Preserve all current controls, evidence, tabs, confirmation gates, themes, and responsive behavior. This is information architecture and plain-language work, not feature removal.
+    - Do not touch Elsewhere or any other consumer App.
+  inScope:
+    - Implement only the allowed first slice in docs/m3-hub-human-information-architecture-contract.md.
+    - Add one bounded server-owned safe failure summary per failed verification command, using the contract's redaction and length rules.
+    - Bring the first safe failed-check summary into the Task hero and Task Detail Overview when present; keep honest unavailable copy when it is absent.
+    - "Replace the seven equal-weight Task Detail Overview steps with four sections: Main asked, Worker returned, Independent result, Final output or next action."
+    - Fold retained Candidate evidence into the Worker-returned section or its disclosure instead of rendering it as another primary outcome card.
+    - Reorder Overview so live state, needs-attention, and active work lead. Compact completed setup, matched version, satisfied self-upgrade, and already-submitted sample evidence.
+    - Remove the generic Overview page-story block only from Overview; leave other pages unchanged in this slice.
+    - Keep Provider and Daemon controls available below operational work or in an honest secondary system-status region.
+    - Author equivalent natural Chinese and English framing. Label original Worker/task text rather than pretending it was localized.
+    - Add focused server/UI tests for safe diagnostic projection, redaction, success/failure/legacy truth, Overview ordering, and four-section Task Overview.
+  outOfScope:
+    - Any Task, Worker, Goal, Competition, Main-review, routing, economics, Provider, persistence, retry, adaptation, or Integration semantic change.
+    - Removing API evidence used by CLI or deep audit, or exposing raw logs, prompts, diffs, secrets, environment dumps, absolute home paths, or unbounded output.
+    - Broad redesign of every Hub page, new navigation, new dependencies, images, gradients, decorative animation, or unrelated CSS cleanup.
+    - Any write to Elsewhere or another consumer App, commit, push, automatic retry, automatic Main decision, or automatic Integration.
+  executionSteps:
+    - Read the Main contract and trace the current SafeTaskJourney verification projection and authenticated Hub renderers.
+    - Implement and test a minimal safe diagnostic extractor before changing presentation.
+    - Refactor Overview ordering without removing operational controls or evidence.
+    - Refactor only the Task Detail Overview and hero, reusing existing dedicated tabs for complete evidence.
+    - Add independent bilingual copy and restrained hierarchy styles using existing tokens.
+    - Run the stored acceptance commands once and report any unrelated existing failure separately.
+  deliverables:
+    - Safe bounded failed-check summaries in the Hub Task journey.
+    - Operations-first Overview hierarchy.
+    - Four-section non-repetitive Task Detail Overview with clear input and output truth.
+    - Natural Chinese and English copy plus focused regression coverage.
+  modules:
+    - name: Safe verification explanation
+      responsibility: Convert one failed command's bounded output into a useful, redacted user-facing clue.
+      consumes:
+        - Existing verification command, exit code, stderr, and stdout evidence.
+      produces:
+        - Optional maximum-240-character failureSummary on the safe Hub journey.
+      boundaries:
+        - No secrets, raw logs, prompts, diffs, absolute home paths, environment dumps, or invented diagnosis.
+    - name: Overview operations hierarchy
+      responsibility: Put live work and action-needed items before completed setup and reliability evidence.
+      consumes:
+        - Existing Hub, task, goal, plan, competition, Provider, version, and upgrade state.
+      produces:
+        - One operations-first Overview with secondary healthy evidence compacted.
+      boundaries:
+        - No data or control removal and no backend lifecycle change.
+    - name: Task collaboration summary
+      responsibility: Present Main input, Worker output, independent result, and final output or next action once each.
+      consumes:
+        - Safe Task journey, Main presentation, Worker claim, verification, delivery, and retained Candidate evidence.
+      produces:
+        - Four-section Overview and a concise hero.
+      boundaries:
+        - Worker claim is not accepted output; rejected files are not final files; missing evidence stays unknown.
+  callChain:
+    - ForkLight records Main assignment, Worker attempt/output, independent verification, Main handling, and delivery as separate evidence.
+    - The server selects and bounds only the safe facts needed by Hub, including an optional redacted failed-check summary.
+    - Overview orders current live and attention state before completed setup/system proof.
+    - Task Detail hero answers what happened and what to do; its Overview shows four distinct collaboration stages.
+    - Dedicated tabs and technical disclosures retain the complete process and evidence.
+  scenarios:
+    - name: Verification failed with safe stderr
+      given: A command exits nonzero and stderr contains an ordinary compiler or assertion line plus paths or control codes.
+      when: SafeTaskJourney is projected and Task Detail opens.
+      then: The first useful redacted line appears with its readable check label; absolute home paths, ANSI codes, and later log noise do not.
+    - name: Verification failed without safe evidence
+      given: A failed command has empty or fully redacted output.
+      when: Task Detail opens.
+      then: The UI says detailed evidence is unavailable and does not invent a cause or recommend changing limits.
+    - name: Successful integrated task
+      given: Worker output passed, Main accepted, and Integration applied.
+      when: Task Detail opens.
+      then: The final result appears once, Main input and original Worker report remain distinct, and no action is requested.
+    - name: Failed task with retained work
+      given: Worker changed files but checks failed and Main has not decided.
+      when: Task Detail opens.
+      then: The usable Candidate evidence sits under Worker returned, the failed check is concrete, and final output remains pending.
+    - name: Healthy returning user
+      given: Setup is ready, builds match, upgrade streak is satisfied, and no Worker is active.
+      when: Overview opens.
+      then: Attention and active-work truth lead; setup/version/sample proof is compact and does not consume the first viewport.
+    - name: Legacy evidence gap
+      given: An older Task lacks a Main presentation or command output.
+      when: Task Detail opens.
+      then: The UI labels the missing evidence without fabricating input, output, failure cause, or localization.
+  risks:
+    - Useful stderr can leak paths or secrets; fail closed and test redaction before presentation.
+    - Compaction can accidentally remove actions; preserve every existing handler and prove controls remain reachable in their dedicated tabs.
+    - A smaller Overview can still become repetitive if retained evidence is rendered twice; bind each evidence type to one primary section.
+    - Broad style cleanup would make review noisy; use existing tokens and only add styles required by the frozen hierarchy.
+  changeBudget:
+    maxFiles: 7
+    maxDiffLines: 1400
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 7
+  fileLimitMode: warn
+  changedLineLimit: 1400
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Overview prioritizes live state, attention, and active work before completed setup, version, upgrade, sample, and system evidence.
+    - Task Detail hero and four-section Overview answer what happened, whether it passed, Main input, Worker return, independent result, final output, and the single next action without repeating one fact as several primary cards.
+    - Failed checks show a safe concrete failure summary when present and honest unavailable copy otherwise.
+    - Safe journey output strips secrets, ANSI control codes, absolute home paths, unbounded logs, prompts, diffs, and environment dumps.
+    - Worker self-report, retained Candidate, accepted output, and delivered output remain visibly distinct.
+    - Existing tabs, actions, confirmation gates, themes, responsive shell, CLI/deep-audit evidence, and all non-Hub product semantics remain unchanged.
+    - English and Chinese framing are independently readable, and original external content is visibly labelled.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-settings.test.ts tests/hub-ui-assets.test.ts tests/hub-ops-mutations.test.ts
+    - npm run check
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check

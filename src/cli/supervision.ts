@@ -3,6 +3,7 @@ import type {
   DeliveryLineage,
   EventRecord,
   IntegrationResultRecord,
+  LiveStageProjection,
   TaskDecisionView,
   TaskRecord,
   TaskStatus,
@@ -12,6 +13,7 @@ import { buildTaskDecisionView } from "../core/task-decision-view.js";
 import {
   classifyActivity,
   DEFAULT_QUIET_AFTER_MS,
+  isOpenFollowUpStage,
   isTerminalTaskStatus,
   type LatestEventMeta,
   type ProgressActivity,
@@ -23,9 +25,13 @@ export {
   buildStatusProgress,
   classifyActivity,
   DEFAULT_QUIET_AFTER_MS,
+  isOpenFollowUpStage,
   isTerminalTaskStatus,
+  projectLiveStage,
   toLatestEventMeta,
+  toLiveStageEvents,
   type LatestEventMeta,
+  type LiveStageEventEvidence,
   type ProgressActivity,
 } from "../core/task-progress.js";
 
@@ -52,6 +58,11 @@ export interface TaskProgressSnapshot {
   task: TaskRecord;
   cursor: ProgressCursor;
   latestEvent?: LatestEventMeta;
+  /** Canonical live-stage projection when the caller supplies ordered events.
+   *  Absent when the caller has no event history; wait will then fall back to
+   *  raw Task status for the terminal check (conservative — never invents an
+   *  open follow-up from a single latest-event cursor). */
+  liveStage?: LiveStageProjection;
 }
 
 export interface WaitDependencies {
@@ -77,6 +88,8 @@ export interface WaitProgressSummary {
   lastEventSummary: string | null;
   activity: ProgressActivity;
   currentAttemptId: string | null;
+  /** Canonical live stage when the caller supplied ordered events. */
+  liveStage?: LiveStageProjection;
 }
 
 export interface WaitResult {
@@ -258,9 +271,15 @@ function buildWaitProgressSummary(
   nowMs: number,
   quietAfterMs: number,
 ): WaitProgressSummary {
-  const activity = classifyActivity(
+  const rawActivity = classifyActivity(
     snapshot.task, snapshot.latestEvent, nowMs, quietAfterMs,
   );
+  // When follow-up work is open on a terminal Task, activity follows the
+  // canonical live-stage observation, not the raw terminal status.
+  const activity = snapshot.liveStage !== undefined
+    && isOpenFollowUpStage(snapshot.liveStage.stage)
+    ? snapshot.liveStage.observation
+    : rawActivity;
   return {
     latestEventSequence: snapshot.cursor.latestEventSequence,
     lastEventAt: snapshot.latestEvent?.timestamp ?? null,
@@ -268,6 +287,7 @@ function buildWaitProgressSummary(
     lastEventSummary: snapshot.latestEvent?.summary ?? null,
     activity,
     currentAttemptId: snapshot.cursor.currentAttemptId,
+    ...(snapshot.liveStage === undefined ? {} : { liveStage: snapshot.liveStage }),
   };
 }
 
@@ -289,6 +309,22 @@ function waitResult(
   };
 }
 
+/** True when the Task is unambiguously terminal: raw status is terminal AND no
+ *  open post-terminal follow-up operation is projected from ordered events.
+ *  When ordered events are unavailable (no liveStage), fall back to raw status
+ *  so latest-only callers remain conservative and never invent an open operation. */
+function isEffectivelyTerminal(snapshot: TaskProgressSnapshot): boolean {
+  if (!isTerminalTaskStatus(snapshot.task.status)) return false;
+  // When the caller supplies a canonical live-stage projection with ordered
+  // events, respect open follow-up operations.
+  if (snapshot.liveStage !== undefined) {
+    return !isOpenFollowUpStage(snapshot.liveStage.stage);
+  }
+  // No ordered events: fall back to raw status. The caller is latest-only and
+  // cannot prove an open follow-up from a single event.
+  return true;
+}
+
 export async function waitForTask(
   policy: WaitPolicy, dependencies: WaitDependencies,
 ): Promise<WaitResult> {
@@ -302,7 +338,8 @@ export async function waitForTask(
   let pollCount = 0;
   const initialKey = progressCursorKey(initial.cursor);
 
-  if (isTerminalTaskStatus(initial.task.status)) {
+  // Terminal only when the Task is done AND every follow-up is closed.
+  if (isEffectivelyTerminal(initial)) {
     return waitResult("terminal", startedAt, pollCount, initial, dependencies.now, quietAfterMs);
   }
 
@@ -314,7 +351,7 @@ export async function waitForTask(
     await dependencies.sleep(Math.min(policy.pollMs, policy.timeoutMs - elapsedMs));
     latest = await dependencies.readProgress();
     pollCount += 1;
-    if (isTerminalTaskStatus(latest.task.status)) {
+    if (isEffectivelyTerminal(latest)) {
       return waitResult("terminal", startedAt, pollCount, latest, dependencies.now, quietAfterMs);
     }
     if (policy.until === "change" && progressCursorKey(latest.cursor) !== initialKey) {
@@ -518,6 +555,13 @@ export function humanWaitLines(result: WaitResult): string {
     lines.push(`lastEvent: ${result.progress.lastEventType} — ${result.progress.lastEventSummary ?? ""}`);
   }
   if (result.task.finishedAt !== undefined) lines.push(`finishedAt: ${result.task.finishedAt}`);
+  if (result.progress.liveStage !== undefined) {
+    lines.push(`liveStage: ${result.progress.liveStage.stage}`);
+    lines.push(`liveStageObservation: ${result.progress.liveStage.observation}`);
+    lines.push(`liveStageMeaning: ${result.progress.liveStage.meaning}`);
+    lines.push(`liveStageNext: ${result.progress.liveStage.next}`);
+    lines.push(`liveStageEvidence: ${result.progress.liveStage.evidence}`);
+  }
   return `${lines.join("\n")}\n`;
 }
 

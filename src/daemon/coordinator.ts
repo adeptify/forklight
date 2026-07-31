@@ -142,6 +142,26 @@ import {
 import { getTaskEconomicsReport, type TaskEconomicsReport } from "../core/task-economics-report.js";
 import { getPortfolioEconomicsSummary, type PortfolioEconomicsSummary } from "../core/portfolio-economics.js";
 import {
+  computeMainDirectAggregate,
+  createMainDirectDecision,
+  isIdenticalClose,
+  MAIN_DIRECT_RECENT_LIMIT,
+  projectMainDirectDecision,
+  projectMainDirectDecisionList,
+  selectMainDirectRecentEntries,
+  validateMainDirectClose,
+  validateMainDirectStart,
+  type MainDirectCompleteInput,
+  type MainDirectStartContext,
+  type MainDirectStartInput,
+} from "../core/main-direct-execution-decision.js";
+import type {
+  MainDirectDecisionAggregate,
+  MainDirectDecisionProjection,
+  MainDirectDecisionRecentEntry,
+  MainDirectVerification,
+} from "../core/types.js";
+import {
   captureDirectCodexSample,
   listDirectCodexInbox,
   recordDirectCodexReview,
@@ -160,6 +180,7 @@ import {
 } from "../core/integration-operation.js";
 import { buildTaskDecisionView } from "../core/task-decision-view.js";
 import { projectTaskSurface, type SafeTaskSummary } from "../core/task-summary.js";
+import { paginateTaskHistory, type TaskHistoryPage, type TaskHistoryPageRequest } from "../core/task-history.js";
 import { isTerminalTaskStatus, toLatestEventMeta } from "../core/task-progress.js";
 import { failureCategoryForTask } from "../core/worker-failure.js";
 import {
@@ -1352,34 +1373,68 @@ export class DaemonCoordinator {
    */
   listTaskSurfaces(statuses?: TaskStatus[], limit = 20): SafeTaskSummary[] {
     const nowMs = Date.now();
-    return this.list(statuses, limit).map((task) => {
-      const events = this.store.listEvents(task.id);
-      const latestEvent = toLatestEventMeta(this.store.latestEventMeta(task.id));
-      const failureCategory = failureCategoryForTask(
-        task.status,
-        events,
-      );
-      const remediationDisposition = this.store.getRemediationDisposition(task.id);
-      const decisionStage = buildTaskDecisionView({
-        task,
-        attempts: this.store.listAttempts(task.id),
-        events,
-        integrationResults: this.store.listIntegrationResults(task.id),
-        ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
-        nowMs,
-      }).stage;
-      const preparationStage = task.status === "preparing"
-        ? this.store.latestPreparationStageMeta(task.id)
-        : undefined;
-      return projectTaskSurface(task, {
-        ...(latestEvent === undefined ? {} : { latestEvent }),
-        ...(failureCategory === undefined ? {} : { failureCategory }),
-        ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
-        decisionStage,
-        ...(preparationStage === undefined ? {} : { preparationStage }),
-        nowMs,
-      });
+    return this.list(statuses, limit).map((task) => this.projectOneTaskSurface(task, nowMs));
+  }
+
+  /**
+   * Project one Task into its canonical SafeTaskSummary surface. Shared by the
+   * recent list projection and the durable History page so both routes derive
+   * identical privacy-safe evidence (progress, failureCategory, remediation
+   * disposition, Decision Stage, and the canonical board placement).
+   */
+  private projectOneTaskSurface(task: TaskRecord, nowMs: number): SafeTaskSummary {
+    const events = this.store.listEvents(task.id);
+    const latestEvent = toLatestEventMeta(this.store.latestEventMeta(task.id));
+    const failureCategory = failureCategoryForTask(
+      task.status,
+      events,
+    );
+    const remediationDisposition = this.store.getRemediationDisposition(task.id);
+    const decisionStage = buildTaskDecisionView({
+      task,
+      attempts: this.store.listAttempts(task.id),
+      events,
+      integrationResults: this.store.listIntegrationResults(task.id),
+      ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+      nowMs,
+    }).stage;
+    const preparationStage = task.status === "preparing"
+      ? this.store.latestPreparationStageMeta(task.id)
+      : undefined;
+    return projectTaskSurface(task, {
+      ...(latestEvent === undefined ? {} : { latestEvent }),
+      ...(failureCategory === undefined ? {} : { failureCategory }),
+      ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+      decisionStage,
+      ...(preparationStage === undefined ? {} : { preparationStage }),
+      // Same ordered evidence Decision View uses so board/list liveStage matches.
+      events: events.map((event) => ({
+        sequence: event.sequence,
+        timestamp: event.timestamp,
+        type: event.type,
+        ...(event.payload === undefined ? {} : { payload: event.payload }),
+      })),
+      nowMs,
     });
+  }
+
+  /**
+   * Read-only durable History page. Derives canonical SafeTaskSummary surfaces
+   * for every terminal Task, then delegates to the pure Core paginator which
+   * keeps only canonical History, applies the safe summary search, and returns
+   * one deterministic bounded page with an opaque continuation.
+   *
+   * Canonical History always sits on a terminal machine status (delivered,
+   * activated, main-rejected, or repaired-delivered outcomes), so the read is
+   * narrowed to terminal Tasks before projection. This is an explicit archive
+   * read; it is not yet optimized database work. Never mutates Tasks, never
+   * echoes private fields, and never infers client-side lifecycle.
+   */
+  listHistoryPage(request: TaskHistoryPageRequest = {}): TaskHistoryPage {
+    const tasks = this.store.listTasks(["succeeded", "failed", "interrupted"]);
+    const nowMs = Date.now();
+    const summaries = tasks.map((task) => this.projectOneTaskSurface(task, nowMs));
+    return paginateTaskHistory(summaries, request);
   }
 
   getPlanBoard(planId: string): PlanBoard {
@@ -1388,6 +1443,35 @@ export class DaemonCoordinator {
 
   listPlanBoards(limit?: number): PlanBoardSummary[] {
     return new BoardService(this.store).listPlanBoards(limit);
+  }
+
+  /** Bounded, privacy-safe Plan context for a single Task. Returns undefined
+   *  when the Task is standalone (no Plan membership). The projection includes
+   *  the Plan identity, the owning item, and direct named dependency/dependent
+   *  edges. Names are sanitised; IDs remain in the payload only for technical
+   *  disclosure. Read-only — never mutates store state. */
+  getTaskPlanContext(taskId: string): Record<string, unknown> | undefined {
+    const item = this.store.getPlanItemByTaskId(taskId);
+    if (!item) return undefined;
+    const plan = this.store.getPlan(item.planId);
+    if (!plan) return undefined;
+    const board = new BoardService(this.store).getPlanBoard(plan.id);
+    const boardItem = Object.values(board.columns)
+      .flat()
+      .find((bi) => bi.taskId === taskId);
+    if (!boardItem) return undefined;
+    const safePlanName = board.plan.name
+      .slice(0, 200)
+      .replace(/[\x00-\x1f\x7f]/g, "")
+      .trim();
+    return {
+      planId: board.plan.planId,
+      ...(safePlanName.length === 0 ? {} : { planName: safePlanName }),
+      itemId: boardItem.itemId,
+      itemIndex: boardItem.itemIndex,
+      namedDependencies: boardItem.namedDependencies.slice(0, 20),
+      namedRequiredBy: boardItem.namedRequiredBy.slice(0, 20),
+    };
   }
 
   statistics(filter: StatisticsFilter = {}): ProviderModelSummary[] {
@@ -3051,5 +3135,175 @@ export class DaemonCoordinator {
       }
       await executeAttempt(this.store, currentTask, false, undefined, undefined, exec, settings.providerDefaults);
     }
+  }
+
+  // --- Main-direct execution decisions ---
+
+  /** Start a Main-direct execution decision. Validates input, resolves
+   *  considered Worker snapshots and evidence, then persists an immutable
+   *  open record. Never creates a Task, launches a Worker, or probes a Provider. */
+  async mainDirectStart(params: Record<string, unknown>): Promise<MainDirectDecisionProjection> {
+    const input: MainDirectStartInput = {
+      taskClass: (() => {
+        const v = params.taskClass;
+        if (typeof v !== "string" || v.trim().length === 0 || v.trim().length > 80) {
+          throw new Error("taskClass must be 1-80 characters");
+        }
+        return v.trim();
+      })(),
+      ...(params.taskFamily === undefined ? {} : {
+        taskFamily: (() => {
+          const v = params.taskFamily;
+          if (typeof v !== "string" || v.trim().length === 0 || v.trim().length > 80) {
+            throw new Error("taskFamily must be 1-80 characters");
+          }
+          return v.trim();
+        })(),
+      }),
+      reason: (() => {
+        const v = params.reason;
+        if (typeof v !== "string") throw new Error("reason must be a valid Main-direct reason code");
+        return v as MainDirectStartInput["reason"];
+      })(),
+      note: (() => {
+        const v = params.note;
+        if (typeof v !== "string" || v.trim().length === 0 || v.length > 300) {
+          throw new Error("note must be 1-300 characters");
+        }
+        return v.trim();
+      })(),
+      consideredWorkerProfileIds: (() => {
+        const v = params.consideredWorkerProfileIds;
+        if (!Array.isArray(v)) throw new Error("consideredWorkerProfileIds must be an array");
+        return v as string[];
+      })(),
+      confirm: params.confirm === true ? true as const : (() => {
+        throw new Error("main_direct_start requires explicit confirm: true");
+      })(),
+    };
+
+    const settings = this.settings.get();
+    const ready = providerReadiness(settings.providerDefaults, this.providerAuthInspector);
+    const providers = ready.providers;
+    const runtimes: MainDirectStartContext["runtimes"] = {};
+    for (const adapter of listWorkerAdapters()) {
+      try {
+        const result = await adapter.doctor();
+        runtimes[adapter.name] = { ok: result.ok };
+      } catch {
+        runtimes[adapter.name] = { ok: false };
+      }
+    }
+    const context: MainDirectStartContext = {
+      workerProfiles: settings.workerProfiles,
+      ...(settings.modelCatalog === undefined ? {} : { modelCatalog: settings.modelCatalog }),
+      providerDefaults: settings.providerDefaults,
+      providers,
+      runtimes,
+    };
+
+    const statsService = new StatisticsService(this.store);
+    context.routingEvidence = {
+      exact: statsService.routingEvidence(input.taskClass.trim(), "full-worker"),
+      ...(input.taskFamily === undefined ? {} : {
+        family: statsService.routingEvidenceByFamily(input.taskFamily, "full-worker"),
+      }),
+      minRelevantSamples: settings.modelRouting.minRelevantSamples,
+      familyMinRelevantSamples: settings.modelRouting.familyMinRelevantSamples,
+    };
+    const { consideredWorkers, evidenceSnapshot } = validateMainDirectStart(input, context);
+    const record = createMainDirectDecision(input, consideredWorkers, evidenceSnapshot);
+    this.store.saveMainDirectDecision(record);
+    return projectMainDirectDecision(record);
+  }
+
+  /** Close a Main-direct execution decision. Idempotent: identical replay
+   *  returns the existing result; conflicting replay fails without mutation. */
+  mainDirectComplete(params: Record<string, unknown>): MainDirectDecisionProjection {
+    const id = (() => {
+      const v = params.id;
+      if (typeof v !== "string" || v.trim().length === 0) throw new Error("id is required");
+      return v.trim();
+    })();
+    const outcome = (() => {
+      const v = params.outcome;
+      if (v !== "completed" && v !== "abandoned") {
+        throw new Error("outcome must be completed or abandoned");
+      }
+      return v;
+    })();
+    const verification: MainDirectVerification | undefined = params.verification === undefined
+      ? undefined
+      : (() => {
+          const v = params.verification;
+          if (v !== "passed" && v !== "failed" && v !== "unavailable") {
+            throw new Error("verification must be passed, failed, or unavailable");
+          }
+          return v as MainDirectVerification;
+        })();
+    const confirm = params.confirm === true ? true as const : (() => {
+      throw new Error("main_direct_complete requires explicit confirm: true");
+    })();
+    const noteVal = (() => {
+      const v = params.note;
+      if (typeof v !== "string" || v.trim().length === 0 || v.length > 300) {
+        throw new Error("note must be 1-300 characters");
+      }
+      return v.trim();
+    })();
+    const input: MainDirectCompleteInput = {
+      id,
+      outcome,
+      ...(verification === undefined ? {} : { verification }),
+      note: noteVal,
+      confirm,
+    };
+
+    const existing = this.store.getMainDirectDecision(input.id);
+    if (existing.status !== "open") {
+      // Idempotency check: if already closed, verify identical close
+      if (existing.closedState) {
+        const newClosed = validateMainDirectClose(input, { ...existing, status: "open" as const });
+        if (isIdenticalClose(existing.closedState, newClosed)) {
+          return projectMainDirectDecision(existing);
+        }
+      }
+      throw new Error(`Decision ${input.id} is already ${existing.status}`);
+    }
+
+    const closedState = validateMainDirectClose(input, existing);
+    const closed: typeof existing = {
+      ...existing,
+      status: closedState.outcome as typeof existing.status,
+      closedState,
+    };
+    const result = this.store.closeMainDirectDecision(closed);
+    if (result.applied) return projectMainDirectDecision(result.record);
+    if (result.record.closedState && isIdenticalClose(result.record.closedState, closedState)) {
+      return projectMainDirectDecision(result.record);
+    }
+    throw new Error(`Decision ${input.id} is already ${result.record.status}`);
+  }
+
+  /** Read-only status of one Main-direct decision. */
+  mainDirectStatus(id: string): MainDirectDecisionProjection {
+    return projectMainDirectDecision(this.store.getMainDirectDecision(id));
+  }
+
+  /** Read-only list of all Main-direct decisions. */
+  mainDirectList(): MainDirectDecisionProjection[] {
+    return projectMainDirectDecisionList(this.store.listMainDirectDecisions());
+  }
+
+  /** Read-only aggregate counts. */
+  mainDirectAggregate(): MainDirectDecisionAggregate {
+    return computeMainDirectAggregate(this.store.listMainDirectDecisions());
+  }
+
+  /** Read-only recent entries for Hub Insights. */
+  mainDirectRecent(limit?: number): MainDirectDecisionRecentEntry[] {
+    return selectMainDirectRecentEntries(
+      this.store.listRecentMainDirectDecisions(limit ?? MAIN_DIRECT_RECENT_LIMIT),
+    );
   }
 }

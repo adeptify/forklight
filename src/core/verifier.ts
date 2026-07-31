@@ -182,7 +182,9 @@ export async function verifyTask(
   task: TaskRecord,
   attemptId: string,
 ): Promise<VerificationResult> {
-  store.setTaskStatus(task.id, "verifying");
+  // Enter verifying with no live Worker PID so status polling cannot treat a
+  // finished Worker as a disappeared running process mid-verification.
+  store.setTaskStatus(task.id, "verifying", { workerPid: null });
   store.addEvent(task.id, attemptId, "verification.started", "Independent verification started");
 
   const { verification, summary } = await executeVerificationPass(store, task, attemptId);

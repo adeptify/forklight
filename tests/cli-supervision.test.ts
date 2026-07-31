@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { AttemptRecord, EventRecord, TaskRecord, TaskStatus } from "../src/core/types.js";
+import type { AttemptRecord, EventRecord, LiveStageProjection, TaskRecord, TaskStatus } from "../src/core/types.js";
 import {
   buildCompactInspection,
   buildProgressCursor,
@@ -485,4 +485,138 @@ test("compact inspection exposes authority without raw claim or verification pay
     "Review remediation and decide whether to resume",
   );
   assert.doesNotMatch(JSON.stringify(compact), /DO_NOT_SURFACE/);
+});
+
+// --- wait with open post-terminal follow-up operations ---
+
+function followUpLiveStage(
+  stage: LiveStageProjection["stage"],
+  observation: LiveStageProjection["observation"] = "active",
+): LiveStageProjection {
+  return {
+    stage,
+    observation,
+    evidence: stage === "candidate-reverifying" ? "candidate-reverification" : "remediation-check",
+    meaning: "normal" as const,
+    next: stage === "candidate-reverifying"
+      ? "wait-for-reverification-result" as const
+      : "wait-for-remediation-result" as const,
+    observedAt: TS,
+    evidenceSequence: 4,
+  };
+}
+
+test("wait: terminal Task with open Candidate reverification keeps polling", async () => {
+  let readCount = 0;
+  let now = 0;
+  const sleeps: number[] = [];
+  const deps = {
+    readProgress: () => {
+      const snap = snapshotFor("failed", 3);
+      readCount += 1;
+      return {
+        ...snap,
+        liveStage: followUpLiveStage("candidate-reverifying"),
+      };
+    },
+    sleep: (ms: number) => { sleeps.push(ms); now += ms; },
+    now: () => now,
+  };
+  const result = await waitForTask(
+    { timeoutMs: 50, pollMs: 10, until: "terminal" }, deps,
+  );
+  assert.equal(result.outcome, "timeout");
+  assert.equal(result.task.status, "failed");
+  assert.equal(result.progress.activity, "active");
+  assert.equal(readCount, 6, "initial read plus five bounded polls");
+  assert.deepEqual(sleeps, [10, 10, 10, 10, 10]);
+  // humanWaitLines now includes liveStage fields when provided by progress.
+  const human = humanWaitLines(result);
+  assert.match(human, /liveStage: candidate-reverifying/);
+});
+
+test("wait: terminal Task with open follow-up returns terminal when follow-up closes", async () => {
+  let reads = 0;
+  const deps = {
+    readProgress: () => {
+      reads += 1;
+      const snap = snapshotFor("failed", 3);
+      if (reads === 1) {
+        return { ...snap, liveStage: followUpLiveStage("remediation-checking") };
+      }
+      // Completion event closes the operation; live stage returns terminal.
+      return { ...snap };
+    },
+    sleep: () => {},
+    now: () => reads * 10,
+  };
+  const result = await waitForTask(
+    { timeoutMs: 100, pollMs: 5, until: "terminal" }, deps,
+  );
+  assert.equal(result.outcome, "terminal");
+  assert.equal(reads, 2);
+});
+
+test("wait: terminal Task without liveStage returns terminal immediately (latest-only conservative)", async () => {
+  const snap = snapshotFor("failed", 2);
+  // No liveStage supplied — latest-only caller stays conservative.
+  const deps = {
+    readProgress: () => snap,
+    sleep: () => {},
+    now: () => 0,
+  };
+  const result = await waitForTask(
+    { timeoutMs: 50, pollMs: 5, until: "terminal" }, deps,
+  );
+  assert.equal(result.outcome, "terminal");
+  assert.equal(result.elapsedMs, 0);
+  assert.equal(result.pollCount, 0);
+});
+
+test("wait: quiet follow-up keeps polling and never becomes failure", async () => {
+  const snap = {
+    ...snapshotFor("failed", 3),
+    liveStage: followUpLiveStage("candidate-reverifying", "quiet"),
+  };
+  let now = 0;
+  const deps = {
+    readProgress: () => snap,
+    sleep: (ms: number) => { now += ms; },
+    now: () => now,
+  };
+  const result = await waitForTask(
+    { timeoutMs: 20, pollMs: 5, until: "terminal" }, deps,
+  );
+  // Quiet = no new completion evidence, so wait should timeout, never return
+  // terminal or failed early.
+  assert.equal(result.outcome, "timeout");
+  assert.equal(result.progress.activity, "quiet");
+  // Never reclassified as failure.
+  assert.notEqual(result.task.status, "running");
+  assert.equal(result.task.status, "failed", "machine truth unchanged");
+});
+
+test("wait: --until change fires when follow-up events advance even on terminal Task", async () => {
+  const openSnap = {
+    ...snapshotFor("failed", 3, TS),
+    liveStage: followUpLiveStage("remediation-checking"),
+  };
+  const advanceSnap = {
+    ...snapshotFor("failed", 4, TS),
+    liveStage: followUpLiveStage("remediation-checking"),
+  };
+  let reads = 0;
+  const deps = {
+    readProgress: () => {
+      reads += 1;
+      return reads === 1 ? openSnap : advanceSnap;
+    },
+    sleep: () => {},
+    now: () => reads * 5,
+  };
+  const result = await waitForTask(
+    { timeoutMs: 50, pollMs: 5, until: "change" }, deps,
+  );
+  assert.equal(result.outcome, "changed");
+  assert.equal(result.progress.latestEventSequence, 4);
 });

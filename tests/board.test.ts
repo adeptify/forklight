@@ -54,6 +54,7 @@ test("builds a deterministic mixed-state board with dependency evidence", async 
     const timestamp = "2026-07-22T00:00:00.000Z";
     const states: TaskStatus[] = ["queued", "waiting", "running", "blocked", "failed", "succeeded"];
     const tasks = states.map((status) => taskRecord(`task-${status}`, timestamp));
+    tasks[5] = { ...tasks[5]!, name: "\u0000 \u007f" };
     tasks.forEach((task, index) => {
       store.createTask(task);
       const status = states[index]!;
@@ -104,6 +105,21 @@ test("builds a deterministic mixed-state board with dependency evidence", async 
     assert.deepEqual(first.columns.blocked[0]!.dependencies[0]?.state, "failed");
     assert.equal(first.columns.failed[0]!.error, "Verifier failed");
     assert.deepEqual(first.columns.completed[0]!.requiredBy, ["queued"]);
+    // Named dependency/dependent projections carry readable names.
+    assert.equal(first.columns.queued[1]!.namedDependencies.length, 1);
+    assert.equal(first.columns.queued[1]!.namedDependencies[0]!.taskName, "task-blocked");
+    assert.equal(first.columns.queued[1]!.namedDependencies[0]!.state, "failed");
+    assert.equal(first.columns.completed[0]!.namedRequiredBy.length, 1);
+    assert.equal(first.columns.completed[0]!.namedRequiredBy[0]!.taskName, "task-queued");
+    // Items without dependents or dependencies have empty arrays, not undefined.
+    assert.equal(Array.isArray(first.columns.active[0]!.namedRequiredBy), true);
+    assert.equal(first.columns.active[0]!.namedRequiredBy.length, 0);
+    assert.equal(Array.isArray(first.columns.active[0]!.namedDependencies), true);
+    assert.equal(first.columns.active[0]!.namedDependencies.length, 0);
+    // Missing task names stay missing so the UI can use a human generic label;
+    // the projection must never promote an internal item ID into primary copy.
+    assert.equal(first.columns.queued[0]!.namedDependencies.length, 1);
+    assert.equal(first.columns.queued[0]!.namedDependencies[0]!.taskName, undefined);
     assert.deepEqual(service.listPlanBoards(), [first.plan]);
     assert.equal(store.getTask("task-running").status, "running");
   } finally {

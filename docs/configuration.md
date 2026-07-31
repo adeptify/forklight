@@ -232,7 +232,10 @@ recreated it.
   baseline and Worker snapshot at preparation time. Because excluded content
   has no trustworthy baseline, it is never eligible for automatic source
   Integration, even when a verifier-side build recreates it inside the Worker
-  workspace after the edit.
+  workspace after the edit. Each entry must therefore be one directory or file
+  name, not a path or glob. Use `target`, not `src-tauri/target` or
+  `**/target/**`; Task validation rejects unsupported spellings before it scans
+  the project or starts a Worker.
 - **`workspace.generatedPaths`** lists glob patterns (for example `dist/**`)
   for content that *is* included in the snapshot but whose changes are
   generated noise. Such changes are retained as generated evidence and kept

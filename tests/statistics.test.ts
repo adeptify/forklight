@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  classifyDecisionReadiness,
   classifyFailure,
   classifyFinalDeliveryOutcome,
   computeRoutingEvidenceCoverage,
@@ -16,6 +17,8 @@ import {
   resolveCurrentMainDecision,
   StatisticsService,
   verificationFrom,
+  type ClassifiedDecision,
+  type DecisionReadinessBucket,
   type FailureCategory,
   type TaskEvidence,
 } from "../src/core/statistics.js";
@@ -1970,6 +1973,12 @@ test("routing-evidence coverage is empty when no eligible terminal Tasks exist",
     withCompleteRoutingDecisionCount: 0,
     distinctTaskClassCount: 0,
     distinctTaskFamilyCount: 0,
+    singleWorkerDecisionCount: 0,
+    comparableMultiWorkerDecisionCount: 0,
+    comparableExactClassDecisionCount: 0,
+    comparableTaskFamilyDecisionCount: 0,
+    unknownMultiWorkerDecisionCount: 0,
+    unusableDecisionCount: 0,
   });
 });
 
@@ -2009,6 +2018,22 @@ test("routing-evidence coverage counts legacy, partial, and complete ordinary Ta
   assert.equal(coverage.withCompleteRoutingDecisionCount, 2);
   assert.equal(coverage.distinctTaskClassCount, 2);
   assert.equal(coverage.distinctTaskFamilyCount, 2);
+  // Default completeRoutingDecision has single worker + scope "none".
+  // Both complete tasks use the same shape — one explicit, one override.
+  assert.equal(coverage.singleWorkerDecisionCount, 2);
+  assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.comparableExactClassDecisionCount, 0);
+  assert.equal(coverage.comparableTaskFamilyDecisionCount, 0);
+  assert.equal(coverage.unknownMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unusableDecisionCount, 0);
+  // Arithmetic invariant: readiness buckets sum to complete count.
+  assert.equal(
+    coverage.singleWorkerDecisionCount
+      + coverage.comparableMultiWorkerDecisionCount
+      + coverage.unknownMultiWorkerDecisionCount
+      + coverage.unusableDecisionCount,
+    coverage.withCompleteRoutingDecisionCount,
+  );
 
   const json = JSON.stringify(coverage);
   assert.ok(!json.includes("private Main reason"));
@@ -2057,6 +2082,11 @@ test("complete coverage requires taskClass, taskFamily, and stored routingDecisi
   );
   assert.equal(coverage.distinctTaskClassCount, 1);
   assert.equal(coverage.distinctTaskFamilyCount, 1);
+  // The one complete decision uses the default single-worker shape.
+  assert.equal(coverage.singleWorkerDecisionCount, 1);
+  assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unknownMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unusableDecisionCount, 0);
 });
 
 test("routing-evidence coverage excludes Review Graph reviewer Tasks", () => {
@@ -2085,6 +2115,10 @@ test("routing-evidence coverage excludes Review Graph reviewer Tasks", () => {
   assert.equal(coverage.withCompleteRoutingDecisionCount, 1);
   assert.equal(coverage.distinctTaskClassCount, 1);
   assert.equal(coverage.distinctTaskFamilyCount, 1);
+  assert.equal(coverage.singleWorkerDecisionCount, 1);
+  assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unknownMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unusableDecisionCount, 0);
 });
 
 test("StatisticsService.routingEvidenceCoverage is read-only over durable Tasks", () => {
@@ -2169,9 +2203,360 @@ test("StatisticsService.routingEvidenceCoverage is read-only over durable Tasks"
     assert.equal(coverage.withTaskClassCount, 1);
     assert.equal(coverage.withTaskFamilyCount, 1);
     assert.equal(coverage.withCompleteRoutingDecisionCount, 1);
+    assert.equal(coverage.singleWorkerDecisionCount, 1);
+    assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+    assert.equal(coverage.unknownMultiWorkerDecisionCount, 0);
+    assert.equal(coverage.unusableDecisionCount, 0);
     assert.equal(store.listTasks().length, before, "coverage must not mutate Task history");
     store.close();
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// --- Decision readiness classifier regression --------------------------------
+
+test("classifyDecisionReadiness: single Worker is never comparable or unknown", () => {
+  const worker = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const single: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [worker],
+    selectedWorker: worker,
+    selectedBecause: { code: "user-specified", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "exact-class", exactSampleCounts: {} },
+  });
+  assert.equal(single.bucket, "single-worker");
+  assert.strictEqual(single.scope, undefined);
+
+  const singleNone: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [worker],
+    selectedWorker: worker,
+    selectedBecause: { code: "user-specified", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+  });
+  assert.equal(singleNone.bucket, "single-worker");
+});
+
+test("classifyDecisionReadiness: two Workers with exact-class scope is comparable", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const w2 = { provider: "deepseek", model: "v4", runtime: "c", effort: "medium" };
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [w1, w2],
+    selectedWorker: w1,
+    selectedBecause: { code: "user-specified", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "exact-class", exactSampleCounts: {} },
+  });
+  assert.equal(result.bucket, "comparable-multi-worker");
+  assert.equal(result.scope, "exact-class");
+});
+
+test("classifyDecisionReadiness: two Workers with task-family scope is comparable", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const w2 = { provider: "deepseek", model: "v4", runtime: "c", effort: "medium" };
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [w1, w2],
+    selectedWorker: w2,
+    selectedBecause: { code: "main-judgment", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "task-family", exactSampleCounts: {}, familySampleCounts: {} },
+  });
+  assert.equal(result.bucket, "comparable-multi-worker");
+  assert.equal(result.scope, "task-family");
+});
+
+test("classifyDecisionReadiness: two Workers with scope none is unknown multi-Worker", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const w2 = { provider: "anthropic", model: "opus-4.8", runtime: "c", effort: "high" };
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [w1, w2],
+    selectedWorker: w1,
+    selectedBecause: { code: "main-judgment", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+  });
+  assert.equal(result.bucket, "unknown-multi-worker");
+  assert.strictEqual(result.scope, undefined);
+});
+
+test("classifyDecisionReadiness: missing shortlist returns unusable without throwing", () => {
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: null as unknown as never[],
+    selectedWorker: { provider: "x", model: "m", runtime: "r", effort: "e" },
+    selectedBecause: { code: "x", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+  } as unknown as import("../src/core/types.js").RoutingDecisionSnapshot);
+  assert.equal(result.bucket, "unusable");
+});
+
+test("classifyDecisionReadiness: empty shortlist returns unusable", () => {
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [],
+    selectedWorker: { provider: "x", model: "m", runtime: "r", effort: "e" },
+    selectedBecause: { code: "x", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+  });
+  assert.equal(result.bucket, "unusable");
+});
+
+test("classifyDecisionReadiness: malformed scope returns unusable", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const w2 = { provider: "deepseek", model: "v4", runtime: "c", effort: "medium" };
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [w1, w2],
+    selectedWorker: w1,
+    selectedBecause: { code: "x", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "unknown-value", exactSampleCounts: {} },
+  } as unknown as import("../src/core/types.js").RoutingDecisionSnapshot);
+  assert.equal(result.bucket, "unusable");
+});
+
+test("classifyDecisionReadiness: workers with empty-string identity fields become unusable", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const w2 = { provider: "", model: "m", runtime: "r", effort: "e" };
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [w1, w2],
+    selectedWorker: w1,
+    selectedBecause: { code: "x", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "exact-class", exactSampleCounts: {} },
+  });
+  // A partially malformed shortlist is not silently narrowed to one Worker.
+  assert.equal(result.bucket, "unusable");
+});
+
+test("classifyDecisionReadiness: duplicate Worker identities are unusable", () => {
+  const worker = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [worker, { ...worker, workerProfileId: "another-profile" }],
+    selectedWorker: worker,
+    selectedBecause: { code: "x", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "exact-class", exactSampleCounts: {} },
+  });
+  assert.equal(result.bucket, "unusable");
+});
+
+test("classifyDecisionReadiness: single Worker with malformed scope is unusable", () => {
+  const worker = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [worker],
+    selectedWorker: worker,
+    selectedBecause: { code: "x", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: undefined as unknown as { scope: "none"; exactSampleCounts: Record<string, number> },
+  });
+  assert.equal(result.bucket, "unusable");
+});
+
+test("classifyDecisionReadiness: scope none still returns unknown-multi-worker for 2+ valid workers", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const w2 = { provider: "deepseek", model: "v4", runtime: "c", effort: "medium" };
+  const result: ClassifiedDecision = classifyDecisionReadiness({
+    taskFamily: "t",
+    shortlist: [w1, w2],
+    selectedWorker: w1,
+    selectedBecause: { code: "x", note: "p" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+  });
+  assert.equal(result.bucket, "unknown-multi-worker");
+});
+
+test("coverage readiness buckets sum to withCompleteRoutingDecisionCount", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const w2 = { provider: "deepseek", model: "v4", runtime: "c", effort: "medium" };
+  const tasks = [
+    coverageTask("single", "succeeded", {
+      taskClass: "c",
+      taskFamily: "f",
+      routingDecision: {
+        taskFamily: "f",
+        shortlist: [w1],
+        selectedWorker: w1,
+        selectedBecause: { code: "user-specified", note: "p" },
+        competition: { intent: "none", triggers: [] },
+        evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+      },
+    }),
+    coverageTask("comparable-exact", "succeeded", {
+      taskClass: "c",
+      taskFamily: "f",
+      routingDecision: {
+        taskFamily: "f",
+        shortlist: [w1, w2],
+        selectedWorker: w1,
+        selectedBecause: { code: "evidence", note: "p" },
+        competition: { intent: "none", triggers: [] },
+        evidenceSnapshot: { scope: "exact-class", exactSampleCounts: {} },
+      },
+    }),
+    coverageTask("comparable-family", "succeeded", {
+      taskClass: "c",
+      taskFamily: "f",
+      routingDecision: {
+        taskFamily: "f",
+        shortlist: [w1, w2],
+        selectedWorker: w2,
+        selectedBecause: { code: "evidence", note: "p" },
+        competition: { intent: "none", triggers: [] },
+        evidenceSnapshot: { scope: "task-family", exactSampleCounts: {}, familySampleCounts: {} },
+      },
+    }),
+    coverageTask("unknown-multi", "succeeded", {
+      taskClass: "c",
+      taskFamily: "f",
+      routingDecision: {
+        taskFamily: "f",
+        shortlist: [w1, w2],
+        selectedWorker: w1,
+        selectedBecause: { code: "main-judgment", note: "p" },
+        competition: { intent: "none", triggers: [] },
+        evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+      },
+    }),
+    coverageTask("unusable", "succeeded", {
+      taskClass: "c",
+      taskFamily: "f",
+      routingDecision: {
+        taskFamily: "f",
+        shortlist: [],
+        selectedWorker: w1,
+        selectedBecause: { code: "x", note: "p" },
+        competition: { intent: "none", triggers: [] },
+        evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+      },
+    }),
+  ];
+  const coverage = computeRoutingEvidenceCoverage(tasks);
+  assert.equal(coverage.withCompleteRoutingDecisionCount, 5);
+  assert.equal(coverage.singleWorkerDecisionCount, 1);
+  assert.equal(coverage.comparableMultiWorkerDecisionCount, 2);
+  assert.equal(coverage.comparableExactClassDecisionCount, 1);
+  assert.equal(coverage.comparableTaskFamilyDecisionCount, 1);
+  assert.equal(coverage.unknownMultiWorkerDecisionCount, 1);
+  assert.equal(coverage.unusableDecisionCount, 1);
+  // Invariant: sum of buckets equals complete decisions
+  assert.equal(
+    coverage.singleWorkerDecisionCount
+      + coverage.comparableMultiWorkerDecisionCount
+      + coverage.unknownMultiWorkerDecisionCount
+      + coverage.unusableDecisionCount,
+    coverage.withCompleteRoutingDecisionCount,
+  );
+  // Invariant: comparable sub-counts sum to comparable multi-Worker
+  assert.equal(
+    coverage.comparableExactClassDecisionCount + coverage.comparableTaskFamilyDecisionCount,
+    coverage.comparableMultiWorkerDecisionCount,
+  );
+});
+
+test("coverage readiness: scope exact-class with single worker is never comparable", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const tasks = [
+    coverageTask("only-one", "succeeded", {
+      taskClass: "c",
+      taskFamily: "f",
+      routingDecision: {
+        taskFamily: "f",
+        shortlist: [w1],
+        selectedWorker: w1,
+        selectedBecause: { code: "only-available", note: "p" },
+        competition: { intent: "none", triggers: [] },
+        evidenceSnapshot: { scope: "exact-class", exactSampleCounts: {} },
+      },
+    }),
+  ];
+  const coverage = computeRoutingEvidenceCoverage(tasks);
+  assert.equal(coverage.singleWorkerDecisionCount, 1);
+  assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unknownMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unusableDecisionCount, 0);
+});
+
+test("coverage readiness: no routingDecision means zero readiness-bucket counts", () => {
+  const tasks = [
+    coverageTask("legacy", "succeeded", {
+      taskClass: "c",
+      taskFamily: "f",
+    }),
+  ];
+  const coverage = computeRoutingEvidenceCoverage(tasks);
+  assert.equal(coverage.eligibleTerminalTaskCount, 1);
+  assert.equal(coverage.withCompleteRoutingDecisionCount, 0);
+  assert.equal(coverage.singleWorkerDecisionCount, 0);
+  assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unknownMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unusableDecisionCount, 0);
+});
+
+test("coverage readiness: no labels means no complete decisions and no readiness counts", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const tasks = [
+    coverageTask("no-labels", "succeeded", {
+      routingDecision: {
+        shortlist: [w1],
+        selectedWorker: w1,
+        selectedBecause: { code: "x", note: "p" },
+        competition: { intent: "none", triggers: [] },
+        evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+      },
+    }),
+  ];
+  const coverage = computeRoutingEvidenceCoverage(tasks);
+  assert.equal(coverage.withCompleteRoutingDecisionCount, 0);
+  assert.equal(coverage.singleWorkerDecisionCount, 0);
+  assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+});
+
+test("coverage readiness: malformed routingDecision with missing evidenceSnapshot is unusable", () => {
+  const w1 = { provider: "xai", model: "grok-4.5", runtime: "g", effort: "high" };
+  const w2 = { provider: "deepseek", model: "v4", runtime: "c", effort: "medium" };
+  const tasks = [
+    coverageTask("malformed", "succeeded", {
+      taskClass: "c",
+      taskFamily: "f",
+      routingDecision: {
+        taskFamily: "f",
+        shortlist: [w1, w2],
+        selectedWorker: w1,
+        selectedBecause: { code: "x", note: "p" },
+        competition: { intent: "none", triggers: [] },
+        // evidenceSnapshot is missing entirely
+        evidenceSnapshot: undefined as unknown as { scope: string; exactSampleCounts: Record<string, number> },
+      },
+    }),
+  ];
+  const coverage = computeRoutingEvidenceCoverage(tasks);
+  assert.equal(coverage.withCompleteRoutingDecisionCount, 1);
+  assert.equal(coverage.singleWorkerDecisionCount, 0);
+  assert.equal(coverage.comparableMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unknownMultiWorkerDecisionCount, 0);
+  assert.equal(coverage.unusableDecisionCount, 1, "missing evidenceSnapshot is unusable, not guessed");
+});
+
+test("classifyDecisionReadiness: four outcomes are exhaustive for well-formed inputs", () => {
+  const buckets: DecisionReadinessBucket[] = ["single-worker", "comparable-multi-worker", "unknown-multi-worker", "unusable"];
+  const seen = new Set<string>();
+  for (const bucket of buckets) {
+    assert.ok(typeof bucket === "string" && bucket.length > 0);
+    assert.ok(!seen.has(bucket), `duplicate bucket: ${bucket}`);
+    seen.add(bucket);
+  }
+  assert.equal(seen.size, 4, "exactly four mutually exclusive readiness buckets exist");
 });

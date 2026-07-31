@@ -848,12 +848,14 @@ test("Hub Insights routing-evidence coverage is isolated, bilingual, and non-ran
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
 
-  // Isolated poll — must not sit inside the all-ops Promise.all
-  assert.ok(src.includes("function pollRoutingCoverage"), "isolated coverage poll helper");
+  // Isolated slice; must not sit inside a global all-ops Promise.all
+  assert.ok(src.includes("SLICE_MAP"), "page dependency map exists");
+  assert.ok(src.includes("fetchSlice"), "generic isolated slice fetcher");
+  assert.ok(src.includes("routingCoverage"), "routing coverage slice key in map");
   assert.ok(src.includes("/api/ops/routing-evidence-coverage"), "bridge URL on the wire");
   assert.ok(src.includes("S.routingCoverage"), "cached coverage state");
   assert.ok(src.includes("S.routingCoverageError"), "isolated failure state");
-  assert.match(src, /Promise\.all\(\[hubP\.catch\([\s\S]*?opsP,\s*econP,\s*recP,\s*sueP\]/);
+  assert.ok(!src.match(/Promise\.all\(\[[\s\S]*fetchJSON.*ops\/board[\s\S]*fetchJSON.*ops\/tasks[\s\S]*fetchJSON.*ops\/competitions[\s\S]*fetchJSON.*ops\/stats[\s\S]*fetchJSON.*ops\/settings[\s\S]*fetchJSON.*ops\/sample-task[\s\S]*fetchJSON.*ops\/goals/), "no bulk all-endpoint Promise.all with 8 ops");
 
   // Renderer + states
   assert.ok(src.includes("function renderRoutingCoverage"), "coverage renderer");
@@ -873,6 +875,15 @@ test("Hub Insights routing-evidence coverage is isolated, bilingual, and non-ran
   const econIdx = rStatsBlock.indexOf("renderPortfolioEconomics");
   const statsSectionIdx = rStatsBlock.indexOf("statsProviderSectionTitle");
   assert.ok(recIdx > 0, "rStats renders routing coverage");
+
+  // Main-direct decisions panel
+  assert.ok(src.includes('data-fl-role", "main-direct-decisions"'), "main-direct decisions panel marker");
+  assert.ok(src.includes('data-fl-role", "main-direct-panel"'), "main-direct panel marker");
+  assert.ok(src.includes('data-fl-role", "main-direct-counts"'), "main-direct counts marker");
+  assert.ok(src.includes('data-fl-role", "main-direct-recent-entry"'), "main-direct recent entry marker");
+  assert.ok(src.includes("function renderMainDirectDecisions"), "main-direct renderer");
+  assert.ok(src.includes("function renderMainDirectDecisionsUnavailable"), "main-direct unavailable renderer");
+  assert.ok(rStatsBlock.indexOf("renderMainDirectDecisions") > 0, "rStats renders main-direct decisions");
   assert.ok(econIdx > recIdx, "coverage appears before economics");
   assert.ok(statsSectionIdx > recIdx, "coverage appears before provider outcome cards");
   // Backend owns counts — browser must not recompute ratios or eligibility
@@ -884,11 +895,25 @@ test("Hub Insights routing-evidence coverage is isolated, bilingual, and non-ran
   assert.ok(!recRenderBlock.includes("progressbar") && !recRenderBlock.includes("progress-bar"),
     "no progress bar for coverage");
   assert.ok(!/model-rank|auto(?:matic)?\s+competition/i.test(recRenderBlock));
+  // Two-section layout: traceability then comparison readiness
+  assert.ok(recRenderBlock.includes("recTraceHeading"), "traceability heading present");
+  assert.ok(recRenderBlock.includes("recReadinessHeading"), "comparison readiness heading present");
+  assert.ok(recRenderBlock.includes("routing-readiness-counts"), "readiness counts section exists");
+  assert.ok(recRenderBlock.includes("routing-comparable-subcounts"), "comparable sub-counts section exists");
 
-  // Bilingual keys: meaning, four counts, caveat, next actions, unavailable
+  // Bilingual keys: meaning, four counts, caveat, next actions, unavailable,
+  // plus new readiness keys
   const recKeys = [
     "recTitle", "recMeaning", "recTotalLabel", "recClassLabel", "recFamilyLabel",
-    "recDecisionLabel", "recDiversity", "recCaveat", "recEmpty", "recEmptyNext",
+    "recDecisionLabel", "recDiversity",
+    "recTraceHeading", "recTraceExplain",
+    "recReadinessHeading",
+    "recSingleWorkerLabel", "recSingleWorkerExplain",
+    "recComparableLabel", "recComparableExplain",
+    "recUnknownLabel", "recUnknownExplain",
+    "recUnusableLabel", "recUnusableExplain",
+    "recComparableSubcounts", "recNoDecisionsToCompare",
+    "recCaveat", "recEmpty", "recEmptyNext",
     "recPartial", "recPartialNext", "recComplete", "recCompleteNext",
     "recLoading", "recUnavailableBridgeHint", "recUnavailableUnknown",
   ];
@@ -927,6 +952,50 @@ test("Hub Insights routing-evidence coverage is isolated, bilingual, and non-ran
   assert.ok(zhUnavailable.includes("任务服务"), "zh bridge uses 任务服务");
   assert.ok(!zhUnavailable.includes("Daemon"), "zh bridge avoids Daemon jargon");
 
+  // New readiness copy: bilingual traceability vs fair comparison
+  const enTrace = enSection.match(/recTraceExplain:\s*"([^"]+)"/)?.[1] ?? "";
+  const zhTrace = zhSection.match(/recTraceExplain:\s*"([^"]+)"/)?.[1] ?? "";
+  assert.ok(/traceable record/i.test(enTrace), "en trace explains traceability");
+  assert.ok(/prerequisite/i.test(enTrace), "en trace distinguishes record from comparison");
+  assert.ok(zhTrace.includes("可追溯"), "zh trace says 可追溯");
+  assert.ok(zhTrace.includes("前提") || zhTrace.includes("公平比较"), "zh trace distinguishes record from comparison");
+
+  const enSingleExplain = enSection.match(/recSingleWorkerExplain:\s*"([^"]+)"/)?.[1] ?? "";
+  const zhSingleExplain = zhSection.match(/recSingleWorkerExplain:\s*"([^"]+)"/)?.[1] ?? "";
+  assert.ok(/intentional/i.test(enSingleExplain) || /valid cost/i.test(enSingleExplain) || /cost-saving/i.test(enSingleExplain),
+    "en single-Worker is intentional, not failure");
+  assert.ok(!/missed comparison|failure|incomplete/i.test(enSingleExplain),
+    "en single-Worker is not described as failure");
+  assert.ok(zhSingleExplain.includes("有意") || zhSingleExplain.includes("节省成本") || zhSingleExplain.includes("不是"),
+    "zh single-Worker is described as intentional");
+  assert.ok(!zhSingleExplain.includes("遗漏") && !zhSingleExplain.includes("失败"),
+    "zh single-Worker is not described as missed comparison");
+
+  const enUnknownExplain = enSection.match(/recUnknownExplain:\s*"([^"]+)"/)?.[1] ?? "";
+  const zhUnknownExplain = zhSection.match(/recUnknownExplain:\s*"([^"]+)"/)?.[1] ?? "";
+  assert.ok(/not.*(?:ranking|tie|automatic)/i.test(enUnknownExplain),
+    "en unknown is not a ranking, tie, or automatic result");
+  assert.ok(/Main judgment/i.test(enUnknownExplain),
+    "en unknown labels it Main judgment");
+  assert.ok((zhUnknownExplain.includes("Main") || zhUnknownExplain.includes("判断")),
+    "zh unknown states Main 判断");
+  // The text explicitly rejects ranking/tie/automatic — verify those denials exist
+  assert.ok(zhUnknownExplain.includes("不是模型排名"), "zh unknown rejects model ranking");
+  assert.ok(zhUnknownExplain.includes("不是平局"), "zh unknown rejects tie claim");
+  assert.ok(zhUnknownExplain.includes("不是自动"), "zh unknown rejects automatic claim");
+  // No positive ranking/winner claims anywhere in the readiness copy
+  assert.ok(!/winner|best.?model|automatic.?choice|Competition.?ran/i.test(enUnknownExplain),
+    "en unknown has no winner/best-model/automatic/Competition claims");
+
+  // Assert no winner / best-model / automatic-choice / Competition-ran copy exists
+  for (const section of [enSection, zhSection]) {
+    const recBlock = section.slice(section.indexOf("recTitle:"), section.indexOf("econEvidenceSectionTitle:"));
+    assert.ok(!/\bwinner\b/i.test(recBlock), "no winner claim in coverage copy");
+    assert.ok(!/\bbest.?model\b/i.test(recBlock), "no best-model claim in coverage copy");
+    assert.ok(!/\bautomatic.?choice\b/i.test(recBlock), "no automatic-choice claim in coverage copy");
+    assert.ok(!/\bCompetition.?ran\b/i.test(recBlock), "no Competition-ran claim in coverage copy");
+  }
+
   // Privacy: user-facing copy must not expose raw internal field codes
   for (const section of [enSection, zhSection]) {
     const recBlock = section.slice(section.indexOf("recTitle:"), section.indexOf("econEvidenceSectionTitle:"));
@@ -940,7 +1009,7 @@ test("Hub Insights economics summary renderer exposes truthful evidence", async 
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   // Polling and bridge surface
-  assert.ok(src.includes("pollEconomics"), "isolated economics poll helper");
+  assert.ok(src.includes("economics"), "economics slice key in dependency map");
   assert.ok(src.includes("/api/ops/economics-summary"), "bridge URL on the wire");
   assert.ok(src.includes("S.economics"), "cached summary state");
   assert.ok(src.includes("S.economicsError"), "isolated failure state");
@@ -1626,26 +1695,47 @@ test("Hub Task-list adapter preserves the compact remediation disposition only",
   const adapterBlock = serverSrc.slice(adapterIdx, adapterEnd > 0 ? adapterEnd : serverSrc.length);
   assert.ok(adapterBlock.includes("list_summaries"),
     "adapter reads daemon list_summaries projection");
+  // The adapter delegates to the shared compact projection so recent Tasks
+  // and History share one privacy boundary (no inline duplicate mapping).
+  assert.ok(adapterBlock.includes("projectCompactTaskSummary"),
+    "adapter delegates to the shared compact Task projection");
+
+  // The shared compact projection method carries the verified-repaired-delivered
+  // allowlist and the privacy boundary (not the route block).
+  const methodIdx = serverSrc.indexOf("projectCompactTaskSummary(t");
+  assert.ok(methodIdx > 0, "shared compact projection method exists");
+  const braceStart = serverSrc.indexOf("{", methodIdx);
+  assert.ok(braceStart > 0, "method opening brace located");
+  let depth = 0;
+  let methodEnd = braceStart;
+  for (let i = braceStart; i < serverSrc.length; i += 1) {
+    if (serverSrc[i] === "{") depth += 1;
+    if (serverSrc[i] === "}") {
+      depth -= 1;
+      if (depth === 0) { methodEnd = i; break; }
+    }
+  }
+  const methodBlock = serverSrc.slice(methodIdx, methodEnd + 1);
   // Compact shape: only status / checkId / createdAt are accepted.
-  assert.ok(adapterBlock.includes('"verified-repaired-delivered"'),
-    "adapter requires verified-repaired-delivered status");
-  assert.ok(adapterBlock.includes("checkId"),
-    "adapter preserves checkId");
-  assert.ok(adapterBlock.includes("createdAt"),
-    "adapter preserves createdAt");
-  // Privacy boundary: forbidden fields never appear in the safe Task-list shape.
-  assert.ok(!adapterBlock.includes("remediationReason"),
+  assert.ok(methodBlock.includes('"verified-repaired-delivered"'),
+    "shared projection requires verified-repaired-delivered status");
+  assert.ok(methodBlock.includes("checkId"),
+    "shared projection preserves checkId");
+  assert.ok(methodBlock.includes("createdAt"),
+    "shared projection preserves createdAt");
+  // Privacy boundary: forbidden fields never appear in the safe Task shape.
+  assert.ok(!methodBlock.includes("remediationReason"),
     "no remediation reason leaked");
-  assert.ok(!adapterBlock.includes("remediationCommand"),
+  assert.ok(!methodBlock.includes("remediationCommand"),
     "no remediation command leaked");
-  assert.ok(!adapterBlock.includes("remediationOutput"),
+  assert.ok(!methodBlock.includes("remediationOutput"),
     "no remediation output leaked");
-  assert.ok(!adapterBlock.includes("remediationPrompt"),
+  assert.ok(!methodBlock.includes("remediationPrompt"),
     "no remediation prompt leaked");
-  assert.ok(!adapterBlock.includes("sourcePath"),
-    "no sourcePath leaked in the list");
+  assert.ok(!methodBlock.includes("sourcePath"),
+    "no sourcePath leaked in the projection");
   // The adapter must not let the disposition overwrite machine status.
-  assert.ok(adapterBlock.includes("t.status"),
+  assert.ok(methodBlock.includes("t.status"),
     "machine status still emitted alongside disposition");
 });
 
@@ -1922,18 +2012,22 @@ test("Hub board activity maps quiet silence age without inventing machine status
   assert.ok(src.includes("function boardActivityBadge"), "board activity badge is shipped");
   assert.ok(src.includes("5 * 60 * 1000"), "stall threshold is five minutes of silence");
   assert.ok(src.includes('stalled: "taskActivityStalled"'), "stalled uses i18n key");
+  // Long quiet must not use error styling — silence is not failure.
+  const badgeSource = extractFunctionSource(src, "boardActivityBadge");
+  assert.ok(!badgeSource.includes('badge-err'), "long quiet must not render as error badge");
   for (const key of [
     "taskActivityActive", "taskActivityQuiet", "taskActivityStalled",
     "taskProgressRunningQuiet", "taskProgressRunningStalled",
   ]) {
     assert.ok(i18n.includes(key + ":"), `i18n has ${key}`);
   }
-  assert.ok(i18n.includes("较长时间无进展"), "zh stalled copy is plain language");
-  assert.ok(i18n.includes("no progress for a while"), "en stalled copy is plain language");
+  assert.ok(i18n.includes("较长时间没有新证据"), "zh long-quiet copy is plain language");
+  assert.ok(i18n.includes("no new evidence for a while"), "en long-quiet copy is plain language");
   // Execute the pure kind classifier against synthetic progress cursors.
+  const liveStageSource = extractFunctionSource(src, "taskLiveStage");
   const kindSource = extractFunctionSource(src, "boardActivityKind");
   const boardActivityKind = new Function(
-    `${kindSource}\nreturn boardActivityKind;`,
+    `${liveStageSource}\n${kindSource}\nreturn boardActivityKind;`,
   )() as (task: Record<string, unknown>) => string | null;
   assert.equal(boardActivityKind({ progress: { activity: "active" } }), "active");
   assert.equal(boardActivityKind({ progress: { activity: "quiet" } }), "quiet");
@@ -1949,19 +2043,193 @@ test("Hub board activity maps quiet silence age without inventing machine status
     boardActivityKind({ progress: { activity: "quiet", lastEventAt: recent } }),
     "quiet",
   );
+  // Canonical liveStage observation is preferred when present.
+  assert.equal(
+    boardActivityKind({
+      progress: {
+        activity: "active",
+        liveStage: { stage: "model-responding", observation: "quiet", meaning: "normal", next: "wait-for-new-evidence", evidence: "model-activity" },
+      },
+    }),
+    "quiet",
+  );
+});
+
+test("Hub live-stage helpers translate closed codes without recomputing lifecycle", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  for (const name of [
+    "taskLiveStage", "liveStageNowText", "liveStageMeaningText", "liveStageNextText",
+    "liveStageCompactText", "liveStageDetailText",
+  ]) {
+    assert.ok(src.includes(`function ${name}(`), `${name} must exist`);
+  }
+  for (const key of [
+    "liveStageNowWaitingModel", "liveStageNowModelProcessing", "liveStageNowModelResponding",
+    "liveStageNowUsingTool", "liveStageNowVerifying", "liveStageNowFailed",
+    "liveStageMeaningProcessing", "liveStageMeaningQuiet", "liveStageCompact", "liveStageDetail", "taskTechnicalLiveStage",
+  ]) {
+    assert.ok(i18n.includes(key + ":"), `i18n has ${key}`);
+  }
+  assert.ok(i18n.includes("Waiting for the model"), "en waiting-for-model copy");
+  assert.ok(i18n.includes("正在等待模型"), "zh waiting-for-model copy");
+  assert.ok(i18n.includes("Model is processing"), "en model-processing copy");
+  assert.ok(i18n.includes("模型正在处理"), "zh model-processing copy");
+  assert.ok(i18n.includes("useful output is not confirmed yet"), "en processing avoids claiming delivery progress");
+  assert.ok(i18n.includes("还不能说明已经产出有效结果"), "zh processing avoids claiming delivery progress");
+  assert.ok(i18n.includes("No new update is visible"), "en quiet says no new update is visible");
+  assert.ok(i18n.includes("看不到新的更新"), "zh quiet says no new update is visible");
+  assert.ok(i18n.includes("不等于失败"), "zh quiet is not a failure");
+  assert.ok(i18n.includes("never starts a retry"), "en quiet never retries");
+  assert.ok(i18n.includes("不会自动重试"), "zh quiet never retries");
+  // Follow-up stage bilingual copy: explicitly says "without another Worker".
+  assert.ok(i18n.includes("liveStageNowCandidateReverifying"), "i18n has candidate reverifying key");
+  assert.ok(i18n.includes("liveStageNowRemediationChecking"), "i18n has remediation checking key");
+  assert.ok(i18n.includes("liveStageNextReverification"), "i18n has reverification next key");
+  assert.ok(i18n.includes("liveStageNextRemediation"), "i18n has remediation next key");
+  assert.ok(i18n.includes("without another Worker"), "en follow-up copy says without another Worker");
+  assert.ok(i18n.includes("不会再次调用 Worker"), "zh follow-up copy says without another Worker");
+
+  const helpers = [
+    "taskLiveStage", "liveStageNowText", "liveStageMeaningText", "liveStageNextText",
+    "liveStageCompactText", "liveStageDetailText",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const liveStageCompactText = new Function(
+    "t",
+    `${helpers}\nreturn liveStageCompactText;`,
+  )((key: string, vars?: Record<string, string>) => {
+    if (key === "liveStageCompact") {
+      return `${vars?.now}. ${vars?.meaning}. ${vars?.next}.`;
+    }
+    return key;
+  }) as (live: Record<string, unknown>) => string;
+  const compact = liveStageCompactText({
+    stage: "using-tool",
+    observation: "active",
+    meaning: "normal",
+    next: "wait-for-tool-result",
+    evidence: "tool-lifecycle",
+  });
+  assert.ok(compact.includes("liveStageNowUsingTool"));
+  assert.ok(compact.includes("liveStageMeaningActive"));
+  assert.ok(compact.includes("liveStageNextTool"));
+  // UI must not invent failure from quiet observation.
+  const quietCompact = liveStageCompactText({
+    stage: "model-responding",
+    observation: "quiet",
+    meaning: "normal",
+    next: "wait-for-new-evidence",
+    evidence: "model-activity",
+  });
+  assert.ok(quietCompact.includes("liveStageMeaningQuiet"));
+  assert.ok(!quietCompact.toLowerCase().includes("failed"));
+});
+
+test("Hub live-stage meaning is stage-aware across active, waiting, completed, quiet, and attention", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const helpers = [
+    "liveStageNowText", "liveStageMeaningText", "liveStageNextText",
+    "liveStageCompactText",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const translate = (key: string) => key;
+  const meaning = new Function("t", `${helpers}\nreturn liveStageMeaningText;`)(
+    translate,
+  ) as (meaning: string, observation: string, stage: string) => string;
+  const nowText = new Function("t", `${helpers}\nreturn liveStageNowText;`)(
+    translate,
+  ) as (stage: string) => string;
+  const nextText = new Function("t", `${helpers}\nreturn liveStageNextText;`)(
+    translate,
+  ) as (next: string) => string;
+  const compactText = new Function("t", `${helpers}\nreturn liveStageCompactText;`)(
+    (key: string, vars?: Record<string, string>) =>
+      key === "liveStageCompact" ? `${vars?.now}. ${vars?.meaning}. ${vars?.next}.` : key,
+  ) as (live: Record<string, unknown>) => string;
+
+  // Processing reports runtime activity without claiming useful output.
+  assert.equal(
+    meaning("normal", "active", "model-processing"),
+    "liveStageMeaningProcessing",
+  );
+  // Other active progress stages say progress is normal, never that waiting is normal.
+  for (const stage of ["model-responding", "using-tool", "verifying", "worker-finished", "legacy-running"]) {
+    assert.equal(
+      meaning("normal", "active", stage),
+      "liveStageMeaningActive",
+      `${stage} active says progress is normal`,
+    );
+  }
+  // Ordinary waiting stages say waiting is normal.
+  for (const stage of ["queued", "preparing-workspace", "waiting-for-model", "unknown"]) {
+    assert.equal(
+      meaning("normal", "active", stage),
+      "liveStageMeaningWaiting",
+      `${stage} active says waiting is normal`,
+    );
+  }
+  // Completion says Worker work is finished (not normal waiting).
+  assert.equal(meaning("normal", "terminal", "completed"), "liveStageMeaningCompleted");
+  // Quiet observation always says no new update is visible, regardless of stage.
+  assert.equal(meaning("normal", "quiet", "model-responding"), "liveStageMeaningQuiet");
+  assert.equal(meaning("normal", "quiet", "worker-finished"), "liveStageMeaningQuiet");
+  // Failed/interrupted still require explicit failure evidence.
+  assert.equal(meaning("attention", "terminal", "failed"), "liveStageMeaningAttention");
+  assert.equal(meaning("attention", "terminal", "interrupted"), "liveStageMeaningAttention");
+
+  // The Worker-finished transition exposes its own now/next closed codes.
+  assert.equal(nowText("worker-finished"), "liveStageNowWorkerFinished");
+  assert.equal(nextText("wait-for-verification-start"), "liveStageNextVerificationStart");
+  const workerFinishedCompact = compactText({
+    stage: "worker-finished",
+    observation: "active",
+    meaning: "normal",
+    next: "wait-for-verification-start",
+    evidence: "terminal",
+  });
+  assert.ok(workerFinishedCompact.includes("liveStageNowWorkerFinished"));
+  assert.ok(workerFinishedCompact.includes("liveStageMeaningActive"));
+  assert.ok(workerFinishedCompact.includes("liveStageNextVerificationStart"));
+  assert.ok(!workerFinishedCompact.includes("liveStageNowWaitingModel"));
+
+  // Bilingual frozen copy exists for every stage-aware category and the new stage.
+  for (const key of [
+    "liveStageMeaningActive", "liveStageMeaningWaiting", "liveStageMeaningCompleted",
+    "liveStageMeaningQuiet", "liveStageMeaningAttention",
+    "liveStageNowWorkerFinished", "liveStageNextVerificationStart",
+  ]) {
+    assert.ok(i18n.includes(key + ":"), `i18n has ${key}`);
+  }
+});
+
+test("Hub live-stage copy never says durable event or 持久事件", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  assert.ok(!i18n.includes("durable event"), "en live-stage copy drops durable event");
+  assert.ok(!i18n.includes("持久事件"), "zh live-stage copy drops 持久事件");
+  // Ordinary waiting now asks for the next visible update in both languages.
+  assert.ok(i18n.includes("a new visible update"), "en next-step asks for the next visible update");
+  assert.ok(i18n.includes("等待下一次可见更新"), "zh next-step asks for the next visible update");
 });
 
 test("Hub task summary follows the end-to-end stage after machine verification", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const progressSource = extractFunctionSource(src, "taskProgressSummary");
   const finalDeliverySource = extractFunctionSource(src, "hasVerifiedFinalDelivery");
-  const boardKindSource = extractFunctionSource(src, "boardActivityKind");
+  const liveHelpers = [
+    "taskLiveStage", "liveStageNowText", "liveStageMeaningText", "liveStageNextText",
+    "liveStageCompactText", "liveStageDetailText", "boardActivityKind",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
   const summarize = new Function(
     "t",
     "preparationProgressText",
-    `${boardKindSource}\n${finalDeliverySource}\n${progressSource}\nreturn taskProgressSummary;`,
+    `${liveHelpers}\n${finalDeliverySource}\n${progressSource}\nreturn taskProgressSummary;`,
   )(
-    (key: string) => key,
+    (key: string, vars?: Record<string, string>) => {
+      if (key === "liveStageCompact") {
+        return `LIVE:${vars?.now}`;
+      }
+      return key;
+    },
     () => "preparing",
   ) as (task: Record<string, unknown>) => string;
 
@@ -1986,6 +2254,22 @@ test("Hub task summary follows the end-to-end stage after machine verification",
   assert.equal(
     summarize({ status: "running", progress: { activity: "active" } }),
     "taskProgressRunning",
+  );
+  assert.equal(
+    summarize({
+      status: "running",
+      progress: {
+        activity: "active",
+        liveStage: {
+          stage: "using-tool",
+          observation: "active",
+          meaning: "normal",
+          next: "wait-for-tool-result",
+          evidence: "tool-lifecycle",
+        },
+      },
+    }),
+    "LIVE:liveStageNowUsingTool",
   );
   assert.equal(
     summarize({ status: "succeeded", decisionStage: "ready-for-integration" }),
@@ -2052,6 +2336,87 @@ test("Hub task summary follows the end-to-end stage after machine verification",
   assert.ok(i18n.includes(
     'journeyNextReadyIntegrate: "Main accepted the result. It is waiting for your authorization to integrate."',
   ));
+});
+
+test("Hub task summary shows follow-up live stage on terminal Tasks", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const progressSource = extractFunctionSource(src, "taskProgressSummary");
+  const finalDeliverySource = extractFunctionSource(src, "hasVerifiedFinalDelivery");
+  const liveHelpers = [
+    "taskLiveStage", "liveStageNowText", "liveStageMeaningText", "liveStageNextText",
+    "liveStageCompactText", "liveStageDetailText", "boardActivityKind",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const summarize = new Function(
+    "t",
+    "preparationProgressText",
+    `${liveHelpers}\n${finalDeliverySource}\n${progressSource}\nreturn taskProgressSummary;`,
+  )(
+    (key: string, vars?: Record<string, string>) => {
+      if (key === "liveStageCompact") {
+        return `LIVE:${vars?.now}`;
+      }
+      return key;
+    },
+    () => "preparing",
+  ) as (task: Record<string, unknown>) => string;
+
+  // Failed Task with open Candidate reverification: progress summary shows live stage.
+  const reverifyingSummary = summarize({
+    status: "failed",
+    decisionStage: "revision-requested",
+    progress: {
+      activity: "active",
+      liveStage: {
+        stage: "candidate-reverifying",
+        observation: "active",
+        meaning: "normal",
+        next: "wait-for-reverification-result",
+        evidence: "candidate-reverification",
+      },
+    },
+  });
+  assert.ok(reverifyingSummary.startsWith("LIVE:liveStageNowCandidateReverifying"),
+    "open reverification takes precedence over historical revision wording");
+
+  // Failed Task with open remediation check: progress summary shows live stage.
+  const remedSummary = summarize({
+    status: "failed",
+    progress: {
+      activity: "active",
+      liveStage: {
+        stage: "remediation-checking",
+        observation: "active",
+        meaning: "normal",
+        next: "wait-for-remediation-result",
+        evidence: "remediation-check",
+      },
+    },
+  });
+  assert.ok(remedSummary.startsWith("LIVE:liveStageNowRemediationChecking"),
+    "failed Task with open remediation shows follow-up live stage");
+
+  // Ordinary failed Task without follow-up stays on the standard progress message.
+  const ordinary = summarize({
+    status: "failed",
+  });
+  assert.equal(ordinary, "taskProgressFailed");
+
+  // Succeeded Task with open remediation check also shows live stage.
+  const succeededRemed = summarize({
+    status: "succeeded",
+    progress: {
+      activity: "active",
+      liveStage: {
+        stage: "remediation-checking",
+        observation: "active",
+        meaning: "normal",
+        next: "wait-for-remediation-result",
+        evidence: "remediation-check",
+      },
+    },
+  });
+  assert.ok(succeededRemed.startsWith("LIVE:liveStageNowRemediationChecking"),
+    "succeeded Task with open remediation shows follow-up live stage");
 });
 
 test("Hub final-delivery UI explains amended-acceptance without command text", async () => {
@@ -3147,28 +3512,35 @@ test("Hub top-level pages lead with purpose and share an input-process-output-ne
     "page-story role marker");
 
   // Top-level operate/configure pages bind the shared renderer (not keys alone).
-  const pageBindings: Array<{ page: string; renderer: string; denseMarker: string }> = [
-    { page: "overview", renderer: "rOverview", denseMarker: "rReadiness" },
-    { page: "board", renderer: "rTasks", denseMarker: "taskSubmitTitle" },
-    { page: "plans", renderer: "rPlans", denseMarker: "noPlans" },
-    { page: "goals", renderer: "rGoals", denseMarker: "noGoals" },
-    { page: "compete", renderer: "rCompetitions", denseMarker: "noCompetitions" },
-    { page: "insights", renderer: "rStats", denseMarker: "econEvidenceSectionTitle" },
-    { page: "models", renderer: "rModel", denseMarker: "modelCatalog" },
-    { page: "workers", renderer: "rWorker", denseMarker: "workerProfiles" },
-    { page: "main", renderer: "rMains", denseMarker: "mains" },
+  // Overview intentionally drops the page-story block in favor of operations-first layout.
+  const pageBindings: Array<{ page: string; renderer: string; denseMarker: string; hasPageStory: boolean }> = [
+    { page: "overview", renderer: "rOverview", denseMarker: "renderCompactReadiness", hasPageStory: false },
+    { page: "board", renderer: "rTasks", denseMarker: "taskSubmitTitle", hasPageStory: true },
+    { page: "plans", renderer: "rPlans", denseMarker: "noPlans", hasPageStory: true },
+    { page: "goals", renderer: "rGoals", denseMarker: "noGoals", hasPageStory: true },
+    { page: "compete", renderer: "rCompetitions", denseMarker: "noCompetitions", hasPageStory: true },
+    { page: "insights", renderer: "rStats", denseMarker: "econEvidenceSectionTitle", hasPageStory: true },
+    { page: "models", renderer: "rModel", denseMarker: "modelCatalog", hasPageStory: true },
+    { page: "workers", renderer: "rWorker", denseMarker: "workerProfiles", hasPageStory: true },
+    { page: "main", renderer: "rMains", denseMarker: "mains", hasPageStory: true },
   ];
-  for (const { page, renderer, denseMarker } of pageBindings) {
+  for (const { page, renderer, denseMarker, hasPageStory } of pageBindings) {
     const fnIdx = src.indexOf(`function ${renderer}()`);
     assert.ok(fnIdx > 0, `${renderer} present`);
     const nextFn = src.indexOf("\nfunction ", fnIdx + 1);
     const block = src.slice(fnIdx, nextFn > 0 ? nextFn : src.length);
     const storyCall = `renderPageStory("${page}")`;
-    assert.ok(block.includes(storyCall), `${renderer} calls ${storyCall}`);
-    const storyAt = block.indexOf(storyCall);
-    const denseAt = block.indexOf(denseMarker);
-    assert.ok(denseAt > 0, `${renderer} still renders dense content (${denseMarker})`);
-    assert.ok(storyAt < denseAt, `${renderer} places page story before dense content`);
+    if (hasPageStory) {
+      assert.ok(block.includes(storyCall), `${renderer} calls ${storyCall}`);
+      const storyAt = block.indexOf(storyCall);
+      const denseAt = block.indexOf(denseMarker);
+      assert.ok(denseAt > 0, `${renderer} still renders dense content (${denseMarker})`);
+      assert.ok(storyAt < denseAt, `${renderer} places page story before dense content`);
+    } else {
+      assert.ok(!block.includes(storyCall), `Overview intentionally drops page-story block`);
+      assert.ok(block.includes(denseMarker), `Overview renders compact readiness instead`);
+      assert.ok(block.includes("ov-live-strip"), "Overview leads with live state strip");
+    }
   }
 
   // Slot labels + every page x slot key in both locales.
@@ -3296,8 +3668,14 @@ test("Hub plan, competition, integration detail drawers consume localization key
   const planKeys = [
     "planDetailLoading", "planDetailExplain", "planDetailUpdated",
     "planLaneQueued", "planLaneActive", "planLaneBlocked", "planLaneFailed",
-    "planLaneCompleted", "planItemNotStarted", "planItemDepsStates",
+    "planLaneCompleted", "planItemNotStarted",
+    "planItemPositionReady", "planItemPositionWaitingFor",
+    "planItemPositionBlockedByFailed", "planItemUnlocks",
   ];
+  // Obsolete primary-copy key replaced by human-readable named-dependency
+  // presentation. Keep the key in i18n as a migration fallback, but the
+  // primary renderer no longer calls it.
+  assert.ok(i18n.includes("planItemDepsStates"), "legacy key survives in i18n");
   const compKeys = [
     "compDetailLoading", "compDetailExplain", "compDetailProgress",
     "compColCandidate", "compColProvider", "compColModel", "compColStatus",
@@ -4472,18 +4850,16 @@ test("Hub Overview version journey card renders three ordered layers, outcome, a
   assert.ok(src.includes("function versionJourneyView"), "pure adapter");
   assert.ok(src.includes("function versionJourneyTechnical"), "closed technical disclosure builder");
 
-  // The card is mounted in rOverview after readiness and before task metrics.
+  // The card is mounted in rOverview as a compact row, in secondary content.
   const ovStart = src.indexOf("function rOverview()");
   assert.ok(ovStart > 0, "rOverview present");
   const ovEnd = src.indexOf("\nfunction ", ovStart + 1);
   const ovBlock = src.slice(ovStart, ovEnd > 0 ? ovEnd : src.length);
-  const storyAt = ovBlock.indexOf('renderPageStory("overview")');
-  const readinessAt = ovBlock.indexOf("rReadiness()");
-  const cardAt = ovBlock.indexOf("renderVersionJourneyCard()");
-  const metricsAt = ovBlock.indexOf("metric(");
-  assert.ok(storyAt > 0 && readinessAt > storyAt, "page story before readiness");
-  assert.ok(cardAt > readinessAt, "version card after readiness");
-  assert.ok(metricsAt > cardAt, "version card before task metrics");
+  assert.ok(!ovBlock.includes('renderPageStory("overview")'), "Overview drops page story");
+  assert.ok(ovBlock.includes("renderCompactVersionRow"), "version renders as compact row");
+  assert.ok(ovBlock.includes("renderCompactReadiness"), "readiness renders as compact row");
+  assert.ok(ovBlock.indexOf("ov-live-strip") < ovBlock.indexOf("renderCompactReadiness"),
+    "live state strip leads before compact readiness");
 
   // Renderer block: three ordered layer rows, outcome, next action, disclosure.
   const cardFn = extractFunctionSource(src, "renderVersionJourneyCard");
@@ -4835,14 +5211,15 @@ test("Hub retained Candidate card consumes only the safe journey projection", as
     assert.ok(!renderer.includes(forbidden), `renderer does not consume private ${forbidden}`);
   }
 
+  const fourSectionFn = extractFunctionSource(src, "renderFourSectionOverview");
+  assert.ok(
+    fourSectionFn.includes("renderRetainedCandidate(task)"),
+    "Retained Candidate folded into Worker-returned section of four-section Overview",
+  );
   const workbench = extractFunctionSource(src, "renderTaskWorkbench");
   assert.ok(
-    workbench.includes("var overviewRetained = renderRetainedCandidate(task)"),
-    "Overview explains the retained Candidate",
-  );
-  assert.ok(
     workbench.includes("var resultRetained = renderRetainedCandidate(task)"),
-    "Result explains the retained Candidate",
+    "Result tab still explains the retained Candidate",
   );
 });
 
@@ -4938,11 +5315,11 @@ test("Hub Overview self-upgrade evidence card is bilingual, server-owned, and pr
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   const { enSection, zhSection } = splitI18n(i18n);
 
-  assert.ok(src.includes("function pollSelfUpgradeEvidence"), "isolated poll helper");
+  assert.ok(src.includes("selfUpgradeEvidence"), "self-upgrade evidence slice key in map");
   assert.ok(src.includes("/api/ops/self-upgrade-evidence"), "bridge URL on the wire");
   assert.ok(src.includes("S.selfUpgradeEvidence"), "cached projection state");
   assert.ok(src.includes("S.selfUpgradeEvidenceError"), "isolated failure state");
-  assert.match(src, /Promise\.all\(\[hubP\.catch\([\s\S]*?opsP,\s*econP,\s*recP,\s*sueP\]/);
+  assert.ok(!src.match(/Promise\.all\(\[[\s\S]*fetchJSON.*ops\/board[\s\S]*fetchJSON.*ops\/tasks[\s\S]*fetchJSON.*ops\/competitions[\s\S]*fetchJSON.*ops\/stats[\s\S]*fetchJSON.*ops\/settings[\s\S]*fetchJSON.*ops\/sample-task[\s\S]*fetchJSON.*ops\/goals/), "no bulk all-endpoint Promise.all with 8 ops");
 
   assert.ok(src.includes("function renderSelfUpgradeEvidenceCard"), "card renderer");
   assert.ok(src.includes("function selfUpgradeEvidenceView"), "closed-code adapter");
@@ -4954,7 +5331,7 @@ test("Hub Overview self-upgrade evidence card is bilingual, server-owned, and pr
   assert.ok(overviewIdx > 0, "rOverview present");
   const nextFn = src.indexOf("function ", overviewIdx + 1);
   const overviewBlock = src.slice(overviewIdx, nextFn > 0 ? nextFn : src.length);
-  assert.ok(overviewBlock.includes("renderSelfUpgradeEvidenceCard"), "Overview renders the card");
+  assert.ok(overviewBlock.includes("renderCompactUpgradeRow"), "Overview uses compact upgrade row");
   // Browser must not recompute consecutive streak semantics.
   assert.ok(!/achieved\s*\+\s*1/.test(overviewBlock), "no browser-side streak increment");
   assert.ok(!/for\s*\(.*results/.test(overviewBlock), "no browser-side result scan");
@@ -5055,4 +5432,630 @@ test("Hub Overview self-upgrade evidence card is bilingual, server-owned, and pr
   assert.match(zhSection, /sueCardTitle:\s*"可靠自升级连续次数"/);
   assert.match(enSection, /sueBreakRetainedFailure:\s*"[^"]*activation[^"]*"/i);
   assert.ok(zhSection.includes("激活阶段失败"), "zh explains activation break");
+});
+
+test("Hub Plan board items explain position and unlocks with readable names, not raw IDs in primary text", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  // Helper functions exist.
+  assert.ok(src.includes("function boardItemPositionText("));
+  assert.ok(src.includes("function boardItemUnlocksText("));
+  // They consume namedDependencies/namedRequiredBy, not raw IDs.
+  assert.ok(src.includes(".namedDependencies") || src.includes("namedDependencies"), "uses namedDependencies");
+  assert.ok(src.includes(".namedRequiredBy") || src.includes("namedRequiredBy"), "uses namedRequiredBy");
+  // Primary position text is read using the new helpers, not the old raw-dep-states label.
+  assert.ok(src.includes("boardItemPositionText(i)"), "calls boardItemPositionText on board item");
+  // Old raw-dep string key is no longer primary visible text (but may stay as a fallback).
+  // Primary position text and unlocks text use readable named keys.
+  for (const key of [
+    "planItemPositionReady", "planItemPositionQueued",
+    "planItemPositionActive", "planItemPositionCompleted",
+    "planItemPositionFailed", "planItemPositionBlocked",
+    "planItemPositionBlockedByFailed", "planItemPositionBlockedByFailedMany",
+    "planItemPositionWaitingFor", "planItemPositionWaitingForMany",
+    "planItemUnlocks", "planItemUnlocksMany",
+  ]) {
+    assert.ok(i18n.includes(key), `i18n key ${key} exists`);
+  }
+  // Primary readable copy must use names, not raw UUIDs or event codes.
+  for (const phrase of [
+    "Ready - no prerequisites are waiting or blocked",
+    "就绪 - 没有等待或阻塞的前置步骤",
+    "Blocked - the required work",
+    "被阻塞 - 前置工作",
+    "Waiting - needs",
+    "等待中 - 需要",
+    "Unlocks:",
+    "完成后解锁：",
+    "planItemGenericSource",
+    "planItemGenericNext",
+    "planItemStepLabel",
+  ]) {
+    assert.ok(i18n.includes(phrase), phrase);
+  }
+  // Generic fallback labels exist so raw IDs are never primary copy.
+  assert.ok(src.includes("safeTaskName("), "name sanitisation helper exists");
+  assert.ok(src.includes("safeItemLabel("), "item label helper exists");
+  // Old keys remain for backward compatibility but primary rendering uses named helpers.
+  assert.ok(src.includes("boardItemPositionText") && src.includes("boardItemUnlocksText"),
+    "primary rendering uses named position and unlocks helpers");
+});
+
+test("Hub Task Detail conditionally explains Plan origin and handoff lineage without empty section for standalone Tasks", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  // Lineage section renderer exists.
+  assert.ok(src.includes("function renderTaskLineage("));
+  assert.ok(src.includes('data-fl-role", "task-lineage"'));
+  // Standalone tasks produce no section.
+  assert.ok(src.includes('kind === "standalone"'), "standalone check exists");
+  // Conditionally renders only when context exists.
+  assert.ok(src.includes("if(lineageCard)"), "guarded by lineage presence");
+  // Bilingual copy.
+  for (const key of [
+    "taskLineageTitle", "taskLineageStartedAs",
+    "taskLineageContinuedFromHandoff", "taskLineageContinuedFromDeps",
+    "taskLineageWorkerChange",
+    "taskLineageThisRunHandoffSuccessor", "taskLineageThisRunHandoffSource",
+    "taskLineageUnlocksHandoff", "taskLineageUnlocks", "taskLineageUnlocksMany",
+    "taskLineageNotARetry",
+  ]) {
+    assert.ok(i18n.includes(key), `i18n key ${key} exists`);
+  }
+  for (const phrase of [
+    "Where this Task sits",
+    "此任务所处的位置",
+    "Part of Plan",
+    "属于 Plan",
+    "step ",
+    "步。",
+    "Continues from another Task",
+    "承接自另一个 Task",
+    "continuation, not a retry",
+    "接力延续，不是重试",
+    "picking up retained work",
+    "从源任务中断处继续保留的成果",
+  ]) {
+    assert.ok(i18n.includes(phrase), phrase);
+  }
+  // Lineage copy never exposes raw task IDs as primary text.
+  assert.ok(!/taskLineageStartedAs.*\{taskId\}/.test(i18n), "StartedAs uses step number, not taskId");
+  assert.ok(!/taskLineageContinuedFromHandoff.*\{sourceTaskId\}/.test(i18n), "ContinuedFromHandoff is a standalone sentence");
+});
+
+test("Hub handoff lineage uses continuation wording, never relabels retained work as accepted or calls successor a retry", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  // Must never call the successor a retry.
+  assert.ok(!i18n.includes("successor is a retry"));
+  assert.ok(!i18n.includes("is a retry of the source"));
+  assert.ok(!i18n.includes("retry of the source Task") || i18n.includes("This is not a retry"));
+  // Explicit continuation marker in the journey handoff already exists.
+  assert.ok(i18n.includes("This is a continuation, not a retry"));
+  assert.ok(i18n.includes("这是一次接力延续，不是重试"));
+  assert.ok(i18n.includes("not accepted output"));
+  assert.ok(i18n.includes("并非被接受的交付物"));
+  // Retained work must never be called accepted output.
+  for (const badPhrase of [
+    "accepted output from the source",
+    "delivered by the source",
+    "approved delivery from the source",
+  ]) {
+    assert.ok(!i18n.includes(badPhrase), `must not claim: ${badPhrase}`);
+  }
+});
+
+test("Hub preserves existing task lanes, filters, actions, and four-part journey truth", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  // Five lanes exist in board rendering.
+  assert.ok(src.includes('"queued"') && src.includes('"active"') && src.includes('"blocked"')
+    && src.includes('"failed"') && src.includes('"completed"'));
+  // Existing supervision actions preserved.
+  assert.ok(src.includes("function showTask("));
+  assert.ok(src.includes("/resume\"") || src.includes('"resume"'));
+  assert.ok(src.includes("/revise\"") || src.includes('"revise"'));
+  assert.ok(src.includes("/correct\"") || src.includes('"correct"'));
+  assert.ok(src.includes("/main-review\"") || src.includes('"main-review"'));
+  assert.ok(src.includes("/reverify\"") || src.includes('"reverify"'));
+  assert.ok(src.includes("taskAction("));
+  // Four-part journey section attributes.
+  assert.ok(src.includes("journeyAssignment"));
+  assert.ok(src.includes("journeyWorkerExecution"));
+  assert.ok(src.includes("journeyVerification"));
+  assert.ok(src.includes("journeyDelivery"));
+  // Theme and language i18n keys survive.
+  assert.ok(i18n.includes("themeLight") && i18n.includes("themeDark"));
+  assert.ok(i18n.includes("langZh") && i18n.includes("langEn"));
+  // Kanban rendering preserved.
+  assert.ok(src.includes("function kanbanCard("));
+  assert.ok(src.includes("function kanbanColumn("));
+});
+
+test("Hub Plan cards and Task lineage expose no raw UUID or event-code text as primary copy", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  // Individual dependency and lineage strings must use {name} placeholders, never raw UUID patterns.
+  const depKeys = [
+    "planItemPositionBlockedByFailed",
+    "planItemPositionBlockedByFailedMany",
+    "planItemPositionWaitingFor",
+    "planItemPositionWaitingForMany",
+    "planItemPositionActive",
+    "planItemPositionCompleted",
+    "planItemPositionFailed",
+    "planItemPositionBlocked",
+    "taskLineageStartedAs",
+    "taskLineageContinuedFromDeps",
+    "taskLineageWorkerChange",
+    "taskLineageUnlocks",
+    "taskLineageUnlocksMany",
+  ];
+  for (const key of depKeys) {
+    // Extract the en value for each key from i18n.
+    const re = new RegExp(`${key}:\\s*"([^"]*)"`, "g");
+    const matches = [...i18n.matchAll(re)];
+    for (const m of matches) {
+      const value = m[1] ?? "";
+      // UUID pattern must not appear in primary copy.
+      assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(value) || value.includes("{") && value.includes("}"),
+        `${key} primary copy must not contain raw UUID: "${value}"`);
+      // Event codes like "candidate.handoff" must not be primary.
+      assert.ok(!/(?:candidate|task|worker|goal|plan)\.\w+\.\w+/.test(value) || value.includes("{"),
+        `${key} primary copy must not contain raw event code: "${value}"`);
+    }
+  }
+  // Primary lineage sentences are standalone - they have no ID placeholders.
+  for (const key of ["taskLineageContinuedFromHandoff", "taskLineageUnlocksHandoff",
+      "taskLineageThisRunHandoffSuccessor", "taskLineageThisRunHandoffSource"]) {
+    const re = new RegExp(`${key}:\\s*"([^"]*)"`, "g");
+    const matches = [...i18n.matchAll(re)];
+    for (const m of matches) {
+      const value = m[1] ?? "";
+      assert.ok(!value.includes("{"), `${key} is a standalone sentence with no raw ID placeholders: "${value}"`);
+    }
+  }
+});
+
+test("Hub bilingual Plan position and lineage copy is independently readable in en and zh-CN", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  // English section has readable position labels.
+  assert.match(i18n, /planItemPositionReady:\s*"Ready/);
+  assert.match(i18n, /planItemPositionWaitingFor:\s*"Waiting\s/);
+  assert.match(i18n, /planItemPositionBlockedByFailed:\s*"Blocked/);
+  assert.match(i18n, /planItemUnlocks:\s*"Unlocks:/);
+  assert.match(i18n, /taskLineageStartedAs:\s*"Part of Plan/);
+  assert.match(i18n, /taskLineageNotARetry:\s*"This is a continuation/);
+  // Chinese section has independently written labels.
+  assert.match(i18n, /planItemPositionReady:\s*"就绪/);
+  assert.match(i18n, /planItemPositionWaitingFor:\s*"等待中/);
+  assert.match(i18n, /planItemPositionBlockedByFailed:\s*"被阻塞/);
+  assert.match(i18n, /planItemUnlocks:\s*"完成后解锁：/);
+  assert.match(i18n, /taskLineageStartedAs:\s*"属于 Plan/);
+  assert.match(i18n, /taskLineageNotARetry:\s*"这是一次接力/);
+});
+
+test("Hub board scope control is primary, bilingual, and defaults to Now", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  // Session-local scope state defaults to Now.
+  assert.ok(/var boardScope\s*=\s*"now"/.test(src), "scope defaults to now");
+  assert.ok(src.includes("function taskBoardScope("), "scope helper reads the canonical code");
+  assert.ok(src.includes("function taskHistoryGroup("), "history group helper translates closed codes");
+  assert.ok(src.includes('"board-scope-row"'), "scope control row marker");
+  assert.ok(src.includes('"board-scope-chip"'), "scope chip class");
+  assert.ok(src.includes("historyState.loaded ? historyState.totalCount : null"),
+    "History scope never presents the bounded recent count as the full archive total");
+  assert.ok(src.includes('if(row[2] !== null)'),
+    "History omits its count until the authoritative total has loaded");
+  // Scope is rendered before the lane legend and search (primary hierarchy).
+  const rTasksIdx = src.indexOf("function rTasks()");
+  const scopeIdx = src.indexOf("board-scope-row", rTasksIdx);
+  const legendIdx = src.indexOf("kanban-legend", rTasksIdx);
+  assert.ok(scopeIdx > 0 && legendIdx > scopeIdx, "scope control precedes the lane legend");
+  // Clearing search + lane never switches the chosen scope.
+  const clearIdx = src.indexOf('boardFilterQuery = ""', rTasksIdx);
+  assert.ok(clearIdx > 0, "clear handler present");
+  const clearEnd = src.indexOf("rTasks();", clearIdx);
+  const clearBlock = src.slice(clearIdx, clearEnd > 0 ? clearEnd + "rTasks();".length : src.length);
+  assert.ok(!/boardScope\s*=/.test(clearBlock), "clear does not switch scope");
+  // Bilingual keys in both locales.
+  for (const key of [
+    "boardScopeLabel", "boardScopeNow", "boardScopeHistory", "boardScopeAll",
+    "boardNowHelper", "boardAllHelper", "boardHistoryHelper",
+    "boardHistoryDelivered", "boardHistoryStopped",
+    "boardHistoryDeliveredHint", "boardHistoryStoppedHint", "boardHistoryEmpty",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  // Plain Chinese verbs; honest full-search History.
+  assert.ok(zhSection.includes("待处理"), "zh Now");
+  assert.ok(zhSection.includes("历史记录"), "zh History");
+  assert.ok(zhSection.includes("已交付"), "zh Delivered");
+  assert.ok(zhSection.includes("已停止"), "zh Stopped");
+  assert.ok(zhSection.includes("搜索所有已结束的记录"), "zh History is honestly searchable, not a bounded recent slice");
+  // English honesty: History searches every closed outcome and loads on demand.
+  assert.match(enSection, /boardHistoryHelper:\s*"[^"]*Search every closed outcome/i);
+  assert.match(enSection, /boardHistoryHelper:\s*"[^"]*never auto-refreshes/i);
+  // CSS ships scope styles and keeps focus visible.
+  assert.ok(css.includes(".board-scope-row"));
+  assert.ok(css.includes(".board-scope-chip"));
+  assert.ok(css.includes(".board-scope-chip:focus-visible"), "scope chip focus stays visible");
+});
+
+test("Hub board composes scope, search, and secondary filters without mutating Tasks", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // Scope filters first, then lane + search compose on the scoped set.
+  assert.ok(src.includes("function taskMatchesBoardFilter("), "board filter helper retained");
+  assert.ok(src.includes("boardFilterQuery"), "search state retained");
+  assert.ok(src.includes("boardFilterLane"), "lane state retained");
+  assert.ok(src.includes("var scoped = tasks.filter"), "scope filter composes before lane/search");
+  // taskLane still selects only on machine status; scope/reason never reroute it.
+  const laneIdx = src.indexOf("function taskLane(");
+  const laneEnd = src.indexOf("function ", laneIdx + 1);
+  const laneBlock = src.slice(laneIdx, laneEnd > 0 ? laneEnd : src.length);
+  assert.ok(!laneBlock.includes("boardScope"), "taskLane ignores scope");
+  assert.ok(!laneBlock.includes("boardReason"), "taskLane ignores reason codes");
+  // History renders Delivered and Stopped outcome groups; machine lanes stay for Now/All.
+  assert.ok(src.includes("function renderHistoryBoard("), "history board renderer");
+  assert.ok(src.includes('"history-board"'), "history board container");
+  assert.ok(src.includes('"history-group tone-"'), "history group tone marker");
+  assert.ok(src.includes('"delivered"') && src.includes('"stopped"'), "Delivered and Stopped groups");
+  // No archive/delete/move mutation is wired.
+  assert.ok(!src.includes("/api/ops/tasks/delete"), "no delete mutation");
+  assert.ok(!src.includes("/api/ops/tasks/archive"), "no archive mutation");
+});
+
+test("Hub board fails open to Now when placement codes are absent or contradictory", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // The UI never recomputes placement; it only reads the canonical boardScope.
+  // Absent or non-"history" codes (including contradictory pairs the Hub
+  // adapter stripped) fall back to Now so unfinished work is never hidden.
+  const fnSrc = extractFunctionSource(src, "taskBoardScope");
+  const taskBoardScope = new Function(
+    "task",
+    `${fnSrc}\nreturn taskBoardScope(task);`,
+  ) as (task: unknown) => string;
+  assert.equal(taskBoardScope({ boardScope: "history" }), "history");
+  assert.equal(taskBoardScope({ boardScope: "now" }), "now");
+  assert.equal(taskBoardScope({}), "now", "absent boardScope fails open to Now");
+  assert.equal(taskBoardScope(undefined), "now");
+  // A contradictory pair the Hub stripped leaves no boardScope -> Now.
+  assert.equal(taskBoardScope({ boardReason: "active-work" }), "now",
+    "reason without a history scope stays Now");
+  assert.equal(taskBoardScope({ boardScope: "archive" }), "now",
+    "unknown scope strings fall back to Now");
+});
+
+test("Hub board scope control and History stay readable at 390px", async () => {
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  // Scope row wraps as one compact row.
+  assert.match(css, /\.board-scope-row\s*\{[^}]*flex-wrap\s*:\s*wrap/i, "scope row wraps");
+  // History board is a single stacked column, not a 4-col grid.
+  assert.match(css, /\.history-board\s*\{[^}]*flex-direction\s*:\s*column/i, "history stacks one column");
+  // Focus remains visible on the scope chip.
+  assert.ok(css.includes(".board-scope-chip:focus-visible"), "scope chip focus visible");
+  // A narrow-viewport rule tunes the scope chips so they stay compact at 390px.
+  assert.match(css, /@media\s*\(\s*max-width\s*:\s*480px\s*\)/i, "narrow scope rule ships");
+});
+
+test("Hub board History copy is plain and honestly searchable in both languages", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  // Chinese: History searches every closed outcome and loads only on demand.
+  const zhHelper = zhSection.match(/boardHistoryHelper:\s*"([^"]*)"/);
+  assert.ok(zhHelper, "zh boardHistoryHelper present");
+  const zhHelperText = zhHelper![1] ?? "";
+  assert.ok(zhHelperText.includes("搜索所有已结束的记录"), "zh says search every closed outcome");
+  assert.ok(zhHelperText.includes("不会自动刷新"), "zh says it never auto-refreshes");
+  // English: same honest on-demand full-search copy.
+  assert.match(enSection, /boardHistoryHelper:\s*"[^"]*Search every closed outcome/i);
+  assert.match(enSection, /boardHistoryHelper:\s*"[^"]*never auto-refreshes/i);
+  // Primary scope/History labels avoid lifecycle jargon in both locales.
+  for (const key of ["boardScopeNow", "boardScopeHistory", "boardScopeAll",
+    "boardHistoryDelivered", "boardHistoryStopped"]) {
+    const enVal = enSection.match(new RegExp(`${key}:\\s*"([^"]*)"`));
+    const zhVal = zhSection.match(new RegExp(`${key}:\\s*"([^"]*)"`));
+    assert.ok(enVal, `en ${key} value present`);
+    assert.ok(zhVal, `zh ${key} value present`);
+    for (const val of [enVal![1] ?? "", zhVal![1] ?? ""]) {
+      assert.ok(!/terminal|projection|decision stage|remediation/i.test(val),
+        `${key} avoids lifecycle jargon: "${val}"`);
+    }
+  }
+  // Repaired delivery is grouped under Delivered, not a runtime-failure label.
+  assert.ok(enSection.includes("Delivered"));
+  assert.ok(zhSection.includes("已交付"));
+  assert.ok(enSection.includes("Stopped"));
+  assert.ok(zhSection.includes("已停止"));
+});
+
+test("Hub History panel is explicit, never polled, and single-flight", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  // History state holds every field the contract requires.
+  assert.ok(src.includes("var historyState = {"), "historyState exists");
+  const hsBlock = src.slice(src.indexOf("var historyState = {"), src.indexOf("};", src.indexOf("var historyState = {")) + 2);
+  for (const field of ["items", "submittedQuery", "draftQuery", "nextCursor",
+    "totalCount", "hasMore", "loading", "error", "stale", "loaded", "failedMode", "generation"]) {
+    assert.ok(hsBlock.includes(field), `historyState includes ${field}`);
+  }
+  // Separate draft vs submitted query: search submits, never requests per keystroke.
+  assert.ok(src.includes("historyState.submittedQuery = historyState.draftQuery.trim()"),
+    "submit copies the trimmed draft into the submitted query");
+  // The History endpoint is called only by loadHistory, never by fetchSlice.
+  assert.ok(src.includes("/api/ops/tasks/history"), "History endpoint URL present");
+  // History must NOT appear in PAGE_DEPS or SLICE_MAP (no automatic polling).
+  const pdStart = src.indexOf("var PAGE_DEPS = {");
+  const pdEnd = src.indexOf("};", pdStart) + 2;
+  const pdBlock = src.slice(pdStart, pdEnd);
+  assert.ok(!/history\s*:/i.test(pdBlock), "PAGE_DEPS has no history slice");
+  const smStart = src.indexOf("var SLICE_MAP = {");
+  const smEnd = src.indexOf("};", smStart) + 2;
+  const smBlock = src.slice(smStart, smEnd);
+  assert.ok(!/history\s*:/i.test(smBlock), "SLICE_MAP has no history slice (no polling)");
+  // Single-flight: a generation counter and AbortController supersede older requests.
+  const lhBlock = extractFunctionSource(src, "loadHistory");
+  assert.ok(lhBlock.includes("historyState.generation"), "uses a generation counter");
+  assert.ok(lhBlock.includes("AbortController"), "uses AbortController for single-flight");
+  assert.ok(lhBlock.includes("gen !== historyState.generation"), "drops stale responses");
+  assert.ok(lhBlock.includes("AbortError"), "treats superseded aborts as non-errors");
+  // Load more de-duplicates by Task id; replace clears only on success.
+  assert.ok(lhBlock.includes("new Set(historyState.items.map"), "Load more de-duplicates by id");
+  // First-page failure is not shown as empty; later-page failure keeps records + stale.
+  assert.ok(lhBlock.includes('historyUnavailable') || lhBlock.includes("t(\"historyUnavailable\")"),
+    "first-page failure uses the unavailable message");
+  assert.ok(lhBlock.includes("historyState.stale = true"), "later-page failure marks stale");
+  assert.ok(lhBlock.includes("historyState.failedMode = mode"),
+    "failure remembers whether search or Load more failed");
+  const retryBlock = extractFunctionSource(src, "historyRetryMode");
+  assert.ok(retryBlock.includes('historyState.failedMode === "more"'),
+    "retry reuses a cursor only when Load more itself failed");
+  assert.ok(!retryBlock.includes("historyState.items.length"),
+    "retained results from an older search cannot misclassify a failed new search as Load more");
+  // The panel renderer exists with explicit search, Refresh, Load more, retry.
+  assert.ok(src.includes("function renderHistoryPanel("), "panel renderer exists");
+  const panelBlock = extractFunctionSource(src, "renderHistoryPanel");
+  assert.ok(panelBlock.includes("<form") || panelBlock.includes('h("form"'), "search form present");
+  assert.ok(panelBlock.includes('type = "submit"'), "search submits via the form");
+  assert.ok(panelBlock.includes("historyRefreshBtn"), "Refresh control present");
+  assert.ok(panelBlock.includes("historyLoadMoreBtn"), "Load more control present");
+  assert.ok(panelBlock.includes("historyRetryBtn"), "retry control present");
+  assert.ok(panelBlock.includes("historyLoadedCount"), "honest loaded/total count present");
+  // Opening History starts the first request only when not already loaded.
+  const chipBlock = src.slice(src.indexOf("chip.addEventListener(\"click\""));
+  const chipEnd = chipBlock.indexOf("});");
+  assert.ok(chipBlock.slice(0, chipEnd).includes("loadHistory(\"search\")"),
+    "selecting History triggers the first load");
+  // Bilingual copy keys for every History control and state.
+  for (const key of [
+    "historySearchLabel", "historySearchPlaceholder", "historySearchBtn",
+    "historyRefreshBtn", "historyLoadMoreBtn", "historyLoading",
+    "historyLoadedCount", "historyUnavailable", "historyStale",
+    "historyRetryBtn", "historyEmpty",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  // Primary History copy avoids implementation jargon in both locales.
+  for (const key of ["historySearchLabel", "historyRefreshBtn", "historyLoadMoreBtn",
+    "historyUnavailable", "historyStale", "historyEmpty"]) {
+    const enVal = enSection.match(new RegExp(`${key}:\\s*"([^"]*)"`));
+    const zhVal = zhSection.match(new RegExp(`${key}:\\s*"([^"]*)"`));
+    assert.ok(enVal, `en ${key} value present`);
+    assert.ok(zhVal, `zh ${key} value present`);
+    for (const val of [enVal![1] ?? "", zhVal![1] ?? ""]) {
+      assert.ok(!/cursor|daemon|projection|lifecycle|endpoint/i.test(val),
+        `${key} avoids implementation jargon: "${val}"`);
+    }
+  }
+  // CSS ships the panel styles and keeps focus visible at 390px.
+  assert.ok(css.includes(".history-panel"));
+  assert.ok(css.includes(".history-search-input:focus"), "search input focus visible");
+  assert.ok(css.includes("@media (max-width: 480px)"), "narrow-viewport rule ships");
+  assert.ok(css.includes(".history-search-form"), "search form wraps");
+  assert.ok(css.includes(".history-load-more"), "load more row styled");
+});
+
+
+test("Hub Plan board dependency rendering bounds more-than-three dependents with a count", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // boardItemUnlocksText has the bounding logic.
+  const fn = extractFunctionSource(src, "boardItemUnlocksText");
+  assert.ok(fn.includes("named.slice(0, 3)"), "bounds to first three names");
+  assert.ok(fn.includes("named.length <= 3"), "branches on count");
+  assert.ok(fn.includes("planItemUnlocksMany"), "uses the many-label with count");
+  // Must not leak more than 3 names in primary copy for list-bounding.
+  assert.ok(fn.includes("more: String(named.length - 3)"), "passes remaining count");
+});
+
+/* --- Visibility-aware, page-scoped Hub polling regression tests --- */
+
+test("Hub page-to-data dependency map covers every top-level tab", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("var PAGE_DEPS ="), "PAGE_DEPS constant exists");
+  assert.ok(src.includes("function requestPlan("), "requestPlan helper exists");
+  // Every top-level tab in the render dispatcher must appear in PAGE_DEPS.
+  var tabs = ["overview", "tasks", "plans", "goals", "competitions", "stats",
+              "model", "worker", "limits", "mains", "delivery"];
+  tabs.forEach(function(tab){
+    assert.ok(src.includes('"' + tab + '"'), "PAGE_DEPS includes " + tab);
+  });
+  // requestPlan is pure; no DOM, fetch, or S mutation.
+  var rpSrc = extractFunctionSource(src, "requestPlan");
+  assert.ok(rpSrc.includes("PAGE_DEPS"), "requestPlan reads PAGE_DEPS");
+  assert.ok(!rpSrc.includes("document."), "requestPlan does not touch DOM");
+  assert.ok(!rpSrc.includes("fetch"), "requestPlan does not fetch");
+});
+
+test("Hub PAGE_DEPS assigns exact slices per page", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // Extract the PAGE_DEPS object literal for precise assertion.
+  var start = src.indexOf("var PAGE_DEPS = {");
+  var end = src.indexOf("};", start) + 2;
+  var block = src.slice(start, end);
+  function entry(tab: string): string {
+    const match = block.match(new RegExp('(?:"' + tab + '"|' + tab + ')\\s*:\\s*\\{([^}]*)\\}'));
+    assert.ok(match, `${tab} dependency entry exists`);
+    return match![1] ?? "";
+  }
+  // Tasks page fetches only tasks (not boards, competitions, goals, etc.)
+  const taskDeps = entry("tasks");
+  assert.match(taskDeps, /(?:"tasks"|tasks)\s*:\s*true/, "tasks page depends on tasks slice");
+  assert.doesNotMatch(taskDeps, /(?:"boards"|boards)\s*:\s*true/, "tasks page does not depend on boards");
+  assert.doesNotMatch(taskDeps, /(?:"stats"|stats)\s*:\s*true/, "tasks page does not depend on stats");
+  assert.doesNotMatch(taskDeps, /(?:"economics"|economics)\s*:\s*true/, "tasks page does not depend on economics");
+  // Insights page fetches stats + economics + routingCoverage but not tasks
+  const insightDeps = entry("stats");
+  assert.match(insightDeps, /(?:"stats"|stats)\s*:\s*true/, "insights page depends on stats slice");
+  assert.match(insightDeps, /(?:"economics"|economics)\s*:\s*true/, "insights page depends on economics");
+  assert.match(insightDeps, /(?:"routingCoverage"|routingCoverage)\s*:\s*true/, "insights page depends on routingCoverage");
+  assert.doesNotMatch(insightDeps, /(?:"tasks"|tasks)\s*:\s*true/, "insights page does not depend on tasks");
+  // Model, worker, limits, mains, delivery pages have empty deps (shared only)
+  ["model","worker","limits","mains","delivery"].forEach(function(tab){
+    assert.equal(entry(tab).trim(), "", tab + " page has empty deps");
+  });
+});
+
+test("Hub SLICE_MAP maps every declared slice to endpoint, field, and error field", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("var SLICE_MAP ="), "SLICE_MAP constant exists");
+  assert.ok(src.includes("function fetchSlice("), "fetchSlice helper exists");
+  // Shared slice
+  assert.ok(src.includes('"health"'), "SLICE_MAP includes health");
+  assert.ok(src.includes("/api/ops/health"), "health endpoint mapped");
+  // Page-specific slices
+  ["tasks","boards","competitions","goals","stats","settings","sample"].forEach(function(k){
+    assert.ok(src.includes('"' + k + '"'), "SLICE_MAP includes " + k);
+  });
+  assert.ok(src.includes("/api/ops/economics-summary"), "economics endpoint mapped");
+  assert.ok(src.includes("/api/ops/routing-evidence-coverage"), "coverage endpoint mapped");
+  assert.ok(src.includes("/api/ops/self-upgrade-evidence"), "self-upgrade endpoint mapped");
+  // fetchSlice never throws; errors are stored
+  var fs = extractFunctionSource(src, "fetchSlice");
+  assert.ok(fs.includes("S[slice.errorField]"), "fetchSlice writes errorField on failure");
+  assert.ok(!fs.includes("throw"), "fetchSlice does not throw");
+  // fetchSlice does NOT clear the data field on error (retains stale evidence)
+  assert.ok(!fs.match(/S\[slice\.field\]\s*=\s*null/), "fetchSlice does not clear data on error");
+});
+
+test("Hub pageEvidenceState classifies loading, unavailable, stale, and ready", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("function pageEvidenceState("), "pageEvidenceState function exists");
+  var pes = extractFunctionSource(src, "pageEvidenceState");
+  assert.ok(pes.includes('"ready"'), "returns ready state");
+  assert.ok(pes.includes('"loading"'), "returns loading state");
+  assert.ok(pes.includes('"unavailable"'), "returns unavailable state");
+  assert.ok(pes.includes('"stale"'), "returns stale state");
+  // Uses errorField to distinguish between never-loaded and first-failure
+  assert.ok(pes.includes("errorField"), "checks per-slice errorField");
+  assert.ok(pes.includes("anyNullWithoutError"), "distinguishes missing from failed");
+  assert.ok(pes.includes("anyNullWithError"), "detects first-fetch failure");
+  assert.ok(pes.includes("anyErrorWithData"), "detects stale retained evidence");
+  // No empty-array fallback (ensureArrays is removed)
+  assert.ok(!src.includes("function ensureArrays"), "ensureArrays must not exist");
+  assert.ok(pes.indexOf("if(anyNullWithError)") < pes.indexOf("if(anyNullWithoutError)"),
+    "a confirmed first-fetch failure wins over another loading slice");
+});
+
+test("Hub status visibly marks retained active-page evidence as stale", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const status = extractFunctionSource(src, "updStatus");
+  assert.ok(status.includes("pageEvidenceState(S.tab"), "status checks the active page evidence state");
+  assert.ok(status.includes('=== "stale"'), "status recognizes retained stale evidence");
+  assert.ok(status.includes("pageStale"), "status uses an explicit page-level stale flag");
+  assert.match(status, /S\.connected\s*&&\s*!pageStale/, "live state requires current page evidence");
+});
+
+test("Hub render treats missing data as loading, not empty success", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  var rSrc = extractFunctionSource(src, "render");
+  assert.ok(rSrc.includes("pageEvidenceState"), "render calls pageEvidenceState");
+  assert.ok(rSrc.includes('"loading"'), "render checks loading state");
+  assert.ok(rSrc.includes('"unavailable"'), "render checks unavailable state");
+  assert.ok(rSrc.includes("stateMsg(\"loading\""), "render shows loading for missing data");
+  assert.ok(rSrc.includes("stateMsg(\"empty\""), "render shows reconnecting for unavailable data");
+  assert.ok(!rSrc.includes("pageHasRequiredData"), "old pageHasRequiredData is removed");
+  // Must never call ensureArrays (converts null to [] which looks like empty success)
+  assert.ok(!rSrc.includes("ensureArrays"), "render does not call ensureArrays");
+});
+
+test("Hub visibility handler cancels timer when hidden and refreshes on return", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("visibilitychange"), "visibility change listener registered");
+  assert.ok(src.includes('"visible"'), "checks for visible state");
+  assert.ok(src.includes("clearTimeout"), "clears timer when hidden");
+  assert.ok(src.includes("document.visibilityState"), "checks visibilityState in scheduleNext");
+  assert.ok(src.includes("=== \"hidden\""), "visibilityState hidden guard exists");
+  // Hidden tabs stop: refresh checks visibility before starting
+  var rf = extractFunctionSource(src, "refresh");
+  assert.ok(rf.includes('"hidden"'), "refresh has hidden guard");
+});
+
+test("Hub scheduleNext honors visibility, token, and configured interval", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  var sn = extractFunctionSource(src, "scheduleNext");
+  assert.ok(sn.includes("visibilityState"), "visibilityState checked in scheduleNext");
+  assert.ok(sn.includes("!S.token"), "scheduleNext stops after 401 auth rejection");
+  assert.ok(sn.includes("refreshIntervalMs"), "reads configured interval");
+  assert.ok(sn.includes("Math.max(200"), "interval has minimum 200ms floor");
+  assert.ok(sn.includes("setTimeout(refresh"), "schedules next refresh via setTimeout");
+});
+
+test("Hub refresh coalesces overlapping triggers and stops after 401", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  var rf = extractFunctionSource(src, "refresh");
+  assert.ok(rf.includes("!S.token"), "refresh stops after token is cleared");
+  assert.ok(rf.includes("batchInFlight"), "checks batchInFlight guard");
+  assert.ok(rf.includes("pendingRefresh = true"), "sets pending when in-flight");
+  assert.ok(rf.includes("pendingRefresh = false"), "resets pending before batch");
+  assert.ok(rf.includes("batchInFlight = true"), "sets batchInFlight when starting");
+  assert.ok(rf.includes("batchInFlight = false"), "clears batchInFlight in finally");
+  assert.ok(rf.includes("if(S.pendingRefresh)"), "checks pending after batch");
+  assert.ok(rf.includes("refresh()"), "follow-up refresh call exists");
+  // Finally block stops scheduling after 401
+  var fin = rf.slice(rf.lastIndexOf("finally"));
+  assert.ok(fin.includes("!S.token"), "finally block stops after 401");
+  // Connected state uses healthError, not health data field
+  assert.ok(rf.includes("S.healthError"), "refresh checks healthError for connected state");
+  assert.ok(!rf.includes("ensureArrays"), "refresh does not call ensureArrays");
+});
+
+test("Hub switchTab triggers immediate render and refresh for new page", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  var st = extractFunctionSource(src, "switchTab");
+  assert.ok(st.includes("render()"), "switchTab calls render immediately");
+  assert.ok(st.includes("refresh()"), "switchTab calls refresh for fresh data");
+  assert.ok(st.includes("workerFormActive"), "switchTab clears workerFormActive for non-worker tabs");
+  assert.ok(st.includes("hideDetail()"), "switchTab closes detail drawer");
+});
+
+test("Hub no longer uses global Promise.all poll with all eight ops endpoints", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // The old pattern bundled health, board, tasks, competitions, stats,
+  // settings, sample-task, and goals in one Promise.all.  That must be gone.
+  var hasBulkAll = src.match(
+    /Promise\.all\(\[[\s\S]*fetchJSON.*ops\/board[\s\S]*fetchJSON.*ops\/tasks[\s\S]*fetchJSON.*ops\/competitions[\s\S]*fetchJSON.*ops\/stats[\s\S]*fetchJSON.*ops\/settings[\s\S]*fetchJSON.*ops\/sample-task[\s\S]*fetchJSON.*ops\/goals/
+  );
+  assert.ok(!hasBulkAll, "global 8-endpoint Promise.all must not exist");
+  // The new pattern fetches slices independently via fetchSlice
+  assert.ok(src.includes("fetchSlice"), "generic slice fetcher is the new mechanism");
+  // Shared truth comes from /api/status + /api/ops/health
+  assert.ok(src.includes("/api/status"), "/api/status is always fetched");
+  assert.ok(src.includes("fetchSlice(\"health\")"), "health is fetched as a named slice");
+});
+
+test("Hub retains prior evidence when one slice fails", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // fetchSlice does not clear the data field on failure
+  var fs = extractFunctionSource(src, "fetchSlice");
+  assert.ok(!fs.match(/S\[slice\.field\]\s*=\s*null/), "fetchSlice retains old data on failure");
+  // Refresh does not have a bulk catch that clears all arrays
+  var rf = extractFunctionSource(src, "refresh");
+  assert.ok(!rf.includes("S.tasks = []"), "refresh does not clear tasks on failure");
+  assert.ok(!rf.includes("S.boards = []"), "refresh does not clear boards on failure");
+  assert.ok(!rf.includes("S.goals = []"), "refresh does not clear goals on failure");
 });

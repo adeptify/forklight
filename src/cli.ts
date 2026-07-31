@@ -113,10 +113,16 @@ import {
 } from "./cli/supervision.js";
 import {
   DEFAULT_QUIET_AFTER_MS,
+  isTerminalTaskStatus,
+  projectLiveStage,
   toLatestEventMeta,
 } from "./core/task-progress.js";
 import { getTaskTokenReport } from "./core/token-report.js";
-import { buildTaskSummary, projectTaskSurface } from "./core/task-summary.js";
+import {
+  buildTaskSummary,
+  projectTaskSurface,
+  type SafeTaskSummary,
+} from "./core/task-summary.js";
 import { buildTaskDecisionView } from "./core/task-decision-view.js";
 import {
   failureCategoryForTask,
@@ -128,6 +134,49 @@ import {
   isBuildIdentity,
 } from "./core/build-identity.js";
 import { daemonExchange } from "./daemon/client.js";
+
+/**
+ * Build the same evidence-aware Task surface the daemon exposes to MCP and Hub.
+ * Local CLI readers must not lose Main Review, remediation, or Integration facts:
+ * omitting them makes already delivered Tasks fail open to Now / needs-review.
+ */
+function projectStoredTaskSurface(
+  store: StateStore,
+  task: TaskRecord,
+  nowMs: number,
+  quietAfterMs = DEFAULT_QUIET_AFTER_MS,
+): SafeTaskSummary {
+  const events = store.listEvents(task.id);
+  const latestEvent = toLatestEventMeta(store.latestEventMeta(task.id));
+  const failureCategory = failureCategoryForTask(task.status, events);
+  const remediationDisposition = store.getRemediationDisposition(task.id);
+  const decisionStage = buildTaskDecisionView({
+    task,
+    attempts: store.listAttempts(task.id),
+    events,
+    integrationResults: store.listIntegrationResults(task.id),
+    ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+    nowMs,
+  }).stage;
+  const preparationStage = task.status === "preparing"
+    ? store.latestPreparationStageMeta(task.id)
+    : undefined;
+  return projectTaskSurface(task, {
+    ...(latestEvent === undefined ? {} : { latestEvent }),
+    ...(failureCategory === undefined ? {} : { failureCategory }),
+    ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+    decisionStage,
+    ...(preparationStage === undefined ? {} : { preparationStage }),
+    events: events.map((event) => ({
+      sequence: event.sequence,
+      timestamp: event.timestamp,
+      type: event.type,
+      ...(event.payload === undefined ? {} : { payload: event.payload }),
+    })),
+    nowMs,
+    quietAfterMs,
+  });
+}
 
 function usage(): string {
   return `ForkLight 0.2
@@ -174,6 +223,13 @@ Usage:
       # observation only; never starts a daemon
   forklight integration history <task-id> [--json]
       # observation only; never starts a daemon
+  forklight main-direct start --task-class <class> [--family <family>] --reason <code> --note <text> [--profiles <json-array>] --confirm [--json]
+  forklight main-direct complete --id <id> --outcome <completed|abandoned> [--verification <passed|failed|unavailable>] --note <text> --confirm [--json]
+  forklight main-direct status <id> [--json]
+  forklight main-direct list [--json]
+  forklight main-direct aggregate [--json]
+  forklight main-direct recent [--limit <n>] [--json]
+      # read-only main-direct projections; never starts a daemon
   forklight upgrade status [--required <1-20>] [--json]
       # read-only consecutive self-upgrade streak; never starts a daemon or Integration
   forklight tokens <task-id> [--json]
@@ -244,6 +300,13 @@ function humanStatusLines(
       lines.push(`activity: ${p.activity}`);
       lines.push(`latestEventSequence: ${String(p.latestEventSequence)}`);
       if (p.latestAction !== undefined) lines.push(`latestAction: ${p.latestAction}`);
+      if (p.liveStage !== undefined) {
+        lines.push(`liveStage: ${p.liveStage.stage}`);
+        lines.push(`liveStageObservation: ${p.liveStage.observation}`);
+        lines.push(`liveStageMeaning: ${p.liveStage.meaning}`);
+        lines.push(`liveStageNext: ${p.liveStage.next}`);
+        lines.push(`liveStageEvidence: ${p.liveStage.evidence}`);
+      }
       continue;
     }
     lines.push(`${key}: ${String(value)}`);
@@ -369,6 +432,58 @@ function humanIntegrationHistoryLines(history: {
     lines.push(`  ${r.status} — ${r.receiptId}${r.error ? ` (${r.error})` : ""}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+/** Human-readable one Main-direct decision line. */
+function humanMainDirectDecisionLines(record: Record<string, unknown>): string {
+  const outcome = typeof record.outcome === "string" ? record.outcome : "";
+  const verification = typeof record.verification === "string" ? ` (${record.verification})` : "";
+  return [
+    `Main-direct decision: ${record.id}`,
+    `  taskClass: ${record.taskClass}`,
+    typeof record.taskFamily === "string" ? `  taskFamily: ${record.taskFamily}` : null,
+    `  reason: ${record.reason}`,
+    `  status: ${record.status}`,
+    `  consideredWorkers: ${typeof record.consideredWorkerCount === "number" ? String(record.consideredWorkerCount) : "0"}`,
+    typeof record.evidenceScope === "string" ? `  evidenceScope: ${record.evidenceScope}` : null,
+    `  startedAt: ${typeof record.startedAt === "string" ? record.startedAt : "-"}`,
+    outcome ? `  outcome: ${outcome}${verification}` : null,
+    typeof record.closedAt === "string" ? `  closedAt: ${record.closedAt}` : null,
+  ].filter(Boolean).join("\n") + "\n";
+}
+
+/** Human-readable list of Main-direct decisions. */
+function humanMainDirectDecisionListLines(records: Record<string, unknown>[]): string {
+  if (records.length === 0) return "No Main-direct decisions recorded.\n";
+  const lines = [`${records.length} Main-direct decision(s):`];
+  for (const r of records) {
+    const outcome = typeof r.outcome === "string" ? ` | outcome: ${r.outcome}` : "";
+    const verification = typeof r.verification === "string" ? ` (${r.verification})` : "";
+    lines.push(
+      `  ${r.id} | ${r.taskClass} | ${r.reason} | ${r.status}${outcome}${verification}`,
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+/** Human-readable Main-direct aggregate. */
+function humanMainDirectAggregateLines(record: Record<string, unknown>): string {
+  const lines = [
+    "Main-direct execution decisions:",
+    `  total: ${String(record.totalCount ?? 0)}`,
+    `  open: ${String(record.openCount ?? 0)}`,
+    `  completed: ${String(record.completedCount ?? 0)}`,
+    `  abandoned: ${String(record.abandonedCount ?? 0)}`,
+    `  completed verification — passed: ${String(record.completedPassedCount ?? 0)}, failed: ${String(record.completedFailedCount ?? 0)}, unavailable: ${String(record.completedUnavailableCount ?? 0)}`,
+  ];
+  const dist = record.reasonDistribution as Record<string, number> | undefined;
+  if (dist && Object.keys(dist).length > 0) {
+    lines.push("  reason distribution:");
+    for (const [k, v] of Object.entries(dist)) {
+      lines.push(`    ${k}: ${String(v)}`);
+    }
+  }
+  return lines.join("\n") + "\n";
 }
 
 /** Plain-language consecutive self-upgrade streak (no raw errors or paths).
@@ -1716,6 +1831,88 @@ async function main(): Promise<void> {
       return;
     }
     throw new Error(`Unknown settings subcommand: ${subcommand}. Use: get, set, apply, or reset.`);
+  }
+
+  if (command === "main-direct") {
+    const subcommand = required(positional, "main-direct subcommand (start, complete, status, list, aggregate, recent)");
+    if (subcommand === "start") {
+      const taskClass = required(option(rest, "--task-class"), "--task-class");
+      const taskFamily = option(rest, "--family");
+      const reason = required(option(rest, "--reason"), "--reason");
+      const note = required(option(rest, "--note"), "--note");
+      const profileIdsRaw = option(rest, "--profiles") ?? "[]";
+      if (!rest.includes("--confirm")) {
+        throw new Error("main-direct start requires explicit --confirm");
+      }
+      let profileIds: string[];
+      try {
+        const parsed = JSON.parse(profileIdsRaw);
+        if (!Array.isArray(parsed)) throw new Error("--profiles must be a JSON array");
+        profileIds = parsed;
+      } catch (e) {
+        throw new Error(`Invalid --profiles JSON: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      await ensureDaemon();
+      const result = await daemonRequest<Record<string, unknown>>("main_direct_start", {
+        taskClass, ...(taskFamily === undefined ? {} : { taskFamily }),
+        reason, note, consideredWorkerProfileIds: profileIds, confirm: true,
+      });
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanMainDirectDecisionLines(result));
+      return;
+    }
+    if (subcommand === "complete") {
+      const id = required(option(rest, "--id"), "--id");
+      const outcome = required(option(rest, "--outcome"), "--outcome");
+      const verification = option(rest, "--verification");
+      const note = required(option(rest, "--note"), "--note");
+      if (!rest.includes("--confirm")) {
+        throw new Error("main-direct complete requires explicit --confirm");
+      }
+      await ensureDaemon();
+      const result = await daemonRequest<Record<string, unknown>>("main_direct_complete", {
+        id, outcome, ...(verification === undefined ? {} : { verification }), note, confirm: true,
+      });
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanMainDirectDecisionLines(result));
+      return;
+    }
+    if (subcommand === "status") {
+      const id = required(rest[0], "id for main-direct status");
+      const result = await daemonObserverRequest<Record<string, unknown>>("main_direct_status", { id });
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanMainDirectDecisionLines(result));
+      return;
+    }
+    if (subcommand === "list") {
+      const result = await daemonObserverRequest<readonly Record<string, unknown>[]>("main_direct_list");
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanMainDirectDecisionListLines(result as Record<string, unknown>[]));
+      return;
+    }
+    if (subcommand === "aggregate") {
+      const result = await daemonObserverRequest<Record<string, unknown>>("main_direct_aggregate");
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanMainDirectAggregateLines(result));
+      return;
+    }
+    if (subcommand === "recent") {
+      const limitRaw = option(rest, "--limit");
+      const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
+      const result = await daemonObserverRequest<readonly Record<string, unknown>[]>(
+        "main_direct_recent", ...(limit !== undefined ? [{ limit }] : []),
+      );
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanMainDirectDecisionListLines(result as Record<string, unknown>[]));
+      return;
+    }
+    throw new Error("Unknown main-direct subcommand. Use: start, complete, status, list, aggregate, or recent.");
   }
 
   if (command === "upgrade") {
@@ -3224,21 +3421,7 @@ async function main(): Promise<void> {
         taskId,
         invoke: async () => {
           const task = reconcileTask(store, taskId);
-          const latestEvent = toLatestEventMeta(store.latestEventMeta(taskId));
-          const failureCategory = failureCategoryForTask(
-            task.status,
-            store.listEvents(taskId),
-          );
-          const preparationStage = task.status === "preparing"
-            ? store.latestPreparationStageMeta(taskId)
-            : undefined;
-          const summary = projectTaskSurface(task, {
-            ...(latestEvent === undefined ? {} : { latestEvent }),
-            ...(failureCategory === undefined ? {} : { failureCategory }),
-            ...(preparationStage === undefined ? {} : { preparationStage }),
-            nowMs: Date.now(),
-            quietAfterMs,
-          });
+          const summary = projectStoredTaskSurface(store, task, Date.now(), quietAfterMs);
           return { task, summary };
         },
         renderOutput: ({ task, summary }) => json
@@ -3255,10 +3438,32 @@ async function main(): Promise<void> {
       const readProgress = (): TaskProgressSnapshot => {
         const task = reconcileTask(store, taskId);
         const latestEvent = toLatestEventMeta(store.latestEventMeta(taskId));
+        // When the Task is terminal, rebuild the canonical live-stage projection
+        // from ordered events so wait can detect open post-terminal follow-up
+        // operations and continue polling instead of returning terminal immediately.
+        let liveStage: TaskProgressSnapshot["liveStage"];
+        if (
+          isTerminalTaskStatus(task.status)
+          && latestEvent !== undefined
+        ) {
+          const events = store.listEvents(taskId);
+          liveStage = projectLiveStage(
+            task,
+            events.map((event) => ({
+              sequence: event.sequence,
+              timestamp: event.timestamp,
+              type: event.type,
+              ...(event.payload === undefined ? {} : { payload: event.payload }),
+            })),
+            Date.now(),
+            DEFAULT_QUIET_AFTER_MS,
+          );
+        }
         return {
           task,
           cursor: buildProgressCursor(task, latestEvent),
           ...(latestEvent === undefined ? {} : { latestEvent }),
+          ...(liveStage === undefined ? {} : { liveStage }),
         };
       };
       const { output } = await withCliExchangeReceipt({
@@ -3366,23 +3571,9 @@ async function main(): Promise<void> {
     }
     if (command === "list") {
       const nowMs = Date.now();
-      const tasks = store.listTasks().slice(0, 20).map((task) => {
-        const latestEvent = toLatestEventMeta(store.latestEventMeta(task.id));
-        const failureCategory = failureCategoryForTask(
-          task.status,
-          store.listEvents(task.id),
-        );
-        const preparationStage = task.status === "preparing"
-          ? store.latestPreparationStageMeta(task.id)
-          : undefined;
-        return projectTaskSurface(task, {
-          ...(latestEvent === undefined ? {} : { latestEvent }),
-          ...(failureCategory === undefined ? {} : { failureCategory }),
-          ...(preparationStage === undefined ? {} : { preparationStage }),
-          nowMs,
-          quietAfterMs: DEFAULT_QUIET_AFTER_MS,
-        });
-      });
+      const tasks = store.listTasks().slice(0, 20).map(
+        (task) => projectStoredTaskSurface(store, task, nowMs),
+      );
       if (json) process.stdout.write(`${JSON.stringify(tasks, null, 2)}\n`);
       else for (const task of tasks) {
         const activity = task.progress?.activity ?? "";

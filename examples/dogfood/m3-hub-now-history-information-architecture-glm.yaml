@@ -1,0 +1,191 @@
+version: 2
+name: Organize Hub tasks into Now and History
+project: /Users/yijunwang/code/forklight
+taskClass: hub-now-history-information-architecture
+taskFamily: hub-product-comprehension
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: volcengine-glm52-1m
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: hub-product-comprehension
+  shortlist:
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: volcengine
+    model: glm-5.2[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: volcengine-glm52-1m
+  selectedBecause:
+    code: main-judgment
+    note: Codex 已冻结端到端归类真相、信息层级、交互与文案方向；GLM 负责按合同实现。上一轮 DeepSeek 已完成相邻 Hub 信息架构，选择 GLM 是基于其既有双语窄 UI 收口经验，不是轮换或竞争。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    The Hub Task Board defaults to work that still needs attention, separates
+    durably closed recent history by end-to-end outcome, and keeps all loaded
+    records searchable without changing Task status or persistence.
+  presentation:
+    summary: 把“现在还要处理什么”和“已经结束的近期记录”分开，让用户先看行动，再看历史；不是删信息，也不是把 Worker 成功误当成已交付。
+    language: zh-CN
+  context:
+    - Follow docs/m3-hub-now-history-information-architecture-contract.md as the Main-owned product and semantics authority.
+    - Current taskLane uses only machine Task.status, so succeeded-before-Main and repaired failed deliveries are visually misleading.
+    - Core Decision Stage and verified repaired-delivery disposition already hold the required end-to-end evidence.
+    - Keep every existing Task action, Detail link, search capability, theme, and responsive shell.
+    - Do not touch Elsewhere or any consumer App.
+  inScope:
+    - Add pure closed boardScope and boardReason projection from existing Task status, Decision Stage, and verified repaired-delivery evidence.
+    - Carry the optional closed codes through SafeTaskSummary and the existing Hub Task adapter without adding private fields.
+    - Add Now, History, and All scope controls with truthful counts; default to Now and preserve scope while clearing search/lane filters.
+    - Keep four machine lanes for Now and All, but render History in Delivered and Stopped end-to-end groups.
+    - Write natural independent Chinese and English labels and focused 390px-safe styles.
+    - Add truth-table, API privacy, UI behavior, bilingual, filter-composition, and responsive regression tests.
+  outOfScope:
+    - Archive/delete/move mutations, persistence changes, pagination, infinite scroll, retention, scheduler, Task status, retry, correction, Main review, Integration, Provider, routing, Competition, economics, Token, other Apps, commit, or push.
+    - Recomputing workflow semantics in JavaScript, inferring delivery from machine succeeded, or inferring failure from quiet time.
+    - Broad visual redesign, Task Detail rewrite, new navigation, new dependencies, gradients, or decorative motion.
+  executionSteps:
+    - Trace Decision View, repaired-delivery projection, SafeTaskSummary, Hub Task adapter, board filters, cards, i18n, and focused tests.
+    - Implement and test a canonical Core truth table before wiring the Hub.
+    - Add scope controls and outcome grouping while preserving existing filters and actions.
+    - Run stored acceptance commands once and report unrelated timing failures separately.
+  deliverables:
+    - Canonical privacy-safe Now/History placement with closed reason codes.
+    - Hub scope controls, counts, composed filters, and end-to-end History groups.
+    - Plain bilingual copy and focused regression coverage.
+  modules:
+    - name: Canonical board placement
+      responsibility: Classify whether a Task still needs attention or has a durably closed outcome.
+      consumes:
+        - Existing Task status, Decision Stage, and verified repaired-delivery disposition.
+      produces:
+        - Closed boardScope and boardReason codes in SafeTaskSummary.
+      boundaries:
+        - Pure read projection only; no status mutation, free-text inference, event payload, prompt, path, or review reason.
+    - name: Hub board organization
+      responsibility: Let users switch between Now, recent History, and All while preserving search and secondary filters.
+      consumes:
+        - Canonical boardScope/boardReason and existing Task card fields.
+      produces:
+        - Now machine lanes plus History Delivered/Stopped groups with truthful counts.
+      boundaries:
+        - Does not archive, delete, retry, review, integrate, or duplicate Task Detail.
+    - name: Human presentation
+      responsibility: Explain scope and outcome in ordinary English and Chinese with the scope control as the primary hierarchy.
+      consumes:
+        - Closed placement codes and selected locale.
+      produces:
+        - Short labels, helper text, empty states, and compact responsive controls.
+      boundaries:
+        - No lifecycle jargon, raw IDs, event names, decorative motion, or broad redesign.
+  callChain:
+    - Durable Task, Decision View, and repaired-delivery evidence enter the Core projector.
+    - SafeTaskSummary carries closed placement codes through daemon list_summaries.
+    - Hub server forwards only those codes in the existing privacy-safe Task response.
+    - Hub scope control filters loaded records and History groups them by closed end-to-end outcome.
+    - Task cards and Task Detail retain the original machine and evidence truth.
+  scenarios:
+    - name: Worker passed awaiting Main
+      given: Machine verification passed and no current Main decision exists.
+      when: The board renders.
+      then: The Task stays in Now and says Main review is next.
+    - name: Accepted awaiting Integration
+      given: Main accepted the Candidate but no completed Integration exists.
+      when: The board renders.
+      then: The Task stays in Now and is not called delivered.
+    - name: Repaired failed delivery
+      given: A failed or interrupted Worker Task has a verified repaired-delivery disposition.
+      when: History renders.
+      then: It appears under Delivered while Task Detail preserves the machine failure.
+    - name: Main rejected
+      given: Current Main review explicitly rejected the Candidate.
+      when: History renders.
+      then: It appears under Stopped and is not described as a runtime failure.
+    - name: Legacy evidence needs review
+      given: Evidence cannot prove a closed outcome.
+      when: The board classifies the Task.
+      then: It stays in Now so unfinished work is never hidden.
+  risks:
+    - Machine status is not the product outcome; Core placement must use Decision evidence and repaired-delivery truth.
+    - Client-side recomputation would drift from CLI/MCP; keep semantics in the canonical projector.
+    - The bounded Task response is recent history, not an archive; label it honestly.
+    - Scope plus lane plus search can become noisy; scope is primary and secondary filters remain compact.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 900
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 8
+  fileLimitMode: warn
+  changedLineLimit: 900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-summary.ts
+    - src/core/types.ts
+    - src/daemon/coordinator.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/task-surface.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Canonical truth-table tests keep open work in Now and only proven closed outcomes in History.
+    - Safe summaries and Hub API expose only closed placement codes and no new private text or paths.
+    - Hub defaults to Now and composes Now/History/All with search and secondary filters without Task mutation.
+    - History uses Delivered and Stopped end-to-end groups; repaired failures are delivered and Main rejection is stopped.
+    - Existing lanes, cards, actions, Detail links, themes, and responsive shell remain compatible.
+    - Chinese and English behavior tests use plain language, describe bounded history honestly, and keep lifecycle jargon out of primary copy.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-surface.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm run check
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check

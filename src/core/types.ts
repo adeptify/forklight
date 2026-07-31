@@ -1359,6 +1359,78 @@ export type DecisionStage =
   | "integration-failed"
   | "unknown";
 
+/**
+ * Closed vocabulary for the canonical privacy-safe live Task activity stage.
+ * UI may translate these codes but must not recompute lifecycle semantics.
+ */
+export type LiveStageCode =
+  | "preparing-workspace"
+  | "waiting-for-model"
+  | "model-processing"
+  | "model-responding"
+  | "using-tool"
+  | "worker-finished"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "legacy-running"
+  | "queued"
+  | "unknown"
+  | "candidate-reverifying"
+  | "remediation-checking";
+
+/** What kind of durable evidence produced the current live stage. */
+export type LiveStageEvidence =
+  | "status"
+  | "preparation"
+  | "worker-start"
+  | "model-activity"
+  | "tool-lifecycle"
+  | "verification"
+  | "terminal"
+  | "policy"
+  | "legacy"
+  | "none"
+  | "candidate-reverification"
+  | "remediation-check";
+
+/** Whether the present observation is ordinary waiting or needs attention. */
+export type LiveStageMeaning = "normal" | "attention";
+
+/** Stable next-step code for bilingual UI translation. */
+export type LiveStageNext =
+  | "wait-for-preparation"
+  | "wait-for-model"
+  | "wait-for-tool-result"
+  | "wait-for-next-model-step"
+  | "wait-for-verification-start"
+  | "wait-for-verification-result"
+  | "wait-for-new-evidence"
+  | "inspect-failure"
+  | "none"
+  | "wait-for-reverification-result"
+  | "wait-for-remediation-result";
+
+/**
+ * Canonical, privacy-safe explanation of what is happening around the Task now.
+ * Rebuildable from ordered durable events after daemon restart.
+ * Never carries prompts, response content, tool arguments, paths, endpoints,
+ * credentials, command text/output, raw errors, ETA, or invented percentages.
+ */
+export interface LiveStageProjection {
+  stage: LiveStageCode;
+  /** Event-age observation. Quiet is never proof of failure. */
+  observation: "active" | "quiet" | "terminal";
+  evidence: LiveStageEvidence;
+  meaning: LiveStageMeaning;
+  next: LiveStageNext;
+  /** Timestamp of the determining evidence when available. */
+  observedAt?: string;
+  /** Sequence of the determining evidence event when available. */
+  evidenceSequence?: number;
+}
+
 export interface TaskDecisionView {
   taskId: string;
   stage: DecisionStage;
@@ -1388,6 +1460,11 @@ export interface TaskDecisionView {
       countKind?: "files" | "dependencies";
       count?: number;
     };
+    /**
+     * Canonical live Worker stage shared by CLI, daemon, board, and Task Detail.
+     * UI translates closed codes only; it must not recompute lifecycle semantics.
+     */
+    liveStage?: LiveStageProjection;
   };
   /** Latest terminal failure class when task is failed|interrupted.
    *  Includes Worker classes and contract-infeasible (verification/Main). */
@@ -1856,4 +1933,123 @@ export interface ReviewGraphView {
     | "integrated"
     | "ready-for-integration"
     | "main-decision";
+}
+
+// --- Main-direct execution decision ---
+
+/** Closed vocabulary for why Main handled work directly. */
+export type MainDirectDecisionReason =
+  | "small-clear-change"
+  | "urgent-fix"
+  | "workers-unavailable"
+  | "user-requested"
+  | "main-judgment";
+
+/** Bounded local verification result from Main's independent check. */
+export type MainDirectVerification = "passed" | "failed" | "unavailable";
+
+/** Immutable lifecycle state. Open = started, incomplete. */
+export type MainDirectDecisionStatus = "open" | "completed" | "abandoned";
+
+/** Frozen Worker Profile identity snapshot captured at decision start.
+ *  provider+model+runtime+effort is the comparable identity;
+ *  workerProfileId is the saved profile reference. */
+export interface MainDirectConsideredWorkerSnapshot {
+  workerProfileId: string;
+  label: string;
+  provider: string;
+  model: string;
+  runtime: string;
+  effort: string;
+  /** Readiness at decision time. Never triggers a Provider probe. */
+  readiness: "ready" | "launchable" | "needs-attention" | "blocked" | "unknown";
+  /** True when the profile was configured and recognizable at decision time. */
+  available: boolean;
+}
+
+/** Bounded evidence snapshot for considered profiles at decision time.
+ *  Derived read-only from existing Task history — never probes a Provider. */
+export interface MainDirectEvidenceSnapshotEntry {
+  workerProfileId: string;
+  exactClassSampleCount: number;
+  familySampleCount: number;
+  scope: "exact-class" | "task-family" | "none";
+}
+
+/** Bounded close outcome. Completed requires verification; abandoned carries none. */
+export interface MainDirectClosedState {
+  outcome: "completed" | "abandoned";
+  /** Present only when outcome is completed. */
+  verification?: MainDirectVerification;
+  /** Bounded Main-authored note (0–300 chars). */
+  note: string;
+  closedAt: string;
+}
+
+/** Durable Main-direct execution decision record.
+ *  Independent from Task/Attempt/Worker lifecycle. */
+export interface MainDirectDecisionRecord {
+  id: string;
+  /** Stable taskClass — explicit, non-empty, ≤80 chars. */
+  taskClass: string;
+  /** Optional stable taskFamily — explicit, ≤80 chars. */
+  taskFamily?: string;
+  /** Closed reason code for handling work directly. */
+  reason: MainDirectDecisionReason;
+  /** Bounded Main-authored explanation (1–300 chars). */
+  note: string;
+  /** Considered Worker Profile ids, frozen at start. 0–4 entries. */
+  consideredWorkerProfileIds: string[];
+  /** Frozen identity snapshots for considered profiles at decision time. */
+  consideredWorkers: MainDirectConsideredWorkerSnapshot[];
+  /** Evidence snapshot at decision time (never probes a Provider). */
+  evidenceSnapshot: MainDirectEvidenceSnapshotEntry[];
+  status: MainDirectDecisionStatus;
+  startedAt: string;
+  /** Present only after explicit close. */
+  closedState?: MainDirectClosedState;
+}
+
+/** Privacy-safe projection for CLI/MCP/Hub. Never carries raw note content. */
+export interface MainDirectDecisionProjection {
+  id: string;
+  taskClass: string;
+  taskFamily?: string;
+  reason: MainDirectDecisionReason;
+  note: string;
+  status: MainDirectDecisionStatus;
+  consideredWorkerCount: number;
+  consideredWorkerIds: string[];
+  /** Only workerProfileId and label — never provider/model/runtime details. */
+  consideredWorkerLabels: Array<{ workerProfileId: string; label: string }>;
+  evidenceScope: "exact-class" | "task-family" | "none";
+  startedAt: string;
+  outcome?: "completed" | "abandoned";
+  verification?: MainDirectVerification;
+  closedAt?: string;
+}
+
+/** Aggregate counts only — never per-record details. */
+export interface MainDirectDecisionAggregate {
+  openCount: number;
+  completedCount: number;
+  abandonedCount: number;
+  completedPassedCount: number;
+  completedFailedCount: number;
+  completedUnavailableCount: number;
+  totalCount: number;
+  reasonDistribution: Partial<Record<MainDirectDecisionReason, number>>;
+}
+
+/** Bounded recent-decision entry for Hub Insights. Privacy-safe. */
+export interface MainDirectDecisionRecentEntry {
+  id: string;
+  taskClass: string;
+  reason: MainDirectDecisionReason;
+  status: MainDirectDecisionStatus;
+  outcome?: "completed" | "abandoned";
+  verification?: MainDirectVerification;
+  startedAt: string;
+  closedAt?: string;
+  consideredWorkerCount: number;
 }

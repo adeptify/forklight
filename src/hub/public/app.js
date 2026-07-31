@@ -30,27 +30,123 @@ function activityLabel(activity){
   };
   return t(map[activity] || "taskActivityUnknown");
 }
+/* Read the canonical live-stage projection from list or detail payloads.
+ * UI translates closed codes only; it never recomputes lifecycle semantics. */
+function taskLiveStage(task){
+  var p = task && (task.progress || (task.decision && task.decision.progress));
+  return p && p.liveStage ? p.liveStage : null;
+}
+function liveStageNowText(stage){
+  var map = {
+    "preparing-workspace": "liveStageNowPreparing",
+    "waiting-for-model": "liveStageNowWaitingModel",
+    "model-processing": "liveStageNowModelProcessing",
+    "model-responding": "liveStageNowModelResponding",
+    "using-tool": "liveStageNowUsingTool",
+    "worker-finished": "liveStageNowWorkerFinished",
+    "verifying": "liveStageNowVerifying",
+    "completed": "liveStageNowCompleted",
+    "failed": "liveStageNowFailed",
+    "interrupted": "liveStageNowInterrupted",
+    "legacy-running": "liveStageNowLegacy",
+    "queued": "liveStageNowQueued",
+    "unknown": "liveStageNowUnknown",
+    "candidate-reverifying": "liveStageNowCandidateReverifying",
+    "remediation-checking": "liveStageNowRemediationChecking"
+  };
+  return t(map[stage] || "liveStageNowUnknown");
+}
+/* Stage-aware meaning: choose the frozen category from closed stage +
+ * observation codes only - never recompute lifecycle or parse prose here.
+ * Attention > quiet > completed > active progress > ordinary waiting. */
+function liveStageMeaningText(meaning, observation, stage){
+  if(stage === "failed" || stage === "interrupted" || meaning === "attention"){
+    return t("liveStageMeaningAttention");
+  }
+  if(stage === "candidate-reverifying" || stage === "remediation-checking"){
+    return observation === "quiet"
+      ? t("liveStageMeaningFollowUpQuiet")
+      : t("liveStageMeaningFollowUp");
+  }
+  if(observation === "quiet") return t("liveStageMeaningQuiet");
+  if(stage === "completed") return t("liveStageMeaningCompleted");
+  if(stage === "model-processing") return t("liveStageMeaningProcessing");
+  if(stage === "model-responding" || stage === "using-tool"
+      || stage === "verifying" || stage === "worker-finished"
+      || stage === "legacy-running"){
+    return t("liveStageMeaningActive");
+  }
+  return t("liveStageMeaningWaiting");
+}
+function liveStageNextText(next){
+  var map = {
+    "wait-for-preparation": "liveStageNextPreparation",
+    "wait-for-model": "liveStageNextModel",
+    "wait-for-tool-result": "liveStageNextTool",
+    "wait-for-next-model-step": "liveStageNextModelStep",
+    "wait-for-verification-start": "liveStageNextVerificationStart",
+    "wait-for-verification-result": "liveStageNextVerification",
+    "wait-for-new-evidence": "liveStageNextEvidence",
+    "inspect-failure": "liveStageNextInspectFailure",
+    "none": "liveStageNextNone",
+    "wait-for-reverification-result": "liveStageNextReverification",
+    "wait-for-remediation-result": "liveStageNextRemediation"
+  };
+  return t(map[next] || "liveStageNextNone");
+}
+/* Compact board line: now · meaning · next from closed liveStage codes. */
+function liveStageCompactText(live){
+  if(!live || !live.stage) return "";
+  return t("liveStageCompact", {
+    now: liveStageNowText(live.stage),
+    meaning: liveStageMeaningText(live.meaning, live.observation, live.stage),
+    next: liveStageNextText(live.next)
+  });
+}
+/* Expanded Task Detail explanation from the same bounded projection. */
+function liveStageDetailText(live){
+  if(!live || !live.stage) return "";
+  return t("liveStageDetail", {
+    now: liveStageNowText(live.stage),
+    meaning: liveStageMeaningText(live.meaning, live.observation, live.stage),
+    next: liveStageNextText(live.next)
+  });
+}
 /* Board-only presentation: map progress.activity (+ silence age) to a
  * short badge. Does not invent a machine status or change taskLane.
- * Quiet = no new event within the backend quiet window. Stalled = still
- * quiet after 5 minutes of silence (user-facing long-run signal only). */
+ * Quiet = no new event within the backend quiet window. Long quiet is still
+ * only "no new evidence" (never failure, retry, or cancellation). */
 function boardActivityKind(task){
+  var live = taskLiveStage(task);
+  if(live && live.observation === "terminal") return null;
+  if(live && live.observation === "active") return "active";
+  if(live && live.observation === "quiet"){
+    // Silence age follows lastEventAt (event age), not the older stage evidence time.
+    var quietTs = (task.progress && task.progress.lastEventAt) || live.observedAt;
+    if(quietTs){
+      var age = Date.now() - Date.parse(quietTs);
+      // 5 minutes: long-run board signal only; not a machine failure.
+      if(Number.isFinite(age) && age >= 5 * 60 * 1000) return "stalled";
+    }
+    return "quiet";
+  }
   var p = task && task.progress;
   if(!p || !p.activity) return null;
   if(p.activity === "terminal") return null;
   if(p.activity === "active") return "active";
   if(p.activity !== "quiet") return null;
   if(p.lastEventAt){
-    var age = Date.now() - Date.parse(p.lastEventAt);
+    var age2 = Date.now() - Date.parse(p.lastEventAt);
     // 5 minutes: long-run board signal only; not a machine status.
-    if(Number.isFinite(age) && age >= 5 * 60 * 1000) return "stalled";
+    if(Number.isFinite(age2) && age2 >= 5 * 60 * 1000) return "stalled";
   }
   return "quiet";
 }
 function boardActivityBadge(task){
   var kind = boardActivityKind(task);
   if(!kind) return null;
-  var cls = kind === "active" ? "badge-info" : (kind === "stalled" ? "badge-err" : "badge-warn");
+  // Long quiet uses warn, never err: silence is not failure evidence.
+  var cls = kind === "active" ? "badge-info" : "badge-warn";
   return h("span", "badge " + cls + " board-activity board-activity-" + kind, activityLabel(kind));
 }
 /* Decision-drawer labels: the English literal is retained as the canonical
@@ -262,12 +358,19 @@ var S = {
   economicsError: null,
   routingCoverage: null,
   routingCoverageError: null,
+  mainDirectAggregate: null,
+  mainDirectAggregateError: null,
+  mainDirectRecent: null,
+  mainDirectRecentError: null,
   selfUpgradeEvidence: null,
   selfUpgradeEvidenceError: null,
   sample: null,
+  healthError: null, tasksError: null, boardsError: null, competitionsError: null,
+  goalsError: null, statsError: null, settingsError: null, sampleError: null,
   hub: null,
   lastOk: 0, connected: false, hadOk: false, tab: "overview",
   detail: null, detailReturnFocus: null, timer: null, token: null,
+  batchInFlight: false, pendingRefresh: false,
   workerEditId: null, workerPreviewTimer: null, workerFormActive: false,
   mrResult: null, mrDirty: false, mrEvaluating: false, mrDraft: null,
   mrTaskClass: "", mrTaskFamily: "", mrCompIntent: "", mrCompTriggers: "",
@@ -524,7 +627,7 @@ function isDeliveryDraftDirty(draft, saved){
   );
 }
 function deliveryReadSettings(){
-  return deliveryNormalizeSettings(S.settings && S.settings.deliveryProfiles);
+  return deliveryNormalizeSettings(S.hub && S.hub.settings && S.hub.settings.deliveryProfiles);
 }
 
 /* --- Utils --- */
@@ -613,9 +716,99 @@ function metric(label, value, hint){
   return m;
 }
 
+/* --- Page-to-data dependency map (pure, testable without DOM) --- */
+/* Each value maps a stable slice key to the endpoint that produces it.
+ * render() uses requestPlan() to decide which slices a visible page needs.
+ * Shared shell truth (/api/status + /api/ops/health) is always fetched;
+ * everything else is per-page. */
+var PAGE_DEPS = {
+  overview:      { tasks: true, boards: true, competitions: true, goals: true, sample: true, selfUpgradeEvidence: true },
+  tasks:         { tasks: true },
+  plans:         { boards: true },
+  goals:         { goals: true },
+  competitions:  { competitions: true },
+  stats:         { stats: true, economics: true, routingCoverage: true, mainDirectAggregate: true, mainDirectRecent: true },
+  model:         {},
+  worker:        {},
+  limits:        {},
+  mains:         {},
+  delivery:      {}
+};
+/* Map every slice key to the exact endpoint and S bucket it writes.
+ * Each fetcher settles independently so one failure never clears
+ * evidence another slice already validated. */
+var SLICE_MAP = {
+  health:              { endpoint: "/api/ops/health",                      field: "health",              errorField: "healthError" },
+  tasks:               { endpoint: "/api/ops/tasks",                       field: "tasks",               errorField: "tasksError" },
+  boards:              { endpoint: "/api/ops/board",                       field: "boards",              errorField: "boardsError" },
+  competitions:        { endpoint: "/api/ops/competitions",                field: "competitions",        errorField: "competitionsError" },
+  goals:               { endpoint: "/api/ops/goals",                       field: "goals",               errorField: "goalsError" },
+  stats:               { endpoint: "/api/ops/stats",                       field: "stats",               errorField: "statsError" },
+  settings:            { endpoint: "/api/ops/settings",                    field: "settings",            errorField: "settingsError" },
+  sample:              { endpoint: "/api/ops/sample-task",                 field: "sample",              errorField: "sampleError" },
+  economics:           { endpoint: "/api/ops/economics-summary",           field: "economics",           errorField: "economicsError" },
+  routingCoverage:     { endpoint: "/api/ops/routing-evidence-coverage",   field: "routingCoverage",     errorField: "routingCoverageError" },
+  mainDirectAggregate: { endpoint: "/api/ops/main-direct-aggregate",       field: "mainDirectAggregate", errorField: "mainDirectAggregateError" },
+  mainDirectRecent:    { endpoint: "/api/ops/main-direct-recent",          field: "mainDirectRecent",    errorField: "mainDirectRecentError" },
+  selfUpgradeEvidence: { endpoint: "/api/ops/self-upgrade-evidence",       field: "selfUpgradeEvidence", errorField: "selfUpgradeEvidenceError" }
+};
+/** Pure: given a closed Hub tab code, return the slice keys its renderer
+ *  consumes (shared hub + health are always added by the caller).  Tests
+ *  can execute this without a DOM. */
+function requestPlan(tab){
+  return PAGE_DEPS[tab] || {};
+}
+/** Fetch one named slice, writing success or error into the matching S
+ *  bucket.  Never throws; errors are stored for the renderer to handle. */
+function fetchSlice(key){
+  var slice = SLICE_MAP[key];
+  if(!slice) return Promise.resolve();
+  return fetchJSON(slice.endpoint).then(function(data){
+    S[slice.field] = data;
+    S[slice.errorField] = null;
+  }, function(e){
+    if(e && e.status === 401) clearHubToken();
+    S[slice.errorField] = (e && e.message) ? e.message : "unavailable";
+  });
+}
+/** Classify the active page's evidence for its declared data dependencies.
+ *  "ready"       = every required slice has data and no current error.
+ *  "loading"     = at least one slice is null with no error (never fetched).
+ *  "unavailable" = at least one slice is null with an error (first fetch failed).
+ *  "stale"       = all slices have data, but at least one has a current error
+ *                   (retained evidence is visibly stale). */
+function pageEvidenceState(tab){
+  var deps = requestPlan(tab);
+  var keys = Object.keys(deps);
+  if(keys.length === 0) return "ready";
+  var allHaveData = true;
+  var anyNullWithError = false;
+  var anyNullWithoutError = false;
+  var anyErrorWithData = false;
+  for(var i = 0; i < keys.length; i++){
+    var slice = SLICE_MAP[keys[i]];
+    if(!slice) continue;
+    if(S[slice.field] === null){
+      allHaveData = false;
+      if(S[slice.errorField]) anyNullWithError = true;
+      else anyNullWithoutError = true;
+    } else if(S[slice.errorField]){
+      anyErrorWithData = true;
+    }
+  }
+  if(allHaveData && !anyErrorWithData) return "ready";
+  // A confirmed first-fetch failure is more informative than another slice
+  // that is still loading: never present a failed page as merely pending.
+  if(anyNullWithError) return "unavailable";
+  if(anyNullWithoutError) return "loading";
+  return "stale"; // allHaveData && anyErrorWithData
+}
+
 /* --- API --- */
-function fetchJSON(path){
-  return fetch(path, { headers: { "X-ForkLight-Hub-Token": S.token } }).then(function(r){
+function fetchJSON(path, opts){
+  var init = { headers: { "X-ForkLight-Hub-Token": S.token } };
+  if(opts && opts.signal){ init.signal = opts.signal; }
+  return fetch(path, init).then(function(r){
     if(r.status === 401) clearHubToken();
     if(!r.ok){ var e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
     return r.json();
@@ -698,103 +891,95 @@ function appendBoundedDetail(panel, msg){
 }
 
 /* --- Polling --- */
-/** Isolated fetch for the new /api/ops/economics-summary route.  Failure
- *  must not mark Tasks, Boards, Stats, or Settings disconnected; it
- *  only degrades the Insights economics panel by storing an error string
- *  and clearing the cached summary so render() can recover next cycle. */
-function pollEconomics(){
-  return fetchJSON("/api/ops/economics-summary").then(function(s){
-    S.economics = s;
-    S.economicsError = null;
-    return s;
-  }).catch(function(e){
-    if(e && e.status === 401) clearHubToken();
-    S.economics = null;
-    S.economicsError = (e && e.message) ? e.message : "unavailable";
-  });
-}
-/** Isolated fetch for Worker-selection evidence coverage. Failure only
- *  degrades this Insights panel; never Tasks, Settings, economics, or
- *  the rest of the main ops poll. Backend owns every count. */
-function pollRoutingCoverage(){
-  return fetchJSON("/api/ops/routing-evidence-coverage").then(function(s){
-    S.routingCoverage = s;
-    S.routingCoverageError = null;
-    return s;
-  }).catch(function(e){
-    if(e && e.status === 401) clearHubToken();
-    S.routingCoverage = null;
-    S.routingCoverageError = (e && e.message) ? e.message : "unavailable";
-  });
-}
-/** Isolated fetch for consecutive self-upgrade streak evidence. Backend owns
- *  every count and break code; the browser only translates closed codes.
- *  Failure degrades only this Overview card. */
-function pollSelfUpgradeEvidence(){
-  return fetchJSON("/api/ops/self-upgrade-evidence").then(function(s){
-    S.selfUpgradeEvidence = s;
-    S.selfUpgradeEvidenceError = null;
-    return s;
-  }).catch(function(e){
-    if(e && e.status === 401) clearHubToken();
-    S.selfUpgradeEvidence = null;
-    S.selfUpgradeEvidenceError = (e && e.message) ? e.message : "unavailable";
-  });
-}
+/** Schedule the next bounded refresh.  Respects visibility (hidden tabs
+ *  schedule nothing), authentication (stops after 401), and the configured
+ *  interval (from /api/status). */
 function scheduleNext(){
-  var ms = S.settings && S.settings.console && S.settings.console.refreshIntervalMs
-    ? Math.max(200, S.settings.console.refreshIntervalMs) : 2000;
+  if(!S.token) return; // Stop scheduling after auth rejection.
+  if(S.timer){ clearTimeout(S.timer); S.timer = null; }
+  if(document.visibilityState === "hidden") return;
+  var hubConsole = S.hub && S.hub.settings && S.hub.settings.console;
+  var settingsConsole = S.settings && S.settings.console;
+  var consoleCfg = hubConsole || settingsConsole;
+  var ms = consoleCfg && consoleCfg.refreshIntervalMs
+    ? Math.max(200, consoleCfg.refreshIntervalMs) : 2000;
   S.timer = setTimeout(refresh, ms);
 }
+/** Run one complete refresh batch for the visible page.
+ *
+ *  - Shared shell truth (/api/status + /api/ops/health) is always fetched.
+ *  - Page-specific slices are derived from the dependency map and each
+ *    settles independently; one failure never erases unrelated evidence.
+ *  - Overlapping triggers (timer, tab change, visibility return, manual
+ *    action) coalesce: at most one batch is in-flight and one follow-up
+ *    batch is queued for the latest visible page.
+ *  - Hidden tabs cancel the next timer and never start new polls.
+ *  - After a 401 authentication rejection, no further polls are scheduled. */
 function refresh(){
-  S.timer = null;
+  // Hard stop after token clearance (401 rejection).
+  if(!S.token) return;
+  // Coalesce: if a batch is already in-flight, mark pending and return.
+  if(S.batchInFlight){
+    S.pendingRefresh = true;
+    return;
+  }
+  // Cancel any scheduled timer before starting fresh work.
+  if(S.timer){ clearTimeout(S.timer); S.timer = null; }
+  // Hidden tabs issue no polls.
+  if(document.visibilityState === "hidden") return;
+
+  S.batchInFlight = true;
+  S.pendingRefresh = false;
+
+  // --- Shared shell truth (always, every tab) ---
   var hubP = fetchJSON("/api/status").then(function(hub){
     S.hub = hub;
     return hub;
   });
-  var econP = pollEconomics();
-  var recP = pollRoutingCoverage();
-  var sueP = pollSelfUpgradeEvidence();
-  var opsP = Promise.all([
-    fetchJSON("/api/ops/health"), fetchJSON("/api/ops/board"), fetchJSON("/api/ops/tasks"),
-    fetchJSON("/api/ops/competitions"), fetchJSON("/api/ops/stats"), fetchJSON("/api/ops/settings"),
-    fetchJSON("/api/ops/sample-task"), fetchJSON("/api/ops/goals")
-  ]).then(function(v){
-    S.health = v[0]; S.boards = v[1]; S.tasks = v[2];
-    S.competitions = v[3]; S.stats = v[4]; S.settings = v[5]; S.sample = v[6];
-    S.goals = v[7];
-    S.lastOk = Date.now(); S.connected = true; S.hadOk = true;
-  }).catch(function(e){
-    S.connected = false;
-    if(e&&e.status===401) clearHubToken();
-    // Daemon may be down; keep setup usable from /api/status
-    if(!S.tasks) S.tasks = [];
-    if(!S.boards) S.boards = [];
-    if(!S.competitions) S.competitions = [];
-    if(!S.stats) S.stats = [];
-    if(!S.goals) S.goals = [];
-  });
+  var healthP = fetchSlice("health");
+
+  // --- Page-specific slices ---
+  var deps = requestPlan(S.tab || "overview");
+  var sliceKeys = Object.keys(deps);
+  var slicePromises = [];
+  for(var i = 0; i < sliceKeys.length; i++){
+    if(SLICE_MAP[sliceKeys[i]]) slicePromises.push(fetchSlice(sliceKeys[i]));
+  }
+
+  // Wait for everything (shared + page slices) to settle.
   Promise.all([hubP.catch(function(e){
     if(e&&e.status===401) clearHubToken();
     throw e;
-  }), opsP, econP, recP, sueP]).then(function(){
+  }), healthP].concat(slicePromises)).then(function(){
     if(!S.token){ showUnauthenticated(); return; }
+    // Connected state follows the current health read, not retained data.
+    if(!S.healthError) { S.lastOk = Date.now(); S.connected = true; S.hadOk = true; }
+    else { S.connected = false; }
     if(S.tab === "worker" && S.workerFormActive){
       updStatus();
       setPageChrome();
     } else {
       render();
     }
-    scheduleNext();
   }).catch(function(){
     if(!S.token){ showUnauthenticated(); return; }
+    S.connected = false;
     if(S.tab === "worker" && S.workerFormActive){
       updStatus();
       setPageChrome();
     } else {
       render();
     }
-    scheduleNext();
+  }).finally(function(){
+    S.batchInFlight = false;
+    if(!S.token) return; // Stop scheduling after auth rejection.
+    if(S.pendingRefresh){
+      // A newer trigger arrived while this batch was in-flight;
+      // run one follow-up for the latest page immediately.
+      refresh();
+    } else {
+      scheduleNext();
+    }
   });
 }
 function startPoll(){
@@ -807,11 +992,15 @@ function updStatus(){
   statusEl.textContent = "";
   footerEl.textContent = "";
   if(topMetaEl) topMetaEl.textContent = "";
-  var st = S.connected ? "ok" : (S.hadOk ? "stale" : "disconnected");
+  // Health can be current while the active page is showing retained evidence
+  // after one of its own endpoints failed.  Keep the shell connection truth,
+  // but make that page-level staleness visible instead of claiming "live".
+  var pageStale = S.connected && pageEvidenceState(S.tab || "overview") === "stale";
+  var st = (S.connected && !pageStale) ? "ok" : (S.hadOk ? "stale" : "disconnected");
   var dot = h("span", "status-dot " + st);
   statusEl.appendChild(dot);
-  var txt = S.connected ? t("live") : (S.hadOk ? t("reconnecting") : t("offline"));
-  if(!S.connected && S.hadOk) txt += " - " + t("connectionLastOk", { time: fmtSince(new Date(S.lastOk).toISOString()) });
+  var txt = (S.connected && !pageStale) ? t("live") : (S.hadOk ? t("reconnecting") : t("offline"));
+  if((!S.connected || pageStale) && S.hadOk) txt += " - " + t("connectionLastOk", { time: fmtSince(new Date(S.lastOk).toISOString()) });
   statusEl.appendChild(document.createTextNode(txt));
   if(S.health){
     statusEl.appendChild(document.createTextNode(" | " + t("connectionCounts", {
@@ -987,19 +1176,107 @@ function boardItem(i){
     });
   }
   d.appendChild(h("div", "name", i.taskName || t("taskUntitled")));
-  var statusText = i.taskStatus ? statusLabel(i.taskStatus) : t("planItemNotStarted");
-  d.appendChild(h("div", "meta", statusText));
+  // Readable position sentence: explain why work is ready, waiting, or blocked
+  // using names from namedDependencies rather than raw IDs.
+  d.appendChild(h("div", "meta", boardItemPositionText(i)));
+  // Readable unlocks-next sentence: what this item will enable.
+  var unlocks = boardItemUnlocksText(i);
+  if(unlocks) d.appendChild(h("div", "meta", unlocks));
   if(i.error) appendBoundedDetail(d, i.error);
+  // Technical disclosure retains IDs but is secondary (primary copy is above).
   if(i.dependencies && i.dependencies.length){
-    var depStr = i.dependencies.map(function(dd){
-      return statusLabel(dd.state);
-    }).join(", ");
-    d.appendChild(h("div", "meta", t("planItemDepsStates", { deps: depStr })));
     appendBoundedDetail(d, i.dependencies.map(function(dd){
       return String(dd.itemId || "-") + " (" + String(dd.state || "-") + ")";
     }).join(", "));
   }
   return d;
+}
+/* Sanitise a task name for primary display: max 200 visible chars, control
+ * characters stripped, empty or whitespace-only falls back to undefined. */
+function safeTaskName(raw){
+  if(typeof raw !== "string" || raw.length === 0) return undefined;
+  var cleaned = raw.slice(0, 200).replace(/[\x00-\x1f\x7f]/g, "").trim();
+  return cleaned.length === 0 ? undefined : cleaned;
+}
+/* Produce a readable label for a Plan item when its task has no usable name.
+ * Uses the itemIndex to give context (step #3) instead of a raw UUID. */
+function safeItemLabel(item){
+  var name = safeTaskName(item.taskName);
+  if(name) return name;
+  var index = typeof item.itemIndex === "number" ? item.itemIndex : undefined;
+  if(index !== undefined) return t("planItemStepLabel", { index: String(index + 1) });
+  return t("taskUntitled");
+}
+/* Produce one readable current-position sentence from named dependency evidence.
+ * Never exposes raw UUIDs or event codes in primary copy. */
+function boardItemPositionText(item){
+  var named = Array.isArray(item.namedDependencies) ? item.namedDependencies : [];
+  var status = item.taskStatus;
+  var label = safeItemLabel(item);
+  // Terminal states: completed, failed, active (running)
+  if(status === "succeeded"){
+    return t("planItemPositionCompleted", { name: label });
+  }
+  if(status === "failed" || status === "interrupted"){
+    return t("planItemPositionFailed", { name: label });
+  }
+  if(status === "running" || status === "preparing" || status === "verifying" || status === "active"){
+    return t("planItemPositionActive", { name: label });
+  }
+  if(status === "blocked"){
+    return t("planItemPositionBlocked", { name: label });
+  }
+  // Queued/waiting/undefined: explain position from dependencies
+  if(named.length === 0){
+    // Not started, no prerequisites: can start now
+    if(!status || status === "queued" || status === "waiting"){
+      return t("planItemPositionReady");
+    }
+    return t("planItemPositionQueued");
+  }
+  // Has dependencies: check if blocked or waiting
+  var failedDeps = named.filter(function(d){ return d.state === "failed"; });
+  var waitingDeps = named.filter(function(d){ return d.state === "waiting"; });
+  if(failedDeps.length > 0){
+    var firstName = safeTaskName(failedDeps[0].taskName) || t("planItemGenericSource");
+    if(failedDeps.length === 1){
+      return t("planItemPositionBlockedByFailed", { name: firstName });
+    }
+    return t("planItemPositionBlockedByFailedMany", {
+      first: firstName,
+      count: String(failedDeps.length)
+    });
+  }
+  if(waitingDeps.length > 0){
+    // Name the first waiting dependency and its readable stage
+    var w = waitingDeps[0];
+    var wName = safeTaskName(w.taskName) || t("planItemGenericSource");
+    var wStage = w.taskStatus ? statusLabel(w.taskStatus) : t("planItemNotStarted");
+    if(waitingDeps.length === 1){
+      return t("planItemPositionWaitingFor", { name: wName, stage: wStage });
+    }
+    return t("planItemPositionWaitingForMany", {
+      name: wName,
+      stage: wStage,
+      count: String(waitingDeps.length)
+    });
+  }
+  // All dependencies satisfied: can start
+  return t("planItemPositionReady");
+}
+/* Produce one readable unlocks-next sentence from named dependent evidence.
+ * Never exposes raw UUIDs as primary copy. */
+function boardItemUnlocksText(item){
+  var named = Array.isArray(item.namedRequiredBy) ? item.namedRequiredBy : [];
+  if(named.length === 0) return "";
+  var names = named.slice(0, 3).map(function(d){ return safeTaskName(d.taskName) || t("planItemGenericNext"); });
+  if(named.length <= 3){
+    return t("planItemUnlocks", { names: names.join(", ") });
+  }
+  return t("planItemUnlocksMany", {
+    names: names.join(", "),
+    more: String(named.length - 3)
+  });
 }
 
 /* --- Task kanban helpers --- */
@@ -1015,6 +1292,13 @@ function countByLane(tasks){
   return c;
 }
 function taskProgressSummary(task){
+  // A follow-up check is current activity, not a replacement machine result.
+  // Show it before historical Main/delivery wording; lane and headline remain
+  // driven by the unchanged Task result elsewhere.
+  var live = taskLiveStage(task);
+  if(live && (live.stage === "candidate-reverifying" || live.stage === "remediation-checking")){
+    return liveStageCompactText(live);
+  }
   if(hasVerifiedFinalDelivery(task)){
     var disposition = task && (task.remediationDisposition
       || (task.decision && task.decision.remediationDisposition)
@@ -1052,7 +1336,18 @@ function taskProgressSummary(task){
   if(status === "preparing"){
     var progress = task && (task.progress || (task.decision && task.decision.progress));
     var prep = progress && progress.preparationStage;
-    return prep ? preparationProgressText(prep) : t("taskProgressPreparing");
+    if(prep) return preparationProgressText(prep);
+    var prepLive = taskLiveStage(task);
+    if(prepLive && prepLive.stage === "preparing-workspace") return liveStageCompactText(prepLive);
+    return t("taskProgressPreparing");
+  }
+  // Prefer the canonical live-stage projection for live Worker states AND for
+  // open post-terminal follow-up operations (Candidate reverification or Main
+  // repair verification) on terminal Tasks. The machine result stays unchanged.
+  live = taskLiveStage(task);
+  if(live && (status === "running" || status === "active" || status === "verifying"
+      || status === "queued" || status === "waiting")){
+    return liveStageCompactText(live);
   }
   if(status === "running" || status === "active"){
     var runKind = boardActivityKind(task);
@@ -1110,7 +1405,8 @@ function kanbanCard(task){
   // renders in the failed lane; only the duplicate badge is suppressed.
   var finalBadge = taskHeadline(task).delivered ? null : finalDeliveryBadge(task);
   if(finalBadge) meta.appendChild(finalBadge);
-  // Quiet / stalled activity is a presentation signal on the board only.
+  // Quiet / long-quiet activity is a presentation signal on the board only.
+  // It never mutates Task state or starts a retry.
   var activityBadge = boardActivityBadge(task);
   if(activityBadge) meta.appendChild(activityBadge);
   var p = task.progress;
@@ -1147,6 +1443,149 @@ function kanbanColumn(lane, label, tone, items){
   }
   col.appendChild(body);
   return col;
+}
+
+/* --- Board scope (Now / History / All) ---
+ * Scope is the primary board control. The canonical Core projection
+ * (boardScope / boardReason) decides Now vs History; the browser only
+ * translates the closed codes and never recomputes lifecycle semantics.
+ * Absent codes (older daemon) fail open to Now so unfinished work is never
+ * hidden. Machine lane selection (taskLane) and Task Detail are unchanged. */
+function taskBoardScope(task){
+  return task && task.boardScope === "history" ? "history" : "now";
+}
+/* Translate closed boardReason codes into a History outcome group.
+ * Delivered covers Integration delivery, activation, and Main-repaired
+ * delivery; Stopped covers an explicit Main rejection. Anything unrecognized
+ * has no proven closed outcome and is grouped with Delivered only when the
+ * Core already classified it as History (never invented client-side). */
+function taskHistoryGroup(task){
+  var reason = task && task.boardReason;
+  if(reason === "delivered" || reason === "activated" || reason === "repaired-delivered") return "delivered";
+  if(reason === "main-rejected") return "stopped";
+  return null;
+}
+function historyGroup(tone, label, hint, items){
+  var section = h("div", "history-group tone-" + tone);
+  var head = h("div", "history-group-head");
+  head.appendChild(h("div", "history-group-title", label));
+  head.appendChild(h("div", "history-group-count", String(items.length)));
+  section.appendChild(head);
+  if(hint) section.appendChild(h("div", "summary-line dim fs11 history-group-hint", hint));
+  var body = h("div", "history-group-body");
+  if(!items.length){
+    body.appendChild(h("div", "kanban-empty", t("taskNothingHere")));
+  } else {
+    items.forEach(function(task){ body.appendChild(kanbanCard(task)); });
+  }
+  section.appendChild(body);
+  return section;
+}
+/* History renders end-to-end outcome groups instead of machine lanes. A
+ * repaired failed Task belongs under Delivered; a Main-rejected Task belongs
+ * under Stopped. Cards and Task Detail keep the original machine evidence. */
+function renderHistoryBoard(tasks){
+  var wrap = h("div", "history-board");
+  wrap.appendChild(h("div", "summary-line dim board-scope-helper", t("boardHistoryHelper")));
+  var delivered = [];
+  var stopped = [];
+  tasks.forEach(function(task){
+    var group = taskHistoryGroup(task);
+    if(group === "stopped") stopped.push(task);
+    else delivered.push(task);
+  });
+  wrap.appendChild(historyGroup("delivered", t("boardHistoryDelivered"), t("boardHistoryDeliveredHint"), delivered));
+  wrap.appendChild(historyGroup("stopped", t("boardHistoryStopped"), t("boardHistoryStoppedHint"), stopped));
+  return wrap;
+}
+
+/* The deliberate History panel: an explicit search form (submit, not per
+ * keystroke), Refresh, honest loaded/total progress, retained-data error
+ * handling, and Load more. Loads only when the user asks; never polled. */
+function renderHistoryPanel(){
+  var panel = h("div", "history-panel");
+  panel.setAttribute("data-fl-role", "history-panel");
+
+  var form = h("form", "history-search-form");
+  form.setAttribute("role", "search");
+  var lab = h("label", "history-search-label");
+  lab.appendChild(h("span", "history-search-label-text", t("historySearchLabel")));
+  var input = h("input", "history-search-input");
+  input.type = "search";
+  input.name = "query";
+  input.value = historyState.draftQuery;
+  input.maxLength = 100;
+  input.placeholder = t("historySearchPlaceholder");
+  input.setAttribute("aria-label", t("historySearchLabel"));
+  input.disabled = historyState.loading;
+  input.addEventListener("input", function(){
+    // Draft only: never request per keystroke. Submit fires the search.
+    historyState.draftQuery = input.value;
+  });
+  lab.appendChild(input);
+  form.appendChild(lab);
+  var submitBtn = h("button", "btn primary sm", t("historySearchBtn"));
+  submitBtn.type = "submit";
+  submitBtn.disabled = historyState.loading;
+  form.appendChild(submitBtn);
+  form.addEventListener("submit", function(e){
+    e.preventDefault();
+    historyState.submittedQuery = historyState.draftQuery.trim();
+    historyState.draftQuery = historyState.submittedQuery;
+    loadHistory("search");
+  });
+  panel.appendChild(form);
+
+  var refreshBtn = h("button", "btn sm history-refresh-btn", t("historyRefreshBtn"));
+  refreshBtn.type = "button";
+  refreshBtn.disabled = historyState.loading;
+  refreshBtn.addEventListener("click", function(){ loadHistory("refresh"); });
+  panel.appendChild(refreshBtn);
+
+  var loaded = historyState.items.length;
+  var total = historyState.totalCount;
+  var status = h("div", "history-status summary-line dim");
+  if(historyState.loading){
+    status.textContent = t("historyLoading");
+  } else if(historyState.error && loaded === 0){
+    status.textContent = "";
+  } else {
+    status.textContent = t("historyLoadedCount", {
+      loaded: String(loaded), total: String(total)
+    });
+  }
+  panel.appendChild(status);
+
+  if(historyState.error){
+    var err = h("div", "history-error");
+    var msg = h("div", "summary-line");
+    msg.textContent = (loaded === 0) ? t("historyUnavailable") : t("historyStale");
+    err.appendChild(msg);
+    var retryBtn = h("button", "btn sm", t("historyRetryBtn"));
+    retryBtn.type = "button";
+    retryBtn.disabled = historyState.loading;
+    retryBtn.addEventListener("click", function(){
+      loadHistory(historyRetryMode());
+    });
+    err.appendChild(retryBtn);
+    panel.appendChild(err);
+  }
+
+  if(loaded > 0){
+    panel.appendChild(renderHistoryBoard(historyState.items));
+  } else if(!historyState.loading && !historyState.error){
+    panel.appendChild(stateMsg("empty", t("historyEmpty")));
+  }
+
+  if(historyState.hasMore && !historyState.loading && !historyState.error){
+    var moreRow = h("div", "history-load-more");
+    var moreBtn = h("button", "btn sm", t("historyLoadMoreBtn"));
+    moreBtn.type = "button";
+    moreBtn.addEventListener("click", function(){ loadHistory("more"); });
+    moreRow.appendChild(moreBtn);
+    panel.appendChild(moreRow);
+  }
+  return panel;
 }
 
 /* --- Guided first Task ---
@@ -1276,28 +1715,92 @@ function renderGuidedSampleCard(){
   return cardEl;
 }
 
-/* --- Overview (dense: metrics + split columns, less vertical scroll) --- */
+/* --- Overview (dense: live state + needs attention + active work first) --- */
 function rOverview(){
   viewEl.textContent = "";
   if(!S.hadOk){ showDisconnected(); return; }
-  // Page story: purpose, input, process, output, next before metrics
-  viewEl.appendChild(renderPageStory("overview"));
+
   var tasks = S.tasks || [];
   var lanes = countByLane(tasks);
   var comps = S.competitions || [];
   var plans = S.boards || [];
+  var goals = S.goals || [];
   var activeComp = comps.filter(function(c){ return c.status === "running" || c.status === "pending"; }).length;
 
-  rReadiness();
+  // First viewport: live state strip
+  var liveStrip = h("div", "ov-live-strip");
+  liveStrip.setAttribute("data-fl-role", "ov-live-strip");
+  var snap = daemonSnapshot();
+  liveStrip.appendChild(h("div", "ov-live-title", t("ovLiveState")));
+  var liveInfo = h("div", "ov-live-info");
+  liveInfo.appendChild(h("span", "badge " + (snap.running ? (snap.ok ? "badge-ok" : "badge-warn") : "badge-dim"),
+    snap.running ? (snap.ok ? t("ovUp") : t("daemonDegraded")) : t("ovDown")));
+  liveInfo.appendChild(document.createTextNode("  " + t("daemonWorkSummary", {
+    active: String(snap.active), queued: String(snap.queued),
+    cap: String(snap.maxConcurrency != null ? snap.maxConcurrency : "-")
+  })));
+  if(snap.error && !snap.running){
+    liveInfo.appendChild(h("div", "summary-line dim mt-4", t("daemonUnavailableHint")));
+  }
+  liveStrip.appendChild(liveInfo);
+  viewEl.appendChild(liveStrip);
 
-  // Three-layer version alignment: source, built product, running service.
-  // Prominent, before task metrics, so a non-technical user sees it first.
-  viewEl.appendChild(renderVersionJourneyCard());
-  // Consecutive self-upgrade reliability: server-owned counts only.
-  viewEl.appendChild(renderSelfUpgradeEvidenceCard());
-  viewEl.appendChild(renderGuidedSampleCard());
+  // Needs attention: actionable items first
+  var attention = tasks.filter(function(task){
+    return (task.status === "failed" || task.status === "interrupted") && !hasVerifiedFinalDelivery(task);
+  }).slice(0, 3);
+  if(attention.length > 0){
+    viewEl.appendChild(sec(t("needsAttention")));
+    attention.forEach(function(task){
+      var attentionRows = [
+        cardHead(task.name, "", badge(task.status)),
+        h("div", "summary-line", taskProgressSummary(task))
+      ];
+      if(task.failureCategory){
+        attentionRows.push(h("div", "summary-line dim fs11", t("attentionCause", {
+          category: failureCategoryLabel(task.failureCategory)
+        })));
+      }
+      viewEl.appendChild(card(function(){ showTask(task.id); }, attentionRows));
+    });
+  }
 
-  var goals = S.goals || [];
+  // Active work
+  viewEl.appendChild(sec(t("ovActiveWork")));
+  var activeItems = tasks.filter(function(t){
+    return taskLane(t.status) === "active";
+  });
+  var activeComps = comps.filter(function(c){ return c.status === "running" || c.status === "pending"; });
+  if(!activeItems.length && !activeComps.length && !goals.filter(function(g){ return g.status === "running"; }).length){
+    viewEl.appendChild(h("div", "summary-line mb-8", t("ovNoActiveWork")));
+  } else {
+    activeItems.slice(0, 3).forEach(function(task){
+      viewEl.appendChild(card(function(){ showTask(task.id); }, [
+        cardHead(task.name, "", badge(task.status)),
+        h("div", "summary-line", taskProgressSummary(task))
+      ]));
+    });
+    activeComps.slice(0, 2).forEach(function(c){
+      viewEl.appendChild(card(function(){ showCompetition(c.id); }, [
+        cardHead(c.name, "", badge(c.status)),
+        h("div", "summary-line", t("competitionProgress", {
+          candidates: String(c.candidateCount), terminal: String((c.progress || {}).terminal || 0), total: String((c.progress || {}).total || 0)
+        }))
+      ]));
+    });
+    goals.filter(function(g){ return g.status === "running"; }).slice(0, 2).forEach(function(g){
+      viewEl.appendChild(card(function(){ showGoalDetail(g.goalId); }, [
+        cardHead(g.name || t("navGoals"), "", badge("running")),
+        h("div", "summary-line", t("goalProgressCompact", {
+          satisfied: String(g.progress ? g.progress.satisfied : 0),
+          total: String(g.progress ? g.progress.total : 0),
+          percent: String(g.progress ? g.progress.percent : 0)
+        }))
+      ]));
+    });
+  }
+
+  // Metrics (compact)
   var metrics = hd("div", "grid-4", [
     metric(t("ovBoard"), String(tasks.length), lanes.active + " " + t("ovWorking")),
     metric(t("ovMotion"), String(lanes.active), lanes.queued + " " + t("ovQueued")),
@@ -1306,49 +1809,21 @@ function rOverview(){
   ]);
   viewEl.appendChild(metrics);
 
+  // Secondary: compact readiness
+  renderCompactReadiness();
+
+  // Secondary: compact version, upgrade, sample
+  renderCompactVersionRow();
+  renderCompactUpgradeRow();
+  renderCompactSampleRow();
+
+  // Goals + Plans (secondary)
   var split = hd("div", "overview-split");
   var left = hd("div", "overview-stack");
-  left.appendChild(sec(t("needsAttention")));
-  var attention = tasks.filter(function(task){
-    return (task.status === "failed" || task.status === "interrupted") && !hasVerifiedFinalDelivery(task);
-  }).slice(0, 3);
-  if(!attention.length){
-    left.appendChild(h("div", "summary-line mb-8", t("noFailed")));
-  } else {
-    attention.forEach(function(task){
-      left.appendChild(card(function(){ showTask(task.id); }, [
-        cardHead(task.name, "", badge(task.status)),
-        h("div", "summary-line", taskProgressSummary(task)),
-        task.failureCategory
-          ? h("div", "summary-line dim fs11", t("attentionCause", {
-              category: failureCategoryLabel(task.failureCategory)
-            }))
-          : h("div", "summary-line dim fs11", t("ovOpenDetails"))
-      ]));
-    });
-  }
-  left.appendChild(sec(t("navCompete")));
-  if(!comps.length){
-    left.appendChild(h("div", "summary-line", t("noCompetitions")));
-  } else {
-    comps.slice(0, 2).forEach(function(c){
-      var pr = c.progress || {};
-      left.appendChild(card(function(){ showCompetition(c.id); }, [
-        cardHead(c.name, "", badge(c.status)),
-        h("div", "summary-line", t("competitionProgress", {
-          candidates: String(c.candidateCount), terminal: String(pr.terminal || 0), total: String(pr.total || 0)
-        }))
-      ]));
-    });
-  }
-
-  var right = hd("div", "overview-stack");
-  right.appendChild(sec(t("navGoals")));
-  if(!goals.length){
-    right.appendChild(h("div", "summary-line", t("noGoals")));
-  } else {
+  if(goals.length){
+    left.appendChild(sec(t("navGoals")));
     goals.slice(0, 3).forEach(function(g){
-      right.appendChild(card(function(){ showGoalDetail(g.goalId); }, [
+      left.appendChild(card(function(){ showGoalDetail(g.goalId); }, [
         cardHead(g.name || t("navGoals"), "", badge(g.status || "pending")),
         h("div", "summary-line", t("goalProgressCompact", {
           satisfied: String(g.progress ? g.progress.satisfied : 0),
@@ -1359,6 +1834,8 @@ function rOverview(){
       ]));
     });
   }
+
+  var right = hd("div", "overview-stack");
   if(plans.length){
     right.appendChild(sec(t("navPlans")));
     plans.slice(0, 2).forEach(function(b){
@@ -1374,6 +1851,9 @@ function rOverview(){
       ]));
     });
   }
+
+  // System status (provider probes + daemon controls)
+  right.appendChild(sec(t("ovSystemStatus")));
   right.appendChild(daemonControlCard());
 
   split.appendChild(left);
@@ -1796,6 +2276,122 @@ function renderSelfUpgradeEvidenceCard(){
   return cardEl;
 }
 
+/* Compact readiness: one row when setup is complete, prominent only while incomplete. */
+function renderCompactReadiness(){
+  var hub = S.hub || {};
+  var prereq = hub.prerequisites || {};
+  var daemon = hub.daemon || {};
+  var mains = hub.mains || [];
+  var models = (hub.modelCatalog && hub.modelCatalog.models) || [];
+  var workers = (hub.workerProfiles && hub.workerProfiles.profiles) || [];
+  var allReady = models.length > 0 && workers.length > 0
+    && mains.some(function(m){ return (m.plugin && m.plugin.installed) || (m.mcp && m.mcp.installed) || (m.skill && m.skill.installed); })
+    && (daemon.running === true || daemon.pid != null);
+
+  if(allReady){
+    var row = h("div", "compact-status-row ok");
+    row.setAttribute("data-fl-role", "ov-setup-ready");
+    row.appendChild(h("span", "compact-status-badge", String.fromCharCode(0x2713)));
+    row.appendChild(document.createTextNode(" " + t("ovSetupReady")));
+    viewEl.appendChild(row);
+    return;
+  }
+  // Setup incomplete: show the full readiness guide
+  rReadiness();
+}
+
+/* Compact version row: one line when current, expandable card when mismatched. */
+function renderCompactVersionRow(){
+  var hub = S.hub || {};
+  var view = versionJourneyView(hub.versionJourney);
+  var isCurrent = view.state === "ready";
+  var row = h("div", "compact-status-row" + (isCurrent ? " ok" : ""));
+  row.setAttribute("data-fl-role", "ov-version-row");
+  row.appendChild(h("span", "compact-status-badge", isCurrent ? String.fromCharCode(0x2713) : String.fromCharCode(0x26A0)));
+  row.appendChild(document.createTextNode(" " + (isCurrent ? t("ovVersionCurrent") : t("ovVersionMismatch"))));
+  if(!isCurrent){
+    row.classList.add("compact-expandable");
+    row.addEventListener("click", function(){
+      if(row.nextSibling && row.nextSibling.getAttribute && row.nextSibling.getAttribute("data-fl-role") === "version-journey-expanded"){
+        row.nextSibling.remove();
+      } else {
+        var card = renderVersionJourneyCard();
+        card.setAttribute("data-fl-role", "version-journey-expanded");
+        row.insertAdjacentElement("afterend", card);
+      }
+    });
+  }
+  viewEl.appendChild(row);
+}
+
+/* Compact upgrade row: one line when satisfied, summary otherwise. */
+function renderCompactUpgradeRow(){
+  if(S.selfUpgradeEvidenceError && !S.selfUpgradeEvidence) return;
+  if(!S.selfUpgradeEvidence){
+    var loading = h("div", "compact-status-row dim");
+    loading.textContent = t("sueLoading");
+    viewEl.appendChild(loading);
+    return;
+  }
+  var view = selfUpgradeEvidenceView(S.selfUpgradeEvidence);
+  if(!view.available) return;
+  var satisfied = view.state === "ready" && view.breakCategory === "none";
+  var row = h("div", "compact-status-row" + (satisfied ? " ok" : ""));
+  row.setAttribute("data-fl-role", "ov-upgrade-row");
+  row.appendChild(h("span", "compact-status-badge", satisfied ? String.fromCharCode(0x2713) : String.fromCharCode(0x26A0)));
+  row.appendChild(document.createTextNode(" " + (satisfied
+    ? t("ovUpgradeSatisfied")
+    : t("ovUpgradePending", { achieved: String(view.achieved), required: String(view.required) })
+  )));
+  if(!satisfied && view.breakCategory !== "none"){
+    row.appendChild(h("div", "summary-line dim fs11 mt-4", t(view.breakKey)));
+  }
+  // Click to expand full card
+  if(!satisfied){
+    row.classList.add("compact-expandable");
+    row.addEventListener("click", function(){
+      if(row.nextSibling && row.nextSibling.getAttribute && row.nextSibling.getAttribute("data-fl-role") === "self-upgrade-expanded"){
+        row.nextSibling.remove();
+      } else {
+        row.insertAdjacentElement("afterend", renderSelfUpgradeEvidenceCard());
+        if(row.nextSibling) row.nextSibling.setAttribute("data-fl-role", "self-upgrade-expanded");
+      }
+    });
+  }
+  viewEl.appendChild(row);
+}
+
+/* Compact sample row: one line when done, short hint otherwise. */
+function renderCompactSampleRow(){
+  if(!S.sample) return;
+  var sample = S.sample;
+  if(!sample.available) return;
+  if(sample.state === "completed" || sample.state === "submitted" || sample.alreadySubmitted){
+    var row = h("div", "compact-status-row ok");
+    row.setAttribute("data-fl-role", "ov-sample-row");
+    row.appendChild(h("span", "compact-status-badge", String.fromCharCode(0x2713)));
+    row.appendChild(document.createTextNode(" " + t("ovSampleDone")));
+    viewEl.appendChild(row);
+    return;
+  }
+  if(sample.state === "prepared" || sample.state === "empty"){
+    var row = h("div", "compact-status-row");
+    row.setAttribute("data-fl-role", "ov-sample-row");
+    row.appendChild(h("span", "compact-status-badge", String.fromCharCode(0x25CB)));
+    row.appendChild(document.createTextNode(" " + t("ovSampleAvailable")));
+    row.classList.add("compact-expandable");
+    row.addEventListener("click", function(){
+      if(row.nextSibling && row.nextSibling.getAttribute && row.nextSibling.getAttribute("data-fl-role") === "guided-sample-expanded"){
+        row.nextSibling.remove();
+      } else {
+        row.insertAdjacentElement("afterend", renderGuidedSampleCard());
+        if(row.nextSibling) row.nextSibling.setAttribute("data-fl-role", "guided-sample-expanded");
+      }
+    });
+    viewEl.appendChild(row);
+  }
+}
+
 /* Overview version card: explains current source, built product, and running
  * task service as three ordered facts, then one outcome and one next action.
  * Exact identity evidence stays inside a closed disclosure. */
@@ -1858,9 +2454,13 @@ function renderVersionJourneyCard(){
 }
 
 /* --- Tasks Kanban --- */
-/* Board filter is presentation-only session state; it never mutates Tasks. */
+/* Board filter is presentation-only session state; it never mutates Tasks.
+ * Scope (Now / History / All) is the primary control; lane and search are
+ * secondary and compose with the selected scope. Clearing search + lane never
+ * switches the chosen scope. */
 var boardFilterQuery = "";
 var boardFilterLane = "all";
+var boardScope = "now";
 /* Two-step submit state: the path input value and the last safe preview.
  * Editing the path invalidates the preview so an old revision can never be
  * reused for a different file. Both survive a poll re-render. */
@@ -1871,8 +2471,146 @@ function submitPreviewRequestIsCurrent(requestId, requestedPath, currentPath){
   return requestId === boardPreviewRequestId
     && requestedPath === String(currentPath || "").trim();
 }
+
+/* --- Durable History (explicit, never polled) ---
+ * History is a separate, deliberately loaded read model. It is NOT in
+ * PAGE_DEPS or any automatic refresh path: the browser only asks the server
+ * for a History page when the user opens History, submits a search, chooses
+ * Refresh, or chooses Load more. One request is in flight at a time; a newer
+ * search supersedes an in-flight Load more (the older response is dropped via
+ * the generation counter and its fetch is aborted). Late responses from an
+ * older search can never overwrite the current search. */
+var historyState = {
+  items: [],
+  submittedQuery: "",
+  draftQuery: "",
+  nextCursor: null,
+  totalCount: 0,
+  hasMore: false,
+  loading: false,
+  error: null,
+  stale: false,
+  loaded: false,
+  failedMode: null,
+  generation: 0,
+};
+var historyAbort = null;
+function historyUrl(mode){
+  var params = new URLSearchParams();
+  params.set("limit", "25");
+  if(mode === "more" && historyState.nextCursor){
+    params.set("cursor", historyState.nextCursor);
+  }
+  if(historyState.submittedQuery){
+    params.set("query", historyState.submittedQuery);
+  }
+  return "/api/ops/tasks/history?" + params.toString();
+}
+/** Load one History page. mode: "search" | "refresh" (replace) or "more"
+ *  (append + de-duplicate). Replaces the page only after a successful
+ *  current-generation response; a later-page failure keeps loaded records,
+ *  marks them possibly stale, and leaves a retry action for the renderer. */
+function loadHistory(mode){
+  if(historyState.loading){
+    // Single-flight: a replace may supersede an in-flight Load more by
+    // aborting it; a concurrent Load more is ignored.
+    if(mode === "more") return;
+    if(historyAbort){ try { historyAbort.abort(); } catch(_e){} historyAbort = null; }
+  }
+  historyState.generation += 1;
+  var gen = historyState.generation;
+  historyState.loading = true;
+  historyState.error = null;
+  if(mode !== "more"){
+    // Fresh replace clears the stale flag. Items and cursor are replaced only
+    // on success, so a failed replace never shows an empty archive.
+    historyState.stale = false;
+  }
+  var controller = new AbortController();
+  historyAbort = controller;
+  render();
+  fetchJSON(historyUrl(mode), { signal: controller.signal })
+    .then(function(res){
+      if(gen !== historyState.generation) return; // superseded
+      var incoming = (res && Array.isArray(res.items)) ? res.items : [];
+      if(mode === "more"){
+        // De-duplicate by Task id; append only new records.
+        var seen = new Set(historyState.items.map(function(it){ return it.id; }));
+        incoming.forEach(function(it){
+          if(it && !seen.has(it.id)){ historyState.items.push(it); seen.add(it.id); }
+        });
+      } else {
+        historyState.items = incoming;
+      }
+      historyState.totalCount = typeof res.totalCount === "number"
+        ? res.totalCount : historyState.items.length;
+      historyState.hasMore = res.hasMore === true;
+      historyState.nextCursor = (typeof res.nextCursor === "string" && res.nextCursor)
+        ? res.nextCursor : null;
+      historyState.loaded = true;
+      historyState.stale = false;
+      historyState.failedMode = null;
+    })
+    .catch(function(e){
+      if(gen !== historyState.generation) return; // superseded
+      // AbortError happens only when a newer search superseded this request.
+      if(e && e.name === "AbortError") return;
+      historyState.error = (e && e.message) ? e.message : t("historyUnavailable");
+      historyState.failedMode = mode;
+      if(mode === "more"){
+        // Keep loaded records, mark them possibly stale, offer retry.
+        historyState.stale = true;
+      } else {
+        // Replace failure: keep prior records if any (do not clear), and mark
+        // them stale. A first-page failure leaves loaded=false so the renderer
+        // shows "unavailable" instead of an empty archive.
+        historyState.stale = historyState.items.length > 0;
+      }
+    })
+    .finally(function(){
+      if(gen === historyState.generation){
+        historyState.loading = false;
+        historyAbort = null;
+      }
+      render();
+    });
+}
+function historyRetryMode(){
+  // Retry the operation that actually failed. In particular, a failed new
+  // search may still be showing retained results and a cursor from the prior
+  // query; reusing that old cursor with the new query would fail forever.
+  if(historyState.failedMode === "more") return "more";
+  return "search";
+}
+/* Preserve the History search input focus and selection across the periodic
+ * board re-render so a user mid-search is not interrupted. The draft value is
+ * already held in historyState; this only restores cursor position. */
+function historyPreserveInput(){
+  var active = document.activeElement;
+  if(active && active.classList && active.classList.contains("history-search-input")){
+    return { start: active.selectionStart, end: active.selectionEnd };
+  }
+  return null;
+}
+function historyRestoreInput(saved){
+  if(!saved) return;
+  var input = viewEl.querySelector(".history-search-input");
+  if(input){
+    input.focus();
+    try { input.setSelectionRange(saved.start, saved.end); } catch(_e){}
+  }
+}
 function taskMatchesBoardFilter(task, query, lane){
-  if(lane && lane !== "all" && taskLane(task.status) !== lane) return false;
+  if(lane && lane !== "all"){
+    // The secondary filter is scope-specific: machine lanes for Now/All,
+    // outcome groups for History. taskLane is unchanged and selects only on
+    // machine status; History groups translate closed boardReason codes.
+    if(boardScope === "history"){
+      if(taskHistoryGroup(task) !== lane) return false;
+    } else if(taskLane(task.status) !== lane){
+      return false;
+    }
+  }
   var q = String(query || "").trim().toLowerCase();
   if(!q) return true;
   var hay = [
@@ -1955,6 +2693,9 @@ function renderSubmitPreviewFacts(preview){
   return wrap;
 }
 function rTasks(){
+  // Capture History search focus before clearing the view so a periodic
+  // board re-render does not interrupt a user mid-search.
+  var savedHistoryInput = historyPreserveInput();
   viewEl.textContent = "";
   if(!S.hadOk){ showDisconnected(); return; }
   viewEl.appendChild(renderPageStory("board"));
@@ -2083,22 +2824,91 @@ function rTasks(){
     viewEl.appendChild(stateMsg("empty", t("noTasks")));
     return;
   }
-  var filtered = tasks.filter(function(task){
+
+  // Scope is the primary board control: Now (work needing attention),
+  // History (durably closed outcomes), and All (every loaded recent task).
+  // History has no badge until its separate read model has loaded, then shows
+  // the authoritative full-history total. Selecting a scope never mutates
+  // Tasks and clearing search/lane never switches scope.
+  var nowCount = 0;
+  tasks.forEach(function(task){
+    if(taskBoardScope(task) !== "history") nowCount += 1;
+  });
+  var scopeRow = h("div", "board-scope-row");
+  scopeRow.appendChild(h("span", "board-scope-label", t("boardScopeLabel")));
+  [
+    ["now", t("boardScopeNow"), nowCount],
+    ["history", t("boardScopeHistory"), historyState.loaded ? historyState.totalCount : null],
+    ["all", t("boardScopeAll"), tasks.length]
+  ].forEach(function(row){
+    var scopeKey = row[0];
+    var chip = h("button", "board-scope-chip" + (boardScope === scopeKey ? " is-active" : ""), "");
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", boardScope === scopeKey ? "true" : "false");
+    chip.appendChild(document.createTextNode(row[1] + (row[2] === null ? "" : " ")));
+    if(row[2] !== null){
+      chip.appendChild(h("span", "legend-count", String(row[2])));
+    }
+    chip.addEventListener("click", function(){
+      boardScope = scopeKey;
+      // Secondary lane/outcome filters are scope-specific; reset them on
+      // scope switch. Search composes with scope and is preserved.
+      boardFilterLane = "all";
+      // History loads only when the user opens it and the current submitted
+      // query has not been loaded yet. Re-entering History reuses loaded
+      // results until Refresh or another search is submitted. Never polled.
+      if(scopeKey === "history" && !historyState.loaded && !historyState.loading){
+        loadHistory("search");
+      }
+      rTasks();
+    });
+    scopeRow.appendChild(chip);
+  });
+  viewEl.appendChild(scopeRow);
+
+  // History is a deliberate, server-backed read model: it does not share the
+  // recent Tasks live filter or machine lanes. Render its explicit search,
+  // Refresh, Load more, and honest loaded/total state; the recent Now/All
+  // board continues below for the other scopes.
+  if(boardScope === "history"){
+    viewEl.appendChild(renderHistoryPanel());
+    historyRestoreInput(savedHistoryInput);
+    return;
+  }
+
+  var scoped = tasks.filter(function(task){
+    if(boardScope === "all") return true;
+    return taskBoardScope(task) === boardScope;
+  });
+  var filtered = scoped.filter(function(task){
     return taskMatchesBoardFilter(task, boardFilterQuery, boardFilterLane);
   });
-  var lanes = { queued: [], active: [], done: [], failed: [] };
-  filtered.forEach(function(taskItem){ lanes[taskLane(taskItem.status)].push(taskItem); });
 
-  var counts = countByLane(tasks);
   var toolbar = h("div", "kanban-toolbar");
   var legend = h("div", "kanban-legend");
-  [
-    ["all", t("taskBoardFilterAll"), tasks.length],
-    ["queued", t("taskLaneQueued"), counts.queued],
-    ["active", t("taskLaneWorking"), counts.active],
-    ["done", t("taskLaneDone"), counts.done],
-    ["failed", t("taskLaneFailed"), counts.failed]
-  ].forEach(function(row){
+  var legendRows;
+  if(boardScope === "history"){
+    var groups = { delivered: 0, stopped: 0 };
+    scoped.forEach(function(task){
+      var g = taskHistoryGroup(task);
+      if(g) groups[g] += 1;
+    });
+    legendRows = [
+      ["all", t("taskBoardFilterAll"), scoped.length],
+      ["delivered", t("boardHistoryDelivered"), groups.delivered],
+      ["stopped", t("boardHistoryStopped"), groups.stopped]
+    ];
+  } else {
+    var counts = countByLane(scoped);
+    legendRows = [
+      ["all", t("taskBoardFilterAll"), scoped.length],
+      ["queued", t("taskLaneQueued"), counts.queued],
+      ["active", t("taskLaneWorking"), counts.active],
+      ["done", t("taskLaneDone"), counts.done],
+      ["failed", t("taskLaneFailed"), counts.failed]
+    ];
+  }
+  legendRows.forEach(function(row){
     var laneKey = row[0];
     var item = h("button", "legend-item board-lane-filter" + (boardFilterLane === laneKey ? " is-active" : ""), "");
     item.type = "button";
@@ -2135,6 +2945,7 @@ function rTasks(){
     var clearBtn = h("button", "btn sm", t("taskBoardFilterClear"));
     clearBtn.type = "button";
     clearBtn.addEventListener("click", function(){
+      // Clearing search + lane never switches the chosen scope.
       boardFilterQuery = "";
       boardFilterLane = "all";
       rTasks();
@@ -2142,22 +2953,31 @@ function rTasks(){
     filterRow.appendChild(clearBtn);
   }
   filterRow.appendChild(h("div", "summary-line", t("taskBoardCount", {
-    count: String(filtered.length) + (filtered.length === tasks.length ? "" : " / " + tasks.length)
+    count: String(filtered.length) + (filtered.length === scoped.length ? "" : " / " + scoped.length)
   })));
   toolbar.appendChild(filterRow);
   viewEl.appendChild(toolbar);
 
   if(!filtered.length){
-    viewEl.appendChild(stateMsg("empty", t("taskBoardFilterEmpty")));
+    viewEl.appendChild(stateMsg("empty",
+      boardScope === "history" ? t("boardHistoryEmpty") : t("taskBoardFilterEmpty")));
     return;
   }
 
-  var board = h("div", "kanban");
-  board.appendChild(kanbanColumn("queued", t("taskLaneQueued"), "queued", lanes.queued));
-  board.appendChild(kanbanColumn("active", t("taskLaneWorking"), "active", lanes.active));
-  board.appendChild(kanbanColumn("done", t("taskLaneDone"), "done", lanes.done));
-  board.appendChild(kanbanColumn("failed", t("taskLaneFailed"), "failed", lanes.failed));
-  viewEl.appendChild(board);
+  if(boardScope === "history"){
+    viewEl.appendChild(renderHistoryBoard(filtered));
+  } else {
+    viewEl.appendChild(h("div", "summary-line dim board-scope-helper",
+      boardScope === "now" ? t("boardNowHelper") : t("boardAllHelper")));
+    var lanes = { queued: [], active: [], done: [], failed: [] };
+    filtered.forEach(function(taskItem){ lanes[taskLane(taskItem.status)].push(taskItem); });
+    var board = h("div", "kanban");
+    board.appendChild(kanbanColumn("queued", t("taskLaneQueued"), "queued", lanes.queued));
+    board.appendChild(kanbanColumn("active", t("taskLaneWorking"), "active", lanes.active));
+    board.appendChild(kanbanColumn("done", t("taskLaneDone"), "done", lanes.done));
+    board.appendChild(kanbanColumn("failed", t("taskLaneFailed"), "failed", lanes.failed));
+    viewEl.appendChild(board);
+  }
 }
 
 /* --- Plans --- */
@@ -2909,32 +3729,164 @@ function routingCoverageState(c){
 function nCount(value){
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
 }
-/** One explanation-first section: meaning, four named counts, limitation,
- *  next action. No progress bar, no model-quality label, no nested grid. */
+/** One Main-direct decision reason label from closed code. */
+function mddReasonLabel(reason){
+  var map = {
+    "small-clear-change": t("mddReasonSmallClear"),
+    "urgent-fix": t("mddReasonUrgentFix"),
+    "workers-unavailable": t("mddReasonWorkersUnavailable"),
+    "user-requested": t("mddReasonUserRequested"),
+    "main-judgment": t("mddReasonMainJudgment")
+  };
+  return map[reason] || reason;
+}
+function mddVerificationLabel(v){
+  var map = {
+    "passed": t("mddVerificationPassed"),
+    "failed": t("mddVerificationFailed"),
+    "unavailable": t("mddVerificationUnavailable")
+  };
+  return map[v] || v;
+}
+function mddBadge(status, outcome){
+  if(status === "open") return h("span", "badge badge-warn", t("mddOpenLabel"));
+  if(outcome === "abandoned") return h("span", "badge badge-dim", t("mddAbandonedLabel"));
+  if(outcome === "completed") return h("span", "badge badge-ok", t("mddCompletedLabel"));
+  return badge(status);
+}
+/** Privacy-safe Main-direct decisions panel for Insights.
+ *  Shows only aggregate counts + recent entries; never carries Task content,
+ *  Worker evidence, paths, private notes, or Main Token/cost claims. */
+function renderMainDirectDecisions(aggregate, recent){
+  var panel = h("div", "card");
+  panel.setAttribute("data-fl-role", "main-direct-decisions");
+  panel.appendChild(h("div", "card-title mb-4", t("mddTitle")));
+  panel.appendChild(h("div", "summary-line dim fs11 mb-4", t("mddSub")));
+
+  // Aggregate counts
+  var ag = aggregate || {};
+  var counts = hd("div", "mt-3");
+  counts.setAttribute("data-fl-role", "main-direct-counts");
+  counts.appendChild(h("div", "summary-line", t("mddCounts", {
+    open: nCount(ag.openCount),
+    completed: nCount(ag.completedCount),
+    abandoned: nCount(ag.abandonedCount),
+    total: nCount(ag.totalCount)
+  })));
+  if((ag.completedCount || 0) > 0){
+    counts.appendChild(h("div", "summary-line dim fs11 mt-2", t("mddCompletedBreakdown", {
+      passed: nCount(ag.completedPassedCount),
+      failed: nCount(ag.completedFailedCount),
+      unavailable: nCount(ag.completedUnavailableCount)
+    })));
+  }
+  panel.appendChild(counts);
+
+  panel.appendChild(evCaveat(t("mddExplanation")));
+
+  // Recent entries
+  panel.appendChild(h("div", "summary-line mt-4 mb-2", t("mddRecentTitle")));
+  var recentArr = recent || [];
+  if(!recentArr.length){
+    panel.appendChild(stateMsg("empty", t("mddRecentEmpty")));
+  } else {
+    var list = hd("div", "mb-4");
+    recentArr.forEach(function(r){
+      var row = h("div", "summary-line dim fs11");
+      row.setAttribute("data-fl-role", "main-direct-recent-entry");
+      var reasonText = typeof r.reason === "string" ? mddReasonLabel(r.reason) : r.reason;
+      var verificationText = typeof r.verification === "string"
+        ? " · " + mddVerificationLabel(r.verification) : "";
+      row.appendChild(mddBadge(r.status, r.outcome));
+      row.appendChild(document.createTextNode(" " + t("mddRecentEntry", {
+        type: r.taskClass || "",
+        reason: reasonText || "",
+        verification: verificationText,
+        count: typeof r.consideredWorkerCount === "number" ? r.consideredWorkerCount : 0
+      })));
+      list.appendChild(row);
+    });
+    panel.appendChild(list);
+  }
+
+  return panel;
+}
+function renderMainDirectDecisionsUnavailable(reason){
+  var cardEl = h("div", "card");
+  cardEl.setAttribute("data-fl-role", "main-direct-decisions");
+  cardEl.appendChild(h("div", "card-title mb-4", t("mddTitle")));
+  cardEl.appendChild(evCaveat(
+    t("mddUnavailableBridgeHint", { reason: reason || t("recUnavailableUnknown") })
+  ));
+  return cardEl;
+}
+/** One explanation-first section: traceability counts, comparison-readiness
+ *  breakdown, limitation, and next action. No progress bar, no model ranking,
+ *  no nested grid. The first block explains what the record count proves
+ *  (traceability) and what it cannot prove (fair multi-Worker comparison). */
 function renderRoutingCoverage(c){
   var panel = h("div", "card");
   panel.setAttribute("data-fl-role", "routing-evidence-coverage");
   panel.appendChild(h("div", "card-title mb-4", t("recTitle")));
-  panel.appendChild(h("div", "summary-line", t("recMeaning")));
 
   var state = routingCoverageState(c);
-  var counts = h("div", "mt-4");
-  counts.setAttribute("data-fl-role", "routing-coverage-counts");
+  // Section 1: Traceability: what was recorded
+  panel.appendChild(h("div", "summary-line", t("recTraceHeading")));
+  var traceCounts = h("div", "mt-3");
+  traceCounts.setAttribute("data-fl-role", "routing-coverage-counts");
   [
     ["recTotalLabel", c && c.eligibleTerminalTaskCount],
     ["recClassLabel", c && c.withTaskClassCount],
     ["recFamilyLabel", c && c.withTaskFamilyCount],
     ["recDecisionLabel", c && c.withCompleteRoutingDecisionCount]
   ].forEach(function(row){
-    counts.appendChild(evRow(t(row[0]), h("span", "mono", nCount(row[1]))));
+    traceCounts.appendChild(evRow(t(row[0]), h("span", "mono", nCount(row[1]))));
   });
-  panel.appendChild(counts);
+  panel.appendChild(traceCounts);
+  panel.appendChild(h("div", "summary-line dim fs11 mt-2 mb-4", t("recTraceExplain")));
 
   if(state !== "empty"){
-    panel.appendChild(h("div", "summary-line dim fs11 mt-4", t("recDiversity", {
+    panel.appendChild(h("div", "summary-line dim fs11 mb-4", t("recDiversity", {
       classes: nCount(c && c.distinctTaskClassCount),
       families: nCount(c && c.distinctTaskFamilyCount)
     })));
+  }
+
+  // Section 2: Comparison readiness: what the complete decisions actually prove
+  if(state !== "empty"){
+    panel.appendChild(h("div", "summary-line mt-4 mb-2", t("recReadinessHeading")));
+    var decTotal = c && typeof c.withCompleteRoutingDecisionCount === "number"
+      ? c.withCompleteRoutingDecisionCount : 0;
+    if(decTotal > 0){
+      var readinessCounts = h("div", "mt-3");
+      readinessCounts.setAttribute("data-fl-role", "routing-readiness-counts");
+      [
+        ["recSingleWorkerLabel", c && c.singleWorkerDecisionCount, t("recSingleWorkerExplain")],
+        ["recComparableLabel", c && c.comparableMultiWorkerDecisionCount, t("recComparableExplain")],
+        ["recUnknownLabel", c && c.unknownMultiWorkerDecisionCount, t("recUnknownExplain")],
+        ["recUnusableLabel", c && c.unusableDecisionCount, t("recUnusableExplain")]
+      ].forEach(function(row){
+        var line = evRow(t(row[0]), h("span", "mono", nCount(row[1])));
+        if(row[2]) line.appendChild(h("div", "dim fs10", row[2]));
+        readinessCounts.appendChild(line);
+      });
+      panel.appendChild(readinessCounts);
+
+      // Comparable sub-counts: exact vs family
+      var comparable = c && typeof c.comparableMultiWorkerDecisionCount === "number"
+        ? c.comparableMultiWorkerDecisionCount : 0;
+      if(comparable > 0){
+        var subCounts = h("div", "mt-2 dim fs10");
+        subCounts.setAttribute("data-fl-role", "routing-comparable-subcounts");
+        subCounts.textContent = t("recComparableSubcounts", {
+          exact: nCount(c && c.comparableExactClassDecisionCount),
+          family: nCount(c && c.comparableTaskFamilyDecisionCount)
+        });
+        panel.appendChild(subCounts);
+      }
+    } else {
+      panel.appendChild(h("div", "summary-line dim mt-3 mb-4", t("recNoDecisionsToCompare")));
+    }
   }
 
   panel.appendChild(evCaveat(t("recCaveat")));
@@ -2976,6 +3928,20 @@ function rStats(){
     recPanel.appendChild(stateMsg("loading", t("recLoading")));
   }
   viewEl.appendChild(recPanel);
+
+  // Main-direct decisions: separate aggregate from Worker routing evidence.
+  // Panel appears in the Insights hierarchy before economics, with its own
+  // independent bilingual copy that never mentions Worker Attempts beyond zero.
+  var mddPanel = h("div", "econ-panel");
+  mddPanel.setAttribute("data-fl-role", "main-direct-panel");
+  if(S.mainDirectAggregate){
+    mddPanel.appendChild(renderMainDirectDecisions(S.mainDirectAggregate, S.mainDirectRecent));
+  } else if(S.mainDirectAggregateError){
+    mddPanel.appendChild(renderMainDirectDecisionsUnavailable(S.mainDirectAggregateError));
+  } else {
+    mddPanel.appendChild(stateMsg("loading", t("mddLoading")));
+  }
+  viewEl.appendChild(mddPanel);
 
   viewEl.appendChild(h("div", "insights-title", t("econEvidenceSectionTitle")));
   viewEl.appendChild(evCaveat(t("econEvidenceSectionCaveat")));
@@ -5270,8 +6236,12 @@ function switchTab(name){
     b.classList.toggle("active", b.getAttribute("data-tab") === name);
   });
   S.tab = name;
+  if(S.tab !== "worker") S.workerFormActive = false;
   hideDetail();
+  // Render immediately with retained evidence (or loading if never fetched).
   render();
+  // Immediately fetch this page's required data.
+  refresh();
 }
 
 /* --- Delivery page (Configure → Delivery) --- */
@@ -7956,7 +8926,9 @@ function renderTaskJourney(task){
   var current = h("div", "journey-section");
   current.setAttribute("data-fl-role", "journey-current");
   current.appendChild(h("div", "journey-section-title", t("journeyCurrentState")));
-  current.appendChild(h("div", "journey-section-body journey-field", taskProgressSummary(task)));
+  var detailLive = taskLiveStage(task);
+  current.appendChild(h("div", "journey-section-body journey-field",
+    detailLive ? liveStageDetailText(detailLive) : taskProgressSummary(task)));
   var currentProgress = task.progress || (task.decision && task.decision.progress);
   if(currentProgress && currentProgress.lastEventAt){
     current.appendChild(h("div", "dim fs11", t("taskLastUpdate", {
@@ -8264,6 +9236,86 @@ function renderTaskJourney(task){
   panel.appendChild(next);
 
   return panel;
+}
+
+/* Conditional "Where this Task sits": Plan origin and handoff lineage.
+ * Only renders when durable context exists; standalone Tasks get no card.
+ * Produces at most four primary facts, never duplicates Task outcome.
+ * Never exposes raw UUIDs or item IDs in primary copy. */
+function renderTaskLineage(task){
+  var lineage = task.taskLineage;
+  var plan = task.planContext;
+  if(!lineage) return null;
+  // Standalone: no lineage section
+  if(lineage.kind === "standalone" && !plan) return null;
+
+  var card = h("div", "card form-card task-lineage-card");
+  card.setAttribute("data-fl-role", "task-lineage");
+  card.appendChild(h("div", "card-title mb-4", t("taskLineageTitle")));
+
+  // Fact 1: Plan origin (Started as) using plan name and step index (never itemId).
+  if(plan && plan.planId){
+    var stepIndex = typeof plan.itemIndex === "number" ? String(plan.itemIndex + 1) : "?";
+    card.appendChild(h("div", "summary-line dim", t("taskLineageStartedAs", {
+      planName: safeTaskName(plan.planName) || t("planItemGenericPlan"),
+      step: stepIndex
+    })));
+  }
+
+  // Fact 2: Continued from; prerequisite or handoff source
+  if(lineage.kind === "handoff" && lineage.role === "successor" && lineage.sourceTaskId){
+    card.appendChild(h("div", "summary-line", t("taskLineageContinuedFromHandoff")));
+    if(lineage.destinationProvider || lineage.destinationModel){
+      card.appendChild(h("div", "summary-line dim", t("taskLineageWorkerChange", {
+        provider: lineage.destinationProvider || "",
+        model: lineage.destinationModel || ""
+      })));
+    }
+  } else if(plan && Array.isArray(plan.namedDependencies) && plan.namedDependencies.length > 0){
+    var depNames = plan.namedDependencies.map(function(d){
+      return safeTaskName(d.taskName) || t("planItemGenericSource");
+    }).filter(Boolean);
+    if(depNames.length){
+      card.appendChild(h("div", "summary-line dim", t("taskLineageContinuedFromDeps", {
+        names: depNames.slice(0, 3).join(", ")
+      })));
+    }
+  }
+
+  // Fact 3: This run; handoff continuation, bounded correction, or original
+  if(lineage.kind === "handoff"){
+    if(lineage.role === "successor"){
+      card.appendChild(h("div", "summary-line", t("taskLineageThisRunHandoffSuccessor")));
+      card.appendChild(h("div", "dim fs11 mt-4", t("taskLineageNotARetry")));
+    } else if(lineage.role === "source"){
+      card.appendChild(h("div", "summary-line", t("taskLineageThisRunHandoffSource")));
+    }
+  }
+
+  // Fact 4: Unlocks next; dependent items or handoff successor
+  if(lineage.kind === "handoff" && lineage.role === "source" && lineage.successorTaskId){
+    card.appendChild(h("div", "summary-line dim", t("taskLineageUnlocksHandoff")));
+  } else if(plan && Array.isArray(plan.namedRequiredBy) && plan.namedRequiredBy.length > 0){
+    var reqNames = plan.namedRequiredBy.map(function(d){
+      return safeTaskName(d.taskName) || t("planItemGenericNext");
+    }).filter(Boolean);
+    if(reqNames.length){
+      if(reqNames.length <= 3){
+        card.appendChild(h("div", "summary-line dim", t("taskLineageUnlocks", {
+          names: reqNames.join(", ")
+        })));
+      } else {
+        card.appendChild(h("div", "summary-line dim", t("taskLineageUnlocksMany", {
+          names: reqNames.slice(0, 3).join(", "),
+          more: String(reqNames.length - 3)
+        })));
+      }
+    }
+  }
+
+  // Only render when we actually produced at least one fact.
+  if(card.children.length <= 1) return null;
+  return card;
 }
 
 function resolveCauseWhat(what){
@@ -9102,6 +10154,162 @@ function renderTaskTabShell(tabs, activeId){
   return root;
 }
 
+/* Four-section Task Overview: Main asked, Worker returned, Independent result, Final output. */
+function renderFourSectionOverview(task){
+  var j = task.journey || {};
+  var a = j.assignment || {};
+  var we = j.workerExecution || {};
+  var iv = j.independentVerification || {};
+  var fd = j.finalDelivery || {};
+  var cause = j.cause || {};
+  var next = j.nextAction || {};
+  var files = Array.isArray(we.changedFilePaths) ? we.changedFilePaths : [];
+  var attempts = Array.isArray(we.attempts) ? we.attempts : [];
+  var container = h("div", "task-four-section");
+
+  // 1. Main asked
+  var s1 = h("div", "four-section-card");
+  s1.setAttribute("data-fl-role", "task-ov-main-asked");
+  s1.appendChild(h("div", "four-section-title", t("taskOvMainAsked")));
+  s1.appendChild(h("div", "summary-line dim mb-8", t("taskOvMainAskedHint")));
+  var goalText = a.presentation && a.presentation.summary
+    ? a.presentation.summary
+    : (a.outcome || a.goal || "");
+  if(goalText){
+    s1.appendChild(reportBlock(
+      a.presentation && a.presentation.summary ? t("taskOvMainAskedInputLabel") : t("taskOvMainAskedGoalLabel"),
+      goalText, true
+    ));
+    if(a.presentation && a.presentation.language){
+      s1.appendChild(h("div", "dim fs11 mt-4", t("journeyInputLanguage", { lang: a.presentation.language })));
+    }
+  } else {
+    s1.appendChild(h("div", "task-report-empty", t("storyInputMissing")));
+  }
+  if(we.provider || we.model || we.runtime){
+    s1.appendChild(h("div", "four-section-sub mt-8", t("taskOvWorkerIdentity") + ": " + [
+      providerDisplayName(we.provider), we.model, runtimeDisplayName(we.runtime)
+    ].filter(Boolean).join(" / ")));
+  }
+  container.appendChild(s1);
+
+  // 2. Worker returned
+  var s2 = h("div", "four-section-card");
+  s2.setAttribute("data-fl-role", "task-ov-worker-returned");
+  s2.appendChild(h("div", "four-section-title", t("taskOvWorkerReturned")));
+  s2.appendChild(h("div", "summary-line dim mb-8", t("taskOvWorkerReturnedHint")));
+  if(attempts.length){
+    var attSummary = h("div", "task-report-process");
+    attempts.forEach(function(att){
+      var line = h("div", "task-report-attempt");
+      var turns = att.turns === undefined ? "" : t("journeyTurns", { count: String(att.turns) });
+      var exit = att.exitCode === undefined || att.exitCode === 0
+        ? "" : t("journeyExitCode", { code: String(att.exitCode) });
+      line.appendChild(h("div", "", t("journeyAttemptLabel", { ordinal: String(att.ordinal) })
+        + " · " + attemptPrimaryLabel(att)
+        + (turns ? " · " + turns : "")
+        + (exit ? " · " + exit : "")));
+      attSummary.appendChild(line);
+    });
+    s2.appendChild(attSummary);
+  }
+  if(we.workerClaim && we.workerClaim.text){
+    s2.appendChild(h("div", "four-section-sub mt-8", t("taskOvWorkerClaim")));
+    s2.appendChild(h("div", "worker-claim-preview", we.workerClaim.text));
+    s2.appendChild(h("div", "summary-line dim fs11", t("taskReportClaimNotProof")));
+  }
+  s2.appendChild(h("div", "four-section-sub mt-8", t("taskOvWorkerFiles", { count: String(files.length) })));
+  if(files.length){
+    var fl = h("ul", "task-report-list files");
+    files.slice(0, 10).forEach(function(f){ fl.appendChild(h("li", "", f)); });
+    if(files.length > 10){
+      fl.appendChild(h("li", "dim", t("storyMoreItems", { count: String(files.length - 10) })));
+    }
+    s2.appendChild(fl);
+  }
+  // Retained candidate evidence folded into Worker returned
+  var rc = renderRetainedCandidate(task);
+  if(rc){
+    rc.classList.add("four-section-sub");
+    s2.appendChild(rc);
+  }
+  container.appendChild(s2);
+
+  // 3. Independent result
+  var s3 = h("div", "four-section-card");
+  s3.setAttribute("data-fl-role", "task-ov-independent-result");
+  s3.appendChild(h("div", "four-section-title", t("taskOvIndependentResult")));
+  s3.appendChild(h("div", "summary-line dim mb-8", t("taskOvIndependentResultHint")));
+  if(iv && iv.available){
+    var passedAll = iv.conclusion === "passed";
+    var conclusionText = passedAll
+      ? t("taskOvChecksPassed", { count: String(iv.totalCount || 0) })
+      : t("taskOvChecksFailed", { failed: String(iv.failedCount || 0), total: String(iv.totalCount || 0) });
+    s3.appendChild(h("div", "four-section-conclusion" + (passedAll ? " ok" : " err"), conclusionText));
+    if(iv.checks && iv.checks.length){
+      var checkList = h("div", "task-report-process");
+      iv.checks.forEach(function(chk){
+        var row = h("div", "task-report-attempt");
+        row.setAttribute("data-fl-role", "verification-check");
+        row.appendChild(h("span", "badge " + (chk.passed ? "badge-ok" : "badge-err"),
+          chk.passed ? t("journeyCheckPassed") : t("journeyCheckFailed")));
+        row.appendChild(document.createTextNode("  " + readableVerificationCheckLabel(chk.label)));
+        if(!chk.passed){
+          if(chk.failureSummary){
+            var fs = h("div", "four-section-failure-summary");
+            fs.setAttribute("data-fl-role", "check-failure-summary");
+            fs.appendChild(h("div", "four-section-failure-label", t("taskOvFailureSummaryLabel")));
+            fs.appendChild(h("div", "four-section-failure-text", chk.failureSummary));
+            row.appendChild(fs);
+          } else {
+            row.appendChild(h("div", "four-section-failure-unavail dim fs11", t("taskOvFailureSummaryUnavailable")));
+          }
+        }
+        checkList.appendChild(row);
+      });
+      s3.appendChild(checkList);
+    }
+  } else {
+    s3.appendChild(h("div", "task-report-empty", t("taskOvChecksNotRun")));
+  }
+  // Main's handling summary
+  if(fd.mainReview){
+    s3.appendChild(h("div", "four-section-sub mt-8", t("taskReportMainDecision") + ": "
+      + reviewDecisionLabel(fd.mainReview.decision)));
+  }
+  container.appendChild(s3);
+
+  // 4. Final output / next action
+  var s4 = h("div", "four-section-card");
+  s4.setAttribute("data-fl-role", "task-ov-final-output");
+  s4.appendChild(h("div", "four-section-title", t("taskOvFinalOutput")));
+  s4.appendChild(h("div", "summary-line dim mb-8", t("taskOvFinalOutputHint")));
+  var repaired = !!(fd.remediationDisposition && fd.remediationDisposition.status === "verified-repaired-delivered");
+  var integrated = !!(fd.integration && fd.integration.status === "completed");
+  var mainAccepted = !!(fd.mainReview && fd.mainReview.decision === "accept");
+  if(repaired){
+    s4.appendChild(h("div", "four-section-conclusion ok", t("taskOvDelivered")));
+  } else if(integrated){
+    s4.appendChild(h("div", "four-section-conclusion ok", t("taskOvIntegrated")));
+  } else if(mainAccepted){
+    s4.appendChild(h("div", "four-section-conclusion ok", t("taskOvReadyIntegrate")));
+  } else {
+    var statusText = task.status || "waiting";
+    if(statusText === "succeeded" || statusText === "completed"){
+      s4.appendChild(h("div", "task-report-empty", t("taskOvPendingReview")));
+    } else if(statusText === "running" || statusText === "preparing" || statusText === "verifying" || statusText === "active"){
+      s4.appendChild(h("div", "task-report-empty", t("taskOvPendingWorker")));
+    } else {
+      s4.appendChild(h("div", "task-report-empty", t("taskOvNoOutput")));
+    }
+  }
+  var nextText = nextActionLabel(next.label || "investigate");
+  s4.appendChild(h("div", "four-section-next mt-8", nextText));
+  container.appendChild(s4);
+
+  return container;
+}
+
 /* Primary Task workbench: sticky hero + tabbed sections so one screen is not a wall of cards. */
 function renderTaskWorkbench(task, extraTabs){
   var j = task.journey || {};
@@ -9129,11 +10337,6 @@ function renderTaskWorkbench(task, extraTabs){
   }
   meta.appendChild(h("span", "dim fs12", taskProgressSummary(task)));
   hero.appendChild(meta);
-  var nextBox = h("div", "task-report-next");
-  nextBox.appendChild(h("div", "task-report-next-label", t("taskReportNextLabel")));
-  nextBox.appendChild(h("div", "task-report-next-body",
-    nextActionLabel(next.label || "investigate")));
-  hero.appendChild(nextBox);
   if(cause.why || cause.what){
     var heroRepaired = hasVerifiedFinalDelivery(task);
     var heroAmended = !!(heroRepaired
@@ -9153,18 +10356,42 @@ function renderTaskWorkbench(task, extraTabs){
           fd.mainReview && fd.mainReview.decision
         );
     if(whyText){
-      hero.appendChild(reportBlock(t("taskReportWhyLabel"), whyText, false));
+      var whatBox = h("div", "task-report-hero-box");
+      whatBox.appendChild(h("div", "task-report-hero-box-label", t("taskHeroWhatHappened")));
+      whatBox.appendChild(h("div", "task-report-hero-box-body", whyText));
+
+      // Show first safe failure summary from failed checks
+      if(iv.checks && iv.checks.length){
+        var firstFailed = null;
+        for(var fi = 0; fi < iv.checks.length; fi++){
+          if(!iv.checks[fi].passed){ firstFailed = iv.checks[fi]; break; }
+        }
+        if(firstFailed && firstFailed.failureSummary){
+          whatBox.appendChild(h("div", "task-hero-failure-summary", t("taskHeroFailureCheck", {
+            label: readableVerificationCheckLabel(firstFailed.label),
+            summary: firstFailed.failureSummary
+          })));
+        } else if(firstFailed){
+          whatBox.appendChild(h("div", "task-hero-failure-summary dim", t("taskHeroFailureCheckNoSummary", {
+            label: readableVerificationCheckLabel(firstFailed.label)
+          })));
+        }
+      }
+      hero.appendChild(whatBox);
     }
   }
+  var nextBox = h("div", "task-report-hero-box");
+  nextBox.appendChild(h("div", "task-report-hero-box-label", t("taskHeroWhatToDo")));
+  nextBox.appendChild(h("div", "task-report-hero-box-body",
+    nextActionLabel(next.label || "investigate")));
+  hero.appendChild(nextBox);
   shell.appendChild(hero);
 
   // --- Tab bodies ---
-  // Overview: short path only
+  // Overview: four-section collaboration summary
   var overviewBody = h("div", "task-tab-body");
   overviewBody.appendChild(h("div", "task-report-card-hint", t("taskTabOverviewHint")));
-  overviewBody.appendChild(renderTaskStory(task));
-  var overviewRetained = renderRetainedCandidate(task);
-  if(overviewRetained) overviewBody.appendChild(overviewRetained);
+  overviewBody.appendChild(renderFourSectionOverview(task));
 
   // Render routingDecision if present in the task spec
   var rd = task && task.routingDecision;
@@ -9749,6 +10976,15 @@ function showTask(id){
           time: dp.lastEventAt ? fmtSince(dp.lastEventAt) : "-"
         })
       ));
+      if(dp.liveStage && dp.liveStage.stage){
+        techBody.appendChild(h("div", "summary-line dim fs11",
+          t("taskTechnicalLiveStage", {
+            stage: String(dp.liveStage.stage),
+            observation: String(dp.liveStage.observation || ""),
+            evidence: String(dp.liveStage.evidence || "")
+          })
+        ));
+      }
       if(dp.latestAction) appendBoundedDetail(techBody, dp.latestAction);
     }
     if(task.error){
@@ -9779,6 +11015,10 @@ function showTask(id){
         t("taskTechnicalTimeline") + " (" + task.timeline.length + ")", tlTech));
     }
     moreBody.appendChild(collapsedSection(t("journeyTechnical"), techBody));
+
+    // Conditional "Where this Task sits" section: only when durable context exists.
+    var lineageCard = renderTaskLineage(task);
+    if(lineageCard) shell.appendChild(lineageCard);
 
     shell.appendChild(renderTaskWorkbench(task, [
       { id: "actions", label: t("taskTabActions"), body: actionsBody },
@@ -10309,7 +11549,26 @@ function showIntegration(taskId){
 function render(){
   updStatus();
   setPageChrome();
-  switch(S.tab){
+  // Guard: never render null arrays as successful empty evidence.  Classify
+  // the current page's data state and show loading/disconnected when the
+  // renderer would otherwise treat missing data as empty success.
+  var tab = S.tab || "overview";
+  var state = pageEvidenceState(tab);
+  if(state === "loading"){
+    viewEl.textContent = "";
+    if(!S.hadOk){ showDisconnected(); return; }
+    viewEl.appendChild(stateMsg("loading", t("loading")));
+    return;
+  }
+  if(state === "unavailable"){
+    if(!S.hadOk){ showDisconnected(); return; }
+    viewEl.textContent = "";
+    viewEl.appendChild(stateMsg("empty", t("reconnecting")));
+    return;
+  }
+  // "ready" and "stale" both render normally; retained evidence is shown
+  // while updStatus already indicates the stale dot in the status bar.
+  switch(tab){
     case "overview": rOverview(); break;
     case "plans": rPlans(); break;
     case "goals": rGoals(); break;
@@ -10343,12 +11602,7 @@ function init(){
   if(!S.token){ showUnauthenticated(); return; }
   $$("#fl-tabs button").forEach(function(btn){
     btn.addEventListener("click", function(){
-      $$("#fl-tabs button").forEach(function(b){ b.classList.remove("active"); });
-      btn.classList.add("active");
-      S.tab = btn.getAttribute("data-tab");
-      if(S.tab !== "worker") S.workerFormActive = false;
-      hideDetail();
-      render();
+      switchTab(btn.getAttribute("data-tab"));
     });
   });
   document.addEventListener("keydown", function(e){
@@ -10357,6 +11611,15 @@ function init(){
   if(scrimEl){
     scrimEl.addEventListener("click", function(){ if(S.detail) hideDetail(); });
   }
+  /* Visibility-aware polling: background tabs stop issuing requests;
+   * one immediate catch-up refresh fires when the tab becomes visible. */
+  document.addEventListener("visibilitychange", function(){
+    if(document.visibilityState === "visible"){
+      refresh();
+    } else {
+      if(S.timer){ clearTimeout(S.timer); S.timer = null; }
+    }
+  });
   $$(".lang-btn").forEach(function(btn){
     btn.addEventListener("click", function(){
       var next = btn.getAttribute("data-lang");

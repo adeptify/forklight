@@ -1,0 +1,197 @@
+version: 2
+name: Make Plan dependencies and Task lineage readable
+project: /Users/yijunwang/code/forklight
+taskClass: hub-readable-dependency-lineage
+taskFamily: hub-product-comprehension
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: hub-product-comprehension
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: Codex 已冻结信息结构、输入输出、真相边界与场景；原 Grok Task 在模型调用前因 ForkLight 无法读取 xAI 认证而安全停止，未产生 Candidate 或模型消耗。DeepSeek 负责按同一合同实现，不自行扩张为图编辑、归档或调度语义改造。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Plan cards explain why work is ready, waiting, or blocked and what it unlocks
+    using names instead of raw IDs. Task Detail conditionally explains its Plan
+    origin and durable handoff lineage without inventing relationships or
+    changing execution semantics.
+  presentation:
+    summary: 让用户看懂一个任务为什么在等、前面是谁、完成后会解锁谁，以及它是不是跨 Worker 接力，而不是面对 ID 和状态堆叠。
+    language: zh-CN
+  context:
+    - Follow docs/m3-hub-readable-dependency-lineage-contract.md as the Main-owned product authority.
+    - The Board model already stores direct dependencies and requiredBy item IDs, but the Hub currently renders raw IDs and machine state words inside a secondary disclosure.
+    - Task Detail already has a four-part Main/Worker/independent/final truth hierarchy and a bounded handoff projection. Extend it; do not replace or duplicate it.
+    - Preserve every existing lane, filter, action, confirmation gate, API consumer, theme, and responsive behavior.
+    - Do not touch Elsewhere or any consumer App.
+  inScope:
+    - Implement only the allowed first slice in the Main contract.
+    - Enrich Board output with bounded direct dependency/dependent names and states using existing Store truth.
+    - Add bounded Task-to-Plan context to the safe Hub task projection without changing Task or Plan records.
+    - Replace raw dependency state lists in Plan cards with one readable current-position sentence and one unlocks-next sentence.
+    - Add a conditional Task Detail Where this Task sits section for Plan and existing handoff evidence.
+    - Write natural Chinese and English copy and focused tests for ready, waiting, failed prerequisite, completed, handoff source/successor, standalone, malformed, and list-bounding cases.
+  outOfScope:
+    - Archive/delete/move mutations, schema migrations, scheduler changes, graph editing, automatic retry, correction, Main decision, Integration, routing, economics, Provider changes, consumer App writes, commit, or push.
+    - Inferring relationships from names, time, Provider, files, prompts, or free text.
+    - Broad redesign, new navigation, new dependencies, gradients, decorative animation, or unrelated cleanup.
+  executionSteps:
+    - Trace BoardService, Task safe projection, Plan/Goal ownership evidence, handoff projection, and current Board/Task renderers.
+    - Add the smallest bounded read-model fields needed; keep old fields compatible.
+    - Implement pure presentation helpers for current position and next relationship before wiring the UI.
+    - Add the conditional Task Detail section without repeating the four primary result sections.
+    - Run the stored acceptance commands once and report any unrelated timing failure separately.
+  deliverables:
+    - Bounded named Plan dependency and dependent projections.
+    - Readable bilingual Plan item position and next-unlock copy.
+    - Conditional Task Detail Plan/handoff lineage explanation.
+    - Focused regression tests for truth, privacy, legacy, and responsive-safe markup.
+  modules:
+    - name: Relationship read model
+      responsibility: Resolve only direct durable Plan and handoff relationships into bounded safe names, states, roles, and optional technical IDs.
+      consumes:
+        - Existing Plan items, dependencies, Task statuses, and handoff events.
+      produces:
+        - Backward-compatible optional named relationship fields for Hub.
+      boundaries:
+        - No persistence mutation, transitive inference, raw event payload, prompt, log, file content, secret, or private path.
+    - name: Plan position presentation
+      responsibility: Explain why a Plan item is ready, waiting, blocked, or terminal and what it unlocks.
+      consumes:
+        - Named direct relationship fields and existing lane/status.
+      produces:
+        - One current-position sentence and one optional unlocks-next sentence.
+      boundaries:
+        - Does not schedule, move, retry, or reinterpret the machine state.
+    - name: Task context presentation
+      responsibility: Explain Plan origin and existing handoff relationship inside Task Detail.
+      consumes:
+        - Safe Task-to-Plan context, bounded handoff story, and existing attempt presentation.
+      produces:
+        - Conditional Where this Task sits section with at most four primary facts.
+      boundaries:
+        - No empty card, invented ancestry, duplicate final outcome, or successor-as-retry wording.
+  callChain:
+    - Store keeps Plan items, direct dependency edges, Task statuses, and durable handoff events.
+    - BoardService and Hub server resolve only direct bounded named relationships.
+    - Hub Plan cards explain current position and immediate next work.
+    - Task Detail reuses the same safe relationship truth to explain origin and handoff context.
+    - Technical disclosure retains IDs while primary copy remains human-readable.
+  scenarios:
+    - name: Ready item
+      given: All immediate prerequisites succeeded.
+      when: Plan Detail renders the item.
+      then: It says the item can start now and names what it unlocks without repeating satisfied state tokens.
+    - name: Waiting item
+      given: One named prerequisite is queued or active.
+      when: Plan Detail renders the item.
+      then: It says which work it waits for and that work's readable current stage.
+    - name: Failed chain
+      given: A named prerequisite failed or was interrupted.
+      when: Plan Detail renders the dependent item.
+      then: It says the chain is blocked by that failed work and does not suggest unrelated setting changes.
+    - name: Cross Worker continuation
+      given: Durable handoff source and successor evidence exists.
+      when: Either Task Detail opens.
+      then: It names the continuation relationship and never calls the successor a retry or retained files accepted output.
+    - name: Standalone legacy task
+      given: No durable Plan or handoff relationship exists.
+      when: Task Detail opens.
+      then: No empty lineage section is rendered and existing truth remains unchanged.
+  risks:
+    - Relationship names can be missing or stale; fail closed and keep technical IDs secondary.
+    - Adding transitive graph traversal can create noise or cycles; this slice is direct-edge only and bounded.
+    - A new section can repeat Task outcome; keep it about position and flow only.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1600
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1600
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/board.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/board.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Plan cards explain ready, waiting, blocked-by-failure, completed, and failed positions with names rather than raw item IDs.
+    - Named direct dependents explain what each item unlocks, with bounded summarization for more than three relationships.
+    - Task Detail conditionally explains Plan origin and existing handoff lineage, while standalone Tasks gain no empty section.
+    - Handoff successors are continuations rather than retries, and retained work is never relabelled as accepted output.
+    - Relationships come only from durable Store/event evidence, remain bounded/privacy-safe, and fail closed on malformed or missing records.
+    - Existing actions, lanes, filters, scheduling, CLI/MCP consumers, four-part Task truth, themes, and responsive shell remain unchanged.
+    - Chinese and English behavior tests prove readable copy and keep raw UUID/event-code text out of primary explanations.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/board.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm run check
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check

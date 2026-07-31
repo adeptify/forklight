@@ -11,8 +11,10 @@ import type {
   AttemptRecord,
   AttemptStatus,
   EventRecord,
+  FrozenWorkerIdentity,
   MainReviewDecisionKind,
   RemediationDisposition,
+  RoutingDecisionSnapshot,
   TaskRecord,
   TaskStatus,
   VerificationResult,
@@ -1362,6 +1364,41 @@ export interface RoutingEvidenceCoverage {
   distinctTaskClassCount: number;
   /** Distinct non-empty taskFamily values among eligible Tasks (diversity only). */
   distinctTaskFamilyCount: number;
+  /**
+   * Complete tasks where the frozen shortlist contains exactly one Worker.
+   * This is not evidence failure — it means Main intentionally avoided a
+   * multi-Worker comparison (e.g. cost-saving, only-available, user-specified).
+   */
+  singleWorkerDecisionCount: number;
+  /**
+   * Complete tasks where the frozen shortlist contains at least two Workers
+   * AND the frozen evidence scope is exact-class or task-family.
+   * These Tasks had fair cross-Worker comparison evidence at decision time.
+   */
+  comparableMultiWorkerDecisionCount: number;
+  /**
+   * Sub-count of comparableMultiWorker: scope was exact-class.
+   * Never exceeds comparableMultiWorkerDecisionCount.
+   */
+  comparableExactClassDecisionCount: number;
+  /**
+   * Sub-count of comparableMultiWorker: scope was task-family.
+   * Never exceeds comparableMultiWorkerDecisionCount.
+   */
+  comparableTaskFamilyDecisionCount: number;
+  /**
+   * Complete tasks where the frozen shortlist contains at least two Workers
+   * BUT the frozen evidence scope was "none". Main had no comparable evidence
+   * at decision time; the choice reflects Main judgment, not a model ranking.
+   * This is not a tie, not an automatic choice, and not Competition evidence.
+   */
+  unknownMultiWorkerDecisionCount: number;
+  /**
+   * Complete tasks whose stored routingDecision lacks a usable shortlist or
+   * evidence scope, or whose scope value cannot be safely interpreted.
+   * Never falls back to guessing; never counted as comparison evidence.
+   */
+  unusableDecisionCount: number;
 }
 
 function hasExplicitLabel(value: unknown): boolean {
@@ -1371,6 +1408,89 @@ function hasExplicitLabel(value: unknown): boolean {
 /** True when a Task stores a routingDecision object. Shape is not re-validated. */
 function hasStoredRoutingDecision(raw: unknown): boolean {
   return raw !== null && raw !== undefined && typeof raw === "object" && !Array.isArray(raw);
+}
+
+/**
+ * Mutually exclusive decision-time readiness classification for one complete
+ * routing decision.  Reads only the frozen shortlist and evidenceSnapshot.scope
+ * stored at Task creation time — never events, attempts, scores, or private reasons.
+ * The four outcomes are exact and exhaustive for any valid RoutingDecisionSnapshot.
+ */
+export type DecisionReadinessBucket =
+  | "single-worker"
+  | "comparable-multi-worker"
+  | "unknown-multi-worker"
+  | "unusable";
+
+export interface ClassifiedDecision {
+  bucket: DecisionReadinessBucket;
+  /** Present only when bucket is comparable-multi-worker. */
+  scope?: "exact-class" | "task-family";
+}
+
+function isFrozenWorkerIdentity(value: unknown): value is FrozenWorkerIdentity {
+  if (value === null || value === undefined || typeof value !== "object") return false;
+  const obj = value as Record<string, unknown>;
+  return typeof obj.provider === "string"
+    && typeof obj.model === "string"
+    && typeof obj.runtime === "string"
+    && typeof obj.effort === "string";
+}
+
+function isValidScope(value: unknown): value is "exact-class" | "task-family" | "none" {
+  return value === "exact-class" || value === "task-family" || value === "none";
+}
+
+function frozenWorkerIdentityKey(worker: FrozenWorkerIdentity): string {
+  return [worker.provider, worker.model, worker.runtime, worker.effort]
+    .map((part) => part.trim())
+    .join("\u0000");
+}
+
+/**
+ * Fail-closed classifier: reads only the frozen shortlist.length and
+ * evidenceSnapshot.scope from a durable routingDecision.  Returns
+ * exactly one bucket for any valid stored shape; malformed shapes
+ * return "unusable" without throwing.
+ */
+export function classifyDecisionReadiness(
+  decision: RoutingDecisionSnapshot,
+): ClassifiedDecision {
+  if (!Array.isArray(decision.shortlist)) {
+    return { bucket: "unusable" };
+  }
+  const validWorkers = decision.shortlist.filter((worker): worker is FrozenWorkerIdentity =>
+    isFrozenWorkerIdentity(worker)
+    && worker.provider.trim().length > 0
+    && worker.model.trim().length > 0
+    && worker.runtime.trim().length > 0
+    && worker.effort.trim().length > 0);
+  if (validWorkers.length !== decision.shortlist.length || validWorkers.length === 0) {
+    return { bucket: "unusable" };
+  }
+
+  const scope = (decision.evidenceSnapshot as Record<string, unknown> | null)?.scope;
+  if (!isValidScope(scope)) {
+    return { bucket: "unusable" };
+  }
+
+  const distinctWorkerCount = new Set(validWorkers.map(frozenWorkerIdentityKey)).size;
+  if (distinctWorkerCount !== validWorkers.length) {
+    return { bucket: "unusable" };
+  }
+
+  if (validWorkers.length === 1) {
+    return { bucket: "single-worker" };
+  }
+
+  // Multi-Worker shortlist: scope determines comparability.
+  if (scope === "none") {
+    return { bucket: "unknown-multi-worker" };
+  }
+  return {
+    bucket: "comparable-multi-worker",
+    scope,
+  };
 }
 
 /**
@@ -1385,6 +1505,12 @@ export function computeRoutingEvidenceCoverage(
   let withTaskClassCount = 0;
   let withTaskFamilyCount = 0;
   let withCompleteRoutingDecisionCount = 0;
+  let singleWorkerDecisionCount = 0;
+  let comparableMultiWorkerDecisionCount = 0;
+  let comparableExactClassDecisionCount = 0;
+  let comparableTaskFamilyDecisionCount = 0;
+  let unknownMultiWorkerDecisionCount = 0;
+  let unusableDecisionCount = 0;
   const distinctClasses = new Set<string>();
   const distinctFamilies = new Set<string>();
 
@@ -1409,6 +1535,34 @@ export function computeRoutingEvidenceCoverage(
     // A stored routingDecision alone is incomplete without class and family.
     if (hasClass && hasFamily && hasStoredRoutingDecision(task.spec?.routingDecision)) {
       withCompleteRoutingDecisionCount += 1;
+      // Classify decision-time readiness from the frozen routingDecision.
+      const classification = classifyDecisionReadiness(
+        task.spec!.routingDecision as RoutingDecisionSnapshot,
+      );
+      switch (classification.bucket) {
+        case "single-worker":
+          singleWorkerDecisionCount += 1;
+          break;
+        case "comparable-multi-worker":
+          comparableMultiWorkerDecisionCount += 1;
+          if (classification.scope === "exact-class") {
+            comparableExactClassDecisionCount += 1;
+          } else if (classification.scope === "task-family") {
+            comparableTaskFamilyDecisionCount += 1;
+          }
+          break;
+        case "unknown-multi-worker":
+          unknownMultiWorkerDecisionCount += 1;
+          break;
+        case "unusable":
+          unusableDecisionCount += 1;
+          break;
+        default: {
+          const _exhaustive: never = classification.bucket;
+          void _exhaustive;
+          unusableDecisionCount += 1;
+        }
+      }
     }
   }
 
@@ -1419,6 +1573,12 @@ export function computeRoutingEvidenceCoverage(
     withCompleteRoutingDecisionCount,
     distinctTaskClassCount: distinctClasses.size,
     distinctTaskFamilyCount: distinctFamilies.size,
+    singleWorkerDecisionCount,
+    comparableMultiWorkerDecisionCount,
+    comparableExactClassDecisionCount,
+    comparableTaskFamilyDecisionCount,
+    unknownMultiWorkerDecisionCount,
+    unusableDecisionCount,
   };
 }
 

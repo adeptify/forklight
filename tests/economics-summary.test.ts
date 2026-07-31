@@ -908,13 +908,12 @@ test("app.js declares isolated economics polling separated from the all-ops prom
   const src = await readFile(appPath, "utf8");
   assert.ok(src.includes("S.economics"), "S.economics state slot");
   assert.ok(src.includes("S.economicsError"), "S.economicsError state slot");
-  assert.ok(src.includes("function pollEconomics"), "isolated poll helper");
   assert.ok(src.includes("/api/ops/economics-summary"), "endpoint URL on the wire");
-  // The isolated fetcher must be passed to Promise.all alongside other ops so
-  // its failure does not make Tasks / Boards / Settings look disconnected.
-  // Isolated panel polls (economics, routing coverage) sit beside opsP so a
-  // single panel failure never marks Tasks / Boards / Settings disconnected.
-  assert.match(src, /Promise\.all\(\[hubP\.catch\([\s\S]*?opsP,\s*econP(?:,\s*recP)?(?:,\s*sueP)?\]/);
+  assert.ok(src.includes("fetchSlice"), "generic isolated slice fetcher exists");
+  // Each slice fetcher settles independently; a single panel failure never
+  // marks Tasks / Boards / Settings disconnected. No global Promise.all with
+  // every ops endpoint should exist.
+  assert.ok(!src.match(/Promise\.all\(\[[\s\S]*fetchJSON.*ops\/board[\s\S]*fetchJSON.*ops\/tasks[\s\S]*fetchJSON.*ops\/competitions[\s\S]*fetchJSON.*ops\/stats[\s\S]*fetchJSON.*ops\/settings[\s\S]*fetchJSON.*ops\/sample-task[\s\S]*fetchJSON.*ops\/goals/), "no bulk all-endpoint Promise.all with 8 ops");
 });
 
 test("Insights renderer uses truthful runtime-estimate fields and never avgCostUsd", async () => {

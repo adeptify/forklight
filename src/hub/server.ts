@@ -16,6 +16,7 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { homedir } from "node:os";
 import path from "node:path";
 import type { SettingsService } from "../core/settings.js";
 import type { SetupService } from "../setup/service.js";
@@ -93,6 +94,8 @@ import { isRuntimeName } from "../core/runtime-names.js";
 import { validateContractQualityOverride } from "../core/worker-profiles.js";
 import { previewQualityPolicy } from "../core/contract-quality.js";
 import { buildDeliveryPlanView } from "../core/delivery-profiles.js";
+import { isLegalBoardPlacement } from "../core/task-summary.js";
+import { HISTORY_INVALID_REQUEST_REASON } from "../core/task-history.js";
 import {
   candidateRevisionMatchesCurrentDiff,
   resolveLatestRevision,
@@ -487,6 +490,9 @@ interface VerificationSection {
     label: string;
     passed: boolean;
     exitCode?: number;
+    /** Safe, redacted diagnostic from the first useful stderr/stdout line.
+     *  Present only when the check failed and a safe line survived redaction. */
+    failureSummary?: string;
   }>;
   /** Locale-neutral conclusion code; the browser owns readable copy. */
   conclusion: "not-run" | "passed" | "failed";
@@ -529,6 +535,104 @@ interface CauseSection {
 interface NextActionSection {
   /** Bounded 1-sentence guidance for the user. */
   label: string;
+}
+
+/** Maximum visible characters in a safe failure summary. */
+const FAILURE_SUMMARY_MAX = 240;
+
+/** Home directory path used for absolute-path redaction. */
+const HOME_DIR = homedir();
+
+/**
+ * Build a bounded, privacy-safe failure summary from one failed verification
+ * command. Searches meaningful stderr lines first, then meaningful stdout lines.
+ * Strips secrets, ANSI codes, absolute home paths, URL credentials/query secrets,
+ * prompt/system/user text, stack traces, and unbounded noise.
+ * Returns undefined when no safe line remains after redaction.
+ */
+export function buildSafeFailureSummary(
+  command: Record<string, unknown>,
+): string | undefined {
+  const rawStderr = typeof command.stderr === "string" ? command.stderr : "";
+  const rawStdout = typeof command.stdout === "string" ? command.stdout : "";
+
+  // Search stderr first, then stdout, for the first useful line.
+  for (const source of [rawStderr, rawStdout]) {
+    if (source.length === 0) continue;
+    const lines = source.split(/\r?\n/);
+    for (const line of lines) {
+      let cleaned = line.trim();
+      if (cleaned.length === 0) continue;
+
+      // Strip ANSI escape / control sequences.
+      cleaned = cleaned
+        .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "")
+        .trim();
+      if (cleaned.length === 0) continue;
+
+      // A verifier workspace path is useful only from the changed project
+      // file onward. Drop the private run root while keeping file + line.
+      cleaned = cleaned.replace(
+        /^.*\/ForkLight\/runs\/[^/]+\/workspace\//,
+        "",
+      );
+
+      // Redact absolute home paths.
+      cleaned = cleaned.replaceAll(HOME_DIR, "[home]");
+
+      // Redact secret-like values: API keys, tokens, credentials.
+      cleaned = cleaned
+        .replace(
+          /\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|API[_-]?KEY)[A-Z0-9_]*)=(?:"[^"]*"|'[^']*'|\S+)/gi,
+          "$1=[redacted]",
+        )
+        .replace(
+          /\b(?:sk-[A-Za-z0-9_-]{8,}|(?:secret|token|password|api[_-]?key)[_:=\-]?[A-Za-z0-9_-]{4,})\b/gi,
+          "[redacted]",
+        );
+
+      // Redact URLs with userinfo credentials or secret query parameters.
+      cleaned = cleaned.replace(
+        /\bhttps?:\/\/[^:@/\s]+:[^@/\s]+@/gi,
+        "https://[redacted]@",
+      );
+      cleaned = cleaned.replace(
+        /\b(https?:\/\/[^\s]*[?&](?:token|key|secret|password|auth|api[_-]?key|access_token|refresh_token|client_secret|private_key)=[^&\s]+)/gi,
+        "[redacted-url]",
+      );
+
+      // Skip noise: stack traces, log prefixes, prompt/system/user content.
+      const noisePrefixes = [
+        "at ", "    at ", "Traceback", "  File ",
+        "node:", "npm ERR!", "WARN ", "INFO ", "DEBUG ",
+        "TRACE ", "FATAL ",
+      ];
+      if (noisePrefixes.some((prefix) => cleaned.startsWith(prefix))) continue;
+
+      // Skip command/test harness wrappers so the first visible sentence is
+      // the concrete failing file, assertion, or parser diagnostic.
+      if (/^[\^~|`'"-]+$/.test(cleaned)) continue;
+      if (/^>\s+\S+@\S+\s+\S+\s*$/.test(cleaned)) continue;
+      if (/^>\s+(?:npm|node|npx|pnpm|yarn|tsx|tsc|eslint|vitest|jest)\b/i.test(cleaned)) continue;
+      if (/^(?:triggerUncaughtException|processTicksAndRejections)\s*\(?$/i.test(cleaned)) continue;
+      if (/^Error:\s*(?:Transform|Build|Command|Process|Tests?) failed\b/i.test(cleaned)) continue;
+
+      // Skip prompt-like content: system prompt, user instruction, assistant prefill.
+      if (/^(?:System|User|Assistant|Human|AI|Bot)\s*:/i.test(cleaned)) continue;
+      // Skip log-level prefixed noise that evades the prefix check.
+      if (/^\[(?:WARN|INFO|DEBUG|TRACE|ERROR)\]/i.test(cleaned)) continue;
+
+      // Truncate to maximum length.
+      if (cleaned.length > FAILURE_SUMMARY_MAX) {
+        cleaned = cleaned.slice(0, FAILURE_SUMMARY_MAX - 3) + "...";
+      }
+
+      return cleaned.length > 0 ? cleaned : undefined;
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -781,11 +885,19 @@ export function buildSafeTaskJourney(
       const cmd = c as Record<string, unknown>;
       const label = typeof cmd.command === "string" ? safeCommandLabel(cmd.command) : "check";
       const exitCode = typeof cmd.exitCode === "number" ? cmd.exitCode : undefined;
-      verifChecks.push({
+      const passed = cmd.exitCode === 0;
+      const entry: VerificationSection["checks"][number] = {
         label: label || "check",
-        passed: cmd.exitCode === 0,
+        passed,
         ...(exitCode === undefined ? {} : { exitCode }),
-      });
+      };
+      // Build a safe failure summary only for failed commands that have
+      // redactable stderr/stdout evidence.
+      if (!passed) {
+        const summary = buildSafeFailureSummary(cmd);
+        if (summary !== undefined) entry.failureSummary = summary;
+      }
+      verifChecks.push(entry);
     });
     // Add behavior/policy/source checks if no commands exist.
     if (verifChecks.length === 0) {
@@ -2373,6 +2485,90 @@ export class HubServer {
     return this.deps.daemonRequest<T>(method, params);
   }
 
+  /**
+   * Compact privacy-safe Task allowlist shared by the recent Tasks route and
+   * the durable History route so a new field cannot silently appear in only
+   * one of them. Forwards the canonical Core board placement only when
+   * boardScope and boardReason form a legal pair; absent or contradictory
+   * codes are dropped so the UI fails open to Now. Never exposes reason text,
+   * command text/output, prompts, paths, sessions, credentials, diffs, or
+   * free-text review reasons.
+   */
+  private projectCompactTaskSummary(t: Record<string, unknown>): Record<string, unknown> {
+    // Compact final-delivery disposition only.
+    const disposition = t.remediationDisposition;
+    let remediationDisposition:
+      | {
+          status: string;
+          checkId: string;
+          createdAt: string;
+          acceptanceBasis?: "original-acceptance" | "amended-acceptance";
+          amendedCommandCount?: number;
+          reasonCode?: "contradictory-acceptance";
+        }
+      | undefined;
+    if (
+      disposition !== null
+      && typeof disposition === "object"
+      && (disposition as { status?: unknown }).status === "verified-repaired-delivered"
+      && typeof (disposition as { checkId?: unknown }).checkId === "string"
+      && typeof (disposition as { createdAt?: unknown }).createdAt === "string"
+    ) {
+      const d = disposition as {
+        status: string;
+        checkId: string;
+        createdAt: string;
+        acceptanceBasis?: unknown;
+        amendedCommandCount?: unknown;
+        reasonCode?: unknown;
+      };
+      remediationDisposition = {
+        status: d.status,
+        checkId: d.checkId,
+        createdAt: d.createdAt,
+        ...(d.acceptanceBasis === "amended-acceptance"
+          || d.acceptanceBasis === "original-acceptance"
+          ? { acceptanceBasis: d.acceptanceBasis }
+          : {}),
+        ...(typeof d.amendedCommandCount === "number"
+          && Number.isSafeInteger(d.amendedCommandCount)
+          && d.amendedCommandCount >= 1
+          ? { amendedCommandCount: d.amendedCommandCount }
+          : {}),
+        ...(d.reasonCode === "contradictory-acceptance"
+          ? { reasonCode: "contradictory-acceptance" as const }
+          : {}),
+      };
+    }
+    // Canonical Core board placement: forward only when boardScope and
+    // boardReason form a legal pair (not two independent vocabulary
+    // memberships). Contradictory but individually valid tokens, unknown
+    // types, or private/injected strings are dropped so the UI fails open
+    // to Now. The Hub never recomputes lifecycle semantics.
+    const boardCodes = isLegalBoardPlacement(t.boardScope, t.boardReason)
+      ? { boardScope: t.boardScope as string, boardReason: t.boardReason as string }
+      : null;
+    return {
+      id: t.taskId ?? t.id,
+      name: t.name,
+      status: t.status,
+      provider: t.provider,
+      model: t.model,
+      runtime: t.runtime,
+      createdAt: t.createdAt,
+      startedAt: t.startedAt,
+      finishedAt: t.finishedAt,
+      error: t.error,
+      progress: t.progress,
+      ...(typeof t.decisionStage === "string" ? { decisionStage: t.decisionStage } : {}),
+      ...(t.failureCategory === undefined ? {} : { failureCategory: t.failureCategory }),
+      ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+      // Forward the canonical Core board placement only when the codes
+      // form a legal pair; absent or contradictory codes fail open to Now.
+      ...(boardCodes === null ? {} : boardCodes),
+    };
+  }
+
   /** Console-compatible read APIs under /api/ops/* */
   private async handleOps(
     req: IncomingMessage,
@@ -2418,71 +2614,63 @@ export class HubServer {
         const surfaces = await this.daemonCall<Array<Record<string, unknown>>>("list_summaries", {
           limit: 50,
         });
-        const tasks = (Array.isArray(surfaces) ? surfaces : []).map((t) => {
-          // Compact final-delivery disposition only.
-          // Never expose reason text, command text/output, prompt, paths, or diffs.
-          const disposition = t.remediationDisposition;
-          let remediationDisposition:
-            | {
-                status: string;
-                checkId: string;
-                createdAt: string;
-                acceptanceBasis?: "original-acceptance" | "amended-acceptance";
-                amendedCommandCount?: number;
-                reasonCode?: "contradictory-acceptance";
-              }
-            | undefined;
-          if (
-            disposition !== null
-            && typeof disposition === "object"
-            && (disposition as { status?: unknown }).status === "verified-repaired-delivered"
-            && typeof (disposition as { checkId?: unknown }).checkId === "string"
-            && typeof (disposition as { createdAt?: unknown }).createdAt === "string"
-          ) {
-            const d = disposition as {
-              status: string;
-              checkId: string;
-              createdAt: string;
-              acceptanceBasis?: unknown;
-              amendedCommandCount?: unknown;
-              reasonCode?: unknown;
-            };
-            remediationDisposition = {
-              status: d.status,
-              checkId: d.checkId,
-              createdAt: d.createdAt,
-              ...(d.acceptanceBasis === "amended-acceptance"
-                || d.acceptanceBasis === "original-acceptance"
-                ? { acceptanceBasis: d.acceptanceBasis }
-                : {}),
-              ...(typeof d.amendedCommandCount === "number"
-                && Number.isSafeInteger(d.amendedCommandCount)
-                && d.amendedCommandCount >= 1
-                ? { amendedCommandCount: d.amendedCommandCount }
-                : {}),
-              ...(d.reasonCode === "contradictory-acceptance"
-                ? { reasonCode: "contradictory-acceptance" as const }
-                : {}),
-            };
-          }
-          return {
-            id: t.taskId ?? t.id,
-            name: t.name,
-            status: t.status,
-            provider: t.provider,
-            model: t.model,
-            runtime: t.runtime,
-            createdAt: t.createdAt,
-            startedAt: t.startedAt,
-            finishedAt: t.finishedAt,
-            error: t.error,
-            progress: t.progress,
-            ...(typeof t.decisionStage === "string" ? { decisionStage: t.decisionStage } : {}),
-            ...(t.failureCategory === undefined ? {} : { failureCategory: t.failureCategory }),
-            ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
-          };
-        });
+        const tasks = (Array.isArray(surfaces) ? surfaces : [])
+          .filter((t): t is Record<string, unknown> => t !== null && typeof t === "object" && !Array.isArray(t))
+          .map((t) => this.projectCompactTaskSummary(t));
         this.sendJson(req, res, 200, tasks);
+        return;
+      }
+      if (opsRoute === "/tasks/history") {
+        // Explicit, read-only, never polled History page. Reuses the same
+        // compact Task allowlist as /api/ops/tasks so recent and History
+        // responses share one privacy boundary. Not in PAGE_DEPS or any
+        // automatic refresh path; the browser calls this only on explicit
+        // search, Refresh, or Load more.
+        const url = new URL(req.url ?? "/", `http://${LOOPBACK}`);
+        const daemonParams: Record<string, unknown> = {};
+        const limitParam = url.searchParams.get("limit");
+        if (limitParam !== null) {
+          const n = Number(limitParam);
+          daemonParams.limit = n;
+        }
+        const queryParam = url.searchParams.get("query");
+        if (queryParam !== null) daemonParams.query = queryParam;
+        const cursorParam = url.searchParams.get("cursor");
+        if (cursorParam !== null && cursorParam.length > 0) {
+          daemonParams.cursor = cursorParam;
+        }
+        try {
+          const page = await this.daemonCall<{
+            items?: unknown;
+            totalCount?: unknown;
+            hasMore?: unknown;
+            nextCursor?: unknown;
+          }>("list_history_page", daemonParams);
+          const items = (Array.isArray(page.items) ? page.items : [])
+            .filter((item): item is Record<string, unknown> =>
+              item !== null && typeof item === "object" && !Array.isArray(item),
+            )
+            .map((item) => this.projectCompactTaskSummary(item));
+          this.sendJson(req, res, 200, {
+            items,
+            totalCount: typeof page.totalCount === "number" ? page.totalCount : items.length,
+            hasMore: page.hasMore === true,
+            ...(typeof page.nextCursor === "string" && page.nextCursor.length > 0
+              ? { nextCursor: page.nextCursor }
+              : {}),
+          });
+        } catch (error) {
+          // The daemon's fixed invalid-request reason is privacy-safe and
+          // tells the user to start a new search; surface it verbatim. Any
+          // other daemon failure uses a bounded privacy-safe message so raw
+          // daemon text, paths, or Task content is never echoed.
+          const msg = error instanceof Error ? error.message : String(error);
+          this.sendJson(req, res, 503, {
+            error: msg === HISTORY_INVALID_REQUEST_REASON
+              ? msg
+              : "History is unavailable right now; try again.",
+          });
+        }
         return;
       }
       if (opsRoute === "/competitions") {
@@ -2528,6 +2716,26 @@ export class HubServer {
           { required: 3 },
         );
         this.sendJson(req, res, 200, evidence);
+        return;
+      }
+      if (opsRoute === "/main-direct-aggregate") {
+        // Read-only aggregate counts. Never exposes per-decision content,
+        // paths, or private notes.
+        const aggregate = await this.daemonCall<Record<string, unknown>>(
+          "main_direct_aggregate",
+          {},
+        );
+        this.sendJson(req, res, 200, aggregate);
+        return;
+      }
+      if (opsRoute === "/main-direct-recent") {
+        // Read-only privacy-safe recent entries. Never exposes per-decision
+        // full notes or considered Worker details.
+        const entries = await this.daemonCall<readonly Record<string, unknown>[]>(
+          "main_direct_recent",
+          {},
+        );
+        this.sendJson(req, res, 200, entries);
         return;
       }
 
@@ -2662,6 +2870,49 @@ export class HubServer {
           spec?.deliveryResolution as { source: "inline" } | { source: "explicit" | "project" | "default"; profileId: string } | undefined,
         );
 
+        // Bounded Plan context for Task Detail lineage section.
+        // One durable daemon query backed by Store truth; no N-plus-one scan.
+        let planContext: Record<string, unknown> | undefined;
+        let taskLineage: Record<string, unknown> | undefined;
+        try {
+          const ctx = await this.daemonCall<Record<string, unknown> | undefined>(
+            "task_plan_context",
+            { taskId: task.id },
+          );
+          if (ctx !== undefined && typeof ctx === "object") {
+            planContext = {
+              planId: ctx.planId,
+              planName: typeof ctx.planName === "string" ? ctx.planName.slice(0, 200) : undefined,
+              itemId: ctx.itemId,
+              itemIndex: ctx.itemIndex,
+              namedDependencies: (Array.isArray(ctx.namedDependencies) ? ctx.namedDependencies : []).slice(0, 20),
+              namedRequiredBy: (Array.isArray(ctx.namedRequiredBy) ? ctx.namedRequiredBy : []).slice(0, 20),
+            };
+          }
+        } catch {
+          planContext = undefined;
+        }
+
+        // Task lineage from existing durable handoff evidence (no new inference).
+        if (journey.candidateHandoff) {
+          const h = journey.candidateHandoff;
+          const isSource = h.role === "source";
+          taskLineage = {
+            kind: "handoff",
+            role: h.role,
+            ...(isSource
+              ? { successorTaskId: h.successorTaskId }
+              : { sourceTaskId: h.sourceTaskId }),
+            destinationProvider: h.destinationProvider,
+            destinationModel: h.destinationModel,
+            notARetry: true,
+          };
+        } else if (planContext) {
+          taskLineage = { kind: "plan", planId: planContext.planId };
+        } else {
+          taskLineage = { kind: "standalone" };
+        }
+
         this.sendJson(req, res, 200, {
           id: task.id,
           name: task.name,
@@ -2687,6 +2938,8 @@ export class HubServer {
           timeline,
           economics,
           deliveryPlan,
+          planContext,
+          taskLineage,
           ...(effectivePolicy === undefined ? {} : { effectivePolicy }),
           ...(candidateReverificationEligibility === undefined
             ? {}

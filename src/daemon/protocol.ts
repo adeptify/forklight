@@ -12,6 +12,7 @@ export type DaemonMethod =
   | "revise"
   | "list"
   | "list_summaries"
+  | "list_history_page"
   | "plan_submit_file"
   | "plan_board"
   | "plan_board_overview"
@@ -62,7 +63,14 @@ export type DaemonMethod =
   | "goal_stop"
   | "goal_task_handoff"
   | "model_routing"
+  | "main_direct_start"
+  | "main_direct_complete"
+  | "main_direct_status"
+  | "main_direct_list"
+  | "main_direct_aggregate"
+  | "main_direct_recent"
   | "self_upgrade_evidence"
+  | "task_plan_context"
   | "shutdown";
 
 export interface DaemonRequest {
@@ -89,6 +97,7 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "task_decision",
   "list",
   "list_summaries",
+  "list_history_page",
   "plan_board",
   "plan_board_overview",
   "statistics",
@@ -112,7 +121,12 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "economics_summary",
   "routing_evidence_coverage",
   "model_routing",
+  "main_direct_status",
+  "main_direct_list",
+  "main_direct_aggregate",
+  "main_direct_recent",
   "self_upgrade_evidence",
+  "task_plan_context",
 ]);
 
 function isMutatingDaemonMethod(method: DaemonMethod): boolean {

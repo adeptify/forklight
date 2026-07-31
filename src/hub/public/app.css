@@ -580,11 +580,141 @@ button:focus-visible,
   color: var(--muted); font-size: 11px;
   overflow-wrap: anywhere;
 }
-/* Board activity is a soft signal; stalled is stronger than quiet. */
+/* Board activity is a soft signal. Long quiet is stronger than short quiet,
+ * but never error styling: silence alone is not failure evidence. */
 .board-activity-quiet { opacity: 0.92; }
-.board-activity-stalled { font-weight: 600; }
+.board-activity-stalled { font-weight: 600; opacity: 0.95; }
 .kanban-empty {
   padding: 14px 8px; text-align: center; color: var(--muted); font-size: 11.5px;
+}
+
+/* Board scope control (Now / History / All) - the primary board hierarchy.
+ * Wraps as one compact row on narrow screens; lane filters stay secondary. */
+.board-scope-row {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-bottom: var(--gap-sm);
+}
+.board-scope-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--muted);
+  margin-right: 2px;
+}
+.board-scope-chip {
+  appearance: none;
+  border: var(--border);
+  background: var(--paper);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.board-scope-chip:focus-visible {
+  outline: 2px solid var(--hi);
+  outline-offset: 2px;
+}
+.board-scope-chip.is-active {
+  border-color: var(--hi);
+  background: var(--hi-soft);
+  color: var(--hi2);
+  font-weight: 700;
+}
+.board-scope-helper {
+  margin-bottom: var(--gap-sm);
+}
+
+/* History renders end-to-end outcome groups (Delivered / Stopped) instead of
+ * machine lanes. Stacked as one column so cards stay readable at 390px. */
+.history-board { display: flex; flex-direction: column; gap: var(--gap); }
+.history-group {
+  border: var(--border);
+  border-radius: var(--radius);
+  background: var(--paper);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+.history-group-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 10px var(--pad-sm);
+  border-bottom: var(--border);
+  background: var(--bg);
+}
+.history-group-title {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--muted);
+}
+.history-group-count {
+  min-width: 20px; height: 20px; padding: 0 6px;
+  border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700;
+  background: var(--bg2);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.history-group-hint { padding: 6px var(--pad-sm) 0; }
+.history-group-body {
+  padding: var(--gap-sm);
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--bg);
+}
+.history-group.tone-delivered .history-group-head { box-shadow: inset 0 -2px 0 var(--hi); }
+.history-group.tone-stopped .history-group-head { box-shadow: inset 0 -2px 0 var(--coral); }
+
+/* Deliberate History panel: explicit search form, Refresh, honest loaded/
+ * total progress, retained-data error, and Load more. Wraps as one compact
+ * block at 390px so controls never overflow horizontally. */
+.history-panel {
+  display: flex; flex-wrap: wrap; gap: var(--gap-sm);
+  align-items: center;
+  margin-bottom: var(--gap);
+}
+.history-search-form {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-end;
+  flex: 1 1 240px; min-width: 0;
+}
+.history-search-label {
+  display: flex; flex-direction: column; gap: 4px;
+  flex: 1 1 200px; min-width: 0;
+  font-size: 11px; font-weight: 650; color: var(--muted);
+}
+.history-search-label-text { letter-spacing: 0.03em; }
+.history-search-input {
+  width: 100%; min-width: 0;
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  color: var(--ink);
+  padding: 7px 10px;
+  font: inherit;
+}
+.history-search-input:focus {
+  outline: 2px solid var(--hi);
+  outline-offset: 1px;
+}
+.history-refresh-btn:focus-visible,
+.history-search-form button:focus-visible,
+.history-error button:focus-visible,
+.history-load-more button:focus-visible {
+  outline: 2px solid var(--hi);
+  outline-offset: 2px;
+}
+.history-status { flex: 1 1 140px; min-width: 0; }
+.history-error {
+  flex: 1 1 100%;
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 8px 10px;
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+.history-load-more {
+  flex: 1 1 100%;
+  display: flex; justify-content: center;
+  padding-top: 4px;
 }
 
 /* Plan columns */
@@ -809,6 +939,174 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   font-weight: 650;
   line-height: 1.45;
   color: var(--ink);
+}
+.task-report-hero-box {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--hi-soft);
+  border: 1px solid color-mix(in srgb, var(--hi) 28%, var(--line));
+  margin-top: 8px;
+}
+.task-report-hero-box-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--hi2);
+  margin-bottom: 4px;
+}
+.task-report-hero-box-body {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.task-hero-failure-summary {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--red-soft);
+  border: 1px solid color-mix(in srgb, var(--red) 24%, var(--line));
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--red);
+  line-height: 1.45;
+  font-family: var(--mono);
+  word-break: break-word;
+}
+.task-hero-failure-summary.dim { color: var(--muted); border-color: var(--line2); background: var(--bg2); }
+/* Operations-first Overview */
+.ov-live-strip {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border: var(--border);
+  border-radius: var(--radius);
+  background: var(--paper);
+  flex-wrap: wrap;
+}
+.ov-live-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--hi2);
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+.ov-live-info { flex: 1; min-width: 0; }
+.compact-status-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  font-size: 12.5px;
+  font-weight: 600;
+  flex-wrap: wrap;
+}
+.compact-status-row.ok { background: var(--green-soft); border-color: color-mix(in srgb, var(--green) 28%, var(--line)); }
+.compact-status-badge { flex-shrink: 0; font-weight: 700; }
+.compact-expandable { cursor: pointer; }
+/* Four-section Task Overview */
+.task-four-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.four-section-card {
+  border: var(--border);
+  border-radius: var(--radius);
+  background: var(--paper);
+  padding: 14px 16px 16px;
+  min-width: 0;
+}
+.four-section-title {
+  font-size: 15px;
+  font-weight: 750;
+  color: var(--ink);
+  margin-bottom: 4px;
+  letter-spacing: -0.01em;
+}
+.four-section-sub {
+  padding: 10px 12px;
+  margin-top: 8px;
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-size: 12.5px;
+}
+.four-section-conclusion {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-weight: 650;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.four-section-conclusion.ok {
+  background: var(--green-soft);
+  border: 1px solid color-mix(in srgb, var(--green) 28%, var(--line));
+  color: var(--green);
+}
+.four-section-conclusion.err {
+  background: var(--red-soft);
+  border: 1px solid color-mix(in srgb, var(--red) 28%, var(--line));
+  color: var(--red);
+}
+.four-section-next {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--hi-soft);
+  border: 1px solid color-mix(in srgb, var(--hi) 28%, var(--line));
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--ink);
+}
+.four-section-failure-summary {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--red-soft);
+  border: 1px solid color-mix(in srgb, var(--red) 20%, var(--line));
+}
+.four-section-failure-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--red);
+  margin-bottom: 2px;
+}
+.four-section-failure-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+  line-height: 1.45;
+  font-family: var(--mono);
+  word-break: break-word;
+}
+.four-section-failure-unavail {
+  margin-top: 4px;
+  font-style: italic;
+}
+.worker-claim-preview {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  border: var(--border);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font);
 }
 .task-report-grid {
   display: grid;
@@ -2030,6 +2328,17 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   .economics-grid { grid-template-columns: 1fr }
   .scope-strip { flex-direction: column; align-items: flex-start; }
   .scope-strip-hint { margin-left: 0; text-align: left; }
+}
+/* At 390px the scope control stays one compact wrapped row, History keeps a
+   single readable column, and focus remains visible on the scope chips. */
+@media (max-width: 480px) {
+  .board-scope-row { gap: 4px; }
+  .board-scope-chip { padding: 4px 10px; font-size: 11.5px; }
+  .history-board { gap: var(--gap-sm); }
+  .history-panel { gap: 6px; }
+  .history-search-form { flex-basis: 100%; }
+  .history-search-label { flex-basis: 100%; }
+  .history-status { flex-basis: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

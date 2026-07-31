@@ -12,7 +12,7 @@ import {
   type ProviderReadiness,
 } from "../src/core/providers.js";
 import { buildHubSettingsPatch, viewHubSettings } from "../src/hub/settings-api.js";
-import { HubServer } from "../src/hub/server.js";
+import { buildSafeFailureSummary, HubServer } from "../src/hub/server.js";
 import { SetupService } from "../src/setup/service.js";
 import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
 import { StateStore } from "../src/state/store.js";
@@ -142,6 +142,7 @@ async function makeHub() {
       }
       if (method === "health") return { ...health } as T;
       if (method === "list_summaries") return [] as T;
+      if (method === "list_history_page") return { items: [], totalCount: 0, hasMore: false } as T;
       if (method === "plan_board_overview") return [] as T;
       if (method === "competition_list") return [] as T;
       if (method === "statistics") return [] as T;
@@ -1280,6 +1281,142 @@ test("Hub /api/ops/tasks projects compact amended-acceptance basis only", async 
     ]);
     const serialized = JSON.stringify(t.remediationDisposition);
     assert.doesNotMatch(serialized, /typecheck|npm run build|private Main|replacement/);
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("Hub /api/ops/tasks forwards closed board scope/reason codes and strips private text", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-tasks-board-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  // Six Task shapes:
+  //  - now: open work awaiting Main (legal pair -> forwarded).
+  //  - history: repaired delivery (legal pair -> forwarded).
+  //  - bad: injected private boardReason string (not a closed code -> dropped).
+  //  - legacy: older daemon with no codes (absent -> fail open to Now in UI).
+  //  - contra-1: history scope with a now reason (individually valid, contradictory -> dropped).
+  //  - contra-2: now scope with a history reason (individually valid, contradictory -> dropped).
+  const sample = [
+    {
+      taskId: "now-1", name: "review", status: "succeeded",
+      provider: "deepseek", model: "m", runtime: "claude-code",
+      decisionStage: "awaiting-main-review",
+      boardScope: "now", boardReason: "awaiting-main",
+    },
+    {
+      taskId: "hist-1", name: "repaired", status: "failed",
+      provider: "deepseek", model: "m", runtime: "claude-code",
+      boardScope: "history", boardReason: "repaired-delivered",
+      remediationDisposition: {
+        status: "verified-repaired-delivered", checkId: "c", createdAt: "2026-07-26T00:00:00.000Z",
+      },
+    },
+    {
+      taskId: "bad-1", name: "bad", status: "succeeded",
+      provider: "deepseek", model: "m", runtime: "claude-code",
+      boardScope: "history", boardReason: "INJECTED-PRIVATE-TEXT",
+      reason: "private remediation reason that must never reach the Hub",
+    },
+    {
+      taskId: "legacy-1", name: "legacy", status: "running",
+      provider: "deepseek", model: "m", runtime: "claude-code",
+    },
+    {
+      taskId: "contra-1", name: "contra-history-now-reason", status: "succeeded",
+      provider: "deepseek", model: "m", runtime: "claude-code",
+      boardScope: "history", boardReason: "active-work",
+    },
+    {
+      taskId: "contra-2", name: "contra-now-history-reason", status: "failed",
+      provider: "deepseek", model: "m", runtime: "claude-code",
+      boardScope: "now", boardReason: "delivered",
+    },
+  ];
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-test-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true }),
+    daemonRequest: async <T>(method: string) => {
+      if (method === "list_summaries") return sample as T;
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(`http://127.0.0.1:${port}/api/ops/tasks`, "GET", server.getToken());
+    assert.equal(res.status, 200);
+    const body = res.body as Array<{
+      id: string;
+      status: string;
+      boardScope?: string;
+      boardReason?: string;
+      remediationDisposition?: Record<string, unknown>;
+    }>;
+    const now1 = body.find((t) => t.id === "now-1")!;
+    assert.equal(now1.status, "succeeded", "machine status preserved");
+    assert.equal(now1.boardScope, "now");
+    assert.equal(now1.boardReason, "awaiting-main");
+
+    const hist1 = body.find((t) => t.id === "hist-1")!;
+    assert.equal(hist1.status, "failed", "machine failure preserved");
+    assert.equal(hist1.boardScope, "history");
+    assert.equal(hist1.boardReason, "repaired-delivered");
+
+    // An injected private boardReason is not a closed code; both codes are
+    // dropped so the UI fails open to Now. No private text leaks through.
+    const bad1 = body.find((t) => t.id === "bad-1")!;
+    assert.equal(bad1.boardScope, undefined);
+    assert.equal(bad1.boardReason, undefined);
+    const badJson = JSON.stringify(bad1);
+    assert.ok(!badJson.includes("INJECTED-PRIVATE-TEXT"));
+    assert.ok(!badJson.includes("private remediation reason"));
+
+    // Legacy daemon responses without codes stay absent (UI treats as Now).
+    const legacy1 = body.find((t) => t.id === "legacy-1")!;
+    assert.equal(legacy1.boardScope, undefined);
+    assert.equal(legacy1.boardReason, undefined);
+
+    // Contradictory but individually valid pairs are omitted entirely so the
+    // UI fails open to Now (a history scope can never carry a now reason, and
+    // vice versa).
+    const contra1 = body.find((t) => t.id === "contra-1")!;
+    assert.equal(contra1.boardScope, undefined, "history + active-work is not a legal pair");
+    assert.equal(contra1.boardReason, undefined);
+    const contra2 = body.find((t) => t.id === "contra-2")!;
+    assert.equal(contra2.boardScope, undefined, "now + delivered is not a legal pair");
+    assert.equal(contra2.boardReason, undefined);
+
+    // Only legal scope/reason pairs appear anywhere in the response.
+    const LEGAL_HISTORY_REASONS = new Set([
+      "delivered", "activated", "repaired-delivered", "main-rejected",
+    ]);
+    const LEGAL_NOW_REASONS = new Set([
+      "active-work", "awaiting-main", "revision-requested", "integration-pending",
+      "unresolved-failure", "needs-review",
+    ]);
+    for (const t of body) {
+      if (t.boardScope === "history") {
+        assert.ok(t.boardReason !== undefined && LEGAL_HISTORY_REASONS.has(t.boardReason),
+          `legal history reason: ${t.boardReason}`);
+      } else if (t.boardScope === "now") {
+        assert.ok(t.boardReason !== undefined && LEGAL_NOW_REASONS.has(t.boardReason),
+          `legal now reason: ${t.boardReason}`);
+      } else {
+        assert.equal(t.boardScope, undefined, "only now/history scopes are forwarded");
+        assert.equal(t.boardReason, undefined, "scope and reason are forwarded as a pair or not at all");
+      }
+    }
   } finally {
     await server.stop();
     store.close();
@@ -2435,6 +2572,391 @@ test("GET /api/ops/self-upgrade-evidence rejects without token and bounds daemon
     assert.ok(res.status >= 400);
     const body = res.body as { error?: string };
     assert.ok(body.error && body.error.includes("self_upgrade_evidence"));
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+// --- Safe failure summary: redaction and bounds ---
+
+test("buildSafeFailureSummary returns first useful stderr line with redaction", () => {
+  const summary = buildSafeFailureSummary({
+    command: "npm run check",
+    exitCode: 1,
+    stderr: "src/app.js:42:15 - error TS2304: Cannot find name 'foo'.\nExtra noise\n",
+    stdout: "",
+  });
+  assert.ok(typeof summary === "string");
+  assert.ok(summary.length > 0 && summary.length <= 240);
+  assert.ok(summary.includes("error TS2304") || summary.includes("Cannot find name"));
+  assert.ok(!summary.includes("Extra noise"));
+});
+
+test("buildSafeFailureSummary strips ANSI escape codes", () => {
+  const summary = buildSafeFailureSummary({
+    command: "test",
+    exitCode: 1,
+    stderr: "\x1b[31mERR\x1b[0m assertion failed: expected 1 got 2",
+    stdout: "",
+  });
+  assert.ok(typeof summary === "string");
+  assert.ok(!summary.includes("\x1b"));
+  assert.ok(summary.includes("assertion failed") || summary.includes("ERR"));
+});
+
+test("buildSafeFailureSummary redacts API key patterns", () => {
+  const summary = buildSafeFailureSummary({
+    command: "curl",
+    exitCode: 1,
+    stderr: "OPENAI_API_KEY=sk-abc123def4567890123456 authentication failed",
+    stdout: "",
+  });
+  assert.ok(typeof summary === "string");
+  assert.ok(!summary.includes("sk-abc123"));
+});
+
+test("buildSafeFailureSummary redacts URL userinfo", () => {
+  const summary = buildSafeFailureSummary({
+    command: "git push",
+    exitCode: 1,
+    stderr: "fatal: Authentication failed for 'https://user:pass123@github.com/org/repo.git/'",
+    stdout: "",
+  });
+  if (summary) {
+    assert.ok(!summary.includes("pass123"));
+    assert.ok(summary.includes("Authentication failed") || summary.includes("[redacted]"));
+  }
+});
+
+test("buildSafeFailureSummary redacts URL query secrets", () => {
+  const summary = buildSafeFailureSummary({
+    command: "curl",
+    exitCode: 1,
+    stderr: "GET https://api.example.com/v1/data?token=abcdef1234567890&format=json failed",
+    stdout: "",
+  });
+  if (summary) {
+    assert.ok(!summary.includes("abcdef1234"));
+  }
+});
+
+test("buildSafeFailureSummary skips stack-trace lines", () => {
+  const summary = buildSafeFailureSummary({
+    command: "node app.js",
+    exitCode: 1,
+    stderr: "    at Module._compile (node:internal/modules/cjs/loader:1521:14)\n"
+      + "Assertion failed: expected value",
+    stdout: "",
+  });
+  assert.ok(typeof summary === "string");
+  assert.ok(!summary.includes("Module._compile"));
+  assert.ok(summary.includes("Assertion"));
+});
+
+test("buildSafeFailureSummary skips prompt-like lines", () => {
+  const summary = buildSafeFailureSummary({
+    command: "check",
+    exitCode: 1,
+    stderr: "System: You are a helpful assistant.\nUser: Fix the bug.\nError: command not found",
+    stdout: "",
+  });
+  assert.ok(typeof summary === "string");
+  assert.ok(!summary.includes("You are a helpful assistant"));
+  assert.ok(!summary.includes("Fix the bug"));
+});
+
+test("buildSafeFailureSummary skips harness wrappers and keeps the concrete project diagnostic", () => {
+  const summary = buildSafeFailureSummary({
+    command: "node --test",
+    exitCode: 1,
+    stderr: "^\n"
+      + "    triggerUncaughtException(\n"
+      + "Error: Transform failed with 1 error:\n"
+      + "/Users/example/Library/Application Support/ForkLight/runs/task-id/workspace/"
+      + "src/adapters/connectors/gmail.ts:96:21: ERROR: Expected \">\" but found \";\"",
+    stdout: "",
+  });
+  assert.equal(
+    summary,
+    "src/adapters/connectors/gmail.ts:96:21: ERROR: Expected \">\" but found \";\"",
+  );
+});
+
+test("buildSafeFailureSummary skips npm script headers before a lint diagnostic", () => {
+  const summary = buildSafeFailureSummary({
+    command: "npm run check",
+    exitCode: 1,
+    stderr: "",
+    stdout: "> relay@0.2.2 check\n> npm run lint && npm test && npm run build\n\n"
+      + "96:21 error Parsing error: '>' expected",
+  });
+  assert.equal(summary, "96:21 error Parsing error: '>' expected");
+});
+
+test("buildSafeFailureSummary returns undefined when all lines are noise", () => {
+  const summary = buildSafeFailureSummary({
+    command: "check",
+    exitCode: 1,
+    stderr: "    at Module._compile (node:internal/modules/cjs/loader:1521:14)\n"
+      + "    at Module.load (node:internal/modules/cjs/loader:1282:38)\n"
+      + "node:internal/modules/cjs/loader:1521\n",
+    stdout: "",
+  });
+  assert.strictEqual(summary, undefined);
+});
+
+test("buildSafeFailureSummary returns undefined for empty stderr and stdout", () => {
+  const summary = buildSafeFailureSummary({
+    command: "echo",
+    exitCode: 1,
+    stderr: "",
+    stdout: "",
+  });
+  assert.strictEqual(summary, undefined);
+});
+
+test("buildSafeFailureSummary truncates to 240 chars", () => {
+  const longLine = "x".repeat(500);
+  const summary = buildSafeFailureSummary({
+    command: "check",
+    exitCode: 1,
+    stderr: longLine,
+    stdout: "",
+  });
+  assert.ok(typeof summary === "string");
+  assert.ok(summary.length <= 240);
+  assert.ok(summary.endsWith("..."));
+});
+
+test("buildSafeFailureSummary falls back to stdout when stderr is empty", () => {
+  const summary = buildSafeFailureSummary({
+    command: "check",
+    exitCode: 1,
+    stderr: "",
+    stdout: "module not found: @missing/dep",
+  });
+  assert.ok(typeof summary === "string");
+  assert.ok(summary.includes("module") || summary.includes("@missing/dep"));
+});
+
+test("Hub /api/ops/tasks/history reuses the compact Task allowlist and returns page metadata", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-history-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  // Daemon returns full SafeTaskSummary records (including private fields).
+  // The Hub must project the same compact allowlist as /api/ops/tasks.
+  const daemonItem = {
+    taskId: "hist-1",
+    name: "older delivery",
+    status: "failed",
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+    runtime: "claude-code",
+    sourcePath: "/private/source",
+    workspacePath: "/private/workspace",
+    sessionId: "private-session",
+    createdAt: "2026-07-20T10:00:00.000Z",
+    updatedAt: "2026-07-20T10:00:00.000Z",
+    boardScope: "history",
+    boardReason: "repaired-delivered",
+    remediationDisposition: {
+      status: "verified-repaired-delivered",
+      checkId: "check-1",
+      createdAt: "2026-07-20T11:00:00.000Z",
+      reason: "private remediation reason that must never reach the Hub",
+      command: "rm -rf /tmp/secret",
+    },
+  };
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-test-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true }),
+    daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
+      calls.push({ method, params });
+      if (method === "list_history_page") {
+        return {
+          items: [daemonItem],
+          totalCount: 83,
+          hasMore: true,
+          nextCursor: "opaque-continuation",
+        } as T;
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/history?limit=25&query=deepseek`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(res.status, 200);
+    const body = res.body as {
+      items: Array<Record<string, unknown>>;
+      totalCount: number;
+      hasMore: boolean;
+      nextCursor: string;
+    };
+    assert.equal(body.items.length, 1);
+    assert.equal(body.items[0]!.id, "hist-1");
+    assert.equal(body.items[0]!.boardScope, "history");
+    assert.equal(body.items[0]!.boardReason, "repaired-delivered");
+    assert.equal(body.totalCount, 83);
+    assert.equal(body.hasMore, true);
+    assert.equal(body.nextCursor, "opaque-continuation");
+    // The compact allowlist drops private fields and private disposition keys.
+    const item = body.items[0]!;
+    assert.equal(item.sourcePath, undefined, "sourcePath must not appear");
+    assert.equal(item.workspacePath, undefined, "workspacePath must not appear");
+    assert.equal(item.sessionId, undefined, "sessionId must not appear");
+    const disp = item.remediationDisposition as Record<string, unknown> | undefined;
+    assert.ok(disp);
+    const dispKeys = Object.keys(disp!).sort();
+    assert.deepEqual(dispKeys, ["checkId", "createdAt", "status"],
+      "private remediation fields must not pass through History");
+    const json = JSON.stringify(body);
+    assert.ok(!json.includes("/private/source"));
+    assert.ok(!json.includes("private-session"));
+    assert.ok(!json.includes("private remediation reason"));
+    // The bounded query/cursor/limit are forwarded to the daemon read-only op.
+    assert.equal(calls[0]!.method, "list_history_page");
+    assert.equal(calls[0]!.params.query, "deepseek");
+    assert.equal(calls[0]!.params.limit, 25);
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("Hub /api/ops/tasks/history and /api/ops/tasks share one compact allowlist", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-history-shared-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const summary = {
+    taskId: "shared-1",
+    name: "shared",
+    status: "succeeded",
+    provider: "glm",
+    model: "glm-4.6",
+    runtime: "claude-code",
+    sourcePath: "/private",
+    workspacePath: "/private-ws",
+    sessionId: "private-session",
+    createdAt: "2026-07-20T10:00:00.000Z",
+    updatedAt: "2026-07-20T10:00:00.000Z",
+    boardScope: "history",
+    boardReason: "delivered",
+  };
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-test-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true }),
+    daemonRequest: async <T>(method: string) => {
+      if (method === "list_summaries") return [summary] as T;
+      if (method === "list_history_page") {
+        return { items: [summary], totalCount: 1, hasMore: false } as T;
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const recent = await doHttp(`http://127.0.0.1:${port}/api/ops/tasks`, "GET", server.getToken());
+    const history = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/history`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(recent.status, 200);
+    assert.equal(history.status, 200);
+    const recentItem = (recent.body as Array<Record<string, unknown>>)[0]!;
+    const historyItem = (history.body as { items: Array<Record<string, unknown>> }).items[0]!;
+    // Same compact field set in both routes; a new field cannot appear in only one.
+    assert.deepEqual(Object.keys(recentItem).sort(), Object.keys(historyItem).sort(),
+      "recent and History share one compact allowlist");
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("Hub /api/ops/tasks/history bounds daemon errors with privacy-safe language", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-history-err-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  // Daemon rejects a cross-query cursor with the fixed privacy-safe reason.
+  let callCount = 0;
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-test-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true }),
+    daemonRequest: async (method: string) => {
+      if (method === "list_history_page") {
+        callCount += 1;
+        if (callCount === 1) {
+          throw new Error("History continuation is invalid; start a new search.");
+        }
+        throw new Error("Daemon is not running (connection refused)");
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const noToken = await doHttp(`http://127.0.0.1:${port}/api/ops/tasks/history`, "GET");
+    assert.equal(noToken.status, 401);
+
+    // The fixed invalid-request reason is surfaced verbatim.
+    const invalid = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/history?cursor=xyz`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(invalid.status, 503);
+    const invalidBody = invalid.body as { error: string };
+    assert.equal(invalidBody.error, "History continuation is invalid; start a new search.");
+
+    // Any other daemon failure uses a bounded privacy-safe message; raw daemon
+    // text is never echoed.
+    const down = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/history`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(down.status, 503);
+    const downBody = down.body as { error: string };
+    assert.ok(!downBody.error.includes("connection refused"));
+    assert.ok(!downBody.error.includes("Daemon"));
   } finally {
     await server.stop();
     store.close();

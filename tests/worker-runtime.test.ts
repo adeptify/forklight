@@ -274,6 +274,16 @@ test("GrokEventNormalizer maps stream lines", () => {
   assert.equal(isMeaningfulGrokResultText("EndTurn"), false);
   const thought = n.parseLine(JSON.stringify({ type: "thought", data: "hmm" }));
   assert.equal(thought[0]?.type, "worker.message");
+  assert.equal(
+    (thought[0]?.payload as { activityKind?: string } | undefined)?.activityKind,
+    "model-processing",
+    "Grok thought emits structured processing activity for live-stage",
+  );
+  const text = n.parseLine(JSON.stringify({ type: "text", data: "hello" }));
+  assert.equal(
+    (text[0]?.payload as { activityKind?: string } | undefined)?.activityKind,
+    "model-response",
+  );
   const failed = n.parseLine(JSON.stringify({ type: "error", message: "auth" }));
   assert.equal(failed[0]?.type, "worker.failed");
   const cancelled = n.parseLine(JSON.stringify({ type: "end", stopReason: "Cancelled" }));

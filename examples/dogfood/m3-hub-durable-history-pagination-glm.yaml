@@ -1,0 +1,193 @@
+version: 2
+name: Make the full Task history searchable and pageable
+project: /Users/yijunwang/code/forklight
+taskClass: hub-durable-history-pagination
+taskFamily: hub-product-comprehension
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: volcengine-glm52-1m
+deliveryProfileId: forklight-self-upgrade
+routingDecision:
+  taskFamily: hub-product-comprehension
+  shortlist:
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: volcengine
+    model: glm-5.2[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: volcengine-glm52-1m
+  selectedBecause:
+    code: main-judgment
+    note: GLM 已完成相邻的 Hub Now/History 双语信息架构，本任务延续同一调用链并由 Main 冻结分页、搜索、隐私与交互合同；当前不把未经校准的历史次数伪装成路由证据，单实现即可验证，也不为凑样本启动竞争。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    The Hub keeps its small frequently refreshed operational Task slice, while
+    an explicitly opened History view can safely search and page through every
+    canonically closed Task without archive polling or lifecycle mutation.
+  presentation:
+    summary: 近期工作继续轻量刷新；只有用户打开历史时才查完整记录，并能搜索、继续加载和看懂失败状态。
+    language: zh-CN
+  context:
+    - Follow docs/m3-hub-durable-history-pagination-contract.md as the Main-owned product and semantics authority.
+    - The current Hub loads at most 50 Task summaries and its History search only covers that loaded subset.
+    - Canonical boardScope and boardReason already distinguish finished product outcomes from machine-only status.
+    - Keep all current uncommitted ForkLight work as the baseline; do not revert or overwrite unrelated changes.
+    - Do not touch Elsewhere, client-core, Adeptify, or another consumer App.
+  inScope:
+    - Add a read-only daemon History-page operation with bounded validated query, deterministic opaque cursor, total count, and canonical History filtering.
+    - Reuse or factor the Hub compact Task allowlist so recent and History responses have identical privacy boundaries.
+    - Add an explicit Hub History loader with submitted search, Refresh, Load more, de-duplication, stale-response protection, and retained-data error handling.
+    - Keep the archive endpoint outside global PAGE_DEPS and every automatic polling path.
+    - Add natural Chinese and English copy, 390px-safe styles, and focused protocol/Core/API/UI tests.
+  outOfScope:
+    - Task mutation, schema migration, retention, delete/archive actions, infinite scroll, automatic archive polling, automatic retry, or loading all pages.
+    - Task Detail/card redesign, workflow semantics in JavaScript, Provider/routing/settings/economics changes, new dependencies, other Apps, commit, or push.
+    - Searching or returning prompts, commands, outputs, errors, diffs, paths, event payloads, credentials, or free-text review reasons.
+  executionSteps:
+    - Trace listTasks, canonical Task surface projection, daemon protocol, Hub allowlist, board scope state, refresh planning, i18n, and focused tests.
+    - Implement and test deterministic History paging and fail-closed cursor/query validation before wiring the Hub.
+    - Add explicit History loading and honest loaded/total/error states without changing automatic refresh planning.
+    - Run every stored acceptance command once and report unrelated failures separately.
+  deliverables:
+    - One bounded privacy-safe daemon History-page contract with stable continuation.
+    - One Hub History interaction that finds older deliveries without background archive polling.
+    - Plain bilingual copy and focused regression evidence for paging, privacy, failures, and responsive controls.
+  modules:
+    - name: Durable History read model
+      responsibility: Select canonical closed outcomes and return one deterministic bounded page.
+      consumes:
+        - Stored terminal Tasks and existing canonical Task surface evidence.
+      produces:
+        - Safe History items, totalCount, hasMore, and opaque nextCursor.
+      boundaries:
+        - Read-only; search safe facts only; no Task mutation, raw private fields, or client-side lifecycle inference.
+    - name: Hub privacy adapter
+      responsibility: Give recent Tasks and History one compact public allowlist.
+      consumes:
+        - Safe Task summaries from the daemon.
+      produces:
+        - Consistent browser-safe Task records and bounded History metadata.
+      boundaries:
+        - No prompt, command, output, path, session, credential, diff, event payload, or free-text reason.
+    - name: Deliberate History interaction
+      responsibility: Load, search, refresh, and extend History only when the user asks.
+      consumes:
+        - History pages and current scope/search interaction.
+      produces:
+        - De-duplicated records, honest loaded/total state, retained-data errors, and accessible controls.
+      boundaries:
+        - No PAGE_DEPS archive slice, polling, per-keystroke requests, infinite scroll, automatic retry, or broad board redesign.
+  callChain:
+    - The user selects History or explicitly submits a History search.
+    - Hub calls the new read-only daemon operation with a bounded query and optional opaque continuation.
+    - Core derives canonical Task surfaces, keeps only History, applies safe search and deterministic pagination.
+    - Hub projects the same compact Task allowlist used by recent Tasks and returns page metadata.
+    - The browser replaces or appends the current generation, de-duplicates by Task id, and renders honest loaded/total/error state.
+  scenarios:
+    - name: Older delivery found
+      given: A canonical delivered Task lies outside the recent 50 loaded Tasks.
+      when: The user opens History and submits a matching search.
+      then: The Task appears without loading the entire archive or changing Task state.
+    - name: Concurrent insert
+      given: The first page was loaded and a newer Task is then inserted.
+      when: Load more uses the issued cursor.
+      then: Previously returned Tasks are not duplicated and the continuation order remains stable.
+    - name: Search changed
+      given: A cursor was issued for one normalized query.
+      when: It is sent with a different query.
+      then: The daemon rejects it with fixed privacy-safe language.
+    - name: Later page unavailable
+      given: The user already sees one or more History pages.
+      when: Load more fails.
+      then: Existing records remain visible, are marked possibly stale, and a retry action is offered.
+    - name: Ordinary polling
+      given: The user stays on Now, another page, or a hidden tab.
+      when: Normal refresh runs.
+      then: No History-page request occurs.
+  risks:
+    - A cursor based only on timestamp can duplicate or omit equal-time Tasks; bind timestamp and Task id.
+    - Reusing the live search input would send per-keystroke requests; keep draft and submitted query separate.
+    - A separate Hub mapping can leak or drift; share the compact allowlist projection.
+    - Replacing loaded data on a transient error makes failure look like an empty archive; preserve prior pages.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 1800
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 12
+  fileLimitMode: warn
+  changedLineLimit: 1800
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-summary.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - src/hub/public/app.css
+    - tests/task-surface.test.ts
+    - tests/daemon.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - History includes only canonical boardScope history records and excludes machine-terminal Tasks still awaiting Main or Integration.
+    - Query and cursor validation is bounded and privacy-safe; equal timestamps page deterministically without duplication or omission.
+    - Recent and History Hub responses share one compact allowlist and expose no new private content.
+    - The History endpoint is absent from PAGE_DEPS and all automatic polling; selection/search/refresh/load-more are explicit and single-flight.
+    - Search submits rather than requests per keystroke; late responses cannot overwrite a newer query.
+    - Later-page failure retains loaded records, first-page failure is not shown as empty, and loaded versus total counts are honest.
+    - Chinese and English primary copy is ordinary language, keyboard accessible, and controls wrap without page overflow near 390px.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-surface.test.ts tests/daemon.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm run check
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check

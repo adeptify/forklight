@@ -1,0 +1,196 @@
+version: 2
+name: Record when Main deliberately handles work without a Worker
+project: ../..
+taskClass: main-direct-execution-decision
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: Exact and family evidence are absent and Competition is not justified. Main selects one DeepSeek Worker for the bounded Store/Core/CLI/MCP/Hub implementation after using zero Worker Tokens for the preceding deterministic CLI repair. This is not a permanent model verdict.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    ForkLight durably records when Main intentionally handles work directly,
+    closes that decision with a bounded local-verification result, and explains
+    it in Hub without fabricating a Worker Task, model score, or Token saving.
+  presentation:
+    summary: Main 可以在开始前记录“这次为什么不派 Worker”，完成后补上结果；Hub 会把这类决定和 Worker 任务分开说明。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-main-direct-execution-decision-contract.md.
+    - Two real Main-direct dogfood fixes already exist only as prose; they must not be backfilled as if the new start boundary had existed.
+    - Existing Task routingDecision requires a selected Worker and cannot represent no Worker without corrupting Task truth.
+    - Existing Direct Codex calibration measures paired Token evidence and must remain separate from this M3 execution-decision record.
+  inScope:
+    - Add one durable non-Task main-direct execution-decision record with immutable start facts and exactly one explicit close result.
+    - Resolve zero to four considered Worker Profile identities and current readiness/evidence snapshot at start without probing Providers or launching work.
+    - Expose confirmed CLI and MCP start/complete mutations plus read-only status/list through the daemon.
+    - Add privacy-safe aggregate counts and a small recent-decisions surface to Hub Insights in independent Chinese and English copy.
+    - Keep current Worker routing coverage, Provider/model statistics, Direct Codex calibration, Task surfaces, and M0 upgrade evidence unchanged.
+  outOfScope:
+    - Do not create or mutate Task, Attempt, Candidate, Workspace, Goal, Plan, Competition, Integration, routing settings, Worker Profile, or Direct Codex sample.
+    - Do not launch, probe, resume, retry, compare, judge, or score any Worker or Provider.
+    - Do not infer or store source path, Prompt, contract, Diff, file count, changed lines, command, output, error text, credential, endpoint, Main Token, duration estimate, or savings claim.
+    - Do not backfill historical prose records or auto-create records for existing Tasks.
+    - Do not auto-close open decisions after restart or expose an arbitrary update/delete API.
+    - Do not commit or push.
+  executionSteps:
+    - Trace Task routing decisions, Direct Codex records, Worker Profile resolution, daemon mutation guards, statistics, and Insights before editing.
+    - Define a closed privacy-safe record and projection, Store persistence, validators, idempotent close, and read-only aggregate.
+    - Add daemon protocol/coordinator methods, then CLI and MCP surfaces that require explicit confirmation before mutation.
+    - Add Hub Insights summary and recent list using only the privacy-safe projection and plain bilingual meaning.
+    - Run focused tests once, repair only Candidate-caused failures, then run full tests/build/syntax/diff checks once.
+  deliverables:
+    - Durable two-stage Main-direct decision lifecycle independent from Task records.
+    - CLI/MCP/daemon operations and privacy-safe status/list/aggregate projections.
+    - Human-readable Hub Insights explanation that separates Main-direct decisions from Worker evidence.
+    - Regression coverage for immutability, idempotency, no Worker side effects, restart persistence, privacy, and legacy-stat stability.
+  modules:
+    - name: Main-direct decision Core and Store
+      responsibility: Validate, persist, replay, and close one immutable decision without creating a Task.
+      consumes:
+        - Main task classification, reason, considered Worker Profile ids, explicit confirm, and bounded close outcome.
+      produces:
+        - Privacy-safe open or closed execution-decision record and aggregate facts.
+      boundaries:
+        - No Task/Worker mutation, Provider request, arbitrary patch/update, raw project content, or inferred completion.
+    - name: Main Runtime operations
+      responsibility: Give CLI and MCP the same explicit start/complete/status/list behavior through daemon authority.
+      consumes:
+        - Closed structured arguments and explicit confirmation for mutations.
+      produces:
+        - Stable record ids and bounded projections for reconnecting Main sessions.
+      boundaries:
+        - No automatic record creation, retry, routing mutation, Worker launch, or private diagnostic echo.
+    - name: Insights explanation
+      responsibility: Explain why Main handled work directly and what happened without mixing it with Worker model evidence.
+      consumes:
+        - Aggregate and recent privacy-safe decision projections.
+      produces:
+        - Plain Chinese/English counts, status, reason, local verification, and zero ForkLight Worker Attempt wording.
+      boundaries:
+        - No Main Token/cost/savings claim, model scoring, raw note beyond the bounded Main-authored explanation, or Task reconstruction.
+  callChain:
+    - Main classifies a bounded piece of work and decides direct handling before editing.
+    - Confirmed start resolves considered Profiles and stores the immutable evidence-time decision without launching a Worker.
+    - Main performs and locally verifies the work outside ForkLight Worker execution.
+    - Confirmed complete closes the record once as completed plus verification, or abandoned.
+    - CLI/MCP/Hub read the same record and separate its aggregate from Worker routing readiness.
+  scenarios:
+    - name: Small clear change completed locally
+      given: Main considered DeepSeek and GLM but chooses direct handling before source work.
+      when: Main starts the record, completes the work, and closes it as completed and passed.
+      then: The durable record shows the decision and local result with zero ForkLight Worker Attempts and no Token saving claim.
+    - name: Main session ends before completion
+      given: A valid open decision exists.
+      when: Daemon or Main restarts without an explicit close.
+      then: The same record remains open and no Worker, retry, or inferred completion occurs.
+    - name: Abandoned direct work
+      given: Main decides not to finish the local work.
+      when: Main closes the record as abandoned.
+      then: Verification is absent and the record is not presented as success.
+    - name: Exact replay versus conflicting replay
+      given: A decision was already closed.
+      when: The identical close request is replayed or a different outcome is submitted.
+      then: Identical replay returns the original result; conflicting replay fails without mutation.
+    - name: Invalid considered Worker input
+      given: Profile ids are duplicate, unknown, too many, or malformed.
+      when: Main requests start.
+      then: Admission fails before persistence and before any Provider or Worker activity.
+    - name: Existing statistics remain truthful
+      given: Main-direct records and ordinary Worker Tasks coexist.
+      when: routing coverage and Provider/model statistics are computed.
+      then: Existing Task counts and model outcomes are unchanged; Main-direct counts appear only in their separate aggregate.
+  risks:
+    - Reusing Task routingDecision would require a fake selected Worker; keep this record independent from TaskSpec.
+    - Recording only after completion would let hindsight masquerade as a decision-time snapshot; require start before close and prohibit backfill.
+    - Saying zero Worker Tokens could be heard as zero total cost; say zero ForkLight Worker Attempts and keep Main Token/cost unavailable.
+    - Free-form evidence could leak project content; use closed codes and bounded Main note only.
+    - Mixing these records into model statistics would reward or punish a model that never ran; keep aggregates independent.
+  changeBudget:
+    maxFiles: 14
+    maxDiffLines: 1600
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 14
+  fileLimitMode: warn
+  changedLineLimit: 1600
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/state
+    - src/daemon
+    - src/cli.ts
+    - src/mcp
+    - src/hub
+    - tests
+acceptance:
+  criteria:
+    - Start and close are explicit, confirmed, immutable, restart-safe, idempotent, and independent from Task/Worker lifecycle.
+    - Considered Worker identities and decision-time evidence are frozen without Provider probes or Worker launch.
+    - CLI, MCP, daemon, statistics, and Hub consume one privacy-safe projection and expose no project content or private diagnostics.
+    - Worker routing coverage, Provider/model outcomes, Direct Codex calibration, and M0 upgrade evidence remain unchanged.
+    - Hub bilingual copy says zero ForkLight Worker Attempts without claiming zero Main Token, cost, time, or proven savings.
+    - No historical backfill, automatic completion, retry, Competition, Worker invocation, Integration, commit, or push occurs.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-direct-execution-decision.test.ts tests/daemon.test.ts tests/mcp.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

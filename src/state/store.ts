@@ -16,6 +16,7 @@ import type {
   GoalRecord,
   IntegrationReceiptRecord,
   IntegrationResultRecord,
+  MainDirectDecisionRecord,
   PlanItemRecord,
   PlanItemStatus,
   PlanRecord,
@@ -372,6 +373,17 @@ export class StateStore {
         ON candidate_handoffs(competition_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_candidate_handoffs_status
         ON candidate_handoffs(status, updated_at);
+      CREATE TABLE IF NOT EXISTS main_direct_decisions (
+        id TEXT PRIMARY KEY,
+        task_class TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        closed_at TEXT,
+        record_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_main_direct_decisions_closed
+        ON main_direct_decisions(status, started_at DESC);
     `);
   }
 
@@ -2408,5 +2420,78 @@ export class StateStore {
         )
         .run(graph.status, JSON.stringify(graph), graph.updatedAt, graph.id);
     });
+  }
+
+  // --- Main-direct execution decisions ---
+
+  saveMainDirectDecision(record: MainDirectDecisionRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO main_direct_decisions (id, task_class, reason, status, started_at, closed_at, record_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.taskClass,
+        record.reason,
+        record.status,
+        record.startedAt,
+        record.closedState?.closedAt ?? null,
+        JSON.stringify(record),
+      );
+  }
+
+  getMainDirectDecision(id: string): MainDirectDecisionRecord {
+    const row = this.db
+      .prepare("SELECT record_json FROM main_direct_decisions WHERE id = ?")
+      .get(id) as { record_json: string } | undefined;
+    if (!row) throw new Error(`Unknown main-direct decision: ${id}`);
+    return parseRecord<MainDirectDecisionRecord>(row.record_json, "main-direct decision");
+  }
+
+  /** Atomically close an open Main-direct decision. A false result means
+   * another caller closed it first; the returned record is the durable winner. */
+  closeMainDirectDecision(record: MainDirectDecisionRecord): {
+    applied: boolean;
+    record: MainDirectDecisionRecord;
+  } {
+    if (record.status === "open" || record.closedState === undefined) {
+      throw new Error("A Main-direct close requires a terminal record and closedState");
+    }
+    const updated = this.db
+      .prepare(
+        `UPDATE main_direct_decisions
+         SET status = ?, closed_at = ?, record_json = ?
+         WHERE id = ? AND status = 'open'`,
+      )
+      .run(record.status, record.closedState?.closedAt ?? null, JSON.stringify(record), record.id);
+    if (updated.changes === 1) return { applied: true, record };
+    return { applied: false, record: this.getMainDirectDecision(record.id) };
+  }
+
+  listMainDirectDecisions(): MainDirectDecisionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM main_direct_decisions
+         ORDER BY started_at DESC, id DESC`,
+      )
+      .all() as unknown as Array<{ record_json: string }>;
+    return rows.map((row) =>
+      parseRecord<MainDirectDecisionRecord>(row.record_json, "main-direct decision"),
+    );
+  }
+
+  listRecentMainDirectDecisions(limit: number): MainDirectDecisionRecord[] {
+    const safeLimit = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+    const rows = this.db
+      .prepare(
+        `SELECT record_json FROM main_direct_decisions
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(safeLimit) as unknown as Array<{ record_json: string }>;
+    return rows.map((row) =>
+      parseRecord<MainDirectDecisionRecord>(row.record_json, "main-direct decision"),
+    );
   }
 }

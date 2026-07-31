@@ -3,6 +3,7 @@ import { latestMainReview } from "./main-review.js";
 import {
   buildStatusProgress,
   DEFAULT_QUIET_AFTER_MS,
+  toLiveStageEvents,
   type LatestEventMeta,
   type PreparationStageCursor,
 } from "./task-progress.js";
@@ -354,12 +355,15 @@ export function buildTaskDecisionView(input: {
   const latestPreparationStage = preparationStage(input.task, orderedEvents);
   // FL-D83: activity is last-event age, not frozen tasks.updatedAt. MCP status
   // and Console Decision View share this progress model with CLI status.
+  // liveStage is rebuilt from ordered durable events so daemon restart preserves
+  // open tool / model / verification truth without Provider calls or mutation.
   const progress = buildStatusProgress(
     input.task,
     latestMeta,
     input.nowMs ?? Date.now(),
     input.quietAfterMs ?? DEFAULT_QUIET_AFTER_MS,
     latestPreparationStage,
+    toLiveStageEvents(orderedEvents),
   );
   // Same gate as CLI list / listTaskSurfaces: do not leak historical categories
   // onto succeeded, running, or queued tasks after revise/resume.

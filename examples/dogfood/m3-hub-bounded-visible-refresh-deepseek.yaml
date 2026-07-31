@@ -1,0 +1,180 @@
+version: 2
+name: Hub refresh follows the page the user can actually see
+project: ../..
+taskClass: hub-bounded-visible-refresh
+taskFamily: product-performance-observability
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+routingDecision:
+  taskFamily: product-performance-observability
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: Recent Hub work shows both candidates can deliver, but GLM's adjacent Hub slice consumed substantially more cache-read volume. This is one deterministic browser scheduling implementation, so Main selects one lower-cost capable Worker and explicitly declines Competition.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    An open Hub keeps the page a person is looking at current without making every
+    tab reread every Task, Plan, Goal, model statistic, and setting every two seconds;
+    background tabs stop polling and catch up once when visible again.
+  presentation:
+    summary: Hub 只刷新用户正在看的内容；切到后台后暂停读取，回来时立即补齐，不再和正在执行的 Worker 抢资源。
+    language: zh-CN
+  context:
+    - The current browser refresh runs /api/status, eight operations endpoints, economics, routing coverage, and self-upgrade evidence together every console refresh interval, regardless of active page.
+    - During Elsewhere dogfood the ForkLight SQLite store was about 176 MB and a workspace scan covered about 2.4 GB / 7,960 files; an open Hub materially increased daemon CPU and memory pressure until it was stopped.
+    - Ops health already has bounded server-side caching. Task, Board, Goal, Competition, and Task Detail truth must remain live and must not be hidden behind a broad cache.
+    - This slice reduces unnecessary browser demand. It does not claim to optimize every SQLite query or solve the separate workspace.exclude wording issue FL-D258 also exposed.
+  inScope:
+    - Replace the all-endpoints-every-cycle refresh with one explicit page-to-data dependency map covering Overview, Tasks, Plans, Goals, Competitions, Insights, Models, Workers, Quality limits, Mains, and Delivery.
+    - Keep /api/status and the small operations health snapshot available wherever shell status counts or current setup truth are rendered; fetch only the additional data the active top-level page consumes.
+    - When a user changes top-level page, immediately request that page's required data and render a truthful loading or retained-stale state until it arrives; never render missing arrays as successful empty evidence.
+    - When document.visibilityState is hidden, cancel the next scheduled refresh and issue no new polling requests. When it becomes visible, perform one immediate refresh and resume the configured interval.
+    - Coalesce overlapping refresh triggers in one tab so tab changes, visibility recovery, and timed polling cannot create concurrent duplicate request batches.
+    - Keep an explicit manual/action refresh able to invalidate the current view after a successful mutation without creating an automatic retry loop.
+    - "Preserve isolated failure boundaries: economics, routing coverage, and self-upgrade failures degrade only their own page/card; one unrelated endpoint failure must not erase previously valid Task or Board data."
+    - Add deterministic browser-source tests for the dependency map, hidden/visible lifecycle, one in-flight batch, immediate tab refresh, and absence of global all-endpoint Promise.all polling.
+  outOfScope:
+    - Do not change daemon scheduling, Store queries/schema, Task/Plan/Goal/Competition semantics, polling interval settings, Provider probes, Worker runtime, model routing, retries, API response shapes, authentication, Integration, or source-write authority.
+    - Do not cache Task Detail or active Task progress on the server, add a service worker, use WebSockets, add dependencies, create background refresh, or invent optimistic Task state.
+    - Do not redesign Hub information architecture, copy, cards, navigation, or visual styling.
+    - Do not touch other projects, commit, or push.
+  executionSteps:
+    - Trace every top-level renderer's S.* inputs and the current refresh/switchTab/init lifecycle before editing.
+    - Define a closed page dependency table and one pure request-plan helper that tests can execute without a DOM.
+    - Separate shared shell status from page-specific reads, retaining each successful slice independently.
+    - Add visibility and in-flight guards, then wire both existing tab-switch paths through one immediate refresh entry.
+    - Run the stored focused, full, build, syntax, and diff checks once; report any baseline issue without looping.
+  deliverables:
+    - Visibility-aware, page-scoped Hub polling.
+    - One-tab request coalescing and immediate catch-up on return.
+    - Independent retained evidence per data slice instead of one all-or-nothing batch.
+    - Regression tests proving request volume and freshness behavior.
+  modules:
+    - name: Refresh plan
+      responsibility: Decide which safe read endpoints one visible top-level page requires.
+      consumes:
+        - Closed Hub tab code and whether a detail/form owns the view.
+      produces:
+        - One deterministic, duplicate-free endpoint set plus isolated evidence groups.
+      boundaries:
+        - No fetch, render, state mutation, lifecycle inference, or model decision.
+    - name: Browser poll lifecycle
+      responsibility: Run at most one visible request batch and schedule the next bounded refresh.
+      consumes:
+        - Visibility, active tab, configured interval, and refresh trigger.
+      produces:
+        - Updated successful slices, per-slice failure state, last-success time, and one next timer.
+      boundaries:
+        - Hidden tabs issue no polls; overlapping triggers coalesce; failure does not auto-loop faster.
+    - name: Page transitions
+      responsibility: Make a newly selected page obtain its own evidence immediately.
+      consumes:
+        - User tab intent and any retained prior evidence.
+      produces:
+        - Immediate bounded refresh followed by normal rendering.
+      boundaries:
+        - Does not clear durable data, mutate Tasks, submit work, or treat absent data as empty success.
+  callChain:
+    - The visible Hub starts and derives a request plan for Overview.
+    - The poll lifecycle reads shared shell truth plus only Overview dependencies and retains each successful slice independently.
+    - A user selects another page; the lifecycle coalesces any in-flight work, then immediately reads that page's missing or refreshable dependencies.
+    - The tab becomes hidden; the next timer is removed and no poll starts.
+    - Visibility returns; one catch-up refresh runs, the current page renders current evidence, and the normal interval resumes.
+  scenarios:
+    - name: Three browser tabs, one visible
+      given: Three Hub tabs are open and two are background tabs.
+      when: Several normal refresh intervals elapse.
+      then: Only the visible tab issues polling reads; background tabs make zero new requests and each catches up once when selected.
+    - name: User watches an active Task list
+      given: The Tasks page is visible while a Worker is running.
+      when: The refresh interval elapses.
+      then: Task and shell health reads stay current without rereading Plans, Goals, Competitions, statistics, economics, routing coverage, settings, or sample setup.
+    - name: User opens Insights
+      given: Existing Task and Board evidence is retained from earlier pages.
+      when: The user selects Insights.
+      then: Statistics, economics, and routing evidence refresh independently; an economics failure does not mark Tasks disconnected or erase their evidence.
+    - name: Rapid tab changes
+      given: One refresh batch is still in flight.
+      when: The user moves from Plans to Tasks and then Overview.
+      then: No duplicate concurrent batch starts; one immediate follow-up refresh uses the final visible page and no endless queue is created.
+  risks:
+    - A page dependency omission can make valid data look empty; tests must assert every renderer's required S slice and loading fallback.
+    - Cancelling hidden timers without an immediate visibility refresh can leave stale UI; the visibility handler is part of acceptance.
+    - A global Promise.all failure would erase partial truth; settle slices independently and retain the last valid value.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 900
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 3
+  fileLimitMode: warn
+  changedLineLimit: 900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - tests/hub-ui-assets.test.ts
+    - tests/hub-settings.test.ts
+acceptance:
+  criteria:
+    - Hidden Hub tabs make no new polling requests and one immediate refresh occurs on visibility return.
+    - Each top-level page fetches only its declared live dependencies; active Task progress and shell health remain current where shown.
+    - Overlapping timer, tab, visibility, and action triggers create at most one in-flight batch plus one coalesced follow-up for the latest page.
+    - Independent slice failures retain prior valid evidence and do not mark unrelated pages disconnected.
+    - API shapes, configured interval, Task/Goal/Plan/Competition behavior, Provider paths, routing, retries, and mutation authority are unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts tests/hub-settings.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - git diff --check

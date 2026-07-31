@@ -12,6 +12,10 @@ import type { NormalizedWorkerEvent } from "../core/types.js";
 /** Hard bound for ordered Grok text-delta assembly (bytes of UTF-16 code units). */
 export const GROK_ASSEMBLED_TEXT_MAX = 32_000;
 
+/** High-frequency thought telemetry is observation only. Persist at most one
+ * processing marker per interval so runtime activity cannot flood Task history. */
+export const GROK_PROCESSING_THROTTLE_MS = 15_000;
+
 /** Stop reasons that are transport/control signals, never useful result bodies. */
 const NON_CONTENT_STOP_REASONS = new Set([
   "endturn",
@@ -118,6 +122,15 @@ function explicitTerminalContent(obj: Record<string, unknown>): string | undefin
 }
 
 export class GrokEventNormalizer {
+  private readonly clock: () => number;
+  private readonly processingThrottleMs: number;
+  private lastProcessingEmittedAt = -1;
+
+  constructor(input?: { clock?: () => number; processingThrottleMs?: number }) {
+    this.clock = input?.clock ?? (() => Date.now());
+    this.processingThrottleMs = input?.processingThrottleMs ?? GROK_PROCESSING_THROTTLE_MS;
+  }
+
   parseLine(line: string): NormalizedWorkerEvent[] {
     const trimmed = line.trim();
     if (!trimmed) return [];
@@ -139,12 +152,21 @@ export class GrokEventNormalizer {
     const lower = type.toLowerCase();
 
     // Live CLI streaming-json: thought / text deltas + end (OAuth dogfood 2026-07-25).
+    // activityKind is the only field live-stage needs; summaries remain human-readable
+    // and are never used for stage classification.
     if (lower === "thought" || lower === "thinking") {
-      const data = typeof obj.data === "string" ? obj.data : "";
+      const now = this.clock();
+      if (
+        this.lastProcessingEmittedAt >= 0
+        && now - this.lastProcessingEmittedAt < this.processingThrottleMs
+      ) return [];
+      this.lastProcessingEmittedAt = now;
       return [{
         type: "worker.message",
-        summary: data ? `thinking: ${data.slice(0, 200)}` : "thinking",
-        payload: { streamType: type },
+        summary: "Model is actively processing",
+        // Grok thought/thinking is closed model-processing evidence; stage
+        // classification uses activityKind only — never reads prose.
+        payload: { streamType: type, activityKind: "model-processing" },
       }];
     }
     if (lower === "text") {
@@ -153,7 +175,8 @@ export class GrokEventNormalizer {
         type: "worker.message",
         summary: data.slice(0, 240) || "text",
         // Full delta is not stored in events; adapter accumulates from raw lines.
-        payload: { streamType: type },
+        // Grok text is visible model response — distinct from processing/thought.
+        payload: { streamType: type, activityKind: "model-response" },
       }];
     }
 

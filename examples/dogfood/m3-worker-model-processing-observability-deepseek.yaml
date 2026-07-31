@@ -1,0 +1,181 @@
+version: 2
+name: Explain when a model is still processing without guessing
+project: ../..
+taskClass: worker-model-processing-observability
+taskFamily: product-performance-observability
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+routingDecision:
+  taskFamily: product-performance-observability
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: Both candidates have zero exact samples; routing reports unknown and no Competition trigger. This is one coherent cross-layer slice. Main selects DeepSeek because adjacent GLM Hub work was deliverable but unusually turn- and cache-heavy. This is not a permanent model verdict.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Main and Hub can tell that a model is actively processing even when no visible
+    response has arrived, without confusing process life, model activity, useful
+    implementation progress, network success, or permission to retry.
+  presentation:
+    summary: Worker 安静时，用户能分清“刚启动等待模型”“模型仍在处理”“已经输出或调用工具”；系统不会因为沉默猜测失败，也不会因为思考信号自动续命或重试。
+    language: zh-CN
+  context:
+    - Current Claude-compatible raw logs can contain tens of thousands of system thinking_tokens lines, but the normalizer ignores all of them; Hub therefore falls back to waiting or quiet even while the runtime reports active reasoning.
+    - A recent real GLM Attempt contained 74083 thinking_tokens telemetry lines. Persisting each line would create a new database and Hub load problem, so the signal must be coalesced before Store writes.
+    - Grok already emits structured thought and text stream kinds, but both are currently labelled model-response and cannot explain processing versus visible output.
+    - Existing liveStage is the canonical privacy-safe projection used by Task surfaces and Hub. Extend it rather than creating another lifecycle state machine.
+  inScope:
+    - Recognize Claude system thinking_tokens as a closed model-processing activity marker without preserving token estimates or raw payload fields.
+    - Rate-limit high-frequency Claude processing markers before persistence using a deterministic testable clock seam and one documented bounded interval; emit the first marker immediately.
+    - Map Grok thought/thinking to model-processing while keeping Grok text and Claude assistant text as model-response.
+    - Extend Core live-stage codes and replay so model-processing is distinct from waiting-for-model and model-responding, while open tools, verification, and terminal evidence retain precedence.
+    - Keep quiet as an observation only; processing evidence never becomes failure and never changes the retry/no-progress watchdog policy.
+    - Add plain bilingual Hub wording and regression coverage for normalization, throttle/privacy, stage precedence, restart determinism, and UI translation.
+  outOfScope:
+    - Do not infer Provider network/request state beyond the structured runtime signal, parse prose, persist estimated thinking counts, or expose logs/prompts/content/paths/credentials/endpoints.
+    - Do not change no-progress resets, duration/Token/cost budgets, Task status, Task updatedAt, retry/correction/adaptation, routing/statistics, Competition, Integration, polling cadence, or Provider configuration.
+    - Do not add dependencies, redesign Task Detail, touch other projects, commit, or push.
+  executionSteps:
+    - Trace Claude and Grok raw-event normalization, Worker event persistence, Core live-stage precedence, shared Task projections, and Hub translation before editing.
+    - Add one closed processing activity marker and deterministic pre-Store throttling for Claude thinking telemetry.
+    - Extend Core replay and Grok thought/text separation without weakening tool, verification, terminal, quiet, or legacy behavior.
+    - Add bilingual copy and focused regressions, then run the full stored acceptance suite once.
+  deliverables:
+    - Bounded privacy-safe Claude model-processing events.
+    - Distinct Grok processing versus visible-response evidence.
+    - One canonical Core model-processing live stage consumed everywhere.
+    - Plain Chinese and English Hub explanation with deterministic tests.
+  modules:
+    - name: Runtime normalization
+      responsibility: Recognize only structured processing signals and bound their durable frequency.
+      consumes:
+        - Claude system thinking telemetry, Grok thought/text kinds, and a deterministic clock.
+      produces:
+        - Privacy-safe worker.message events with closed activityKind values.
+      boundaries:
+        - No raw content, token estimate, Provider claim, Store mutation outside the existing event path, or watchdog reset.
+    - name: Core live-stage replay
+      responsibility: Derive one truthful current Worker stage from ordered durable evidence.
+      consumes:
+        - Worker start, processing, visible response, tool lifecycle, verification, terminal evidence, and event age.
+      produces:
+        - Stable model-processing/model-responding/using-tool projections and existing next-action codes.
+      boundaries:
+        - No prose inference, retry, Task mutation, ETA, or success claim.
+    - name: Hub explanation
+      responsibility: Translate the canonical stage into beginner-readable Chinese and English.
+      consumes:
+        - Closed liveStage code, observation, meaning, and next action.
+      produces:
+        - Compact Board and detailed Task wording that explains what is known and what is not.
+      boundaries:
+        - Does not recompute lifecycle or expose telemetry internals.
+  callChain:
+    - A Worker starts and Hub truthfully shows that ForkLight is waiting for the first model signal.
+    - The runtime emits structured processing telemetry; the normalizer emits at most one bounded safe marker per interval through the existing Worker event path.
+    - Core replay projects model-processing unless an open tool, verification, or terminal event is stronger.
+    - Shared Task surfaces carry that projection; Hub translates it without inferring failure or starting another Attempt.
+  scenarios:
+    - name: Long reasoning without visible text
+      given: Claude emits many thinking telemetry lines but no assistant text or tool call.
+      when: Main or the user views the running Task.
+      then: The stage says the model is processing, durable events stay bounded, and no Token estimate or raw content is exposed.
+    - name: Tool remains open
+      given: A tool-start event has no matching completion yet.
+      when: A processing marker arrives.
+      then: The canonical stage remains using-tool because tool lifecycle is stronger evidence.
+    - name: Processing becomes quiet
+      given: The last processing marker is older than the quiet window and the Worker has not terminated.
+      when: Hub refreshes.
+      then: It says no new update is visible and that this is not failure; it neither extends watchdog policy nor retries.
+    - name: Grok separates thought and output
+      given: Grok emits a thought event followed by a text event.
+      when: Both are normalized and replayed.
+      then: Thought projects model-processing and text projects model-responding without reading their prose.
+  risks:
+    - Persisting every telemetry line would increase database and UI load; throttle before Store writes and test the exact bound.
+    - Treating processing as implementation progress could let unproductive loops live forever; do not reset the no-progress watchdog.
+    - A new stage could override stronger evidence; tests must freeze tool, verification, terminal, quiet, and restart precedence.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 1400
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: 12
+  fileLimitMode: warn
+  changedLineLimit: 1400
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/events
+    - src/hub/public
+    - tests/normalize.test.ts
+    - tests/grok-worker-runtime.test.ts
+    - tests/task-surface.test.ts
+    - tests/task-decision-view.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Claude thinking telemetry emits one immediate privacy-safe processing marker and then at most one per bounded interval; token estimates and raw payloads never enter durable events.
+    - Grok thought/thinking is processing while Grok text and Claude assistant text remain visible model response.
+    - Core distinguishes waiting, processing, response, and tool use; open tool, verification, terminal, quiet, and restart precedence remain truthful.
+    - Processing telemetry does not reset or alter no-progress, duration, Token, retry, correction, routing, or Integration behavior.
+    - Hub renders independent plain Chinese and English wording from the canonical stage without runtime jargon or network/success claims.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/normalize.test.ts tests/grok-worker-runtime.test.ts tests/task-surface.test.ts tests/task-decision-view.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check

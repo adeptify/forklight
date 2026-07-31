@@ -14,6 +14,8 @@ import {
 import type { AttemptAuthorization, TaskStatus } from "../core/types.js";
 import { StateStore } from "../state/store.js";
 import { DaemonCoordinator } from "./coordinator.js";
+import type { TaskHistoryPageRequest } from "../core/task-history.js";
+import { HISTORY_INVALID_REQUEST_REASON } from "../core/task-history.js";
 import type { ProviderAuthInspector } from "../core/providers.js";
 import type { DaemonRequest, DaemonResponse } from "./protocol.js";
 import { requiresMatchingBuildIdentity } from "./protocol.js";
@@ -524,6 +526,33 @@ export class ForkLightDaemon {
         const limit = typeof params.limit === "number" ? params.limit : 20;
         return this.coordinator.listTaskSurfaces(statuses, limit);
       }
+      case "list_history_page": {
+        // Read-only durable History page. The Core paginator validates the
+        // bounded limit/query/cursor and fails closed with a fixed privacy-safe
+        // reason for any out-of-range or contradictory value.
+        const historyRequest: TaskHistoryPageRequest = {};
+        if (params.limit !== undefined) {
+          if (typeof params.limit !== "number") {
+            // Reuse the Core's fixed privacy-safe reason so a malformed limit
+            // never echoes the value, a path, or Task content.
+            throw new Error(HISTORY_INVALID_REQUEST_REASON);
+          }
+          historyRequest.limit = params.limit;
+        }
+        if (params.query !== undefined) {
+          if (typeof params.query !== "string") {
+            throw new Error(HISTORY_INVALID_REQUEST_REASON);
+          }
+          historyRequest.query = params.query;
+        }
+        if (params.cursor !== undefined) {
+          if (typeof params.cursor !== "string" || params.cursor.length === 0) {
+            throw new Error(HISTORY_INVALID_REQUEST_REASON);
+          }
+          historyRequest.cursor = params.cursor;
+        }
+        return this.coordinator.listHistoryPage(historyRequest);
+      }
       case "plan_submit_file":
         return this.coordinator.submitPlanFile(requiredString(params.planFile, "planFile"));
       case "plan_board":
@@ -532,6 +561,8 @@ export class ForkLightDaemon {
         return this.coordinator.listPlanBoards(
           typeof params.limit === "number" ? params.limit : undefined,
         );
+      case "task_plan_context":
+        return this.coordinator.getTaskPlanContext(requiredString(params.taskId, "taskId"));
       case "statistics": {
         const detailRaw = params.detail;
         let detail: StatisticsDetail = "compact";
@@ -908,6 +939,21 @@ export class ForkLightDaemon {
               return params.required;
             })();
         return this.coordinator.selfUpgradeEvidence(required);
+      }
+      case "main_direct_start":
+        return this.coordinator.mainDirectStart(params);
+      case "main_direct_complete":
+        return this.coordinator.mainDirectComplete(params);
+      case "main_direct_status":
+        return this.coordinator.mainDirectStatus(requiredString(params.id, "id"));
+      case "main_direct_list":
+        return this.coordinator.mainDirectList();
+      case "main_direct_aggregate":
+        return this.coordinator.mainDirectAggregate();
+      case "main_direct_recent": {
+        const limit = typeof params.limit === "number" && Number.isSafeInteger(params.limit)
+          ? params.limit : undefined;
+        return this.coordinator.mainDirectRecent(limit);
       }
       default:
         throw new Error(`Unknown daemon method: ${String(request.method)}`);
