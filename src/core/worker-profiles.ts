@@ -218,6 +218,7 @@ export function validateWorkerProfile(
   }
 
   let modelConfigId: string | undefined;
+  let supportedEfforts: readonly string[] | undefined;
   let provider: ProviderName | undefined;
   let model: string | undefined;
   let endpoint: string | undefined;
@@ -232,6 +233,7 @@ export function validateWorkerProfile(
       provider = mc.provider;
       model = mc.model;
       endpoint = mc.endpoint;
+      supportedEfforts = mc.supportedEfforts;
     }
   }
 
@@ -268,6 +270,11 @@ export function validateWorkerProfile(
       throw new Error(`${label}.effort must be low|medium|high|xhigh|max`);
     }
     effort = o.effort as EffortLevel;
+    if (supportedEfforts !== undefined && !supportedEfforts.includes(effort)) {
+      throw new Error(
+        `${label}.effort=${effort} is not supported by model config ${modelConfigId}; supported: ${supportedEfforts.join("|")}`,
+      );
+    }
   }
 
   const maxBudgetUsd = parseOptionalBudget(o.maxBudgetUsd, `${label}.maxBudgetUsd`);
@@ -371,7 +378,7 @@ export function materializeWorkerModel(
   profile: WorkerProfile,
   catalog: ModelCatalogSettings | undefined,
   providerDefaults: ProviderDefaultsSettings,
-): { provider: ProviderName; model: string; endpoint: string; modelConfigId?: string } {
+): { provider: ProviderName; model: string; endpoint: string; modelConfigId?: string; supportedEfforts?: readonly EffortLevel[] } {
   if (profile.modelConfigId !== undefined) {
     if (catalog === undefined) {
       throw new Error(`Worker ${profile.id} references modelConfigId without modelCatalog`);
@@ -382,6 +389,7 @@ export function materializeWorkerModel(
       model: mc.model,
       endpoint: resolveModelEndpoint(mc, providerDefaults),
       modelConfigId: mc.id,
+      ...(mc.supportedEfforts === undefined ? {} : { supportedEfforts: mc.supportedEfforts }),
     };
   }
   if (profile.provider === undefined || profile.model === undefined) {
@@ -474,6 +482,16 @@ export function resolveWorkerSelection(
   const effortRaw = input.effort ?? base?.effort ?? settings.execution.defaultEffort;
   if (typeof effortRaw !== "string" || !EFFORTS.has(effortRaw)) {
     throw new Error("effort must be low|medium|high|xhigh|max");
+  }
+  if (
+    baseModel?.supportedEfforts !== undefined
+    && providerName === baseModel.provider
+    && model === baseModel.model
+    && !baseModel.supportedEfforts.includes(effortRaw as EffortLevel)
+  ) {
+    throw new Error(
+      `effort=${effortRaw} is not supported by model config ${baseModel.modelConfigId}; supported: ${baseModel.supportedEfforts.join("|")}`,
+    );
   }
 
   const maxBudgetUsd = input.maxBudgetUsd !== undefined

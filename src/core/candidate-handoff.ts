@@ -50,6 +50,7 @@ import {
 import { buildTaskRecord } from "./runner.js";
 import { authorizeHandoffRestartRecovery } from "./attempt-authorization.js";
 import { resolveWorkerSelection } from "./worker-profiles.js";
+import { defaultExecutableForRuntime } from "./runtime-names.js";
 import type { ForkLightSettings } from "./settings.js";
 import { isoTimestamp as timestamp } from "./time.js";
 import type {
@@ -306,7 +307,7 @@ export function buildHandoffSuccessorSpec(
   cloned.runtime = {
     ...cloned.runtime,
     name: selection.runtime,
-    executable: selection.runtime === "grok-build" ? "grok" : "claude",
+    executable: defaultExecutableForRuntime(selection.runtime),
     effort: selection.effort,
     maxBudgetUsd: selection.maxBudgetUsd,
   };

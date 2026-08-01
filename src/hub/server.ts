@@ -81,6 +81,11 @@ import {
   validateModelConfig,
 } from "../core/model-catalog.js";
 import {
+  codexModelConfigFromEntry,
+  loadLocalCodexModelCatalog,
+  type CodexModelCatalogEntry,
+} from "../core/codex-model-catalog.js";
+import {
   defaultAdvancedPolicyFields,
   enforcementCapabilityForRuntime,
   previewEffectivePolicy,
@@ -323,6 +328,8 @@ export interface HubServerDeps {
     anyReady: boolean;
     providers: Record<ProviderName, ProviderReadiness>;
   };
+  /** Deterministic, privacy-safe local Codex catalog seam. */
+  loadCodexModels?: () => Promise<CodexModelCatalogEntry[]>;
   /**
    * Optional cache for expensive setup/status and daemon-health evidence.
    * Defaults to a single shared cache with a 1.5 s monotonic TTL. Tests can
@@ -2043,6 +2050,12 @@ export class HubServer {
         this.sendJson(req, res, 422, { error: "Unsupported provider" });
         return;
       }
+      if (provider === "openai") {
+        this.sendJson(req, res, 422, {
+          error: "Codex Workers use the local Codex sign-in; do not store an OpenAI API key here",
+        });
+        return;
+      }
       if (apiKey.length < 8 || apiKey.length > 4096 || /[\0\r\n]/.test(apiKey)) {
         this.sendJson(req, res, 422, { error: "Invalid API key" });
         return;
@@ -2164,6 +2177,35 @@ export class HubServer {
         this.cache.invalidate("opsHealth");
         this.sendJson(req, res, 200, {
           ok: true,
+          modelCatalog: updated.modelCatalog,
+          settings: viewHubSettings(updated),
+        });
+      } catch (error) {
+        this.sendJson(req, res, 422, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
+    }
+
+    if (route === "/api/codex-model-catalog" && req.method === "POST") {
+      const body = await this.readBody(req);
+      if (!body || body.action !== "import") {
+        this.sendJson(req, res, 422, { error: "action must be import" });
+        return;
+      }
+      try {
+        const entries = await (this.deps.loadCodexModels ?? loadLocalCodexModelCatalog)();
+        let next = this.deps.settings.get().modelCatalog;
+        for (const entry of entries) {
+          next = upsertModelConfig(next, codexModelConfigFromEntry(entry));
+        }
+        const updated = this.deps.settings.update({ modelCatalog: next });
+        this.cache.invalidate("setupStatus");
+        this.cache.invalidate("opsHealth");
+        this.sendJson(req, res, 200, {
+          ok: true,
+          imported: entries.length,
           modelCatalog: updated.modelCatalog,
           settings: viewHubSettings(updated),
         });

@@ -45,7 +45,7 @@ import {
   currentBuildIdentity,
   isBuildIdentity,
 } from "../core/build-identity.js";
-import { SUPPORTED_RUNTIME_NAMES } from "../core/runtime-names.js";
+import { defaultExecutableForRuntime, SUPPORTED_RUNTIME_NAMES } from "../core/runtime-names.js";
 import { isPricingRouteId, resolveWorkerSelection } from "../core/worker-profiles.js";
 import { assessWorkspaceBoundary } from "../workspace/boundary-advice.js";
 import { createPathPolicy } from "../workspace/path-policy.js";
@@ -240,7 +240,7 @@ export function inlineTask(
     input.maxBudgetUsd !== undefined ? input.maxBudgetUsd : resolved.maxBudgetUsd,
     settings.execution.defaultMaxBudgetUsd,
   );
-  const defaultExecutable = resolved.runtime === "grok-build" ? "grok" : "claude";
+  const defaultExecutable = defaultExecutableForRuntime(resolved.runtime);
   return {
     version: 2,
     name: input.name,

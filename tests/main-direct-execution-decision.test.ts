@@ -49,10 +49,12 @@ function makeContext(overrides: Partial<MainDirectStartContext> = {}): MainDirec
       minimax: { ready: false, authMode: "none" as const, endpoint: providerDef.minimax.defaultEndpoint, defaultModel: providerDef.minimax.defaultModel, keychainService: providerDef.minimax.defaultKeychainService, error: "not configured" },
       volcengine: { ready: false, authMode: "none" as const, endpoint: providerDef.volcengine.defaultEndpoint, defaultModel: providerDef.volcengine.defaultModel, keychainService: providerDef.volcengine.defaultKeychainService, error: "not configured" },
       xai: { ready: false, authMode: "none" as const, endpoint: providerDef.xai.defaultEndpoint, defaultModel: providerDef.xai.defaultModel, keychainService: providerDef.xai.defaultKeychainService, error: "not configured" },
+      openai: { ready: false, authMode: "none" as const, endpoint: providerDef.openai.defaultEndpoint, defaultModel: providerDef.openai.defaultModel, keychainService: providerDef.openai.defaultKeychainService, error: "not configured" },
     },
     runtimes: {
       "claude-code": { ok: true },
       "grok-build": { ok: true },
+      "codex-cli": { ok: true },
     },
     ...overrides,
   };

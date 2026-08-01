@@ -8,6 +8,7 @@ import type { ProviderHealthStatus, ProviderStatus } from "./types.js";
 import type { StateStore } from "../state/store.js";
 import type { SettingsService, ProbeSettings } from "./settings.js";
 import {
+  hasLocalCodexSignIn,
   hasLocalGrokSignIn,
   providerNames,
   resolveProvider,
@@ -295,6 +296,7 @@ export class ProviderProbeService {
     private readonly readKeychain: KeychainReader,
     private readonly now: Clock,
     private readonly grokSignInReady: () => boolean = hasLocalGrokSignIn,
+    private readonly codexSignInReady: () => boolean = hasLocalCodexSignIn,
   ) {}
 
   /** Return a frozen snapshot of the probe policy from current settings. */
@@ -307,10 +309,13 @@ export class ProviderProbeService {
     const defaults = this.settings.get().providerDefaults[name];
     const config = resolveProvider(name, {}, defaults);
 
-    // xAI is for Grok Build only — keychain existence, never Claude/Anthropic probe.
-    if (name === "xai") {
-      const keyOk = this.keychainExists(config.keychainService);
-      const localSignInReady = this.grokSignInReady();
+    // Runtime-owned local sign-in providers are never sent through the
+    // Claude/Anthropic probe. Real Worker evidence remains authoritative.
+    if (name === "xai" || name === "openai") {
+      const keyOk = name === "openai" ? false : this.keychainExists(config.keychainService);
+      const localSignInReady = name === "xai"
+        ? this.grokSignInReady()
+        : this.codexSignInReady();
 
       // ForkLight does not perform a real Grok network request in this probe.
       // Either supported authentication path therefore proves launchability,
@@ -346,7 +351,9 @@ export class ProviderProbeService {
         latencyMs: 0,
         timestamp: new Date(this.now()).toISOString(),
         failureCategory: "authentication",
-        failureSummary: "xAI keychain entry missing (used with runtime grok-build)",
+        failureSummary: name === "xai"
+          ? "xAI authentication missing (used with runtime grok-build)"
+          : "Codex local sign-in missing (used with runtime codex-cli)",
         source: "explicit-probe",
       };
       this.store.saveProbeEvidence(evidence);
@@ -378,12 +385,13 @@ export class ProviderProbeService {
   getProviderStatus(name: ProviderName): ProviderStatus {
     const defaults = this.settings.get().providerDefaults[name];
     const config = resolveProvider(name, {}, defaults);
-    const keychainOk = this.keychainExists(config.keychainService);
+    const keychainOk = name === "openai" ? false : this.keychainExists(config.keychainService);
     const evidence = this.store.getProbeEvidence(name);
 
-    // Authentication readiness: Keychain, or for xAI the supported
+    // Authentication readiness: Keychain, or for runtime-owned providers the supported
     // local-sign-in path.  Both are launch readiness, not remote verification.
-    const localSignInReady = name === "xai" && this.grokSignInReady();
+    const localSignInReady = (name === "xai" && this.grokSignInReady())
+      || (name === "openai" && this.codexSignInReady());
     const authReady = keychainOk || localSignInReady;
 
     const policy = this.probePolicy();
@@ -398,7 +406,7 @@ export class ProviderProbeService {
 
     // Shared normalization: an old explicit-probe failure for xAI is not a
     // real connectivity failure when local sign-in provides a viable path.
-    const status = name === "xai"
+    const status = name === "xai" || name === "openai"
       ? normalizeProbeStatusWithLocalSignIn(derivedStatus, evidence, localSignInReady)
       : derivedStatus;
 

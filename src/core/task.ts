@@ -7,6 +7,7 @@ import { isProviderName, providerDefinition, providerNames } from "./providers.j
 import { normalizeDirectCodexProfileId } from "./direct-codex-calibration.js";
 import {
   assertProviderRuntimePair,
+  defaultExecutableForRuntime,
   isRuntimeName,
   supportedRuntimeNamesList,
   type RuntimeName,
@@ -505,6 +506,26 @@ export function parseTaskSpec(
   if (!["low", "medium", "high", "xhigh", "max"].includes(effort)) {
     throw new Error("task.runtime.effort must be low, medium, high, xhigh, or max");
   }
+  if (selectedProfileId !== undefined) {
+    const selectedProfile = (workerProfiles ?? cloneDefaults().workerProfiles).profiles
+      .find((candidate) => candidate.id === selectedProfileId);
+    const configuredModel = selectedProfile?.modelConfigId === undefined
+      ? undefined
+      : modelCatalog.models.find((candidate) => candidate.id === selectedProfile.modelConfigId);
+    const effectiveModel = typeof provider.model === "string"
+      ? provider.model
+      : (profileDefaults.model ?? providerDef.defaultModel);
+    if (
+      configuredModel?.supportedEfforts !== undefined
+      && providerName === configuredModel.provider
+      && effectiveModel === configuredModel.model
+      && !configuredModel.supportedEfforts.includes(effort as never)
+    ) {
+      throw new Error(
+        `task.runtime.effort=${effort} is not supported by model config ${configuredModel.id}; supported: ${configuredModel.supportedEfforts.join("|")}`,
+      );
+    }
+  }
   const maxBudgetUsd = (() => {
     const raw = runtime.maxBudgetUsd;
     if (raw === null) return null;
@@ -676,7 +697,7 @@ export function parseTaskSpec(
       executable: stringValue(
         runtime.executable,
         "task.runtime.executable",
-        runtimeName === "grok-build" ? "grok" : "claude",
+        defaultExecutableForRuntime(runtimeName),
       ),
       effort: effort as "low" | "medium" | "high" | "xhigh" | "max",
       maxBudgetUsd,

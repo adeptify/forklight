@@ -7,6 +7,7 @@ import {
   providerNames,
   providerVariantLabel,
   providerVariants,
+  hasLocalCodexSignIn,
   resolveProvider as resolveRuntimeProvider,
   type ResolvedProviderConfig,
 } from "../core/providers.js";
@@ -39,6 +40,7 @@ export function createSystemInspector(): SetupSystemInspector {
         return false;
       }
     },
+    hasLocalCodexSignIn,
   };
 }
 
@@ -86,7 +88,9 @@ export class SetupService {
         name,
         label: providerLabel(name),
         variantLabel: providerVariantLabel(name),
-        configured: this.keychain.has(definition.defaultKeychainService, account),
+        configured: name === "openai"
+          ? (this.system.hasLocalCodexSignIn?.() ?? false)
+          : this.keychain.has(definition.defaultKeychainService, account),
         defaultModel: definition.defaultModel,
         defaultEndpoint: definition.defaultEndpoint,
         variants: providerVariants(name, effective.providerDefaults),
@@ -103,7 +107,10 @@ export class SetupService {
     ];
     for (const name of ordered) {
       const definition = providerDefinition(name, effective.providerDefaults);
-      if (!this.keychain.has(definition.defaultKeychainService, account)) continue;
+      const configured = name === "openai"
+        ? (this.system.hasLocalCodexSignIn?.() ?? false)
+        : this.keychain.has(definition.defaultKeychainService, account);
+      if (!configured) continue;
       const variant = providerVariants(name, effective.providerDefaults)
         .find((candidate) => candidate.endpoint === definition.defaultEndpoint);
       return {
@@ -165,6 +172,9 @@ export class SetupService {
 
   commitProvider(selection: SetupProviderSelection, apiKey: string): SetupProviderCommit {
     const resolved = this.resolveProvider(selection);
+    if (resolved.provider === "openai") {
+      throw new Error("Codex Workers use the local Codex sign-in; no OpenAI API key is stored here");
+    }
     this.assertCanStoreCredential(apiKey);
     const account = this.system.account();
     const hadPrevious = this.keychain.has(resolved.keychainService, account);

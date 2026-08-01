@@ -111,6 +111,16 @@ Passing the active milestone alone does not complete the Goal.
    or manufactured model comparisons.
 11. **No repository publication by default.** Integration into a source tree is
    a separate reviewed action. Commit and push require 一骏's explicit approval.
+12. **Prefer Runtime-native Goal execution when it is real.** A saved Worker may
+   choose `auto`, `single-run`, or `native-goal` execution. `auto` prefers a
+   Runtime's genuine, machine-observable Goal mode when the adapter can bind its
+   durable Goal/session identity, progress, completion, blocked state, and
+   interruption to one ForkLight Task lineage; otherwise it uses one normal
+   run. `native-goal` fails readiness when that proof is unavailable instead of
+   pretending a long prompt is a Goal. Runtime-native Goal mode should own the
+   bounded end-to-end implementation, while ForkLight still owns the Task
+   Contract, workspace boundary, independent acceptance, no-progress stop,
+   finite correction/retry authority, and return to Main.
 
 ## Milestone roadmap
 
@@ -317,6 +327,7 @@ finishing a Task does not automatically add another Task.
 | FL-101 | M3 | Accumulate natural same-scope evidence and form the first fair comparable cohort; improve recommendations only where the cohort supports it. | At least one comparable exact-class or family cohort; plain-language recommendation and override path verified. |
 | FL-102 | M1 | Run the clean-user protocol on a new macOS account, disposable VM, or new Mac with an unfamiliar user. | Complete worksheet, timing, interventions, comprehension, reviewed delivery, and restart evidence. |
 | FL-103 | M3/UX | Continue Hub information architecture cleanup around Now/History, Task input/output, failure cause, retained work, and next action. | Real bilingual browser audit at desktop and narrow width; user story is clear before technical evidence is expanded. |
+| FL-104 | M2/M3 | Add a per-Worker execution preference (`auto`, `single-run`, `native-goal`) and a Runtime capability contract for genuine end-to-end Goal execution. Start with Codex only after its basic single-run path is trustworthy, then map other Runtimes only where they expose observable durable Goal semantics. | `auto` selects native Goal only when supported; forced native Goal fails clearly when unsupported; Runtime Goal/session identity and progress survive restart; no-progress and finite retry/correction controls still return authority to Main; one real end-to-end implementation proves the path. |
 
 ### Later
 

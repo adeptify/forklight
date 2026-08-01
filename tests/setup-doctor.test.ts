@@ -39,6 +39,7 @@ function localProviders(configured: string[] = []): LocalProviderFact[] {
     { name: "glm", label: "GLM via Alibaba Model Studio", defaultModel: "glm-5.2" },
     { name: "volcengine", label: "Volcengine Coding Plan (GLM)", defaultModel: "glm-5.2[1M]" },
     { name: "xai", label: "xAI", defaultModel: "grok-code[1M]" },
+    { name: "openai", label: "OpenAI (Codex local sign-in)", defaultModel: "gpt-5.6-luna" },
   ];
   return names.map((n) => ({
     name: n.name,
@@ -69,6 +70,7 @@ function daemonHealthProviders(readyList: string[]): Record<string, unknown> {
     deepseek: mk("deepseek", "api-key"), qwen: mk("qwen", "api-key"),
     minimax: mk("minimax", "api-key"), glm: mk("glm", "api-key"),
     volcengine: mk("volcengine", "api-key"), xai: mk("xai", "local-sign-in"),
+    openai: mk("openai", "local-sign-in"),
   };
 }
 
@@ -267,7 +269,7 @@ test("JSON output has expected structure", () => {
   const parsed = JSON.parse(renderDoctorJson(resolve({ daemonReady: ["deepseek"] }))) as Record<string, unknown>;
   assert.deepEqual(Object.keys(parsed).sort(), ["current", "nextAction", "prerequisites", "providers", "source", "sourceDetail"]);
   assert.equal(parsed.source, "daemon");
-  assert.equal((parsed.providers as unknown[]).length, 6);
+  assert.equal((parsed.providers as unknown[]).length, 7);
 
   const noReadyParsed = JSON.parse(renderDoctorJson(resolve({ daemonReady: [] }))) as Record<string, unknown>;
   assert.equal(noReadyParsed.current, null);
@@ -328,6 +330,13 @@ function runtimeHealthResult(readyList: string[]): Record<string, unknown> {
         issues: readyList.includes("grok-build") ? [] : ["grok not found"],
         capabilities: {},
       },
+      "codex-cli": {
+        ok: readyList.includes("codex-cli"),
+        displayName: "Codex CLI",
+        executable: "codex",
+        issues: readyList.includes("codex-cli") ? [] : ["codex not found"],
+        capabilities: {},
+      },
     },
   };
 }
@@ -344,7 +353,7 @@ function runtimeEvidence(
 }
 
 function localRuntimeFacts(readyList: string[]): LocalRuntimeFact[] {
-  return (["claude-code", "grok-build"] as const).map((name) => ({
+  return (["claude-code", "grok-build", "codex-cli"] as const).map((name) => ({
     name,
     ok: readyList.includes(name),
   }));

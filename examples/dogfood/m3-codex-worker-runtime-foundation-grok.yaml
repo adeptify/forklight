@@ -1,10 +1,10 @@
 version: 2
-name: Add the Codex CLI Worker Runtime foundation
+name: "Replacement implementation: add the Codex CLI Worker Runtime foundation"
 project: ../..
 taskClass: m3-codex-worker-runtime-foundation
 taskFamily: worker-runtime
 directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
-workerProfileId: deepseek-flash-1m
+workerProfileId: local-grok-builder
 routingDecision:
   taskFamily: worker-runtime
   shortlist:
@@ -19,14 +19,14 @@ routingDecision:
       effort: high
       workerProfileId: local-grok-builder
   selectedWorker:
-    provider: deepseek
-    model: deepseek-v4-flash[1M]
-    runtime: claude-code
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
     effort: high
-    workerProfileId: deepseek-flash-1m
+    workerProfileId: local-grok-builder
   selectedBecause:
     code: main-judgment
-    note: No fair comparable cohort exists. DeepSeek Flash is selected for a bounded implementation slice after the Claude temp-root bootstrap was repaired and verified; Main will independently review every boundary.
+    note: The one DeepSeek implementation Task failed before Candidate creation because Claude Code still attempted a denied literal /tmp directory. Grok is the single bounded replacement for the identical contract; Main will independently review every boundary and will not start another Worker replacement.
   competition:
     intent: none
     triggers: []

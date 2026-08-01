@@ -9,6 +9,8 @@ import type { ProviderDefaultsSettings } from "./settings.js";
 const ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 const MODEL_PATTERN = /^[A-Za-z0-9._+:/\[\]-]{1,128}$/;
 const ENDPOINT_PATTERN = /^https:\/\/[^\s]{4,512}$/;
+const SUPPORTED_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"] as const);
+export type ModelSupportedEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ModelConfig {
   id: string;
@@ -17,6 +19,8 @@ export interface ModelConfig {
   model: string;
   /** Optional endpoint override; omit → providerDefaults for that provider. */
   endpoint?: string;
+  /** Closed model-specific reasoning levels. `ultra` is intentionally absent. */
+  supportedEfforts?: ModelSupportedEffort[];
 }
 
 export interface ModelCatalogSettings {
@@ -82,12 +86,28 @@ export function validateModelConfig(raw: unknown, label = "modelConfig"): ModelC
     }
     endpoint = o.endpoint;
   }
+  let supportedEfforts: ModelSupportedEffort[] | undefined;
+  if (o.supportedEfforts !== undefined) {
+    if (!Array.isArray(o.supportedEfforts) || o.supportedEfforts.length < 1) {
+      throw new Error(`${label}.supportedEfforts must be a non-empty array when supplied`);
+    }
+    const seen = new Set<string>();
+    supportedEfforts = o.supportedEfforts.map((value, index) => {
+      if (typeof value !== "string" || !SUPPORTED_EFFORTS.has(value as ModelSupportedEffort)) {
+        throw new Error(`${label}.supportedEfforts[${index}] must be low|medium|high|xhigh|max`);
+      }
+      if (seen.has(value)) throw new Error(`${label}.supportedEfforts contains duplicate ${value}`);
+      seen.add(value);
+      return value as ModelSupportedEffort;
+    });
+  }
   return {
     id: o.id,
     label: o.label.trim(),
     provider: o.provider,
     model: o.model,
     ...(endpoint === undefined ? {} : { endpoint }),
+    ...(supportedEfforts === undefined ? {} : { supportedEfforts }),
   };
 }
 

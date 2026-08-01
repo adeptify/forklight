@@ -73,7 +73,7 @@ export type EventType =
   | "review.assignment.failed";
 
 export interface ProviderSpec {
-  name: "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai";
+  name: "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai" | "openai";
   model: string;
   endpoint?: string;
   /** Explicit billing route — never forwarded to Worker environment or persisted as a credential. */

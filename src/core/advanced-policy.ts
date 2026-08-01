@@ -633,6 +633,7 @@ export function enforcementCapabilityForRuntime(
 ): EnforcementCapability {
   switch (runtime) {
     case "claude-code":
+    case "codex-cli":
       return {
         durationEnforcement: "preemptive",
         tokenEnforcement: "post-observation",

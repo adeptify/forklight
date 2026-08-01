@@ -63,7 +63,7 @@ function mkSvc(
   return new ProviderProbeService(store, settings, runner, keychain, reader, clock);
 }
 
-const ALL_PROVIDERS: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"];
+const ALL_PROVIDERS: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"];
 
 // --- Probe policy ---
 
@@ -408,7 +408,7 @@ test("provider with keychain but no probe evidence is unverified", () => {
 
 // --- getAllProviderStatuses ---
 
-test("getAllProviderStatuses returns all registered providers including xai", () => {
+test("getAllProviderStatuses returns all registered providers including local runtimes", () => {
   const service = mkSvc(undefined, undefined, undefined, stubKeychain(new Set(["forklight.deepseek.api-key"])));
   const all = service.getAllProviderStatuses();
   assert.equal(Object.keys(all).length, ALL_PROVIDERS.length);
@@ -416,6 +416,7 @@ test("getAllProviderStatuses returns all registered providers including xai", ()
     assert.ok(n in all, `${n} missing from getAllProviderStatuses`);
   }
   assert.ok("xai" in all);
+  assert.ok("openai" in all);
 });
 
 // --- normalizeProbeStatusWithLocalSignIn ---

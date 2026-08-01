@@ -11,7 +11,7 @@ import { taskPaths } from "./config.js";
 import { isProviderName, providerNames } from "./providers.js";
 import { isoTimestamp as timestamp } from "./time.js";
 import { isTerminalTaskStatus } from "./task-progress.js";
-import { assertProviderRuntimePair } from "./runtime-names.js";
+import { assertProviderRuntimePair, defaultExecutableForRuntime } from "./runtime-names.js";
 import {
   resolveWorkerSelection,
   type ResolvedWorkerSelection,
@@ -610,7 +610,7 @@ function cloneSpecFromIdentity(
   cloned.runtime = {
     ...cloned.runtime,
     name: resolved.runtime,
-    executable: resolved.runtime === "grok-build" ? "grok" : "claude",
+    executable: defaultExecutableForRuntime(resolved.runtime),
     effort: resolved.effort,
     maxBudgetUsd: resolved.maxBudgetUsd,
   };

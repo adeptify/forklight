@@ -113,6 +113,73 @@ test("legacy provider+model worker profiles still resolve", () => {
   assert.equal(resolved.maxBudgetUsd, 0.2);
 });
 
+test("Codex Worker profile enforces the model-specific supported effort", () => {
+  const settings = cloneDefaults();
+  const catalog = upsertMC(settings.modelCatalog, {
+    id: "codex-luna",
+    label: "Codex Luna",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    endpoint: "https://api.openai.com/v1",
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+  });
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "codex-luna-high",
+    label: "Codex Luna High",
+    runtime: "codex-cli",
+    modelConfigId: "codex-luna",
+    effort: "high",
+    maxBudgetUsd: null,
+  }, catalog);
+  const resolved = resolveWorkerSelection({ workerProfileId: "codex-luna-high" }, {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles: profiles,
+    modelCatalog: catalog,
+  });
+  assert.equal(resolved.provider, "openai");
+  assert.equal(resolved.runtime, "codex-cli");
+  assert.equal(resolved.model, "gpt-5.6-luna");
+  assert.equal(resolved.effort, "high");
+  assert.throws(
+    () => validateWorkerProfile({
+      id: "codex-bad",
+      label: "Codex bad effort",
+      runtime: "codex-cli",
+      modelConfigId: "codex-luna",
+      effort: "ultra",
+    }, "workerProfile", catalog),
+    /effort must be/,
+  );
+  assert.throws(
+    () => resolveWorkerSelection({ workerProfileId: "codex-limited", effort: "max" }, {
+      execution: settings.execution,
+      providerDefaults: settings.providerDefaults,
+      workerProfiles: upsertWorkerProfile(profiles, {
+        id: "codex-limited",
+        label: "Codex limited",
+        runtime: "codex-cli",
+        modelConfigId: "codex-luna-limited",
+        effort: "low",
+      }, upsertMC(catalog, {
+        id: "codex-luna-limited",
+        label: "Codex Luna Limited",
+        provider: "openai",
+        model: "gpt-5.6-luna",
+        supportedEfforts: ["low"],
+      })),
+      modelCatalog: upsertMC(catalog, {
+        id: "codex-luna-limited",
+        label: "Codex Luna Limited",
+        provider: "openai",
+        model: "gpt-5.6-luna",
+        supportedEfforts: ["low"],
+      }),
+    }),
+    /not supported/,
+  );
+});
+
 test("MCP inlineTask uses worker modelConfigId and budget", () => {
   const settings = cloneDefaults();
   const catalog = settings.modelCatalog;
@@ -244,12 +311,40 @@ test("Hub Models + Workers chain: model catalog, worker with limits, setDefault"
     staticRoot: staticDir,
     account: () => "cfg-user",
     port: 0,
+    loadCodexModels: async () => [{
+      model: "gpt-5.6-luna",
+      label: "GPT-5.6-Luna",
+      supportedEfforts: ["low", "high", "max"],
+      defaultEffort: "high",
+    }],
   });
   const port = await server.start();
   const token = server.getToken();
   const base = `http://127.0.0.1:${port}`;
   try {
-    let res = await doHttp(`${base}/api/model-catalog`, "POST", token, {
+    let res = await doHttp(`${base}/api/codex-model-catalog`, "POST", token, {
+      action: "import",
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal((res.body as { imported: number }).imported, 1);
+    const imported = (res.body as { modelCatalog: { models: Array<Record<string, unknown>> } })
+      .modelCatalog.models.find((model) => model.id === "codex-gpt-5-6-luna");
+    assert.deepEqual(imported?.supportedEfforts, ["low", "high", "max"]);
+
+    res = await doHttp(`${base}/api/worker-profiles`, "POST", token, {
+      action: "upsert",
+      profile: {
+        id: "codex-luna-max",
+        label: "Codex Luna Max",
+        runtime: "codex-cli",
+        modelConfigId: "codex-gpt-5-6-luna",
+        effort: "max",
+        maxBudgetUsd: null,
+      },
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+
+    res = await doHttp(`${base}/api/model-catalog`, "POST", token, {
       action: "upsert",
       model: {
         id: "qwen-cheap",

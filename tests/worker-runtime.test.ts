@@ -27,6 +27,11 @@ import {
   sanitizeGrokConnectivityEvent,
   seedGrokHomeAuth,
 } from "../src/workers/grok.js";
+import {
+  buildCodexCliArgs,
+  CodexCliAdapter,
+  seedCodexHome,
+} from "../src/workers/codex.js";
 import { failureCategoryFromEvents } from "../src/core/worker-failure.js";
 import {
   appendGrokTextDelta,
@@ -37,9 +42,14 @@ import {
   isMeaningfulGrokResultText,
   resolveGrokTerminalResultText,
 } from "../src/events/grok-normalize.js";
+import {
+  codexAgentMessageFromLine,
+  CodexEventNormalizer,
+  codexUsage,
+} from "../src/events/codex-normalize.js";
 import type { TaskRecord, TaskSpec } from "../src/core/types.js";
 import { checkpointSatisfied } from "../src/core/checkpoint.js";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { StateStore } from "../src/state/store.js";
@@ -98,19 +108,24 @@ function minimalContract(overrides: Record<string, unknown> = {}): Record<string
   };
 }
 
-test("runtime name whitelist includes claude-code and grok-build", () => {
+test("runtime name whitelist includes Claude, Grok, and Codex", () => {
   assert.ok(isRuntimeName("claude-code"));
   assert.ok(isRuntimeName("grok-build"));
+  assert.ok(isRuntimeName("codex-cli"));
   assert.equal(isRuntimeName("nope"), false);
   assert.ok(SUPPORTED_RUNTIME_NAMES.includes("claude-code"));
   assert.ok(SUPPORTED_RUNTIME_NAMES.includes("grok-build"));
+  assert.ok(SUPPORTED_RUNTIME_NAMES.includes("codex-cli"));
 });
 
 test("provider×runtime pairing fail-closed", () => {
   assert.doesNotThrow(() => assertProviderRuntimePair("xai", "grok-build"));
   assert.doesNotThrow(() => assertProviderRuntimePair("deepseek", "claude-code"));
+  assert.doesNotThrow(() => assertProviderRuntimePair("openai", "codex-cli"));
   assert.throws(() => assertProviderRuntimePair("deepseek", "grok-build"), /xai/);
   assert.throws(() => assertProviderRuntimePair("xai", "claude-code"), /xai/);
+  assert.throws(() => assertProviderRuntimePair("deepseek", "codex-cli"), /openai/);
+  assert.throws(() => assertProviderRuntimePair("openai", "claude-code"), /codex-cli/);
 });
 
 test("parseTaskSpec accepts grok-build + xai and rejects mismatches", () => {
@@ -150,16 +165,108 @@ test("parseTaskSpec accepts grok-build + xai and rejects mismatches", () => {
   );
 });
 
-test("registry dispatches Claude and Grok adapters", () => {
+test("registry dispatches Claude, Grok, and Codex adapters", () => {
   resetWorkerRegistryForTests();
   const names = listWorkerAdapters().map((a) => a.name).sort();
-  assert.deepEqual(names, ["claude-code", "grok-build"]);
+  assert.deepEqual(names, ["claude-code", "codex-cli", "grok-build"]);
   const claude = getWorkerAdapter("claude-code");
   assert.equal(claude.capabilities().checkpoint, "supported");
   const grok = getWorkerAdapter("grok-build");
   assert.equal(grok.capabilities().checkpoint, "unsupported");
+  const codex = getWorkerAdapter("codex-cli");
+  assert.equal(codex.capabilities().sessionResume, "unsupported");
+  assert.equal(codex.defaultExecutable, "codex");
   assert.ok(grokDisallowedTools().includes("run_terminal_cmd"));
   assert.throws(() => getWorkerAdapter("unknown"), /Unknown worker runtime/);
+});
+
+test("Codex CLI argv freezes model, effort, sandbox, and disabled expansion paths", () => {
+  const args = buildCodexCliArgs({
+    prompt: "bounded task",
+    workspace: "/private/task/workspace",
+    model: "gpt-5.6-luna",
+    effort: "max",
+    allowEdits: true,
+  });
+  assert.equal(args[0], "exec");
+  assert.ok(args.includes("--ephemeral"));
+  assert.ok(args.includes("--json"));
+  assert.ok(args.includes("--ignore-user-config"));
+  assert.ok(args.includes("--ignore-rules"));
+  assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
+  assert.equal(args[args.indexOf("--model") + 1], "gpt-5.6-luna");
+  assert.ok(args.includes('model_reasoning_effort="max"'));
+  assert.ok(args.includes('approval_policy="never"'));
+  assert.ok(args.includes("features.multi_agent=false"));
+  assert.ok(args.includes("features.apps=false"));
+  assert.ok(args.includes('web_search="disabled"'));
+  assert.ok(args.includes("project_doc_max_bytes=0"));
+  assert.ok(!args.includes("danger-full-access"));
+  assert.ok(!args.includes("ultra"));
+
+  const readOnly = buildCodexCliArgs({
+    prompt: "review",
+    workspace: "/private/task/workspace",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    allowEdits: false,
+  });
+  assert.equal(readOnly[readOnly.indexOf("--sandbox") + 1], "read-only");
+  assert.deepEqual(new CodexCliAdapter().effortArgs("xhigh"), [
+    "-c", 'model_reasoning_effort="xhigh"',
+  ]);
+});
+
+test("Codex JSONL normalizer preserves session, progress, result, and exact usage", () => {
+  const normalizer = new CodexEventNormalizer();
+  const started = normalizer.parseLine('{"type":"thread.started","thread_id":"thread-1"}');
+  assert.equal(started[0]?.sessionId, "thread-1");
+  const tool = normalizer.parseLine('{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"npm test"}}');
+  assert.equal(tool[0]?.type, "worker.tool.started");
+  const messageLine = '{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"Implemented safely"}}';
+  assert.equal(codexAgentMessageFromLine(messageLine), "Implemented safely");
+  assert.equal(normalizer.parseLine(messageLine)[0]?.type, "worker.message");
+  const done = normalizer.parseLine('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,"cache_write_input_tokens":3,"output_tokens":20,"reasoning_output_tokens":7}}');
+  assert.equal(done[0]?.type, "worker.completed");
+  assert.deepEqual(done[0]?.terminal?.usage, {
+    inputTokens: 100,
+    outputTokens: 20,
+    cacheReadInputTokens: 40,
+    cacheCreationInputTokens: 3,
+    source: "terminal-result",
+    complete: true,
+  });
+  assert.equal(codexUsage({ input_tokens: 1, output_tokens: 2 })?.cacheReadInputTokens, 0);
+  assert.equal(codexUsage({ input_tokens: 1 }), undefined);
+  assert.equal(normalizer.parseLine('{"type":"turn.completed","usage":{}}')[0]?.type, "worker.failed");
+});
+
+test("Codex JSONL malformed and conflicting terminal evidence fail closed", () => {
+  const malformed = new CodexEventNormalizer().parseLine("not-json");
+  assert.equal(malformed[0]?.type, "worker.failed");
+  assert.equal(malformed[0]?.terminal?.isError, true);
+
+  const duplicate = new CodexEventNormalizer();
+  duplicate.parseLine('{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}');
+  const conflict = duplicate.parseLine('{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}');
+  assert.equal(conflict[0]?.type, "worker.failed");
+  assert.match(conflict[0]?.terminal?.failureReason ?? "", /conflicting terminal/);
+});
+
+test("seedCodexHome copies only auth and safe catalog with private permissions", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-codex-seed-"));
+  const operator = path.join(root, "operator");
+  const taskHome = path.join(root, "task-home");
+  await mkdir(operator, { recursive: true });
+  await writeFile(path.join(operator, "auth.json"), '{"private":"credential"}');
+  await writeFile(path.join(operator, "models_cache.json"), '{"models":[]}');
+  await writeFile(path.join(operator, "config.toml"), "mcp=true");
+  const result = await seedCodexHome(taskHome, operator);
+  assert.deepEqual(result.seeded, ["auth.json", "models_cache.json"]);
+  const { readdir, stat } = await import("node:fs/promises");
+  assert.deepEqual((await readdir(taskHome)).sort(), ["auth.json", "models_cache.json"]);
+  assert.equal((await stat(path.join(taskHome, "auth.json"))).mode & 0o777, 0o600);
+  assert.equal((await stat(path.join(taskHome, "models_cache.json"))).mode & 0o777, 0o600);
 });
 
 test("Grok adapter prompt has no Claude checkpoint MCP tool name", () => {

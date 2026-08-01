@@ -52,6 +52,7 @@ export interface SetupSystemInspector {
   nodeVersion(): string;
   account(): string;
   commandExists(command: string): boolean;
+  hasLocalCodexSignIn?(): boolean;
 }
 
 export interface SetupKeychainStore {

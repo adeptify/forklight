@@ -30,6 +30,7 @@ import {
   getWorkerProfile,
   resolveWorkerSelection,
 } from "./worker-profiles.js";
+import { defaultExecutableForRuntime } from "./runtime-names.js";
 import type {
   ContractTaskSpec,
   EffectivePolicySnapshot,
@@ -872,7 +873,7 @@ function buildReviewerSpec(
   selection: ReturnType<typeof resolveWorkerSelection>,
   revisionId: string,
 ): ContractTaskSpec {
-  const defaultExecutable = selection.runtime === "grok-build" ? "grok" : "claude";
+  const defaultExecutable = defaultExecutableForRuntime(selection.runtime);
   return {
     version: 2,
     name: `Read-only review of ${candidate.name}`.slice(0, 120),

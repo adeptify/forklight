@@ -655,13 +655,13 @@ function readableDuration(ms){
   return t("workersDurationSeconds", { count: String(Math.ceil(ms / 1000)) });
 }
 function runtimeDisplayName(runtime){
-  var names = { "claude-code": "Claude Code", "grok-build": "Grok Build" };
+  var names = { "claude-code": "Claude Code", "grok-build": "Grok Build", "codex-cli": "Codex CLI" };
   return names[runtime] || runtime || "?";
 }
 function providerDisplayName(provider){
   var names = {
     deepseek: "DeepSeek", minimax: "MiniMax", qwen: "Qwen",
-    glm: "GLM", volcengine: "Volcengine", xai: "xAI"
+    glm: "GLM", volcengine: "Volcengine", xai: "xAI", openai: "OpenAI"
   };
   return names[provider] || provider || "?";
 }
@@ -4415,7 +4415,7 @@ function fillProviderSelect(sel, selected){
   sel.textContent = "";
   var list = hubProviders();
   if(!list.length){
-    ["deepseek","qwen","minimax","glm","volcengine","xai"].forEach(function(n){
+    ["deepseek","qwen","minimax","glm","volcengine","xai","openai"].forEach(function(n){
       var o = document.createElement("option"); o.value = n; o.textContent = n; sel.appendChild(o);
     });
   } else {
@@ -4979,6 +4979,17 @@ function rModel(){
   var list = cat.models || [];
   var split = hd("div", "configure-split");
   var listCol = hd("div", "configure-list");
+  var codexImport = h("button", "btn", t("modelsImportCodex"));
+  codexImport.type = "button";
+  codexImport.addEventListener("click", function(){
+    postJSON("/api/codex-model-catalog", { action: "import" })
+      .then(function(result){
+        toast(t("modelsImportedCodex", { count: String(result.imported || 0) }));
+        return refresh();
+      })
+      .catch(function(e){ flashError(t("operationFailed"), e && e.message); });
+  });
+  listCol.appendChild(codexImport);
   if(!list.length){
     listCol.appendChild(stateMsg("empty", t("modelsEmpty")));
   }
@@ -4990,6 +5001,9 @@ function rModel(){
       h("span", "badge badge-dim", t("modelBadge"))
     ));
     if(mc.endpoint) cardEl.appendChild(h("div", "summary-line mono dim", mc.endpoint));
+    if(Array.isArray(mc.supportedEfforts)){
+      cardEl.appendChild(h("div", "summary-line dim", t("workersEffort") + ": " + mc.supportedEfforts.join(" · ")));
+    }
     var actions = h("div", "actions");
     if(list.length > 1){
       var rm = h("button", "btn sm danger", t("modelsRemove"));
@@ -6021,9 +6035,9 @@ function buildMrReasons(cands, policy, result){
 
 function workerModelCompatible(runtime, modelConfig){
   if(!modelConfig || !modelConfig.provider) return false;
-  return runtime === "grok-build"
-    ? modelConfig.provider === "xai"
-    : modelConfig.provider !== "xai";
+  if(runtime === "grok-build") return modelConfig.provider === "xai";
+  if(runtime === "codex-cli") return modelConfig.provider === "openai";
+  return modelConfig.provider !== "xai" && modelConfig.provider !== "openai";
 }
 
 function workerReadinessFor(workerId){
@@ -6263,7 +6277,7 @@ function rWorker(){
   var labIn = field("fl-wp-label", t("workersLabel"), "text", isEdit ? (editingProfile.label || "") : "", "");
   var labR = h("label", "", t("workersRuntime"));
   var selR = h("select", "");
-  [["claude-code",t("workersRuntimeClaude")],["grok-build",t("workersRuntimeGrok")]].forEach(function(pair){
+  [["claude-code",t("workersRuntimeClaude")],["grok-build",t("workersRuntimeGrok")],["codex-cli",t("workersRuntimeCodex")]].forEach(function(pair){
     var o = document.createElement("option"); o.value = pair[0]; o.textContent = pair[1]; selR.appendChild(o);
   });
   if(isEdit && editingProfile.runtime) selR.value = editingProfile.runtime;
@@ -6324,11 +6338,25 @@ function rWorker(){
   syncBudgetInput();
   var labEf = h("label", "", t("workersEffort"));
   var selEf = h("select", "");
-  [["",t("inherit")],["low",t("workersEffortLow")],["medium",t("workersEffortMedium")],
-    ["high",t("workersEffortHigh")],["xhigh",t("workersEffortXHigh")],["max",t("workersEffortMax")]].forEach(function(pair){
-    var o = document.createElement("option"); o.value = pair[0]; o.textContent = pair[1]; selEf.appendChild(o);
-  });
-  selEf.value = isEdit ? (editingProfile.effort || "") : "medium";
+  var effortPairs = [["",t("inherit")],["low",t("workersEffortLow")],["medium",t("workersEffortMedium")],
+    ["high",t("workersEffortHigh")],["xhigh",t("workersEffortXHigh")],["max",t("workersEffortMax")]];
+  function syncModelEfforts(preferred){
+    var selected = models.find(function(mc){ return mc.id === selM.value; });
+    var allowed = selected && Array.isArray(selected.supportedEfforts)
+      ? selected.supportedEfforts : null;
+    var previous = preferred !== undefined ? preferred : selEf.value;
+    selEf.textContent = "";
+    effortPairs.forEach(function(pair){
+      if(pair[0] && allowed && allowed.indexOf(pair[0]) < 0) return;
+      if(!pair[0] && allowed) return;
+      var o = document.createElement("option"); o.value = pair[0]; o.textContent = pair[1]; selEf.appendChild(o);
+    });
+    var options = Array.from(selEf.options).map(function(option){ return option.value; });
+    if(options.indexOf(previous) >= 0) selEf.value = previous;
+    else if(options.indexOf("max") >= 0 && selR.value === "codex-cli") selEf.value = "max";
+    else selEf.value = options[0] || "";
+  }
+  syncModelEfforts(isEdit ? (editingProfile.effort || "") : "medium");
   labEf.appendChild(selEf); form.appendChild(labEf);
   var advDetails = h("details", "advanced-disclosure");
   var advSummary = h("summary", "", t("workersAdvancedToggle"));
@@ -6466,10 +6494,12 @@ function rWorker(){
   form.addEventListener("change", function(){ S.workerFormActive = true; });
   selR.addEventListener("change", function(){
     syncCompatibleModels("");
+    syncModelEfforts(undefined);
     if(advDetails.open && selR.value){
       scheduleWorkerPreview(selR.value);
     }
   });
+  selM.addEventListener("change", function(){ syncModelEfforts(undefined); });
 
   if(isEdit){
     form.appendChild(h("div", "summary-line dim fs11 mt-8", t("workersEditing", { id: editingProfile.id })));

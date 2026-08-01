@@ -11,6 +11,12 @@ Integration.
 This first slice establishes the executable foundation. It does not yet claim
 the full Hub editing and resume experience described in `PROJECT.md`.
 
+The preferred later execution mode is Codex's genuine Goal mode when it can be
+driven and observed through a stable machine interface. This foundation must
+not fake Goal support by merely asking a single `codex exec` turn to "keep
+going". It first establishes the safe single-run substrate that native Goal
+execution will reuse.
+
 ## Verified local inputs
 
 - Local executable: `codex-cli 0.146.0`.
@@ -66,6 +72,29 @@ The adapter must:
 - reject resume in this foundation slice instead of silently starting a fresh
   session.
 
+### Runtime-native Goal follow-up
+
+Consumes a saved execution preference (`auto`, `single-run`, or
+`native-goal`) and the same bounded Task Contract. It produces one durable
+Runtime Goal identity whose progress, terminal completion, blocked state,
+usage, and interruption remain attached to the exact ForkLight Task/Attempt
+lineage.
+
+- `auto` uses native Goal only when the adapter advertises and proves that
+  capability; otherwise it uses the normal single-run path.
+- `native-goal` fails readiness with a plain-language explanation when the
+  selected Runtime cannot expose genuine Goal semantics.
+- Native Goal should complete the end-to-end implementation inside the Task
+  boundary, not return after an arbitrary first coding step.
+- Unlimited duration may be configured, but observable no-progress,
+  cancellation, finite correction/retry authority, independent verification,
+  and return to Main remain mandatory.
+- A Runtime Goal may not create hidden Workers, broaden tools or writable
+  paths, integrate source, commit, push, or bypass ForkLight accounting.
+
+This is the next layer after the single-run Codex foundation, not acceptance
+scope for the first Candidate.
+
 ### Readiness
 
 Doctor/readiness consumes only executable/version, `codex login status`, safe
@@ -102,6 +131,6 @@ or needs-attention result. It never reads or returns credential contents.
 
 - Hub model import/editor polish, Main-client installation, pricing, Provider
   probe network requests, Competition, resume/recovery, direct-Main calibration,
-  automatic Integration, commit, push, and all non-ForkLight repositories.
+  Runtime-native Goal execution, automatic Integration, commit, push, and all
+  non-ForkLight repositories.
 - No changes to existing Claude/Grok Provider behavior or saved identities.
-

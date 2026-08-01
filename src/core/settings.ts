@@ -45,7 +45,7 @@ export interface ExecutionSettings {
   maxConcurrency: number;
   noProgressTimeoutMs: number;
   defaultEffort: EffortLevel;
-  defaultProvider: "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai";
+  defaultProvider: "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai" | "openai";
   /** Default Worker runtime when Task YAML/MCP omits runtime.name. */
   defaultRuntime: RuntimeName;
   defaultMaxBudgetUsd: number | null;
@@ -168,6 +168,7 @@ export interface ProviderDefaultsSettings {
   glm: ProviderDefaultSettings;
   volcengine: ProviderDefaultSettings;
   xai: ProviderDefaultSettings;
+  openai: ProviderDefaultSettings;
 }
 
 export interface ForkLightSettings {
@@ -301,6 +302,12 @@ const DEFAULTS: ForkLightSettings = {
       defaultModel: "grok-4.5",
       defaultEndpoint: "https://api.x.ai/v1",
       defaultKeychainService: "forklight.xai.api-key",
+      requestTimeoutMs: 3_000_000,
+    },
+    openai: {
+      defaultModel: "gpt-5.6-luna",
+      defaultEndpoint: "https://api.openai.com/v1",
+      defaultKeychainService: "forklight.openai.api-key",
       requestTimeoutMs: 3_000_000,
     },
   },
@@ -443,7 +450,7 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
     "verificationTimeoutMs", "reviewReceiptTtlMs", "backupRetentionCount", "autoRollback",
   ],
   console: ["loopbackPort", "refreshIntervalMs", "boardListLimit", "taskListLimit", "eventListLimit"],
-  providerDefaults: ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"],
+  providerDefaults: ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"],
   probe: ["probeTimeoutMs", "maxBudgetUsd", "cacheLifetimeMs", "maxProbeConcurrency"],
   // array-body sections use custom validation, not deepMerge field lists
   modelCatalog: ["models"],
@@ -474,7 +481,7 @@ const PROVIDER_DEFAULT_FIELDS: readonly string[] = [
 ];
 
 const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"]);
-const VALID_PROVIDER_NAMES = new Set<string>(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]);
+const VALID_PROVIDER_NAMES = new Set<string>(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"]);
 const VALID_POLICY_MODES = new Set<string>(["hard", "warn", "score", "off"]);
 
 // Rejects credential-bearing field names.  `defaultKeychainService` names a

@@ -10,7 +10,7 @@ import {
   type ProviderDefaultsSettings,
 } from "./settings.js";
 
-export type ProviderName = "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai";
+export type ProviderName = "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai" | "openai";
 
 export interface ProviderDefinition {
   name: ProviderName;
@@ -39,7 +39,7 @@ export interface ProviderVariant {
   recommended?: boolean;
 }
 
-const PROVIDER_NAMES: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"];
+const PROVIDER_NAMES: ProviderName[] = ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"];
 
 export function isProviderName(value: string): value is ProviderName {
   return PROVIDER_NAMES.includes(value as ProviderName);
@@ -86,9 +86,9 @@ export function providerEnvironment(
   apiKey: string,
   baseEnvironment: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
-  if (config.name === "xai") {
+  if (config.name === "xai" || config.name === "openai") {
     throw new Error(
-      "providerEnvironment does not support xai; GrokBuildAdapter builds its own env (XAI_API_KEY + GROK_HOME)",
+      `providerEnvironment does not support ${config.name}; its Worker adapter owns authentication and environment`,
     );
   }
   const environment: NodeJS.ProcessEnv = {
@@ -116,6 +116,7 @@ export function providerLabel(name: ProviderName): string {
     case "glm": return "GLM via Alibaba Model Studio";
     case "volcengine": return "Volcengine Coding Plan (GLM)";
     case "xai": return "xAI";
+    case "openai": return "OpenAI (Codex local sign-in)";
   }
 }
 
@@ -131,6 +132,16 @@ export function providerVariants(
   defaults: ProviderDefaultsSettings = cloneDefaults().providerDefaults,
 ): ProviderVariant[] {
   const current = providerDefinition(name, defaults);
+  if (name === "openai") {
+    return [{
+      id: "local-codex",
+      label: "Local Codex sign-in",
+      description: "Uses the signed-in Codex CLI with runtime codex-cli; no API key is stored by ForkLight.",
+      endpoint: current.defaultEndpoint,
+      models: [current.defaultModel],
+      recommended: true,
+    }];
+  }
   if (name === "xai") {
     return [{
       id: "default",
@@ -244,6 +255,7 @@ export interface ProviderAuthInspector {
   /** Prove the exact Keychain read used at Worker launch without retaining the value. */
   hasReadableKeychainValue(keychainService: string, keychainAccount?: string): boolean;
   hasLocalGrokSignIn(): boolean;
+  hasLocalCodexSignIn?(): boolean;
 }
 
 export interface ProviderLaunchAuthentication {
@@ -258,6 +270,19 @@ export interface ProviderLaunchAuthentication {
 export function hasLocalGrokSignIn(): boolean {
   try {
     const authFile = path.join(homedir(), ".grok", "auth.json");
+    accessSync(authFile, constants.R_OK);
+    const metadata = statSync(authFile);
+    return metadata.isFile() && metadata.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Check only the minimum local Codex credential file required for a
+ * task-local auth seed. Contents and paths never leave this boundary. */
+export function hasLocalCodexSignIn(): boolean {
+  try {
+    const authFile = path.join(homedir(), ".codex", "auth.json");
     accessSync(authFile, constants.R_OK);
     const metadata = statSync(authFile);
     return metadata.isFile() && metadata.size > 0;
@@ -290,6 +315,7 @@ export function realProviderAuthInspector(): ProviderAuthInspector {
       }
     },
     hasLocalGrokSignIn,
+    hasLocalCodexSignIn,
   };
 }
 
@@ -302,15 +328,18 @@ export function providerLaunchAuthentication(
   spec: Pick<TaskSpec, "provider" | "runtime">,
   inspector: ProviderAuthInspector = realProviderAuthInspector(),
 ): ProviderLaunchAuthentication {
-  const keychainReady = inspector.hasReadableKeychainValue(
+  const keychainReady = spec.provider.name !== "openai" && inspector.hasReadableKeychainValue(
     spec.provider.keychainService,
     spec.provider.keychainAccount,
   );
   const localSignInReady = spec.provider.name === "xai"
     && spec.runtime.name === "grok-build"
     && inspector.hasLocalGrokSignIn();
+  const localCodexReady = spec.provider.name === "openai"
+    && spec.runtime.name === "codex-cli"
+    && (inspector.hasLocalCodexSignIn?.() ?? false);
   if (keychainReady) return { ready: true, authMode: "api-key" };
-  if (localSignInReady) return { ready: true, authMode: "local-sign-in" };
+  if (localSignInReady || localCodexReady) return { ready: true, authMode: "local-sign-in" };
   return {
     ready: false,
     authMode: "none",
@@ -330,8 +359,10 @@ export function providerReadiness(
   const providers = {} as Record<ProviderName, ProviderReadiness>;
   for (const name of providerNames()) {
     const definition = providerDefinition(name, defaults);
-    const keychainReady = inspector.hasReadableKeychainValue(definition.defaultKeychainService);
-    const localSignInReady = name === "xai" && inspector.hasLocalGrokSignIn();
+    const keychainReady = name !== "openai"
+      && inspector.hasReadableKeychainValue(definition.defaultKeychainService);
+    const localSignInReady = (name === "xai" && inspector.hasLocalGrokSignIn())
+      || (name === "openai" && (inspector.hasLocalCodexSignIn?.() ?? false));
     const authMode: ProviderReadiness["authMode"] = keychainReady
       ? "api-key"
       : localSignInReady ? "local-sign-in" : "none";

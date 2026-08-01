@@ -56,7 +56,7 @@ export function safeProviderVerificationSnapshot(
     );
     // Shared normalization: an old explicit-probe failure is not a real
     // connectivity failure when local sign-in provides a viable launch path.
-    if (name === "xai") {
+    if (name === "xai" || name === "openai") {
       status = normalizeProbeStatusWithLocalSignIn(
         status,
         evidence,
