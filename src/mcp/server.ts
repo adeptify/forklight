@@ -47,6 +47,8 @@ import {
 } from "../core/build-identity.js";
 import { SUPPORTED_RUNTIME_NAMES } from "../core/runtime-names.js";
 import { isPricingRouteId, resolveWorkerSelection } from "../core/worker-profiles.js";
+import { assessWorkspaceBoundary } from "../workspace/boundary-advice.js";
+import { createPathPolicy } from "../workspace/path-policy.js";
 
 const SERVER_INSTRUCTIONS =
   "ForkLight runs bounded external coding Workers (runtimes: claude-code default, optional grok-build with provider xai). The Main agent may be Claude Code, Grok Build, OpenCode, Codex, or a human using CLI/Console — not Codex-only. Before submit, the Main agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, modules, call chain, scenarios, risks, and independent acceptance. Validate first. Submit returns immediately. Prefer forklight_wait over tight-loop status. Use forklight_list for progress-aware boards. Status may include failureCategory authentication|budget|runtime|contract-infeasible. Worker runtime is chosen by task.runtime (or defaultRuntime), independent of which Main client is connected. Record taskId for continuity across Main sessions. The Main agent remains accountable for review and user approvals. Never call ForkLight a native subagent of the Main product, and never use it to commit or push.";
@@ -360,6 +362,12 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         spec,
         settings.integration,
       );
+      // Canonical privacy-safe workspace-boundary advice, same assessor the CLI
+      // and Hub consume. Read-only, fail-closed, never blocks admission.
+      const workspaceBoundaryAdvice = await assessWorkspaceBoundary({
+        projectDir: spec.project,
+        policy: createPathPolicy(spec),
+      });
       return textAndData({
         ...report,
         budget: {
@@ -369,6 +377,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         },
         resolvedRuntimeMaxBudgetUsd: spec.runtime.maxBudgetUsd,
         integrationFeasibility,
+        workspaceBoundaryAdvice,
       });
     },
   );
@@ -1013,27 +1022,51 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
             .describe("Worker runtime (e.g. claude-code, grok-build). Omitted for legacy comparisons."),
           effort: z.string().trim().max(10).optional()
             .describe("Worker effort level. Omitted for legacy comparisons."),
-        })).min(2).max(10),
+        })).min(2).max(10).optional()
+          .describe("Legacy provider/model candidates. Mutually exclusive with workerProfileIds."),
+        workerProfileIds: z.array(z.string().trim().min(1).max(64)).min(2).max(10).optional()
+          .describe("Saved Worker Profile ids. The daemon resolves each into its frozen provider/model/runtime/effort identity. Mutually exclusive with candidates."),
         taskFamily: z.string().trim().max(80).optional()
           .describe("Stable task family for cross-project evidence fallback when exact-class evidence is insufficient"),
         competitionIntent: z.enum(["none", "consider", "required"]).optional()
           .describe("Main's explicit Competition intent from the routing decision"),
         competitionTriggers: z.array(z.enum(["critical", "multiple-plausible-solutions", "new-family", "user-requested"])).optional()
           .describe("Main's Competition triggers from the routing decision"),
+      }).superRefine((value, context) => {
+        const hasCandidates = value.candidates !== undefined;
+        const hasProfiles = value.workerProfileIds !== undefined;
+        if (hasCandidates === hasProfiles) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Provide exactly one of candidates or workerProfileIds",
+          });
+        }
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ taskClass, candidates, taskFamily, competitionIntent, competitionTriggers }) => {
+    async ({ taskClass, candidates, workerProfileIds, taskFamily, competitionIntent, competitionTriggers }) => {
       await ensureDaemon(home);
+      const params: Record<string, unknown> = { taskClass };
+      if (workerProfileIds !== undefined) params.workerProfileIds = workerProfileIds;
+      else params.candidates = candidates;
+      if (taskFamily !== undefined) params.taskFamily = taskFamily;
+      if (competitionIntent !== undefined) params.competitionIntent = competitionIntent;
+      if (competitionTriggers !== undefined) params.competitionTriggers = competitionTriggers;
       const advisory = await daemonRequest<RoutingAdvisoryResponse>(
         "model_routing",
-        { taskClass, candidates, taskFamily, competitionIntent, competitionTriggers },
+        params,
         home,
       );
       const rec = advisory.recommendation;
       const suggestions: string[] = [];
       if (rec) {
-        suggestions.push(`Model routing recommends ${rec.provider}/${rec.model} (confidence ${rec.confidence}) for task class "${taskClass}".`);
+        const recLabel = rec.workerLabel !== undefined
+          ? `${rec.workerLabel} (${rec.provider}/${rec.model})`
+          : `${rec.provider}/${rec.model}`;
+        suggestions.push(`Model routing recommends ${recLabel} (confidence ${rec.confidence}) for task class "${taskClass}".`);
+        if (rec.workerProfileId !== undefined) {
+          suggestions.push(`This recommendation points to Worker Profile ${rec.workerProfileId}.`);
+        }
       } else {
         suggestions.push(`Model routing advice for "${taskClass}": evidence is unknown (scope=${advisory.evidenceScope}).`);
       }

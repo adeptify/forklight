@@ -116,7 +116,13 @@ export type RoutingFactorUnavailableReason =
   | "budget-reliability-missing-bounded-evidence"
   | "budget-reliability-mixed-envelope-candidate"
   | "budget-reliability-mixed-envelope-cross-candidate"
-  | "budget-reliability-coverage-incomplete";
+  | "budget-reliability-coverage-incomplete"
+  | "candidate-excluded-from-comparison";
+
+/** Whether a single candidate participated in the evidence-ready comparison
+ *  cohort. Excluded candidates stay eligible and never receive synthetic
+ *  quality scores. */
+export type CohortParticipation = "compared" | "insufficient-evidence";
 
 export interface RoutingFactorResult {
   factor: RoutingFactorName;
@@ -162,11 +168,27 @@ export interface RoutingCandidateResult {
    *  Legacy provider/model-only input omits these. */
   runtime?: string;
   effort?: string;
+  /** Profile identity bound at daemon resolution. Legacy provider/model-only
+   *  candidates omit these; never fabricated. */
+  workerProfileId?: string;
+  workerLabel?: string;
   /** Historical failure never permanently removes a candidate. */
   eligible: true;
+  /** Legacy exact-class evidence. Always present; may be zero-history for
+   *  new candidates. CLI/Hub should prefer comparisonEvidence for scoped facts. */
   evidence: RoutingEvidence;
+  /** Evidence from the active comparison scope.  When evidenceScope is
+   *  "task-family" this is the family evidence; otherwise it is the exact
+   *  evidence.  Consumers use this to display truthful active-scope counts
+   *  instead of always defaulting to the legacy exact column.  Excluded
+   *  candidates retain their identity but carry zero-history here. */
+  comparisonEvidence: RoutingEvidence;
   /** Identity-bound exact/family sample counts for truthful missing-evidence UI. */
   sampleCoverage: RoutingSampleCoverage;
+  /** Whether this candidate was part of the evidence-ready comparison cohort.
+   *  Excluded candidates stay eligible; their factors are marked unavailable
+   *  and they never receive synthetic quality scores. */
+  cohortParticipation: CohortParticipation;
   factors: RoutingFactorResult[];
   totalScore: number;
   uncertainty: {
@@ -183,6 +205,14 @@ export interface RoutingRecommendation {
   model: string;
   confidence: number;
   reasoning: string;
+  /** Whether the recommendation covers every requested candidate or only the
+   *  evidence-ready subset.  This is carried on the recommendation itself so
+   *  consumers never have to infer its claim boundary. */
+  coverage: "all-candidates" | "evidence-ready-subset";
+  /** Same Profile identity as the winning candidate — bound after sorting,
+   *  never reattached by array index. Legacy recommendations omit these. */
+  workerProfileId?: string;
+  workerLabel?: string;
 }
 
 /** Knowledge state: recommendation when evidence supports a clear best;
@@ -223,6 +253,22 @@ export interface RoutingAdvisoryResponse {
     factor: RoutingFactorName;
     reason: RoutingFactorUnavailableReason;
   }>;
+  /** Whether every requested candidate was included in the comparison cohort.
+   *  False when some candidates lacked enough evidence and were excluded. */
+  allCandidatesCompared: boolean;
+  /** Number of candidates that participated in the comparison cohort. */
+  cohortCandidateCount: number;
+  /** Number of distinct routing identities within the cohort. */
+  distinctIdentityCount: number;
+  /** Total number of candidates originally requested. */
+  totalCandidateCount: number;
+  /** Number of requested candidates not included in this comparison because
+   *  they lacked enough comparable evidence. They remain eligible. */
+  excludedCandidateCount: number;
+  /** Explicit coverage marker for any recommendation:
+   *  `"all-candidates"` when every requested candidate was compared;
+   *  `"evidence-ready-subset"` when the recommendation only covers the cohort. */
+  recommendationCoverage: "all-candidates" | "evidence-ready-subset" | null;
 }
 
 interface FactorPlan {
@@ -566,8 +612,17 @@ export interface ProvideRoutingAdviceInput {
   /** Optional taskFamily for evidence fallback. */
   taskFamily?: string;
   /** Candidates to compare. Runtime and effort are optional — legacy
-   *  provider/model input omits them and evidence is keyed by provider/model. */
-  candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }>;
+   *  provider/model input omits them and evidence is keyed by provider/model.
+   *  workerProfileId/workerLabel are carried through to candidates and the
+   *  recommendation whenever the daemon resolver binds them. */
+  candidates: Array<{
+    provider: string;
+    model: string;
+    runtime?: string;
+    effort?: string;
+    workerProfileId?: string;
+    workerLabel?: string;
+  }>;
   /** Exact-class evidence map keyed by provider\0model. */
   evidenceMap: Map<string, RoutingEvidence>;
   /** Optional family-scope evidence map keyed by provider\0model. */
@@ -579,26 +634,63 @@ export interface ProvideRoutingAdviceInput {
   competitionTriggers?: CompetitionTrigger[];
 }
 
-/** Resolve the comparable evidence scope: exact-class, task-family, or none.
- *  Every candidate must meet the threshold for a scope to be used. */
-function resolveEvidenceScope(
+/** Evidence-ready comparison cohort resolution.
+ *
+ *  Chooses one evidence scope (exact-class, task-family, or none) and collects
+ *  the candidate indices whose evidence meets the active threshold under that
+ *  scope.  A cohort requires at least two **distinct routing identities** —
+ *  duplicate executable identities cannot masquerade as independent comparison
+ *  points even when two Profiles share the same provider+model+runtime+effort.
+ *
+ *  Returns the resolved scope, the set of in-cohort candidate indices, and the
+ *  count of distinct routing identities in the cohort.  Excluded candidates
+ *  retain their original identities and remain eligible; they are never scored
+ *  with synthetic zero-quality evidence. */
+function resolveEvidenceCohort(
   evidence: RoutingEvidence[],
   familyEvidence: RoutingEvidence[] | undefined,
+  candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }>,
   policy: RoutingPolicySettings,
-): EvidenceScope {
-  const exactSufficient = evidence.every(
-    (item) => item.relevantSampleCount >= policy.minRelevantSamples,
-  );
-  if (exactSufficient) return "exact-class";
+): { scope: EvidenceScope; cohortIndices: Set<number>; distinctIdentityCount: number } {
+  const collectDistinctIndices = (
+    scopeEvidence: RoutingEvidence[],
+    minSamples: number,
+  ): { indices: Set<number>; distinctIdentities: Set<string> } => {
+    const indices = new Set<number>();
+    const identities = new Set<string>();
+    for (let i = 0; i < scopeEvidence.length; i++) {
+      if (scopeEvidence[i]!.relevantSampleCount >= minSamples) {
+        const key = routingIdentityKey(candidates[i]!);
+        indices.add(i);
+        identities.add(key);
+      }
+    }
+    return { indices, distinctIdentities: identities };
+  };
 
-  if (familyEvidence !== undefined && familyEvidence.length === evidence.length) {
-    const familySufficient = familyEvidence.every(
-      (item) => item.relevantSampleCount >= policy.familyMinRelevantSamples,
-    );
-    if (familySufficient) return "task-family";
+  // Prefer exact-class evidence first.
+  const exact = collectDistinctIndices(evidence, policy.minRelevantSamples);
+  if (exact.distinctIdentities.size >= 2) {
+    return {
+      scope: "exact-class",
+      cohortIndices: exact.indices,
+      distinctIdentityCount: exact.distinctIdentities.size,
+    };
   }
 
-  return "none";
+  // Fallback to family evidence when a taskFamily is provided.
+  if (familyEvidence !== undefined && familyEvidence.length === evidence.length) {
+    const family = collectDistinctIndices(familyEvidence, policy.familyMinRelevantSamples);
+    if (family.distinctIdentities.size >= 2) {
+      return {
+        scope: "task-family",
+        cohortIndices: family.indices,
+        distinctIdentityCount: family.distinctIdentities.size,
+      };
+    }
+  }
+
+  return { scope: "none", cohortIndices: new Set(), distinctIdentityCount: 0 };
 }
 
 /** Determine whether Competition should be advised based on Main's intent,
@@ -684,40 +776,59 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
       })
     : undefined;
 
-  const evidenceScope = resolveEvidenceScope(evidence, familyEvidence, input.policy);
+  // Resolve the evidence-ready comparison cohort. Returns one scope plus the set
+  // of candidate indices whose evidence meets the active threshold. Requires at
+  // least two distinct routing identities in the cohort.
+  const { scope: evidenceScope, cohortIndices, distinctIdentityCount } = resolveEvidenceCohort(
+    evidence, familyEvidence, input.candidates, input.policy,
+  );
 
   // Use the evidence from the resolved scope for scoring.
   const scoringEvidence = evidenceScope === "task-family" && familyEvidence
     ? familyEvidence
     : evidence;
 
-  const allSufficient = evidenceScope !== "none";
+  // Build an ordered index of cohort members for factor plan value access.
+  const cohortOrdered = Array.from(cohortIndices).sort((a, b) => a - b);
+  const cohortEvidenceArray = cohortOrdered.map((i) => scoringEvidence[i]!);
+
+  const allSufficient = cohortEvidenceArray.length >= 2;
+
+  // Factor-specific sample gates use the active scope's threshold.
+  const activeMinRelevantSamples = evidenceScope === "task-family"
+    ? input.policy.familyMinRelevantSamples
+    : input.policy.minRelevantSamples;
+
+  // Build factor plans from cohort evidence only.  Excluded candidates are
+  // never mixed into the factor calculation.
   const plans: FactorPlan[] = [
     acceptedDeliveryPlan(
-      input.policy.weights.acceptedDelivery, scoringEvidence, allSufficient,
-      input.policy.minRelevantSamples,
+      input.policy.weights.acceptedDelivery, cohortEvidenceArray, allSufficient,
+      activeMinRelevantSamples,
     ),
-    behaviorPlan(input.policy.weights.verifiedBehavior, scoringEvidence, allSufficient),
+    behaviorPlan(input.policy.weights.verifiedBehavior, cohortEvidenceArray, allSufficient),
     basePlan(
       "modelQualityFailure", input.policy.weights.modelQualityFailure,
-      scoringEvidence.map((item) => item.modelQualityFailureRate), allSufficient, true,
+      cohortEvidenceArray.map((item) => item.modelQualityFailureRate), allSufficient, true,
     ),
     basePlan(
       "correctionChurn", input.policy.weights.correctionChurn,
-      scoringEvidence.map((item) => item.correctionChurnRate), allSufficient, true,
+      cohortEvidenceArray.map((item) => item.correctionChurnRate), allSufficient, true,
     ),
     firstPassSuccessPlan(
-      input.policy.weights.firstPassSuccess, scoringEvidence, allSufficient,
-      input.policy.minRelevantSamples,
+      input.policy.weights.firstPassSuccess, cohortEvidenceArray, allSufficient,
+      activeMinRelevantSamples,
     ),
-    costPlan(input.policy.weights.officialCost, scoringEvidence, allSufficient),
-    durationPlan(input.policy.weights.duration, scoringEvidence, allSufficient),
+    costPlan(input.policy.weights.officialCost, cohortEvidenceArray, allSufficient),
+    durationPlan(input.policy.weights.duration, cohortEvidenceArray, allSufficient),
     budgetReliabilityPlan(
-      input.policy.weights.budgetReliability, scoringEvidence, allSufficient,
-      input.policy.minRelevantSamples,
+      input.policy.weights.budgetReliability, cohortEvidenceArray, allSufficient,
+      activeMinRelevantSamples,
     ),
   ];
 
+  // Missing-evidence mode applies to cohort members only. Excluded candidates
+  // are never the cause of positive-factor-unavailable.
   const positiveUnavailable = plans.some((plan) => plan.weight > 0 && !plan.available);
   const omittedFactors = plans
     .filter((plan) => plan.weight > 0 && !plan.available)
@@ -729,15 +840,36 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     (sum, plan) => sum + (plan.available ? plan.weight : 0),
     0,
   );
+
+  // Excluded candidate factor template — factors are unavailable with a stable
+  // reason and zero score. Never synthesizes quality judgments.
+  function excludedFactors(): RoutingFactorResult[] {
+    return plans.map((plan) => ({
+      factor: plan.name,
+      weight: plan.weight,
+      available: false,
+      unavailableReason: "candidate-excluded-from-comparison" as RoutingFactorUnavailableReason,
+      normalizedScore: 0,
+      weightedScore: 0,
+    }));
+  }
+
   // Snapshot coverage by the same identity index used for evidence lookup so
   // later score/alphabetical sorting cannot reattach one model's counts to another.
   const results: RoutingCandidateResult[] = evidence.map((item, index) => {
-    const factors = plans.map((plan) => factorResult(plan, index));
+    const inCohort = cohortIndices.has(index);
+    const cohortIdx = inCohort ? cohortOrdered.indexOf(index) : -1;
+    const factors = inCohort
+      ? plans.map((plan) => factorResult(plan, cohortIdx))
+      : excludedFactors();
+
     const reasons: RoutingUncertaintyReason[] = [];
-    if (evidenceScope === "none") {
+    // Scope-none: no cohort could form at all.
+    if (evidenceScope === "none" || !inCohort) {
       reasons.push("insufficient-relevant-samples");
     }
-    if (input.policy.missingEvidenceMode === "strict" && positiveUnavailable) {
+    // Strict mode only blocks the cohort; excluded candidates are not the cause.
+    if (inCohort && input.policy.missingEvidenceMode === "strict" && positiveUnavailable) {
       reasons.push("positive-factor-unavailable");
     }
     if (activeWeight === 0) reasons.push("no-active-factors");
@@ -761,13 +893,23 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
       model: item.model,
       ...(candidate?.runtime !== undefined ? { runtime: candidate.runtime } : {}),
       ...(candidate?.effort !== undefined ? { effort: candidate.effort } : {}),
+      ...(candidate?.workerProfileId !== undefined
+        ? { workerProfileId: candidate.workerProfileId } : {}),
+      ...(candidate?.workerLabel !== undefined
+        ? { workerLabel: candidate.workerLabel } : {}),
       eligible: true,
       evidence: item,
+      /** Active-scope evidence that drove this comparison.  Consumers
+       *  use this to show truthful counts (e.g. family counts when
+       *  scope is "task-family") instead of always defaulting to the
+       *  legacy exact-column evidence. */
+      comparisonEvidence: scoringEvidence[index]!,
       sampleCoverage,
+      cohortParticipation: inCohort ? "compared" : "insufficient-evidence",
       factors,
       totalScore: factors.reduce((sum, factor) => sum + factor.weightedScore, 0),
       uncertainty: {
-        insufficientSamples: evidenceScope === "none",
+        insufficientSamples: evidenceScope === "none" || !inCohort,
         insufficientGap: false,
         incompatibleCost: cost.weight > 0 && !cost.available,
         incompatibleCurrency: cost.unavailableReason === "official-cost-mixed-currency"
@@ -780,11 +922,33 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     || left.provider.localeCompare(right.provider)
     || left.model.localeCompare(right.model));
 
-  const gap = results[0]!.totalScore - results[1]!.totalScore;
+  // Rank executable identities, not Profile rows. Multiple Profiles can point
+  // at the same provider+model+runtime+effort; counting those duplicates as
+  // first and second place would manufacture a zero gap and hide a real
+  // separation from the next distinct Worker identity.
+  const cohortByIdentity = new Map<string, RoutingCandidateResult[]>();
+  for (const result of results) {
+    if (result.cohortParticipation !== "compared") continue;
+    const key = routingIdentityKey(result);
+    const group = cohortByIdentity.get(key) ?? [];
+    group.push(result);
+    cohortByIdentity.set(key, group);
+  }
+  const rankedIdentities = Array.from(cohortByIdentity.values())
+    .map((group) => group[0]!)
+    .sort((left, right) => right.totalScore - left.totalScore
+      || left.provider.localeCompare(right.provider)
+      || left.model.localeCompare(right.model));
+  const gap = evidenceScope === "none"
+    ? 0
+    : rankedIdentities[0]!.totalScore - rankedIdentities[1]!.totalScore;
   const gapRatio = activeWeight > 0 ? gap / activeWeight : 0;
   const insufficientGap = gapRatio <= input.policy.uncertaintyThreshold;
+
+  // Score-gap markers apply only to cohort members who were actually scored.
   if (insufficientGap && evidenceScope !== "none") {
     for (const result of results) {
+      if (result.cohortParticipation !== "compared") continue;
       result.uncertainty.insufficientGap = true;
       if (!result.uncertainty.reasons.includes("score-gap-too-small")) {
         result.uncertainty.reasons.push("score-gap-too-small");
@@ -798,15 +962,32 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     ? "recommendation"
     : "unknown";
 
-  const top = results[0]!;
-  const recommendation = knowledge === "recommendation"
+  const allCompared = cohortIndices.size === evidence.length;
+  const recommendationCoverage = allCompared
+    ? "all-candidates" as const
+    : "evidence-ready-subset" as const;
+  const top = rankedIdentities[0];
+  const topIdentityProfiles = top === undefined
+    ? []
+    : cohortByIdentity.get(routingIdentityKey(top)) ?? [];
+  const recommendation = knowledge === "recommendation" && top !== undefined
     ? {
         provider: top.provider,
         model: top.model,
         confidence: Math.max(0, Math.min(1, gapRatio)),
-        reasoning: `clear-score-gap:${gapRatio.toFixed(4)};relevant-samples:${top.evidence.relevantSampleCount}`,
+        reasoning: `clear-score-gap:${gapRatio.toFixed(4)};relevant-samples:${top.comparisonEvidence.relevantSampleCount};equivalent-profiles:${topIdentityProfiles.length}`,
+        coverage: recommendationCoverage,
+        // Recommend a concrete Profile only when the evidence distinguishes a
+        // single Profile for this executable identity. If multiple Profiles
+        // share it, recommend the identity without arbitrarily naming one.
+        ...(topIdentityProfiles.length === 1 && top.workerProfileId !== undefined
+          ? { workerProfileId: top.workerProfileId } : {}),
+        ...(topIdentityProfiles.length === 1 && top.workerLabel !== undefined
+          ? { workerLabel: top.workerLabel } : {}),
       }
     : undefined;
+
+  const canonicalRecommendationCoverage = recommendation?.coverage ?? null;
 
   // Competition advice: derived from intent + triggers, not uncertainty.
   // familyAvailable is used to gate new-family trigger:
@@ -837,5 +1018,11 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     shouldRunCompetition: competition.shouldRunCompetition,
     resolvedPolicy,
     omittedFactors,
+    allCandidatesCompared: allCompared,
+    cohortCandidateCount: cohortIndices.size,
+    distinctIdentityCount,
+    totalCandidateCount: evidence.length,
+    excludedCandidateCount: evidence.length - cohortIndices.size,
+    recommendationCoverage: canonicalRecommendationCoverage,
   };
 }

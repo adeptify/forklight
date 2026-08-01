@@ -17,15 +17,27 @@ import path from "node:path";
 import { daemonSocketPath } from "../../src/core/config.js";
 import { sleepMs as sleep } from "../../src/core/time.js";
 import {
+  daemonObserverRequest,
   daemonRequest,
   startDaemonProcess,
   stopDaemon,
 } from "../../src/daemon/client.js";
+import type { IntegrationOperationView } from "../../src/core/types.js";
 
 const SIGNAL_EXIT_DEADLINE_MS = 5_000;
 const SOCKET_PROBE_TIMEOUT_MS = 200;
 const READY_POLL_INTERVAL_MS = 50;
 const READY_POLL_ATTEMPTS = 100;
+
+/** Bounded per-wait window used by `observeUntilTerminal`. Short enough that a
+ *  non-terminal operation is observed again quickly; long enough that a single
+ *  wait rarely adds noise. Diagnostic timing is never a correctness gate. */
+export const OBSERVER_WAIT_TIMEOUT_MS = 200;
+/** Final escape bound for a whole observation. This is only a safety net that
+ *  prevents the suite hanging when an operation never becomes terminal; it is
+ *  NOT a "must be fast enough" threshold. Correctness is proven by the durable
+ *  terminal result and exact-home side effects, never by elapsed time. */
+export const OBSERVER_TERMINAL_ESCAPE_MS = 120_000;
 
 export interface DetachedDaemonCleanupResult {
   homeRemoved: boolean;
@@ -293,4 +305,53 @@ export class DetachedDaemonFixture {
     this.cleaned = true;
     return result;
   }
+}
+
+// --- Integration operation observer ----------------------------------------
+
+/** Outcome of observing one durable Integration operation to its terminal
+ *  state. `waitCount` and `elapsedMs` are diagnostic only; they never decide
+ *  correctness. */
+export interface TerminalObservation {
+  readonly view: IntegrationOperationView;
+  readonly waitCount: number;
+  /** Diagnostic only — never a correctness gate. */
+  readonly elapsedMs: number;
+}
+
+/** Follow ONE durable Integration operation through repeated read-only waits
+ *  until it reaches `completed` or `failed`.
+ *
+ *  The loop talks only through `daemonObserverRequest` (never `ensureDaemon` /
+ *  `startDaemonProcess` / `restartDaemon`), keeps the same `operationId`, and
+ *  never starts, resumes, or replaces any runner or Daemon. `escapeDeadlineMs`
+ *  is a finite final exit bound so the suite cannot hang when an operation
+ *  never becomes terminal; it is not a speed assertion. */
+export async function observeUntilTerminal(options: {
+  home: string;
+  operationId: string;
+  waitTimeoutMs?: number;
+  escapeDeadlineMs?: number;
+}): Promise<TerminalObservation> {
+  const waitTimeoutMs = options.waitTimeoutMs ?? OBSERVER_WAIT_TIMEOUT_MS;
+  const escapeDeadlineMs = options.escapeDeadlineMs ?? OBSERVER_TERMINAL_ESCAPE_MS;
+  const startedAt = Date.now();
+  const deadline = startedAt + escapeDeadlineMs;
+  let waitCount = 0;
+  let lastStatus = "outcome-unknown";
+  while (Date.now() < deadline) {
+    const view = await daemonObserverRequest<IntegrationOperationView>(
+      "integration_wait",
+      { operationId: options.operationId, timeoutMs: waitTimeoutMs },
+      options.home,
+    );
+    waitCount += 1;
+    if (view.status === "completed" || view.status === "failed") {
+      return { view, waitCount, elapsedMs: Date.now() - startedAt };
+    }
+    lastStatus = view.status;
+  }
+  throw new Error(
+    `Integration operation ${options.operationId} did not reach a terminal state within ${escapeDeadlineMs}ms (last status: ${lastStatus})`,
+  );
 }

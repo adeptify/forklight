@@ -1,0 +1,197 @@
+version: 2
+name: Warn about visible Git-ignored directories before Worker launch
+project: ../..
+taskClass: m3-prelaunch-workspace-boundary-advice
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: Comparable multi-model evidence is still unavailable. Main selects Flash because the user asked to use it more, this is a bounded deterministic metadata feature, and one accepted result adds natural family evidence; this is not a superiority claim.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Before a Worker consumes Tokens, Task admission preview truthfully warns
+    when Git-ignored directory roots would still enter the Worker snapshot and
+    be treated as ordinary source, without exposing paths or changing policy.
+  presentation:
+    summary: Worker 启动前说明是否有 Git 已忽略、但仍会作为普通源码进入隔离工作区的目录。
+    language: zh-CN
+  context:
+    - The aligned contract is docs/m3-prelaunch-workspace-boundary-advice-contract.md.
+    - Inspect src/core/task-preview.ts, src/workspace/path-policy.ts, src/core/process.ts, CLI validation output, daemon/MCP preview adapters, Hub submit preview, and existing tests before editing.
+    - Current admission preview explains Task quality, Worker policy, Integration limits, routing, and classification reuse but does not inspect the live source workspace boundary.
+    - The existing PathPolicy is authoritative for snapshot-exclusion, generated-path, built-in generated, internal, and default-business classification.
+    - The preview safe allowlist currently excludes paths and commands; preserve that privacy boundary.
+    - ForkLight itself currently has Git-ignored roots beyond the Task excludes, giving a real read-only dogfood signal after Integration.
+  inScope:
+    - Add one canonical read-only workspace-boundary assessor using a fixed bounded Git ignored-directory query.
+    - Classify each ignored directory root through the existing PathPolicy and report only bounded counts plus closed clear/review/unavailable and next-action codes.
+    - Fail closed on non-Git, command failure, timeout, output truncation, malformed output, or unsafe counts without returning diagnostics.
+    - Attach the detached deeply frozen advice to the shared Task admission preview without entering previewRevisionDigest.
+    - Render concise CLI output and beginner-readable bilingual Hub copy inside the existing execution-boundary section.
+    - Add regression tests for real Git fixtures, PathPolicy coverage, privacy, immutability, digest stability, adapters, and Hub states.
+  outOfScope:
+    - Do not infer generated content from directory names, parse .gitignore text, read project file contents, or return any path/name/Git output.
+    - Do not block admission, modify Task YAML or Settings, add an auto-fix button, change PathPolicy, prepare a Workspace, launch a Worker, submit a Task, call a Provider, start Competition, retry, adapt, or integrate.
+    - Do not change existing quality, routing, classification, Integration, preview confirmation, digest, database, or economics semantics.
+    - Do not touch other repositories, Elsewhere, Client-Core, client-app-adeptify, SDK release paths, commit, or push.
+  executionSteps:
+    - Freeze real temporary-Git fixtures and privacy negatives before production changes.
+    - Implement one bounded assessor with an injectable process runner for deterministic failure tests.
+    - Attach its safe output during prepared admission and preserve the existing digest facts.
+    - Extend CLI and Hub by consuming only the canonical advice.
+    - Run focused checks once, correct only Candidate-caused failures, then run npm check, Hub syntax, and diff hygiene once.
+  deliverables:
+    - Canonical privacy-safe workspace-boundary advice.
+    - Shared CLI, daemon/MCP, and Hub admission-preview propagation.
+    - Bilingual explanation of clear, review, unavailable, and legacy states.
+    - Focused regression coverage and one real ForkLight preview proof.
+  modules:
+    - name: Workspace boundary assessor
+      responsibility: Compare Git ignored directory roots with the existing Task PathPolicy.
+      consumes:
+        - Resolved TaskSpec project and workspace policy plus one fixed read-only Git result.
+      produces:
+        - Closed status, bounded counts, availability reason, and next action.
+      boundaries:
+        - No path output, file content, name heuristic, mutation, execution, or admission decision.
+    - name: Admission preview composition
+      responsibility: Add the advice to the canonical safe preview.
+      consumes:
+        - One prepared admission and detached workspace-boundary advice.
+      produces:
+        - Identical semantics for CLI, daemon, MCP, and Hub.
+      boundaries:
+        - Advice does not enter previewRevisionDigest or mutate Task state.
+    - name: Human presentation
+      responsibility: Explain whether the user should review workspace boundaries before launching.
+      consumes:
+        - Safe workspaceBoundaryAdvice only.
+      produces:
+        - Concise CLI lines and bilingual Hub copy in the execution-boundary section.
+      boundaries:
+        - No raw Git error, path list, auto-edit, blocking gate, or second submit path.
+  callChain:
+    - Main previews an absolute Task Contract through CLI, MCP, or Hub.
+    - Canonical admission resolves Task, Worker, policy, quality, Integration, and routing as today.
+    - The assessor asks local Git for ignored directory roots and classifies them through PathPolicy.
+    - The preview returns only safe counts and one closed next action.
+    - The user may edit workspace settings and preview again or explicitly continue through the unchanged submit confirmation.
+  scenarios:
+    - name: Visible ignored root needs review
+      given: Git ignores two directory roots, one is excluded and one remains default-business.
+      when: The Task is previewed.
+      then: Review state reports two observed, one covered, one visible-business without exposing either name.
+    - name: Generated path already covers root
+      given: An ignored root is not excluded but its content is covered by workspace.generatedPaths.
+      when: The assessor classifies it.
+      then: It counts as covered and does not create a false missing-exclusion warning.
+    - name: Non-Git project
+      given: The source directory is valid but has no Git worktree.
+      when: It is previewed.
+      then: Advice is unavailable with a closed manual-review next action and no stderr.
+    - name: Advisory does not become authority
+      given: The ignored-root facts change after preview.
+      when: Preview digest and admission behavior are compared.
+      then: The advisory changes but does not itself block or alter the existing digest and confirmation authority.
+  risks:
+    - Treating Git ignore as proof of generated output can delete intended context; copy must explicitly say it is only a review signal.
+    - Returning ignored names can reveal local information; project only counts and closed codes.
+    - Partial Git output can create false clear states; timeout, truncation, or malformed output must be unavailable.
+    - Copying Core logic into Hub can drift; presentation consumes the canonical advice only.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1400
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 1400
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-preview.ts
+    - src/core/process.ts
+    - src/workspace/path-policy.ts
+    - src/cli.ts
+    - src/daemon
+    - src/mcp
+    - src/hub
+    - tests
+acceptance:
+  criteria:
+    - A fixed read-only Git query plus the existing PathPolicy produces bounded clear/review/unavailable advice without exposing paths, names, commands, diagnostics, or file content.
+    - Excluded and generated-covered ignored roots are not counted as ordinary source; ignored files do not fabricate directory risk.
+    - Failures, timeout, truncation, malformed output, and non-Git projects never become a false clear result.
+    - CLI, daemon/MCP, and Hub consume the same Core meaning, and Hub explains the review signal in readable Chinese and English without blocking submit.
+    - Advice remains detached and deeply frozen, does not enter previewRevisionDigest, and creates no Task, Attempt, Workspace, Provider, Competition, retry, adaptation, Integration, or settings mutation.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-preview.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm run check
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

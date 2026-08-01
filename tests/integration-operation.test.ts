@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { performance } from "node:perf_hooks";
-import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { taskPaths } from "../src/core/config.js";
+import { daemonSocketPath, taskPaths } from "../src/core/config.js";
 import { buildIntegrationOperationView, buildCompactIntegrationOperationView } from "../src/core/integration-operation.js";
 import { preflightIntegration } from "../src/core/integration.js";
 import { recordMainReview } from "../src/core/main-review.js";
@@ -31,8 +31,13 @@ import type {
 } from "../src/core/types.js";
 import { DaemonCoordinator } from "../src/daemon/coordinator.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
-import { daemonRequest } from "../src/daemon/client.js";
+import { daemonObserverRequest, daemonRequest } from "../src/daemon/client.js";
 import { StateStore } from "../src/state/store.js";
+import {
+  observeUntilTerminal,
+  probeSocketAlive,
+  type TerminalObservation,
+} from "./helpers/detached-daemon.js";
 import { prepareWorkspace } from "../src/workspace/copy.js";
 import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
 import { createPathPolicy } from "../src/workspace/path-policy.js";
@@ -356,13 +361,14 @@ test("durable Integration results project truthful terminal statuses", async () 
 test("integration starts non-blocking and timeout remains outcome-unknown", async () => {
   const fixture = await operationFixture();
   try {
-    const startedAt = performance.now();
     const started = fixture.coordinator.startIntegration(
       fixture.task.id,
       fixture.receiptId,
     );
+    // Non-blocking is proven by lifecycle evidence, not machine speed: the
+    // operation is already running, a short read-only wait reports
+    // outcome-unknown, and no durable result exists yet.
     assert.equal(started.status, "running");
-    assert.ok(performance.now() - startedAt < 100);
 
     const early = await fixture.coordinator.waitIntegration(started.operationId, 5);
     assert.equal(early.status, "outcome-unknown");
@@ -376,11 +382,46 @@ test("integration starts non-blocking and timeout remains outcome-unknown", asyn
       fixture.coordinator.integrationStatus(started.operationId).status,
       "completed",
     );
+    // Public Integration views never expose a temporary runner identity.
+    assert.ok(
+      !JSON.stringify(final).includes("runnerPid"),
+      "public Integration view must not expose runnerPid",
+    );
   } finally {
     await fixture.coordinator.shutdown();
     fixture.store.close();
   }
 });
+
+/** Finally-safe detached teardown: if the test body never captured a terminal
+ *  view (it threw while the one operation was still running), observe the SAME
+ *  operation until terminal before closing the exact-home daemon. Closing
+ *  before terminality would let the late activation runner spawn a replacement
+ *  daemon. Then prove the exact endpoint/socket are gone. */
+async function closeDaemonAfterTerminal(
+  daemon: ForkLightDaemon,
+  home: string,
+  operationId: string | undefined,
+  terminal: TerminalObservation | undefined,
+): Promise<void> {
+  try {
+    if (operationId !== undefined && terminal === undefined) {
+      await observeUntilTerminal({ home, operationId });
+    }
+  } finally {
+    await daemon.close();
+    assert.equal(
+      await probeSocketAlive(home),
+      false,
+      "exact-home daemon endpoint must be unreachable after close",
+    );
+    assert.equal(
+      existsSync(daemonSocketPath(home)),
+      false,
+      "exact-home daemon socket must be removed after close",
+    );
+  }
+}
 
 test("detached activation completes the durable Integration operation", async () => {
   const markerName = "runtime-ready.txt";
@@ -396,6 +437,8 @@ test("detached activation completes the durable Integration operation", async ()
 
   const daemon = new ForkLightDaemon(fixture.home, 0);
   await daemon.start();
+  let operationId: string | undefined;
+  let terminal: TerminalObservation | undefined;
   try {
     const started = await daemonRequest<{
       operationId: string;
@@ -410,32 +453,34 @@ test("detached activation completes the durable Integration operation", async ()
       fixture.home,
     );
     assert.equal(started.status, "running");
-    const early = await daemonRequest<{ status: string }>(
+    operationId = started.operationId;
+
+    // A 5ms read-only wait may return outcome-unknown. The test keeps the same
+    // operation and keeps observing until a durable terminal result appears;
+    // it never starts, resumes, or replaces a runner.
+    const early = await daemonObserverRequest<{ status: string }>(
       "integration_wait",
-      { operationId: started.operationId, timeoutMs: 5 },
+      { operationId, timeoutMs: 5 },
       fixture.home,
     );
     assert.equal(early.status, "outcome-unknown");
 
-    const final = await daemonRequest<{
-      status: string;
-      stages: Array<{ stage: string; status: string }>;
-      result: IntegrationResultRecord;
-    }>(
-      "integration_wait",
-      { operationId: started.operationId, timeoutMs: 10_000 },
-      fixture.home,
-    );
-    assert.equal(final.status, "completed");
-    assert.equal(final.result.status, "applied");
+    terminal = await observeUntilTerminal({ home: fixture.home, operationId });
+    assert.equal(terminal.view.status, "completed");
+    assert.equal(terminal.view.result?.status, "applied");
+    assert.equal(terminal.view.result?.id, operationId);
     assert.deepEqual(
-      final.stages.map(({ stage, status }) => [stage, status]),
+      terminal.view.stages.map(({ stage, status }) => [stage, status]),
       [
         ["source-applied", "passed"],
         ["source-verified", "passed"],
         ["artifact-built", "passed"],
         ["runtime-activated", "passed"],
       ],
+    );
+    assert.ok(
+      !JSON.stringify(terminal.view).includes("runnerPid"),
+      "public Integration view must not expose runnerPid",
     );
     assert.equal(
       await readFile(path.join(fixture.source, markerName), "utf8"),
@@ -451,8 +496,116 @@ test("detached activation completes the durable Integration operation", async ()
       false,
     );
   } finally {
-    await daemon.close();
+    await closeDaemonAfterTerminal(daemon, fixture.home, operationId, terminal);
   }
+  // The exact-home daemon, endpoint, and runner are all gone; the home is
+  // removable with no late replacement daemon.
+  await rm(fixture.home, { recursive: true, force: true });
+});
+
+test("detached activation failure is durable and teardown waits for the terminal failure", async () => {
+  const fixture = await operationFixture({
+    buildCommands: ["node -e \"process.exit(0)\""],
+    activationCommands: ["node -e \"process.exit(3)\""],
+    activationCheckCommands: ["node -e \"process.exit(0)\""],
+  });
+  await fixture.coordinator.shutdown();
+  fixture.store.close();
+
+  const daemon = new ForkLightDaemon(fixture.home, 0);
+  await daemon.start();
+  let operationId: string | undefined;
+  let terminal: TerminalObservation | undefined;
+  try {
+    const started = await daemonRequest<{ operationId: string; status: string }>(
+      "integration_apply",
+      { taskId: fixture.task.id, receiptId: fixture.receiptId, confirm: true },
+      fixture.home,
+    );
+    assert.equal(started.status, "running");
+    operationId = started.operationId;
+
+    terminal = await observeUntilTerminal({ home: fixture.home, operationId });
+    assert.equal(terminal.view.status, "failed");
+    assert.equal(terminal.view.result?.status, "retained-failure");
+    assert.equal(
+      terminal.view.stages.find((stage) => stage.stage === "runtime-activated")?.status,
+      "failed",
+    );
+    assert.ok(
+      !JSON.stringify(terminal.view).includes("runnerPid"),
+      "public Integration view must not expose runnerPid",
+    );
+  } finally {
+    await closeDaemonAfterTerminal(daemon, fixture.home, operationId, terminal);
+  }
+  // The exact-home daemon, endpoint, and runner are all gone; the home is
+  // removable with no late replacement daemon.
+  await rm(fixture.home, { recursive: true, force: true });
+});
+
+test("detached activation teardown waits for terminality even when the test body throws", async () => {
+  const markerName = "runtime-ready.txt";
+  const fixture = await operationFixture({
+    buildCommands: ["node -e \"process.exit(0)\""],
+    activationCommands: [
+      `node -e 'setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(markerName)}, "ready"), 200)'`,
+    ],
+    activationCheckCommands: [`test -f ${markerName}`],
+  });
+  await fixture.coordinator.shutdown();
+  fixture.store.close();
+
+  const daemon = new ForkLightDaemon(fixture.home, 0);
+  await daemon.start();
+  let operationId: string | undefined;
+  let terminal: TerminalObservation | undefined;
+  await assert.rejects(
+    async () => {
+      try {
+        const started = await daemonRequest<{ operationId: string; status: string }>(
+          "integration_apply",
+          { taskId: fixture.task.id, receiptId: fixture.receiptId, confirm: true },
+          fixture.home,
+        );
+        assert.equal(started.status, "running");
+        operationId = started.operationId;
+        // Simulated assertion failure while the one operation is still running.
+        assert.equal(
+          started.status,
+          "unexpected-completed",
+          "simulated assertion failure before terminality",
+        );
+      } finally {
+        try {
+          if (operationId !== undefined) {
+            terminal = await observeUntilTerminal({ home: fixture.home, operationId });
+          }
+        } finally {
+          await daemon.close();
+          assert.equal(
+            await probeSocketAlive(fixture.home),
+            false,
+            "exact-home daemon endpoint must be unreachable after close",
+          );
+        }
+      }
+    },
+    /simulated assertion failure before terminality/,
+  );
+
+  // The finally waited for the same durable operation to become terminal before
+  // closing the daemon, so exactly one terminal result exists and the marker the
+  // activation wrote is present.
+  assert.equal(terminal?.view.status, "completed");
+  assert.equal(terminal?.view.result?.status, "applied");
+  assert.equal(
+    await readFile(path.join(fixture.source, markerName), "utf8"),
+    "ready",
+  );
+  // The exact-home daemon, endpoint, and runner are all gone; the home is
+  // removable with no late replacement daemon.
+  await rm(fixture.home, { recursive: true, force: true });
 });
 
 // --- Compact Integration Operation View tests ---

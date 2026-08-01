@@ -1,0 +1,199 @@
+version: 2
+name: Compare only Workers with enough fair routing evidence
+project: ../..
+taskClass: m3-routing-evidence-ready-subset
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: The current family has five Flash samples but zero first-pass verified successes, while the other candidates lack a fair comparison cohort. This change alters routing semantics, so Main selects the stronger Pro Worker for implementation without claiming historical superiority.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    ForkLight compares an evidence-ready subset of distinct Worker identities
+    without letting zero-history candidates erase a fair recommendation, while
+    keeping every untested Worker eligible and clearly outside the comparison.
+  presentation:
+    summary: 只比较证据够用的 Worker，未知 Worker 仍可选，也不会被当成低分。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-routing-evidence-ready-subset-contract.md.
+    - Inspect src/core/model-routing.ts and tests/model-routing.test.ts first, then trace CLI and Hub rendering before editing.
+    - Current routing requires every requested candidate to meet one scope threshold, so one new Worker suppresses an otherwise fair comparison.
+    - Current production evidence for this family is asymmetric; this task must not manufacture samples or claim a winner from that live data.
+    - Preserve exact-class precedence, full Worker identity semantics, Main override, and Competition separation.
+  inScope:
+    - Build one canonical evidence-ready comparison cohort in the routing Core.
+    - Require at least two distinct routing identities in the cohort and retain all requested candidates in the response.
+    - Score only cohort members; mark excluded candidates as insufficient evidence without synthetic scores or quality judgments.
+    - Add privacy-safe cohort coverage and per-candidate participation facts to the canonical response and recommendation.
+    - Make factor-specific sample gates use the active exact or family threshold.
+    - Update CLI and Hub to explain full-candidate versus evidence-ready-subset recommendations in plain Chinese and English.
+    - Add focused regression coverage for asymmetric candidates, duplicate executable identities, scope precedence, strict/flexible behavior, family thresholds, no auto-Competition, privacy, and client rendering.
+  outOfScope:
+    - Do not change default policy values, statistics derivation, Worker Profiles, Task admission, result persistence, failure categories, cost formulas, or Integration.
+    - Do not assign priors, exploration bonuses, penalty scores, or permanent exclusions to unknown Workers.
+    - Do not start a Provider probe, Competition, extra Worker, Task replay, or settings mutation from routing advice.
+    - Do not redesign the Hub or expose private Task evidence, endpoints, Keychain services, credentials, prompts, or logs.
+    - Do not touch other repositories, Elsewhere, Client-Core, client-app-adeptify, SDK release paths, commit, or push.
+  executionSteps:
+    - Freeze existing routing behavior with focused tests for the new asymmetric cohort scenarios before changing the scorer.
+    - Separate scope/cohort resolution from factor planning and use the active scope threshold consistently.
+    - Preserve original candidate identities while scoring only the cohort and bind any sorted recommendation to the correct Worker Profile.
+    - Thread canonical coverage facts through existing CLI and Hub renderers without duplicating routing decisions.
+    - Run focused tests once, repair only Candidate-caused failures, then run full tests, build, Hub syntax, and diff hygiene once.
+  deliverables:
+    - Evidence-ready subset comparison in the canonical routing Core.
+    - Truthful all-candidate versus subset recommendation coverage.
+    - Plain-language CLI and Hub explanation with unknown Workers kept eligible.
+    - Regression tests covering semantics, configuration, privacy, and Competition independence.
+  modules:
+    - name: Comparison cohort resolver
+      responsibility: Choose exact, family, or no cohort from candidates that individually meet the configured threshold.
+      consumes:
+        - Frozen candidate identities, exact evidence, optional family evidence, and routing thresholds.
+      produces:
+        - One scope and a set of at least two distinct evidence-ready Worker identities, or none.
+      boundaries:
+        - No scoring of excluded candidates and no inference from Profile count alone.
+    - name: Cohort scorer
+      responsibility: Apply existing quality, correction, first-pass, cost, duration, and budget factors only to comparable cohort evidence.
+      consumes:
+        - Cohort evidence, active scope threshold, weights, and missing-evidence mode.
+      produces:
+        - Candidate factors, uncertainty, optional recommendation, and coverage marker.
+      boundaries:
+        - Unknown candidates remain eligible and do not become synthetic zero-quality evidence.
+    - name: Explanation surfaces
+      responsibility: Explain how many candidates were compared and the limits of any recommendation.
+      consumes:
+        - Canonical cohort and per-candidate participation facts.
+      produces:
+        - Consistent CLI and Hub copy in Chinese and English.
+      boundaries:
+        - No client-side threshold calculation, routing mutation, Worker launch, or technical-first presentation.
+  callChain:
+    - Main supplies task class, optional family, and saved Worker candidates.
+    - Core finds an exact evidence-ready subset, otherwise a family subset, otherwise none.
+    - Existing factors compare only that subset under the active scope threshold.
+    - All candidates remain in the advisory with truthful participation status.
+    - CLI and Hub explain the recommendation boundary; Main still makes the execution decision.
+  scenarios:
+    - name: Two ready and two unknown
+      given: Four candidates, with two distinct identities above exact threshold and two with zero history.
+      when: Main requests routing advice.
+      then: The two ready candidates are compared, the others stay eligible outside the cohort, and any recommendation is marked subset-only.
+    - name: Family fallback subset
+      given: Fewer than two exact-ready identities but three family-ready identities.
+      when: A taskFamily is supplied.
+      then: The family threshold drives cohort and factor coverage for those three identities.
+    - name: Only one ready identity
+      given: Multiple Profiles but only one distinct executable identity meets either threshold.
+      when: Advice is calculated.
+      then: Knowledge remains unknown and no recommendation is created.
+    - name: Unknown does not authorize Competition
+      given: A valid subset recommendation plus untested candidates and Competition intent none.
+      when: Advice is returned.
+      then: Competition remains false and Main may still override the subset advice.
+  risks:
+    - Treating excluded candidates as score zero would falsely punish exploration; their factors must remain unavailable.
+    - Counting duplicate Profiles as independent Workers would fabricate comparison readiness; use the canonical routing identity.
+    - Reusing exact thresholds for family factor coverage would make configurable family policy ineffective.
+    - A subset recommendation can look universal unless its coverage is first-class and visible before technical scores.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1400
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 1400
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/model-routing.ts
+    - src/cli.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/model-routing.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - At least two distinct routing identities can form an exact or family evidence-ready cohort even when other requested candidates lack history.
+    - Excluded candidates remain eligible, carry explicit insufficient-evidence participation facts, and never receive synthetic quality scores.
+    - Any recommendation declares whether it covers all candidates or only the evidence-ready subset, with matching CLI and Hub explanations.
+    - Family-scope factor coverage uses familyMinRelevantSamples and exact scope uses minRelevantSamples.
+    - Missing-evidence mode and score-gap rules apply to the cohort, while Competition remains controlled only by Main intent and enabled triggers.
+    - All outputs remain read-only and privacy-safe with no Provider request, Task mutation, Worker launch, endpoint, credential, prompt, or raw log.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/model-routing.test.ts tests/daemon-cli.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

@@ -27,6 +27,29 @@ import {
 import { assessIntegrationFeasibility, type IntegrationFeasibility } from "./integration-feasibility.js";
 import type { ForkLightSettings, TaskPolicy } from "./settings.js";
 import { loadTaskSpec } from "./task.js";
+import {
+  computeClassificationAdvice,
+  type ClassificationAdvice,
+} from "./classification-advice.js";
+import {
+  formatRoutingExplanationHuman,
+  projectSafeRoutingExplanation,
+  type SafeRoutingExplanation,
+} from "./routing-explanation.js";
+import {
+  assessWorkspaceBoundary,
+  formatWorkspaceBoundaryAdviceHuman,
+  type WorkspaceBoundaryAdvice,
+} from "../workspace/boundary-advice.js";
+import { createPathPolicy } from "../workspace/path-policy.js";
+
+export type {
+  RoutingExplanationNextAction,
+  RoutingSelectionBasis,
+  SafeRoutingCompetition,
+  SafeRoutingEvidence,
+  SafeRoutingExplanation,
+} from "./routing-explanation.js";
 import type {
   AdvancedPolicyFields,
   EffectivePolicySnapshot,
@@ -35,6 +58,7 @@ import type {
   ProvenanceSource,
   QualityCheck,
   QualityReport,
+  TaskRecord,
   TaskSpec,
 } from "./types.js";
 import type { RuntimeName } from "./runtime-names.js";
@@ -82,12 +106,40 @@ export interface SafeTaskAdmissionPreview {
   };
   integration: SafeIntegrationFeasibility;
   /**
+   * Current classification reuse advice derived from terminal ordinary Tasks.
+   * Read-only evidence for Main; it never infers semantics, never ranks
+   * families, and NEVER enters previewRevisionDigest. A sibling Task becoming
+   * terminal may change these counts without invalidating a submit
+   * confirmation.
+   */
+  classificationAdvice: ClassificationAdvice;
+  /**
+   * Privacy-safe pre-submit routing explanation: why this Worker was selected,
+   * how many candidates were compared, aggregate historical evidence, and the
+   * recorded Competition intent. Detached from mutable Task data, derived only
+   * from the frozen Task-file routingDecision and resolved selection, and never
+   * enters previewRevisionDigest.
+   */
+  routingExplanation: SafeRoutingExplanation;
+  /**
+   * Detached privacy-safe pre-launch workspace boundary advice: how many
+   * Git-ignored directory roots were observed, how many the existing
+   * PathPolicy already covers, and how many would still enter the Worker as
+   * ordinary source. Counts and closed codes only — never paths, names, Git
+   * output, or diagnostics. Non-Git projects and any scan failure fail closed
+   * to unavailable. This is a review signal, never an admission gate: it does
+   * not enter previewRevisionDigest and never changes Task/settings/quality/
+   * Integration authority.
+   */
+  workspaceBoundaryAdvice: WorkspaceBoundaryAdvice;
+  /**
    * Content-free digest binding the preview to the exact Task file bytes and
    * the current effective admission settings (selection, policy/provenance,
    * quality result, Integration summary). Daemon submit_file recomputes this
    * from one prepared admission and rejects a stale or malformed value before
    * any Task mutation. Contains no recoverable Task text, path, command,
-   * endpoint, credential reference, or Provider response.
+   * endpoint, credential reference, or Provider response. Classification
+   * history is deliberately absent from this digest.
    */
   previewRevisionDigest: string;
 }
@@ -110,6 +162,12 @@ export interface PreparedTaskAdmission {
   readonly integration: IntegrationFeasibility;
   readonly profileId: string | undefined;
   readonly profileLabel: string | undefined;
+  /**
+   * Detached deeply frozen workspace-boundary advice computed once from the
+   * resolved project and the Task PathPolicy. Never enters the digest and
+   * never changes admission facts.
+   */
+  readonly workspaceBoundaryAdvice: WorkspaceBoundaryAdvice;
   /** Combined content-free revision digest (file bytes + effective admission). */
   readonly previewRevisionDigest: string;
 }
@@ -213,6 +271,12 @@ export async function prepareTaskAdmission(
   const profileLabel = profileId === undefined
     ? undefined
     : settings.workerProfiles.profiles.find((profile) => profile.id === profileId)?.label;
+  // One canonical read-only workspace-boundary check after Task and Settings
+  // are resolved. Always fails closed to unavailable; never blocks admission.
+  const workspaceBoundaryAdvice = await assessWorkspaceBoundary({
+    projectDir: spec.project,
+    policy: createPathPolicy(spec),
+  });
   const previewRevisionDigest = computePreviewRevisionDigest({
     taskFileDigest: loaded.taskFileDigest,
     spec,
@@ -229,6 +293,7 @@ export async function prepareTaskAdmission(
     integration,
     profileId,
     profileLabel,
+    workspaceBoundaryAdvice,
     previewRevisionDigest,
   };
 }
@@ -236,10 +301,13 @@ export async function prepareTaskAdmission(
 /**
  * Project a prepared admission into the explicit safe allowlist. Never spreads
  * the full TaskSpec or settings; never includes path, command, endpoint,
- * credential, raw Task text, or Provider response.
+ * credential, raw Task text, or Provider response. The optional read-only
+ * history snapshot feeds only the classification advice; it never influences
+ * the preview revision digest or any admission fact.
  */
 export function projectSafeTaskAdmissionPreview(
   prepared: PreparedTaskAdmission,
+  tasks: readonly TaskRecord[] = [],
 ): SafeTaskAdmissionPreview {
   const spec = prepared.spec;
   const maxBudgetUsd = spec.runtime.maxBudgetUsd;
@@ -258,6 +326,23 @@ export function projectSafeTaskAdmissionPreview(
     effectivePolicy: safeEffectivePolicy(prepared.effectivePolicy),
     quality: safeQualitySummary(prepared.qualityReport),
     integration: safeIntegrationSummary(prepared.integration),
+    classificationAdvice: computeClassificationAdvice(
+      spec.taskClass,
+      spec.taskFamily,
+      tasks,
+    ),
+    routingExplanation: projectSafeRoutingExplanation({
+      ...(spec.routingDecision === undefined ? {} : { routingDecision: spec.routingDecision }),
+      selectedWorker: {
+        provider: spec.provider.name,
+        model: spec.provider.model,
+        runtime: spec.runtime.name,
+        effort: spec.runtime.effort,
+      },
+      ...(prepared.profileId === undefined ? {} : { workerProfileId: prepared.profileId }),
+      ...(prepared.profileLabel === undefined ? {} : { workerProfileLabel: prepared.profileLabel }),
+    }),
+    workspaceBoundaryAdvice: prepared.workspaceBoundaryAdvice,
     previewRevisionDigest: prepared.previewRevisionDigest,
   };
 }
@@ -355,13 +440,59 @@ export function computePreviewRevisionDigest(input: {
 
 /**
  * Build one safe admission preview from an absolute Task Contract path and the
- * immutable current settings snapshot. Performs no Task/settings mutation.
+ * immutable current settings snapshot. The optional terminal ordinary Task
+ * history snapshot feeds only the read-only classification advice; it never
+ * enters the preview revision digest and never affects admission facts.
+ * Performs no Task/settings mutation.
  */
 export async function buildTaskAdmissionPreview(
   taskFileInput: string,
   settings: ForkLightSettings,
+  tasks: readonly TaskRecord[] = [],
 ): Promise<SafeTaskAdmissionPreview> {
-  return projectSafeTaskAdmissionPreview(await prepareTaskAdmission(taskFileInput, settings));
+  return projectSafeTaskAdmissionPreview(
+    await prepareTaskAdmission(taskFileInput, settings),
+    tasks,
+  );
+}
+
+/** Human-readable classification reuse lines. States and counts only — no
+ *  semantic guess, no ranking, and no private Task content. */
+export function formatClassificationAdviceHuman(advice: ClassificationAdvice): string {
+  const lines: string[] = [];
+  lines.push("Classification reuse advice:");
+  lines.push(
+    `  taskClass: ${advice.taskClass.state}`
+    + ` (${advice.taskClass.terminalCount} terminal, ${advice.taskClass.completeSelectionCount} complete)`,
+  );
+  lines.push(
+    `  taskFamily: ${advice.taskFamily.state}`
+    + ` (${advice.taskFamily.terminalCount} terminal, ${advice.taskFamily.completeSelectionCount} complete)`,
+  );
+  if (advice.familyChoices.length > 0) {
+    lines.push("  Established families:");
+    for (const choice of advice.familyChoices) {
+      lines.push(
+        `    ${choice.family}: ${choice.terminalCount} terminal,`
+        + ` ${choice.completeSelectionCount} complete, ${choice.distinctClassCount} class(es)`,
+      );
+    }
+  } else {
+    lines.push("  Established families: (none)");
+  }
+  if (advice.classChoices.length > 0) {
+    lines.push("  Existing classes in the selected family:");
+    for (const choice of advice.classChoices) {
+      lines.push(
+        `    ${choice.taskClass}: ${choice.terminalCount} terminal,`
+        + ` ${choice.completeSelectionCount} complete`,
+      );
+    }
+  } else {
+    lines.push("  Existing classes in the selected family: (none)");
+  }
+  lines.push(`  Next action: ${advice.nextAction}`);
+  return lines.join("\n");
 }
 
 /** Human-readable validate lines. Never prints paths, secrets, or raw contract text. */
@@ -428,6 +559,13 @@ export function formatTaskAdmissionPreviewHuman(preview: SafeTaskAdmissionPrevie
       lines.push(`  ! ${issue}`);
     }
   }
+  lines.push("");
+  lines.push(formatRoutingExplanationHuman(preview.routingExplanation));
+  lines.push("");
+  lines.push(formatClassificationAdviceHuman(preview.classificationAdvice));
+  lines.push("");
+  lines.push(formatWorkspaceBoundaryAdviceHuman(preview.workspaceBoundaryAdvice));
+  lines.push("");
   lines.push(`Preview revision digest: ${preview.previewRevisionDigest}`);
   lines.push("(preview only — does not create or submit a Task)");
   return `${lines.join("\n")}\n`;

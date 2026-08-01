@@ -1,0 +1,203 @@
+version: 2
+name: Show reusable Task classes inside the selected family
+project: ../..
+taskClass: m3-task-class-reuse-within-family-guidance
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: Routing evidence is insufficient for a recommendation and Competition intent is none. Main selects Flash because the user asked to use it more often and this bounded projection plus incumbent Hub refinement has deterministic acceptance; this is not a superiority claim.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    When a Task uses an established family but its exact class is missing or new,
+    admission preview shows a bounded privacy-safe list of existing classes in
+    that family so Main can deliberately reuse stable names without any automatic
+    classification or semantic guess.
+  presentation:
+    summary: 在已有大类里把可复用的工作类型和真实数量讲清楚，帮助 Main 少造一次性分类名。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-task-class-reuse-within-family-guidance-contract.md.
+    - Inspect src/core/classification-advice.ts, src/core/task-preview.ts, src/hub/public/app.js, src/hub/public/i18n.js and their focused tests before editing.
+    - Current advice reports whether the exact class and family exist and lists established families, but it does not expose the existing class names within the explicitly selected family.
+    - Real local history has 207 classified terminal Tasks but 170 distinct classes; orchestration-efficiency currently has four terminal Tasks and four different class names.
+    - Preserve the incumbent Hub visual system and the existing what/why/boundaries/classification reading path.
+  inScope:
+    - Add a bounded classChoices projection for the explicitly selected existing taskFamily.
+    - Return taskClass, terminal count and complete-selection count for each choice, using the same eligible terminal ordinary cohort.
+    - Bound choices to eight and sort by complete-selection count, terminal count and stable class name.
+    - Keep the projection detached, deeply frozen, privacy-safe and outside previewRevisionDigest.
+    - Extend CLI human output and daemon/MCP safe preview through the canonical shared projection.
+    - In Hub, show the class choices only when the family exists and the current class is missing or new, using plain bilingual copy and an accessible disclosure.
+    - Add focused executable tests for filtering, bounds, ordering, exclusions, immutability, privacy, digest stability, propagation and Hub conditions.
+  outOfScope:
+    - Do not auto-generate, infer, rename, merge, migrate, rank or write taskClass or taskFamily.
+    - Do not use string similarity, embeddings, a model call, quality scores, cost, duration or Worker outcomes.
+    - Do not change admission, digest rules, Settings, database, routing, Worker selection, Competition, retry, Integration or economics.
+    - Do not add a new Hub page, new global style system, one-click file edits, or expose Task identity/private content.
+    - Do not touch other repositories, SDK consumers, Elsewhere, commit or push.
+  executionSteps:
+    - Trace the current pure classification projection, digest boundary, CLI formatter and Hub renderer before editing.
+    - Extend the closed safe projection once; reuse it through all existing preview adapters.
+    - Add Hub wording and conditional progressive disclosure without duplicating Core filters or counts.
+    - Run focused tests once, correct only Candidate-caused failures at most once, then run full suite/build/syntax/diff checks once.
+  deliverables:
+    - Canonical classChoices projection scoped to the selected existing family.
+    - CLI and structured preview propagation with no digest or lifecycle change.
+    - Beginner-readable bilingual Hub guidance shown only when it changes Main's decision.
+    - Regression tests covering stable bounds, privacy and no-mutation invariants.
+  modules:
+    - name: Within-family class projection
+      responsibility: Aggregate stable class names only inside the explicitly selected family.
+      consumes:
+        - Parsed taskFamily and terminal ordinary Task records.
+      produces:
+        - At most eight class names with transparent terminal and complete-selection counts.
+      boundaries:
+        - No semantic inference, ranking by quality, model identity, private content, mutation or execution.
+    - name: Admission preview composition
+      responsibility: Carry the new safe class choices through the canonical preview and CLI formatter.
+      consumes:
+        - Existing ClassificationAdvice result.
+      produces:
+        - Structured daemon/MCP data and concise human CLI lines.
+      boundaries:
+        - History remains outside previewRevisionDigest and submission authority.
+    - name: Hub classification guidance
+      responsibility: Reveal existing names when the current class is missing or new inside an existing family.
+      consumes:
+        - Safe classChoices plus closed class/family states.
+      produces:
+        - Bilingual disclosure, truthful counts and a manual-decision explanation.
+      boundaries:
+        - No file write, auto-selection, recommendation score or second classification model.
+  callChain:
+    - Main previews an absolute Task Contract through CLI, MCP or Hub.
+    - Canonical preview computes existing admission facts and digest exactly as before.
+    - Classification projection filters terminal ordinary history to the selected family and builds bounded classChoices.
+    - CLI lists them; Hub conditionally reveals them only when the current class needs a decision.
+    - Main keeps the new class or edits the Task file to reuse an existing name, then previews again before explicit submit.
+  scenarios:
+    - name: New class in established family
+      given: The family has multiple terminal ordinary classes but the requested class is new.
+      when: Main previews the Task.
+      then: Only classes from that family appear with truthful counts and no automatic selection.
+    - name: Missing class in established family
+      given: taskClass is absent and taskFamily exists in history.
+      when: Hub renders the preview.
+      then: Existing classes are expanded with wording that Main must judge semantic fit.
+    - name: Existing exact class
+      given: The exact class already exists in the selected family.
+      when: Hub renders the preview.
+      then: Reuse state and next action remain visible without an extra candidate list.
+    - name: Unbounded or unrelated history
+      given: More than eight classes exist across several families, including active and reviewer Tasks.
+      when: Advice is built.
+      then: At most eight eligible classes from the selected family are returned in stable transparent order.
+    - name: Mutable sibling history
+      given: One same-family Task becomes terminal after an admission preview.
+      when: Main previews again.
+      then: Class counts may change but the preview revision digest remains identical.
+  risks:
+    - Calling the list recommendations would overstate semantic knowledge; consistently call them existing choices or names to consider.
+    - Showing the list for an already-reused class would add noise; condition it on missing/new class plus existing family.
+    - Recomputing in Hub could drift and leak data; Hub must consume the Core projection only.
+    - Putting history in the digest would create unnecessary stale previews; preserve the existing digest boundary.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1100
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1100
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/classification-advice.ts
+    - src/core/task-preview.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/statistics.test.ts
+    - tests/task-preview.test.ts
+    - tests/daemon.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - classChoices contains at most eight eligible terminal ordinary classes from only the explicitly selected existing family, with truthful counts and deterministic ordering.
+    - The projection is detached, deeply frozen, privacy-safe and absent from previewRevisionDigest, with no mutation or lifecycle side effect.
+    - CLI, daemon/MCP and Hub consume the same canonical meaning; Hub does not recompute counts or semantic fit.
+    - Hub shows plain bilingual class choices only for missing/new class plus existing family, keeps Main as the decision maker and preserves the current preview hierarchy.
+    - Existing submission, routing, Competition, Settings, Integration and economics behavior remain unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts tests/task-preview.test.ts tests/daemon.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

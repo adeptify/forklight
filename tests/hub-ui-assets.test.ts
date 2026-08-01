@@ -1195,6 +1195,945 @@ test("Hub i18n carries two-step preview strings in both languages", async () => 
   assert.ok(enSection.includes("out of date"), "en stale instruction");
 });
 
+test("Hub submit preview renders explanation-first classification reuse advice", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // The advisory block is rendered under the existing preview facts.
+  assert.ok(src.includes("renderSubmitClassificationAdvice"), "classification advice renderer");
+  assert.ok(src.includes("preview.classificationAdvice"), "renderer consumes the safe projection");
+  assert.ok(src.includes("taskSubmitClassTitle"), "explanation-first title key");
+  assert.ok(src.includes("taskSubmitClassBody"), "body explains the comparison source");
+  assert.ok(src.includes("taskSubmitClassFactClass"), "taskClass fact label key");
+  assert.ok(src.includes("taskSubmitClassFactFamily"), "taskFamily fact label key");
+  assert.ok(src.includes("taskSubmitFamilyChoices"), "established families label key");
+  assert.ok(src.includes("taskSubmitFamilyChoice"), "one bounded family row key");
+  assert.ok(src.includes("taskSubmitFamilyChoicesEmpty"), "empty families note key");
+  assert.ok(src.includes("taskSubmitNextAction"), "manual next-action label key");
+  // Every closed next-action code maps to a bounded explanation; no raw code is
+  // rendered as primary copy.
+  for (const code of [
+    "reuse-classification",
+    "extend-family",
+    "add-class",
+    "add-family",
+    "confirm-new-family",
+    "fill-classification",
+  ]) {
+    assert.ok(src.includes(code), `next-action code ${code} mapped`);
+    assert.ok(src.includes(`case "${code}"`), `next-action switch handles ${code}`);
+  }
+  // No semantic ranking or Task identity is exposed by the renderer.
+  const adviceIdx = src.indexOf("function renderSubmitClassificationAdvice");
+  assert.ok(adviceIdx > 0);
+  const adviceEnd = src.indexOf("function renderSubmitPreviewFacts", adviceIdx);
+  const adviceBlock = src.slice(adviceIdx, adviceEnd > 0 ? adviceEnd : src.length);
+  assert.ok(!adviceBlock.includes("taskId"), "no Task id rendered");
+  assert.ok(!adviceBlock.includes("spec.project"), "no project path rendered");
+  assert.ok(!adviceBlock.includes("keychainService"), "no keychain rendered");
+  assert.ok(!adviceBlock.includes("acceptance.commands"), "no commands rendered");
+});
+
+test("Hub i18n carries classification reuse strings in both languages", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const zhSection = i18n.slice(i18n.indexOf("zh: {"));
+  const enSection = i18n.slice(0, i18n.indexOf("zh: {"));
+  const keys = [
+    "taskSubmitClassTitle",
+    "taskSubmitClassBody",
+    "taskSubmitClassFactClass",
+    "taskSubmitClassFactFamily",
+    "taskSubmitClassMissing",
+    "taskSubmitClassNew",
+    "taskSubmitClassExisting",
+    "taskSubmitClassExistingComplete",
+    "taskSubmitFamilyChoices",
+    "taskSubmitFamilyChoice",
+    "taskSubmitFamilyChoicesEmpty",
+    "taskSubmitClassChoices",
+    "taskSubmitClassChoice",
+    "taskSubmitClassChoicesHint",
+    "taskSubmitNextAction",
+    "taskSubmitNextReuse",
+    "taskSubmitNextExtend",
+    "taskSubmitNextExtendWithChoices",
+    "taskSubmitNextAddClass",
+    "taskSubmitNextAddClassWithChoices",
+    "taskSubmitNextAddFamily",
+    "taskSubmitNextConfirmFamily",
+    "taskSubmitNextFill",
+    "taskSubmitClassUnavailable",
+  ];
+  for (const key of keys) {
+    assert.ok(enSection.includes(key), `en ${key} present`);
+    assert.ok(zhSection.includes(key), `zh ${key} present`);
+  }
+  // Beginner copy explains reuse, a new family, and missing family in Chinese.
+  assert.ok(zhSection.includes("沿用已有分类"), "zh reuse explanation");
+  assert.ok(zhSection.includes("新大类"), "zh new-family explanation");
+  assert.ok(zhSection.includes("稳定大类"), "zh stable-family term");
+  assert.ok(enSection.includes("never guesses"), "en never-guess body");
+  // Within-family class guidance is bilingual and keeps Main as the judge.
+  assert.ok(enSection.includes("Existing classes in this family"), "en class choices title");
+  assert.ok(enSection.includes("Judge by meaning"), "en class choices manual-decision hint");
+  assert.ok(enSection.includes("never replaces"), "en class choices no-auto-replace hint");
+  assert.ok(zhSection.includes("同一大类里已有的工作类型"), "zh class choices title");
+  assert.ok(zhSection.includes("请按真实含义判断"), "zh class choices manual-decision hint");
+  assert.ok(zhSection.includes("不会自动替换"), "zh class choices no-auto-replace hint");
+  assert.ok(zhSection.includes("含义相同就复用"), "zh choices next action prioritizes semantic reuse");
+  assert.ok(enSection.includes("Reuse a matching name"), "en choices next action prioritizes semantic reuse");
+});
+
+test("Hub reveals within-family class choices only when the class needs a decision", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const render = submitPreviewHarness(src);
+  const base = {
+    taskName: "Class guidance preview",
+    workerProfileId: "local-grok-builder",
+    workerProfileLabel: "Local Grok Builder",
+    provider: "xai",
+    model: "grok-4.5",
+    runtime: "grok-build",
+    effort: "high",
+    budget: { maxBudgetUsd: 1.25, unlimited: false },
+    effectivePolicy: { values: { baseMaxAttempts: 6, maxExtraAttempts: 1, maxAdaptationRounds: 2 } },
+    quality: { passed: true, score: 80 },
+    integration: { applicable: true, integratable: true },
+    routingExplanation: {
+      present: true,
+      selectedWorker: {
+        provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high",
+        workerProfileId: "local-grok-builder", workerProfileLabel: "Local Grok Builder",
+      },
+      shortlistSize: 1,
+      basis: "user-specified",
+      evidence: null,
+      competition: null,
+      nextAction: "submit-directly",
+    },
+    previewRevisionDigest: "0".repeat(64),
+  };
+
+  // New class inside an existing family → the disclosure expands with the
+  // same-family candidates and a manual-decision hint.
+  const newClass = render({
+    ...base,
+    classificationAdvice: {
+      taskClass: { state: "new", terminalCount: 0, completeSelectionCount: 0 },
+      taskFamily: { state: "existing", terminalCount: 2, completeSelectionCount: 1 },
+      familyChoices: [],
+      classChoices: [
+        { taskClass: "migration", terminalCount: 1, completeSelectionCount: 1 },
+        { taskClass: "lint-fix", terminalCount: 1, completeSelectionCount: 0 },
+      ],
+      nextAction: "extend-family",
+    },
+  });
+  const newText = textOf(newClass);
+  assert.ok(newText.includes("[taskSubmitClassChoicesHint]"), "manual-decision hint rendered");
+  assert.ok(newText.includes("[taskSubmitClassChoices]"), "class choices disclosure rendered");
+  assert.ok(newText.includes("[taskSubmitClassChoice]"), "class choice row rendered");
+  let classOpen = false;
+  walkEl(newClass, (el) => {
+    if (el.tagName === "details" && el.children[0] && el.children[0].textContent === "[taskSubmitClassChoices]") {
+      classOpen = el.attrs["open"] !== undefined;
+    }
+  });
+  assert.equal(classOpen, true, "class choices disclosure is expanded for a new class");
+  // No Task identity or private content is rendered by the guidance block.
+  assert.ok(!newText.includes("taskId"));
+  assert.ok(!newText.includes("spec.project"));
+  assert.ok(!newText.includes("keychainService"));
+
+  // Missing class inside an existing family → the same disclosure appears.
+  const missingClass = render({
+    ...base,
+    classificationAdvice: {
+      taskClass: { state: "missing", terminalCount: 0, completeSelectionCount: 0 },
+      taskFamily: { state: "existing", terminalCount: 2, completeSelectionCount: 1 },
+      familyChoices: [],
+      classChoices: [{ taskClass: "migration", terminalCount: 2, completeSelectionCount: 1 }],
+      nextAction: "add-class",
+    },
+  });
+  assert.ok(textOf(missingClass).includes("[taskSubmitClassChoices]"), "missing class shows candidates");
+
+  // Exact class already reused → no extra candidate list noise.
+  const reused = render({
+    ...base,
+    classificationAdvice: {
+      taskClass: { state: "existing", terminalCount: 2, completeSelectionCount: 1 },
+      taskFamily: { state: "existing", terminalCount: 2, completeSelectionCount: 1 },
+      familyChoices: [],
+      classChoices: [{ taskClass: "migration", terminalCount: 2, completeSelectionCount: 1 }],
+      nextAction: "reuse-classification",
+    },
+  });
+  const reusedText = textOf(reused);
+  assert.ok(!reusedText.includes("[taskSubmitClassChoices]"), "reused class adds no disclosure");
+  assert.ok(!reusedText.includes("[taskSubmitClassChoicesHint]"), "reused class adds no hint");
+
+  // New family → classChoices is empty and no disclosure is added.
+  const newFamily = render({
+    ...base,
+    classificationAdvice: {
+      taskClass: { state: "new", terminalCount: 0, completeSelectionCount: 0 },
+      taskFamily: { state: "new", terminalCount: 0, completeSelectionCount: 0 },
+      familyChoices: [],
+      classChoices: [],
+      nextAction: "confirm-new-family",
+    },
+  });
+  assert.ok(!textOf(newFamily).includes("[taskSubmitClassChoices]"), "new family adds no disclosure");
+});
+
+test("Hub wires preview-bound draft-only class reuse actions and pending state", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // The bounded ops route is wired to the current board preview state.
+  assert.ok(src.includes("/api/ops/tasks/reuse-class"), "reuse-class ops route");
+  // The reuse request is built from the exact current preview (path + digest)
+  // plus the user-chosen class and confirm, and it is the ONLY reuse request.
+  assert.ok(src.includes("var reuseFilePath = boardPreview.filePath"), "reuse captures the current board path");
+  assert.ok(src.includes("var reuseDigest = boardPreview.digest"), "reuse captures the current preview digest");
+  assert.ok(src.includes("taskClass: taskClass"), "reuse sends the chosen class");
+  assert.ok(src.includes("previewRevisionDigest: reuseDigest"), "reuse binds the captured safe digest field");
+  assert.ok(src.includes("filePath: reuseFilePath"), "reuse sends the captured path");
+  assert.ok(src.includes("confirm: true"), "reuse requires confirm");
+  // Confirmation, per-choice action label, and bounded outcome copy.
+  assert.ok(src.includes("taskSubmitClassReuseConfirm"), "explicit confirmation i18n key");
+  assert.ok(src.includes("taskSubmitClassReuseBtn"), "per-choice action label key");
+  assert.ok(src.includes("taskSubmitClassReuseOk"), "success i18n key");
+  assert.ok(src.includes("taskSubmitClassReuseStale"), "stale i18n key");
+  assert.ok(src.includes("taskSubmitClassReuseFailed"), "failure i18n key");
+  // Pending state disables every reuse action, Preview and Submit together.
+  assert.ok(src.includes("boardReusePending"), "pending flag");
+  assert.ok(src.includes("pathIn.disabled = boardReusePending"), "a periodic render keeps path editing disabled");
+  assert.ok(src.includes("previewBtn.disabled = boardReusePending"), "a periodic render keeps Preview disabled");
+  assert.ok(src.includes('"data-fl-role", "reuse-class"'), "per-choice action role attribute");
+  assert.ok(src.includes("data-fl-role"), "action role attribute");
+  // Success renders only the daemon-returned fresh preview; Submit stays a
+  // separate click.
+  assert.ok(src.includes("renderSubmitPreview();"), "fresh preview re-render");
+  assert.ok(!/\.innerHTML\s*=/.test(src), "no innerHTML");
+});
+
+test("Hub i18n carries draft-only class reuse strings in both languages", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const zhSection = i18n.slice(i18n.indexOf("zh: {"));
+  const enSection = i18n.slice(0, i18n.indexOf("zh: {"));
+  const keys = [
+    "taskSubmitClassReuseBtn",
+    "taskSubmitClassReuseConfirm",
+    "taskSubmitClassReuseOk",
+    "taskSubmitClassReuseStale",
+    "taskSubmitClassReuseFailed",
+  ];
+  for (const key of keys) {
+    assert.ok(enSection.includes(key), `en ${key} present`);
+    assert.ok(zhSection.includes(key), `zh ${key} present`);
+  }
+  assert.ok(enSection.includes("Only the taskClass field changes"), "English copy describes a field, not a physical line");
+  assert.ok(zhSection.includes("只会修改 taskClass 字段"), "Chinese copy describes a field, not a physical line");
+  assert.ok(enSection.includes("could not confirm the result"), "English unknown outcome stays truthful");
+  assert.ok(zhSection.includes("无法确认操作结果"), "Chinese unknown outcome stays truthful");
+  assert.ok(enSection.includes("Use this type"), "en button label");
+  assert.ok(zhSection.includes("使用这个类型"), "zh button label");
+  assert.ok(enSection.includes("not submitted"), "en no-submit confirmation");
+  assert.ok(zhSection.includes("不会提交任务"), "zh no-submit confirmation");
+  assert.ok(enSection.includes("separate click"), "en separate-submit note");
+  assert.ok(zhSection.includes("单独点击"), "zh separate-submit note");
+});
+
+test("Hub renders per-choice reuse actions only for an eligible current preview", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const render = submitPreviewHarness(src);
+  const base = {
+    taskName: "Reuse action preview",
+    workerProfileId: "local-grok-builder",
+    workerProfileLabel: "Local Grok Builder",
+    provider: "xai",
+    model: "grok-4.5",
+    runtime: "grok-build",
+    effort: "high",
+    budget: { maxBudgetUsd: 1.25, unlimited: false },
+    effectivePolicy: { values: { baseMaxAttempts: 6, maxExtraAttempts: 1, maxAdaptationRounds: 2 } },
+    quality: { passed: true, score: 80 },
+    integration: { applicable: true, integratable: true },
+    routingExplanation: {
+      present: true,
+      selectedWorker: {
+        provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high",
+        workerProfileId: "local-grok-builder", workerProfileLabel: "Local Grok Builder",
+      },
+      shortlistSize: 1,
+      basis: "user-specified",
+      evidence: null,
+      competition: null,
+      nextAction: "submit-directly",
+    },
+    previewRevisionDigest: "0".repeat(64),
+  };
+  const advice = {
+    taskClass: { state: "new", terminalCount: 0, completeSelectionCount: 0 },
+    taskFamily: { state: "existing", terminalCount: 2, completeSelectionCount: 1 },
+    familyChoices: [],
+    classChoices: [
+      { taskClass: "migration", terminalCount: 1, completeSelectionCount: 1 },
+      { taskClass: "lint-fix", terminalCount: 1, completeSelectionCount: 0 },
+    ],
+    nextAction: "extend-family",
+  };
+  const invoked: Array<{ taskClass: string }> = [];
+  // Eligible preview with a handler: one action button per displayed choice.
+  const tree = render({ ...base, classificationAdvice: advice }, {
+    onReuse: (taskClass: string) => invoked.push({ taskClass }),
+    eligible: true,
+    pending: false,
+  });
+  const buttons: FakeEl[] = [];
+  walkEl(tree, (el) => {
+    if (el.attrs["data-fl-role"] === "reuse-class") buttons.push(el);
+  });
+  assert.equal(buttons.length, 2, "one action per listed class");
+  assert.ok(buttons.every((b) => b.tagName === "button"), "actions are buttons");
+  assert.ok(buttons.every((b) => b.disabled !== true), "actions enabled when not pending");
+  assert.ok(textOf(tree).includes("[taskSubmitClassReuseBtn]"), "action label rendered");
+  // Clicking invokes the exact class through the supplied handler.
+  (buttons[0]!.listeners["click"] ?? []).forEach((fn) => fn());
+  assert.deepEqual(invoked, [{ taskClass: "migration" }]);
+});
+
+test("Hub reuse actions and Submit are disabled while a reuse request is pending", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const render = submitPreviewHarness(src);
+  const base = {
+    taskName: "Reuse pending preview",
+    workerProfileId: "local-grok-builder",
+    workerProfileLabel: "Local Grok Builder",
+    provider: "xai",
+    model: "grok-4.5",
+    runtime: "grok-build",
+    effort: "high",
+    budget: { maxBudgetUsd: 1.25, unlimited: false },
+    effectivePolicy: { values: { baseMaxAttempts: 6, maxExtraAttempts: 1, maxAdaptationRounds: 2 } },
+    quality: { passed: true, score: 80 },
+    integration: { applicable: true, integratable: true },
+    routingExplanation: {
+      present: false,
+      selectedWorker: {
+        provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high",
+        workerProfileId: "local-grok-builder", workerProfileLabel: "Local Grok Builder",
+      },
+      shortlistSize: null,
+      basis: null,
+      evidence: null,
+      competition: null,
+      nextAction: "not-recorded",
+    },
+    previewRevisionDigest: "0".repeat(64),
+  };
+  const advice = {
+    taskClass: { state: "missing", terminalCount: 0, completeSelectionCount: 0 },
+    taskFamily: { state: "existing", terminalCount: 2, completeSelectionCount: 1 },
+    familyChoices: [],
+    classChoices: [{ taskClass: "migration", terminalCount: 2, completeSelectionCount: 1 }],
+    nextAction: "add-class",
+  };
+  const tree = render({ ...base, classificationAdvice: advice }, {
+    onReuse: () => {},
+    eligible: true,
+    pending: true,
+  });
+  const buttons: FakeEl[] = [];
+  walkEl(tree, (el) => {
+    if (el.attrs["data-fl-role"] === "reuse-class") buttons.push(el);
+  });
+  assert.ok(buttons.length >= 1, "reuse action rendered while pending");
+  assert.ok(buttons.every((b) => b.disabled === true), "every reuse action disabled while pending");
+});
+
+test("Hub submit preview renders explanation-first routing explanation", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // The routing block is rendered under the existing preview facts.
+  assert.ok(src.includes("renderSubmitRoutingExplanation"), "routing explanation renderer");
+  assert.ok(src.includes("preview.routingExplanation"), "renderer consumes the safe projection");
+  assert.ok(src.includes("taskSubmitRoutingTitle"), "explanation-first title key");
+  assert.ok(src.includes("taskSubmitRoutingBody"), "body explains the frozen record");
+  // Every closed basis maps to a bounded explanation.
+  for (const code of [
+    "user-specified",
+    "only-available",
+    "historical-evidence",
+    "runtime-capability",
+    "main-judgment",
+    "other",
+  ]) {
+    assert.ok(src.includes(`case "${code}"`), `basis switch handles ${code}`);
+  }
+  // Every closed next-action code maps to a bounded explanation.
+  for (const code of [
+    "submit-directly",
+    "consider-competition",
+    "run-competition",
+    "not-recorded",
+  ]) {
+    assert.ok(src.includes(`case "${code}"`), `next-action switch handles ${code}`);
+  }
+  // No private route field, identity-key map, or settings digest is read.
+  const rIdx = src.indexOf("function renderSubmitRoutingExplanation");
+  assert.ok(rIdx > 0);
+  const rEnd = src.indexOf("function renderSubmitClassificationAdvice", rIdx);
+  assert.ok(rEnd > rIdx, "routing renderer ends before classification renderer");
+  const rBlock = src.slice(rIdx, rEnd);
+  assert.ok(!rBlock.includes("taskId"), "no Task id rendered");
+  assert.ok(!rBlock.includes("spec.project"), "no project path rendered");
+  assert.ok(!rBlock.includes("keychainService"), "no keychain rendered");
+  assert.ok(!rBlock.includes("acceptance.commands"), "no commands rendered");
+  assert.ok(!rBlock.includes("endpoint"), "no endpoint rendered");
+  assert.ok(!rBlock.includes("selectedBecause"), "private reason note never read");
+  assert.ok(!rBlock.includes("settingsDigest"), "settings digest never read");
+  assert.ok(!rBlock.includes("exactSampleCounts"), "raw identity-key map never read");
+});
+
+test("Hub i18n carries routing explanation strings in both languages", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const zhSection = i18n.slice(i18n.indexOf("zh: {"));
+  const enSection = i18n.slice(0, i18n.indexOf("zh: {"));
+  const keys = [
+    "taskSubmitRoutingTitle",
+    "taskSubmitRoutingBody",
+    "taskSubmitRoutingUnavailable",
+    "taskSubmitRoutingNotRecorded",
+    "taskSubmitRoutingFactSelected",
+    "taskSubmitRoutingFactShortlist",
+    "taskSubmitRoutingFactBasis",
+    "taskSubmitRoutingFactScope",
+    "taskSubmitRoutingFactEvidence",
+    "taskSubmitRoutingFactCompetition",
+    "taskSubmitRoutingFactNext",
+    "taskSubmitRoutingBasisUserSpecified",
+    "taskSubmitRoutingBasisOnlyAvailable",
+    "taskSubmitRoutingBasisHistoricalEvidence",
+    "taskSubmitRoutingBasisRuntimeCapability",
+    "taskSubmitRoutingBasisMainJudgment",
+    "taskSubmitRoutingBasisOther",
+    "taskSubmitRoutingScopeExactClass",
+    "taskSubmitRoutingScopeTaskFamily",
+    "taskSubmitRoutingScopeNone",
+    "taskSubmitRoutingEvidenceValue",
+    "taskSubmitRoutingCompetitionNone",
+    "taskSubmitRoutingCompetitionConsider",
+    "taskSubmitRoutingCompetitionRequired",
+    "taskSubmitRoutingCompetitionMissing",
+    "taskSubmitRoutingTriggerCritical",
+    "taskSubmitRoutingTriggerMultiple",
+    "taskSubmitRoutingTriggerNewFamily",
+    "taskSubmitRoutingTriggerUserRequested",
+    "taskSubmitRoutingNextSubmitDirectly",
+    "taskSubmitRoutingNextConsiderCompetition",
+    "taskSubmitRoutingNextRunCompetition",
+    "taskSubmitRoutingNextNotRecorded",
+  ];
+  for (const key of keys) {
+    assert.ok(enSection.includes(key), `en ${key} present`);
+    assert.ok(zhSection.includes(key), `zh ${key} present`);
+  }
+  // Beginner copy answers why, evidence, and Competition in Chinese.
+  assert.ok(zhSection.includes("为什么选这个 Worker"), "zh title asks why");
+  assert.ok(zhSection.includes("历史证据支持这个 Worker"), "zh evidence basis");
+  assert.ok(zhSection.includes("本任务不会启动 Competition"), "zh competition-none copy");
+  assert.ok(zhSection.includes("直接提交这个 Worker"), "zh next-action copy");
+  assert.ok(enSection.includes("No Competition will be started"), "en competition-none copy");
+  assert.ok(enSection.includes("Selection basis"), "en basis label");
+  // Scope none means insufficient comparable history — never "unrecorded".
+  assert.ok(enSection.includes("insufficient comparable history"), "en scope-none copy");
+  assert.ok(zhSection.includes("可比历史不足"), "zh scope-none copy");
+});
+
+/* Fake DOM used by the submit-preview renderer tests below. It mirrors what
+ * the Hub's h()/collapsedSection() actually touch, so the full four-stage
+ * reading path can be asserted without a browser. */
+type FakeEl = {
+  tagName: string;
+  className: string;
+  textContent: string | undefined;
+  children: FakeEl[];
+  attrs: Record<string, string>;
+  listeners: Record<string, Array<(ev?: unknown) => void>>;
+  disabled?: boolean;
+  type?: string;
+  setAttribute(k: string, v: string): void;
+  appendChild(c: FakeEl): FakeEl;
+  addEventListener(type: string, fn: (ev?: unknown) => void): void;
+};
+
+function fakeHubEl(tag: string): FakeEl {
+  return {
+    tagName: tag,
+    className: "",
+    textContent: undefined,
+    children: [],
+    attrs: {},
+    listeners: {},
+    setAttribute(k: string, v: string) { this.attrs[k] = String(v); },
+    appendChild(c: FakeEl) { this.children.push(c); return c; },
+    addEventListener(type: string, fn: (ev?: unknown) => void) {
+      (this.listeners[type] ??= []).push(fn);
+    },
+  };
+}
+
+function submitPreviewHarness(src: string) {
+  const names = [
+    "submitFactRow",
+    "submitWorkerIdentity",
+    "submitWorkerText",
+    "submitFieldValue",
+    "submitBudgetText",
+    "submitAttemptsText",
+    "submitAdaptationText",
+    "submitQualityText",
+    "submitIntegrationText",
+    "submitBoundaryAdviceText",
+    "submitRoutingBasisText",
+    "submitRoutingScopeText",
+    "submitRoutingTriggerText",
+    "submitRoutingCompetitionText",
+    "submitRoutingNextActionText",
+    "renderSubmitRoutingExplanation",
+    "submitClassificationStateText",
+    "submitClassificationNextActionKey",
+    "renderSubmitClassificationAdvice",
+    "renderSubmitPreviewFacts",
+  ];
+  const body = names.map((name) => extractFunctionSource(src, name)).join("\n");
+  function h(tag: string, cls: string, text: unknown) {
+    const el = fakeHubEl(tag);
+    el.className = cls || "";
+    if (text !== undefined) el.textContent = String(text);
+    return el;
+  }
+  function t(key: string) { return `[${key}]`; }
+  function collapsedSection(title: string, node: FakeEl) {
+    const details = fakeHubEl("details");
+    const summary = fakeHubEl("summary");
+    summary.textContent = title;
+    details.appendChild(summary);
+    if (node) details.appendChild(node);
+    return details;
+  }
+  const documentStub = {
+    createElement: fakeHubEl,
+    createTextNode(text: unknown) { return { text: String(text) }; },
+  };
+  const factory = new Function(
+    "h", "t", "collapsedSection", "document",
+    `${body}\nreturn renderSubmitPreviewFacts;`,
+  );
+  return factory(h, t, collapsedSection, documentStub) as (
+    preview: Record<string, unknown>,
+    options?: Record<string, unknown>,
+  ) => FakeEl;
+}
+
+function walkEl(el: FakeEl, visit: (el: FakeEl) => void) {
+  visit(el);
+  el.children.forEach((child) => walkEl(child, visit));
+}
+
+function textOf(el: FakeEl): string {
+  let out = el.textContent || "";
+  el.children.forEach((child) => { out += textOf(child); });
+  return out;
+}
+
+test("Hub submit preview composes one four-stage reading path in DOM order", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const render = submitPreviewHarness(src);
+  const preview = {
+    taskName: "Refactor pricing service to route through the official price table",
+    workerProfileId: "local-grok-builder",
+    workerProfileLabel: "Local Grok Builder",
+    provider: "xai",
+    model: "grok-4.5",
+    runtime: "grok-build",
+    effort: "high",
+    // Private fields the renderer must never leak into the UI.
+    routingDecision: "PRIVATE-ROUTE-REASON-NEVER-RENDER",
+    selectedBecause: "PRIVATE-SELECTED-BECAUSE-NEVER-RENDER",
+    spec: { project: "/private/project/path", commands: ["PRIVATE-CMD-NEVER-RENDER"] },
+    budget: { maxBudgetUsd: 1.25, unlimited: false },
+    effectivePolicy: { values: { baseMaxAttempts: 6, maxExtraAttempts: 1, maxAdaptationRounds: 2 } },
+    quality: { passed: true, score: 80 },
+    integration: { applicable: true, integratable: true },
+    classificationAdvice: {
+      taskClass: { state: "new", terminalCount: 0, completeSelectionCount: 0 },
+      taskFamily: { state: "missing", terminalCount: 0, completeSelectionCount: 0 },
+      familyChoices: [
+        { family: "refactor", terminalCount: 2, completeSelectionCount: 1, distinctClassCount: 2 },
+        { family: "data-migration", terminalCount: 5, completeSelectionCount: 3, distinctClassCount: 4 },
+      ],
+      nextAction: "add-family",
+    },
+    routingExplanation: {
+      present: true,
+      selectedWorker: {
+        provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high",
+        workerProfileId: "local-grok-builder", workerProfileLabel: "Local Grok Builder",
+      },
+      shortlistSize: 4,
+      basis: "main-judgment",
+      evidence: { scope: "none", candidateCount: 2, totalSamples: 7 },
+      competition: { intent: "consider", triggers: ["critical"] },
+      nextAction: "consider-competition",
+    },
+    previewRevisionDigest: "0".repeat(64),
+  };
+  let tree: FakeEl | undefined;
+  assert.doesNotThrow(() => { tree = render(preview); }, "renderSubmitPreviewFacts must not throw");
+  const root = tree!;
+
+  // The four sections appear in exactly what/why/boundaries/next order.
+  const roles: string[] = [];
+  walkEl(root, (el) => {
+    const role = el.attrs["data-fl-role"];
+    if (role) roles.push(role);
+  });
+  assert.deepEqual(roles, ["submit-what", "submit-why", "submit-boundaries", "submit-classify"],
+    "one reading path: what will run, why this Worker, execution boundaries, classification and next");
+
+  // The selected Worker identity renders exactly once, in the "what" section.
+  let workerRows = 0;
+  let repeatedSelectedRows = 0;
+  walkEl(root, (el) => {
+    if (el.className.split(" ").includes("submit-fact-worker")) workerRows += 1;
+    // No fact row may repeat the old routing "Selected Worker" line.
+    const label = el.children[0] && el.children[0].textContent;
+    if (el.tagName === "div" && label === "[taskSubmitRoutingFactSelected]: ") repeatedSelectedRows += 1;
+  });
+  assert.equal(workerRows, 1, "Worker identity renders exactly once");
+  assert.equal(repeatedSelectedRows, 0, "routing never repeats the selected Worker");
+
+  // Every boundary fact survives inside the execution-boundaries section.
+  const boundaryText = textOf(root);
+  for (const key of [
+    "taskSubmitFactBudget", "taskSubmitFactAttempts", "taskSubmitFactAdaptation",
+    "taskSubmitFactQuality", "taskSubmitFactIntegration",
+  ]) {
+    assert.ok(boundaryText.includes(`[${key}]`), `boundary fact ${key} preserved`);
+  }
+
+  // The established-family list is a closed native disclosure; the next action
+  // stays directly visible beside it.
+  const details: FakeEl[] = [];
+  walkEl(root, (el) => { if (el.tagName === "details") details.push(el); });
+  const summaries = details.map((d) => (d.children[0] && d.children[0].textContent) || "");
+  assert.ok(summaries.includes("[taskSubmitFamilyChoices]"), "family candidates are a native disclosure");
+  assert.ok(summaries.includes("[taskSubmitTechnical]"), "technical digest stays a native disclosure");
+  let familyOpen = false;
+  walkEl(root, (el) => {
+    if (el.tagName === "details" && el.children[0] && el.children[0].textContent === "[taskSubmitFamilyChoices]") {
+      familyOpen = el.attrs["open"] !== undefined;
+    }
+  });
+  assert.equal(familyOpen, false, "family disclosure defaults closed");
+  const nextActions: string[] = [];
+  walkEl(root, (el) => {
+    if (el.className.split(" ").includes("submit-next-action")) nextActions.push(el.textContent || "");
+  });
+  assert.equal(nextActions.length, 1, "one classification next action stays visible");
+  assert.ok((nextActions[0] ?? "").includes("[taskSubmitNextAddFamily]"),
+    "next action is not hidden by the disclosure");
+
+  // Privacy: private fields, raw decisions, paths and commands never leak.
+  const renderedText = textOf(root);
+  for (const forbidden of [
+    "PRIVATE-ROUTE-REASON-NEVER-RENDER",
+    "PRIVATE-SELECTED-BECAUSE-NEVER-RENDER",
+    "/private/project/path",
+    "PRIVATE-CMD-NEVER-RENDER",
+    "routingDecision",
+    "selectedBecause",
+  ]) {
+    assert.ok(!renderedText.includes(forbidden), `preview facts never render ${forbidden}`);
+  }
+});
+
+test("Hub submit preview degrades honestly when routing and classification advice are absent", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const render = submitPreviewHarness(src);
+  const preview = {
+    taskName: "Legacy task with a frozen Worker but no recorded reasoning",
+    workerProfileId: "local-grok-builder",
+    workerProfileLabel: "Local Grok Builder",
+    provider: "xai",
+    model: "grok-4.5",
+    runtime: "grok-build",
+    effort: "medium",
+    budget: { unlimited: true },
+    effectivePolicy: { values: { baseMaxAttempts: 3, maxExtraAttempts: 0 } },
+    quality: { passed: true, score: 70 },
+    integration: { applicable: false },
+    routingExplanation: null,
+    classificationAdvice: null,
+    previewRevisionDigest: "d".repeat(64),
+  };
+  const tree = render(preview);
+  const rendered = textOf(tree);
+  assert.ok(rendered.includes("[taskSubmitRoutingUnavailable]"), "missing routing explanation is stated honestly");
+  assert.ok(rendered.includes("[taskSubmitClassUnavailable]"), "missing classification advice is stated honestly");
+  // The effective Worker and execution limits remain readable.
+  assert.ok(rendered.includes("local-grok-builder"), "effective Worker stays visible without routing advice");
+  assert.ok(rendered.includes("[taskSubmitFactBudget]"), "budget stays visible");
+  assert.ok(rendered.includes("[taskSubmitFactIntegration]"), "Integration stays visible");
+  let workerRows = 0;
+  walkEl(tree, (el) => {
+    if (el.className.split(" ").includes("submit-fact-worker")) workerRows += 1;
+  });
+  assert.equal(workerRows, 1, "legacy preview still renders the Worker once");
+});
+
+test("Hub submit preview renders workspace boundary review/clear/unavailable/legacy states", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const render = submitPreviewHarness(src);
+  const base = {
+    taskName: "Boundary preview",
+    workerProfileId: "local-grok-builder",
+    workerProfileLabel: "Local Grok Builder",
+    provider: "xai",
+    model: "grok-4.5",
+    runtime: "grok-build",
+    effort: "high",
+    budget: { maxBudgetUsd: 1.25, unlimited: false },
+    effectivePolicy: { values: { baseMaxAttempts: 6, maxExtraAttempts: 1, maxAdaptationRounds: 2 } },
+    quality: { passed: true, score: 80 },
+    integration: { applicable: true, integratable: true },
+    classificationAdvice: {
+      taskClass: { state: "new", terminalCount: 0, completeSelectionCount: 0 },
+      taskFamily: { state: "missing", terminalCount: 0, completeSelectionCount: 0 },
+      familyChoices: [],
+      nextAction: "add-family",
+    },
+    routingExplanation: {
+      present: true,
+      selectedWorker: {
+        provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high",
+        workerProfileId: "local-grok-builder", workerProfileLabel: "Local Grok Builder",
+      },
+      shortlistSize: 1,
+      basis: "user-specified",
+      evidence: null,
+      competition: null,
+      nextAction: "submit-directly",
+    },
+    previewRevisionDigest: "0".repeat(64),
+  };
+
+  // Review: count rendered, hint rendered, no directory names, and the tip
+  // appears inside the boundaries section before the technical digest.
+  const review = render({
+    ...base,
+    workspaceBoundaryAdvice: {
+      status: "review",
+      ignoredDirectoryRootCount: 2,
+      coveredCount: 1,
+      visibleBusinessCount: 1,
+      reason: "checked",
+      nextAction: "review-workspace-boundaries",
+    },
+  });
+  const reviewText = textOf(review);
+  assert.ok(reviewText.includes("[taskSubmitFactBoundary]"), "boundary fact label rendered");
+  assert.ok(reviewText.includes("[taskSubmitBoundaryReview]"), "review count copy rendered");
+  assert.ok(reviewText.includes("[taskSubmitBoundaryReviewHint]"), "review hint rendered");
+  assert.ok(!reviewText.includes("dist"), "no ignored directory name is rendered");
+  assert.ok(!reviewText.includes("/private/"), "no absolute path is rendered");
+  assert.ok(
+    reviewText.indexOf("[taskSubmitBoundaryReview]") < reviewText.indexOf("[taskSubmitDigestLabel]"),
+    "review tip sits before the technical digest",
+  );
+  let reviewSection = 0;
+  walkEl(review, (el) => {
+    if (el.attrs["data-fl-role"] === "submit-boundaries") reviewSection += 1;
+  });
+  assert.equal(reviewSection, 1, "boundary tip lives inside the execution-boundaries section");
+
+  // Clear: concise, truthful, and does not claim future coverage.
+  const clear = render({
+    ...base,
+    workspaceBoundaryAdvice: {
+      status: "clear",
+      ignoredDirectoryRootCount: 0,
+      coveredCount: 0,
+      visibleBusinessCount: 0,
+      reason: "checked",
+      nextAction: "continue",
+    },
+  });
+  assert.ok(textOf(clear).includes("[taskSubmitBoundaryClear]"), "clear copy rendered");
+
+  // Unavailable: closed reason, no internal error text.
+  const unavailable = render({
+    ...base,
+    workspaceBoundaryAdvice: {
+      status: "unavailable",
+      ignoredDirectoryRootCount: 0,
+      coveredCount: 0,
+      visibleBusinessCount: 0,
+      reason: "not-git",
+      nextAction: "manual-review",
+    },
+  });
+  const unavailableText = textOf(unavailable);
+  assert.ok(unavailableText.includes("[taskSubmitBoundaryUnavailable]"), "unavailable copy rendered");
+  assert.ok(!unavailableText.includes("fatal"), "no Git diagnostic is rendered");
+  assert.ok(!unavailableText.includes("not-git"), "internal reason code is not rendered");
+
+  // Legacy (older daemon without the field): safe manual-review degrade.
+  const legacy = render(base);
+  const legacyText = textOf(legacy);
+  assert.ok(legacyText.includes("[taskSubmitBoundaryLegacy]"), "legacy degrade note rendered");
+});
+
+test("Hub boundary renderer fails closed for unknown or malformed advice", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const render = submitPreviewHarness(src);
+  const base = {
+    taskName: "Boundary malformed preview",
+    workerProfileId: "local-grok-builder",
+    workerProfileLabel: "Local Grok Builder",
+    provider: "xai",
+    model: "grok-4.5",
+    runtime: "grok-build",
+    effort: "high",
+    budget: { maxBudgetUsd: 1.25, unlimited: false },
+    effectivePolicy: { values: { baseMaxAttempts: 6, maxExtraAttempts: 1, maxAdaptationRounds: 2 } },
+    quality: { passed: true, score: 80 },
+    integration: { applicable: true, integratable: true },
+    classificationAdvice: {
+      taskClass: { state: "new", terminalCount: 0, completeSelectionCount: 0 },
+      taskFamily: { state: "missing", terminalCount: 0, completeSelectionCount: 0 },
+      familyChoices: [],
+      nextAction: "add-family",
+    },
+    routingExplanation: {
+      present: true,
+      selectedWorker: {
+        provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high",
+        workerProfileId: "local-grok-builder", workerProfileLabel: "Local Grok Builder",
+      },
+      shortlistSize: 1,
+      basis: "user-specified",
+      evidence: null,
+      competition: null,
+      nextAction: "submit-directly",
+    },
+    previewRevisionDigest: "0".repeat(64),
+  };
+
+  // Unknown status never disappears and never echoes the raw status value.
+  const unknown = textOf(render({ ...base, workspaceBoundaryAdvice: { status: "mystery" } }));
+  assert.ok(unknown.includes("[taskSubmitBoundaryLegacy]"), "unknown status falls back to manual review");
+  assert.ok(!unknown.includes("mystery"), "raw status value is never echoed");
+
+  // Malformed counts fail closed to manual review instead of a false clear.
+  const malformed = textOf(render({
+    ...base,
+    workspaceBoundaryAdvice: {
+      status: "clear",
+      ignoredDirectoryRootCount: -1,
+      coveredCount: 0,
+      visibleBusinessCount: 0,
+    },
+  }));
+  assert.ok(malformed.includes("[taskSubmitBoundaryLegacy]"), "malformed counts fall back to manual review");
+
+  const inconsistent = textOf(render({
+    ...base,
+    workspaceBoundaryAdvice: {
+      status: "clear",
+      ignoredDirectoryRootCount: 2,
+      coveredCount: 1,
+      visibleBusinessCount: 0,
+      reason: "checked",
+      nextAction: "continue",
+    },
+  }));
+  assert.ok(inconsistent.includes("[taskSubmitBoundaryLegacy]"), "inconsistent advice falls back to manual review");
+
+  // Non-object advice (null/corrupt) also fails closed.
+  const nullAdvice = textOf(render({ ...base, workspaceBoundaryAdvice: null }));
+  assert.ok(nullAdvice.includes("[taskSubmitBoundaryLegacy]"), "null advice falls back to manual review");
+});
+
+test("Hub app.js boundary renderer consumes only the safe projection", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("function submitBoundaryAdviceText"), "boundary advice renderer");
+  assert.ok(src.includes("preview.workspaceBoundaryAdvice"), "renderer consumes the safe projection");
+  assert.ok(src.includes("taskSubmitFactBoundary"), "boundary fact label key");
+  assert.ok(src.includes("taskSubmitBoundaryReview"), "review copy key");
+  assert.ok(src.includes("taskSubmitBoundaryClear"), "clear copy key");
+  assert.ok(src.includes("taskSubmitBoundaryUnavailable"), "unavailable copy key");
+  assert.ok(src.includes("taskSubmitBoundaryLegacy"), "legacy degrade copy key");
+  // The renderer only reads counts and closed codes; it never touches paths.
+  assert.ok(!/workspaceBoundaryAdvice\.[a-zA-Z]*[Pp]ath/.test(src),
+    "renderer never reads a path field");
+});
+
+test("Hub i18n carries workspace boundary strings in both languages", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const enSection = i18n.slice(0, i18n.indexOf("zh: {"));
+  const zhSection = i18n.slice(i18n.indexOf("zh: {"));
+  const keys = [
+    "taskSubmitFactBoundary",
+    "taskSubmitBoundaryReview",
+    "taskSubmitBoundaryReviewHint",
+    "taskSubmitBoundaryClear",
+    "taskSubmitBoundaryUnavailable",
+    "taskSubmitBoundaryLegacy",
+  ];
+  for (const key of keys) {
+    assert.ok(enSection.includes(`${key}:`), `en ${key}`);
+    assert.ok(zhSection.includes(`${key}:`), `zh ${key}`);
+  }
+  // The review copy is explicit that Git ignore is only a review signal and
+  // never proof of generated output, and it names the fields to check.
+  assert.ok(enSection.includes("does not prove generated output"), "en review hint");
+  assert.ok(zhSection.includes("不能证明"), "zh review hint is a denial");
+  assert.ok(enSection.includes("workspace.exclude"), "en names exclude field");
+  assert.ok(zhSection.includes("workspace.exclude"), "zh names exclude field");
+  assert.ok(enSection.includes("workspace.generatedPaths"), "en names generatedPaths field");
+  assert.ok(zhSection.includes("workspace.generatedPaths"), "zh names generatedPaths field");
+  // Unavailable and legacy copy require manual confirmation, not an auto-fix.
+  assert.ok(enSection.includes("Manually confirm"), "en manual-review instruction");
+  assert.ok(zhSection.includes("手动确认"), "zh manual-review instruction");
+  assert.ok(!zhSection.includes("自动添加"), "no auto-edit claim in zh");
+  assert.ok(!enSection.includes("automatically add"), "no auto-edit claim in en");
+});
+
+test("Hub submit preview responsive and scoped CSS ships in both languages", async () => {
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const enSection = i18n.slice(0, i18n.indexOf("zh: {"));
+  const zhSection = i18n.slice(i18n.indexOf("zh: {"));
+  // Group headings are scoped, use existing tokens, and are bilingual.
+  assert.ok(css.includes(".submit-preview-facts"), "submit preview container scoped style");
+  assert.ok(css.includes(".submit-group-title"), "group heading style ships");
+  assert.ok(css.includes(".submit-group-boundaries"), "boundaries grouping style ships");
+  assert.ok(css.includes("overflow-wrap: anywhere"), "long values wrap without overflow");
+  assert.ok(css.includes("word-break: break-word"), "long values break cleanly");
+  // Narrow screens collapse the two-column boundaries grid to the DOM order.
+  assert.ok(/@media \(max-width: 768px\)[\s\S]*\.submit-group-boundaries[\s\S]*grid-template-columns: 1fr/
+    .test(css), "narrow layout stacks boundaries in DOM order");
+  // The new group headings exist in both languages.
+  assert.ok(enSection.includes("taskSubmitGroupWhat"), "en group-what key");
+  assert.ok(zhSection.includes("taskSubmitGroupWhat"), "zh group-what key");
+  assert.ok(enSection.includes("taskSubmitGroupBoundaries"), "en group-boundaries key");
+  assert.ok(zhSection.includes("taskSubmitGroupBoundaries"), "zh group-boundaries key");
+  assert.ok(zhSection.includes("将执行什么"), "zh what-run heading copy");
+  assert.ok(zhSection.includes("执行边界"), "zh boundaries heading copy");
+  assert.ok(enSection.includes("What will run"), "en what-run heading copy");
+  assert.ok(enSection.includes("Execution boundaries"), "en boundaries heading copy");
+});
+
 test("Hub app.js carries worker-edit and advanced-policy helpers", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   assert.ok(src.includes("S.workerEditId"), "worker edit state variable");
@@ -1541,6 +2480,182 @@ test("Hub preflight card renders ordered path evidence without throwing", async 
   const firstPathIdx = renderedTexts.findIndex((s) => s.includes(`${pathEvidence[0]!.path} - `));
   assert.ok(hintIdx >= 0 && firstPathIdx >= 0 && hintIdx < firstPathIdx,
     "beginner classification copy appears before technical path lines");
+});
+
+test("Hub preflight card explains a patch-not-applicable issue before collapsed diagnostics bilingually", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const enSection = i18n.slice(0, i18n.indexOf("zh: {"));
+  const zhSection = i18n.slice(i18n.indexOf("zh: {"));
+  // Renderer binds the canonical issue and leads with the explanation.
+  assert.ok(src.includes("result.applicabilityIssue"), "renderer reads applicabilityIssue");
+  assert.ok(src.includes('"preflight-applicability"'), "explanation section marker");
+  // Raw diagnostics are suppressed from the primary copy when the issue exists.
+  assert.ok(src.includes("rejects.length && !applicabilityIssue"),
+    "primary rejection list is suppressed for the applicability case");
+  assert.ok(src.includes('event.presentationCode === "integration-patch-not-applicable"'),
+    "ordinary Task Detail timeline consumes the closed applicability presentation hint");
+  assert.ok(src.includes('return t("tlPreflightPatchNotApplicable")'),
+    "ordinary Task Detail localizes the applicability summary instead of showing raw git text");
+  // Every applicability copy key exists in both locales.
+  for (const key of [
+    "taskPreflightApplicabilityTitle",
+    "taskPreflightApplicabilityHappened",
+    "taskPreflightApplicabilityMeaning",
+    "taskPreflightApplicabilityNext",
+    "tlPreflightPatchNotApplicable",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key} present`);
+    assert.ok(zhSection.includes(key), `zh ${key} present`);
+  }
+  // Bilingual copy is real (not English fallback) and stays cautious.
+  assert.ok(enSection.includes("no longer applies cleanly"), "en what-happened copy");
+  assert.ok(enSection.includes("did not determine the exact cause"), "en cautious meaning");
+  assert.ok(enSection.includes("decide which changes to keep"), "en next action");
+  assert.ok(enSection.includes("The exact conflict was not determined"), "en next action does not assert an exact conflict");
+  assert.ok(zhSection.includes("无法干净地应用"), "zh what-happened copy");
+  assert.ok(zhSection.includes("没有判断具体原因"), "zh cautious meaning");
+  assert.ok(zhSection.includes("决定保留哪些改动"), "zh next action");
+  assert.ok(zhSection.includes("具体冲突尚未确定"), "zh next action does not assert an exact conflict");
+  // The applicability copy itself must not blame the Worker or promise that
+  // retrying unchanged fixes the problem (other timeline labels may use those
+  // words, so check only the applicability values).
+  function extractI18nValue(section: string, key: string): string {
+    const m = section.match(new RegExp(key + ':\\s*"([^"]*)"'));
+    return m ? m[1]! : "";
+  }
+  const enApplicability = [
+    "taskPreflightApplicabilityHappened",
+    "taskPreflightApplicabilityMeaning",
+    "taskPreflightApplicabilityNext",
+  ].map((k) => extractI18nValue(enSection, k)).join(" ");
+  const zhApplicability = [
+    "taskPreflightApplicabilityHappened",
+    "taskPreflightApplicabilityMeaning",
+    "taskPreflightApplicabilityNext",
+  ].map((k) => extractI18nValue(zhSection, k)).join(" ");
+  assert.ok(!/worker failed/i.test(enApplicability), "en applicability copy does not blame the Worker");
+  assert.ok(!/retry.*will fix/i.test(enApplicability), "en applicability copy does not promise retry fixes it");
+  assert.ok(!/重试即可|重试就能/.test(zhApplicability), "zh applicability copy does not promise retry fixes it");
+
+  // Render with the issue and verify ordering + no raw diagnostic in primary copy.
+  const fnSource = extractFunctionSource(src, "renderPreflightResult");
+  const renderedTexts: string[] = [];
+  function fakeEl(tag: string) {
+    return {
+      tagName: tag,
+      className: "",
+      textContent: undefined as string | undefined,
+      children: [] as unknown[],
+      attrs: {} as Record<string, string>,
+      setAttribute(k: string, v: string) { this.attrs[k] = v; },
+      appendChild(c: unknown) { this.children.push(c); return c; },
+      querySelector() { return null; },
+      addEventListener() {},
+    };
+  }
+  function h(tag: string, cls: string, text: unknown) {
+    const el = fakeEl(tag);
+    el.className = cls || "";
+    if (text !== undefined) {
+      el.textContent = String(text);
+      renderedTexts.push(String(text));
+    }
+    return el;
+  }
+  function t(key: string) { return `[${key}]`; }
+  function collapsedSection(title: string, node: unknown) {
+    const el = fakeEl("details");
+    renderedTexts.push(String(title));
+    if (node) el.appendChild(node);
+    return el;
+  }
+  function boundedDiagnostic(v: unknown) { return String(v); }
+  function deliveryPlanExpectation() { return "not-configured"; }
+  const DELIVERY_STAGE_KEYS = ["sourceApply", "sourceVerify", "artifactBuild", "runtimeActivation"];
+  const DELIVERY_STAGE_LABEL_KEYS: Record<string, string> = {
+    sourceApply: "stageSourceApply",
+    sourceVerify: "stageSourceVerify",
+    artifactBuild: "stageArtifactBuild",
+    runtimeActivation: "stageRuntimeActivation",
+  };
+  const documentStub = {
+    createElement: fakeEl,
+    createTextNode(text: unknown) { renderedTexts.push(String(text)); return { text: String(text) }; },
+  };
+  const factory = new Function(
+    "h", "t", "collapsedSection", "boundedDiagnostic", "deliveryPlanExpectation",
+    "DELIVERY_STAGE_KEYS", "DELIVERY_STAGE_LABEL_KEYS", "document",
+    `${fnSource}\nreturn renderPreflightResult;`,
+  );
+  const renderPreflightResult = factory(
+    h, t, collapsedSection, boundedDiagnostic, deliveryPlanExpectation,
+    DELIVERY_STAGE_KEYS, DELIVERY_STAGE_LABEL_KEYS, documentStub,
+  ) as (result: Record<string, unknown>) => { attrs: Record<string, string> };
+
+  const rawDiagnostic = "Patch does not apply cleanly: error: patch failed";
+  const result = {
+    id: "rec-applic",
+    expiresAt: "2026-07-29T00:00:00.000Z",
+    rejectionReasons: [rawDiagnostic],
+    affectedFiles: ["src/a.ts"],
+    deliveryPlan: { stages: {} },
+    applicabilityIssue: { code: "patch-not-applicable" },
+  };
+  let card: { attrs: Record<string, string> } | undefined;
+  assert.doesNotThrow(() => {
+    card = renderPreflightResult(result);
+  }, "renderPreflightResult must not throw with the applicability issue");
+  assert.equal(card!.attrs["data-fl-role"], "preflight-result");
+
+  // The explanation (what happened + uncertain meaning) and the one coherent
+  // applicability next action (in the footer) all render before the collapsed
+  // technical disclosure, which is the only place raw diagnostics may appear.
+  const titleIdx = renderedTexts.indexOf("[taskPreflightApplicabilityTitle]");
+  const happenedIdx = renderedTexts.indexOf("[taskPreflightApplicabilityHappened]");
+  const meaningIdx = renderedTexts.indexOf("[taskPreflightApplicabilityMeaning]");
+  const nextIdx = renderedTexts.indexOf("[taskPreflightApplicabilityNext]");
+  const disclosureIdx = renderedTexts.indexOf("[taskPreflightReceiptDetails]");
+  assert.ok(titleIdx >= 0 && happenedIdx >= 0 && meaningIdx >= 0 && nextIdx >= 0,
+    "explanation and applicability next action rendered");
+  assert.ok(meaningIdx < nextIdx, "explanation appears before the applicability next action");
+  assert.ok(disclosureIdx >= 0, "collapsed technical disclosure rendered");
+  assert.ok(nextIdx < disclosureIdx,
+    "applicability next action appears before the collapsed technical disclosure");
+  // No contradictory generic footer for the applicability case.
+  assert.ok(
+    !renderedTexts.some((s) => s.indexOf("[taskPreflightNextReject]") === 0 || s.includes("[taskPreflightNextReject]")),
+    "no generic correct-the-source footer for the applicability case",
+  );
+  // Raw git diagnostic appears only inside the collapsed disclosure, never in
+  // the primary copy before the explanation.
+  const rawIdx = renderedTexts.findIndex((s) => s.includes(rawDiagnostic));
+  assert.ok(rawIdx >= 0, "raw diagnostic retained as technical evidence");
+  assert.ok(nextIdx < rawIdx, "raw diagnostic appears only after the applicability next action");
+
+  // Legacy receipt without the structured issue: no explanation block, and the
+  // existing readable rejection list is preserved (no throw).
+  const legacyResult = {
+    id: "rec-legacy",
+    expiresAt: "2026-07-29T00:00:00.000Z",
+    rejectionReasons: ["Patch changes 6 files (limit: 5)"],
+    affectedFiles: ["src/a.ts"],
+    deliveryPlan: { stages: {} },
+  };
+  renderedTexts.length = 0;
+  let legacyCard: { attrs: Record<string, string> } | undefined;
+  assert.doesNotThrow(() => {
+    legacyCard = renderPreflightResult(legacyResult);
+  }, "legacy receipt without the issue must still render");
+  assert.equal(legacyCard!.attrs["data-fl-role"], "preflight-result");
+  assert.ok(
+    !renderedTexts.some((s) => s.includes("taskPreflightApplicability")),
+    "legacy receipt renders no applicability explanation",
+  );
+  assert.ok(
+    renderedTexts.some((s) => s.includes("Patch changes 6 files")),
+    "legacy rejection list remains readable",
+  );
 });
 
 test("shipped tree has no Console product server or Setup UI server", async () => {
@@ -3926,6 +5041,49 @@ test("Hub model routing renders bilingual explanation-first UI with safe control
   assert.ok(i18n.includes("Some evidence did not participate"));
 });
 
+test("Hub model routing candidate selection is Profile-only and identity-preserving", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.doesNotThrow(() => new Function(src), "Hub app.js must parse before routing assertions");
+
+  const renderStart = src.indexOf("function renderModelRoutingSection");
+  const renderEnd = src.indexOf("function renderMrResult", renderStart);
+  const routingBlock = src.slice(renderStart, renderEnd > 0 ? renderEnd : src.length);
+
+  // Candidate options are built from saved Worker Profiles only and keyed by Profile id.
+  assert.ok(routingBlock.includes("saved Worker Profiles only"), "profile-only candidate construction");
+  assert.match(routingBlock, /candOptions\.push\(\{\s*key:\s*p\.id\b/, "candidate key is the Profile id");
+  assert.ok(!routingBlock.includes("From catalog models not already covered"),
+    "no catalog-only candidate loop remains");
+  assert.equal(
+    (routingBlock.match(/candOptions\.push\(/g) || []).length,
+    1,
+    "exactly one candidate source (saved Worker Profiles)",
+  );
+
+  // Result rendering preserves worker identity.
+  assert.ok(src.includes('t("mrCandidateWorker"'), "profile candidate name uses worker label");
+  assert.ok(src.includes('t("mrRecommendationProfile"'), "profile recommendation uses worker label");
+  assert.ok(src.includes('t("mrWorkerProfileId"'), "worker profile id is shown");
+  assert.ok(src.includes('t("mrComparedWorkers"'), "explanation names the compared Workers");
+
+  // Evaluate sends saved Profile ids, never provider/model candidates.
+  assert.ok(src.includes("workerProfileIds: deduped"), "evaluate sends workerProfileIds");
+
+  // Bilingual keys.
+  for (const key of [
+    "mrComparedWorkers", "mrRecommendationProfile", "mrWorkerProfileId", "mrCandidateWorker",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+
+  // Chinese copy is a real translation, not an English fallback.
+  assert.ok(zhSection.includes("比较的 Worker"), "zh compared-workers copy");
+  assert.ok(zhSection.includes("ForkLight 推荐 Worker"), "zh profile recommendation copy");
+});
+
 test("Hub model routing explains asymmetric sample coverage without claiming history is empty", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18nSrc = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
@@ -4126,6 +5284,67 @@ test("Hub model routing explains asymmetric sample coverage without claiming his
   assert.ok(!familyTieReasons.some((r) => /Insufficient evidence/i.test(r)),
     "ready family tie must not report sparse exact-type counts as insufficient");
 
+  // `no-active-factors` means no factor can participate in this evaluation;
+  // it does not by itself prove that the user set every weight to zero. When
+  // sample coverage is already the blocker, keep the explanation focused on
+  // that primary cause instead of adding a false settings diagnosis.
+  const insufficientAndNoActive = noFamilyCands.map((candidate) => ({
+    ...candidate,
+    uncertainty: {
+      insufficientSamples: true,
+      insufficientGap: false,
+      reasons: ["insufficient-relevant-samples", "no-active-factors"],
+    },
+  }));
+  const enabledWeights = {
+    acceptedDelivery: 1, verifiedBehavior: 1, modelQualityFailure: 0.5,
+    correctionChurn: 0.2, firstPassSuccess: 0.5,
+    officialCost: 0, duration: 0, budgetReliability: 0,
+  };
+  i18n!.setLang("en");
+  const sparseReasons = api.buildMrReasons(insufficientAndNoActive, {
+    ...policy, weights: enabledWeights,
+  }, { evidenceScope: "none" });
+  assert.ok(!sparseReasons.some((r) => /preferences are turned off|enabled preferences do not/i.test(r)),
+    "sample shortage must not be mislabeled as disabled weights or a second factor failure");
+
+  const readyNoActive = noFamilyCands.map((candidate) => ({
+    ...candidate,
+    sampleCoverage: {
+      exactTerminalCount: 8, exactRelevantCount: 8, exactMinRelevantSamples: 5,
+    },
+    evidence: { relevantSampleCount: 8 },
+    uncertainty: {
+      insufficientSamples: false,
+      insufficientGap: false,
+      reasons: ["no-active-factors"],
+    },
+  }));
+  const allWeightsOff = Object.fromEntries(Object.keys(enabledWeights).map((key) => [key, 0]));
+  const disabledReasons = api.buildMrReasons(readyNoActive, {
+    ...policy, weights: allWeightsOff,
+  }, { evidenceScope: "exact-class" });
+  assert.ok(disabledReasons.some((r) => /All comparison preferences are turned off/i.test(r)),
+    "actual zero weights receive the settings-specific explanation");
+
+  const unavailableReasons = api.buildMrReasons(readyNoActive, {
+    ...policy, weights: enabledWeights,
+  }, { evidenceScope: "exact-class" });
+  assert.ok(unavailableReasons.some((r) => /enabled preferences do not currently have usable evidence/i.test(r)),
+    "enabled-but-unavailable evidence must not be described as zero weights");
+
+  i18n!.setLang("zh");
+  const zhSparseReasons = api.buildMrReasons(insufficientAndNoActive, {
+    ...policy, weights: enabledWeights,
+  }, { evidenceScope: "none" });
+  assert.ok(!zhSparseReasons.some((r) => /比较偏好都已关闭|已启用的偏好目前没有/.test(r)),
+    "中文样本不足路径也只解释主因");
+  const zhDisabledReasons = api.buildMrReasons(readyNoActive, {
+    ...policy, weights: allWeightsOff,
+  }, { evidenceScope: "exact-class" });
+  assert.ok(zhDisabledReasons.some((r) => r.includes("所有比较偏好都已关闭")),
+    "中文零权重路径给出准确设置解释");
+
   // Privacy: coverage keys must not mention Task ids, paths, prompts, or logs
   for (const section of [enSection, zhSection]) {
     const blockStart = section.indexOf("mrCandidateExactCoverage");
@@ -4254,6 +5473,71 @@ test("Hub model routing accepted delivery shows Main-backed counts not machine s
     const block = section.slice(blockStart, blockStart + 1500);
     assert.ok(!/taskId|sourcePath|rawLog|apiKey|endpoint|prompt/i.test(block),
       "accepted-delivery copy stays privacy-safe");
+  }
+});
+
+test("Hub model routing evidence-ready subset renders bilingual coverage facts and keeps excluded Workers eligible", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  // Core rendering: cohort participation filtering and badges.
+  assert.ok(src.includes(".cohortParticipation === \"compared\""),
+    "filters compared Workers by cohort participation");
+  assert.ok(src.includes("mrCandidateExcludedFromComparison"),
+    "renders excluded-from-comparison badge");
+  assert.ok(src.includes("mr-subset-warning"),
+    "renders subset warning styling");
+
+  // Canonical coverage facts consumed in the result section.
+  assert.ok(src.includes(".allCandidatesCompared"),
+    "reads allCandidatesCompared from response");
+  assert.ok(src.includes(".totalCandidateCount"),
+    "reads totalCandidateCount from response");
+  assert.ok(src.includes(".excludedCandidateCount"),
+    "reads the canonical not-compared count from response");
+  assert.ok(src.includes("rec.coverage"),
+    "reads the canonical recommendation boundary from the recommendation");
+  assert.ok(src.includes("comparisonEvidence"),
+    "reads comparisonEvidence for active-scope counts");
+
+  // Bilingual i18n for cohort coverage and excluded candidates.
+  for (const key of [
+    "mrAllCandidatesCompared", "mrEvidenceReadySubset",
+    "mrCandidateExcludedFromComparison", "mrRecommendationSubsetOnly",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+
+  // Missing history is explained as a temporary evidence gap, while the
+  // Worker remains selectable. The copy does not assign a quality outcome.
+  const enCandidateCopy = enSection.match(
+    /mrCandidateExcludedFromComparison:\s*"([^"]+)"/,
+  )?.[1] ?? "";
+  const zhCandidateCopy = zhSection.match(
+    /mrCandidateExcludedFromComparison:\s*"([^"]+)"/,
+  )?.[1] ?? "";
+  assert.match(enCandidateCopy, /needs more comparable history/i);
+  assert.match(enCandidateCopy, /remains available/i);
+  assert.doesNotMatch(enCandidateCopy, /permanently|is worse|has failed/i);
+  assert.match(zhCandidateCopy, /需要更多可比历史/);
+  assert.match(zhCandidateCopy, /仍然可选/);
+  assert.doesNotMatch(zhCandidateCopy, /永久|更差|已经失败/);
+
+  // No em dash was introduced by the evidence-ready-subset work.
+  for (const key of [
+    "mrAllCandidatesCompared", "mrEvidenceReadySubset",
+    "mrCandidateExcludedFromComparison", "mrRecommendationSubsetOnly",
+  ]) {
+    const startIdx = src.indexOf(key);
+    if (startIdx < 0) continue;
+    // Search the surrounding renderable region for an em dash.
+    const region = src.slice(Math.max(0, startIdx - 200), startIdx + 800);
+    // Exclude the i18n definitions themselves; only check app.js comments.
+    // The app.js comment for the participation tag must not contain an em dash.
+    assert.ok(!/cohort.*tag.*—/.test(region),
+      `no em dash in app.js near ${key}`);
   }
 });
 

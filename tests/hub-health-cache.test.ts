@@ -841,13 +841,16 @@ test("cache: cached responses do not include credentials, raw commands, or new i
     const keys = Object.keys(first.body as Record<string, unknown>).sort();
     assert.deepEqual(keys, [
       "checkedAt", "daemon", "mains", "modelCatalog", "modelRouting", "prerequisites",
-      "providerReadinessSource", "providerReadinessSourceDetail", "providers", "runtimes",
+      "providerReadinessSource", "providerReadinessSourceDetail", "providers",
+      "runtimeReadinessSource", "runtimeReadinessSourceDetail", "runtimes",
       "settings", "versionJourney", "workerProfiles",
       "workerReadiness",
     ]);
     const body = first.body as Record<string, unknown>;
     assert.ok(body.providerReadinessSource === "daemon" || body.providerReadinessSource === "local-fallback");
     assert.equal(typeof body.providerReadinessSourceDetail, "string");
+    assert.ok(body.runtimeReadinessSource === "daemon" || body.runtimeReadinessSource === "local-fallback");
+    assert.equal(typeof body.runtimeReadinessSourceDetail, "string");
   } finally {
     await ctx.cleanup();
   }

@@ -1,0 +1,200 @@
+version: 2
+name: Make detached Integration activation deterministic and self-cleaning
+project: ../..
+taskClass: m3-integration-activation-determinism
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: The exact class has no comparable evidence. Main selects Pro because this blocking slice crosses detached process lifecycle, durable state, daemon ownership, cleanup, and timing under load. The choice is task-specific and does not penalize Flash permanently.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek-flash-1m: 0
+      default: 0
+      volcengine-glm52-1m: 0
+      local-grok-builder: 0
+
+contract:
+  outcome: >-
+    Detached Integration activation reaches one durable terminal result under
+    realistic test load and every test-owned runner/daemon is cleaned exactly,
+    without retries, fake success, or broad timeout inflation.
+  presentation:
+    summary: 后台激活在机器繁忙时也能可靠完成或明确失败，测试不会留下临时 Daemon 干扰下一次合入。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-integration-activation-determinism-contract.md.
+    - Inspect src/activation/runner.ts, src/activation/main.ts, src/daemon/coordinator.ts, src/daemon/client.ts, tests/integration-operation.test.ts, and tests/helpers/detached-daemon.ts before editing.
+    - The accepted runtime-authority Candidate passed 2211/2211 independently but two Integrations rolled back on untouched detached activation timing; the quiet retry failed only this test with outcome-unknown after 10 seconds.
+    - Existing test-owned cleanup already uses exact home and exact PIDs; reuse or extend that authority boundary instead of adding process scans.
+    - The prior runtime-authority Candidate must remain untouched and will be re-preflighted only after this task is integrated.
+  inScope:
+    - Trace the one-runner handoff from startIntegration through runner launch, durable completion, observer wait, and fixture teardown.
+    - Make slow runner startup and completion deterministic without launching a second runner or converting timeout into success.
+    - Ensure a failed or interrupted test cannot close its fixture while a late runner can still create an unowned daemon.
+    - Add exact-ownership cleanup/adoption for any daemon or runner the fixture can create, with bounded proof of process and socket exit.
+    - Add deterministic slow-start, early-outcome-unknown, terminal completion, failure cleanup, and single-runner regression coverage.
+    - Preserve production handoff authorization, read-only observer behavior, durable result uniqueness, privacy, and fail-closed semantics.
+  outOfScope:
+    - Do not fix this solely by increasing one fixed timeout, lowering full-suite concurrency, or adding suite/test retries.
+    - Do not change Provider, Worker, routing, Competition, Task attempts, correction, cost, Hub UI, credentials, or settings semantics.
+    - Do not modify the accepted runtime-authority Candidate files unless a shared lifecycle type makes one narrowly unavoidable; return that conflict to Main first.
+    - Do not scan or kill processes by name, touch user homes, or signal any PID not created/adopted by the exact test fixture.
+    - Do not touch other repositories, Elsewhere, Client-Core, client-app-adeptify, SDK/release/consumer/Nexus paths, commit, or push.
+  executionSteps:
+    - Reproduce and trace the detached activation test under the current full-suite lifecycle, including what continues after the 10-second observer returns.
+    - Freeze the single-runner and exact-ownership invariants in focused tests before changing lifecycle code.
+    - Implement the smallest production/test seam that binds observation and teardown to durable progress and exact process ownership.
+    - Run the detached activation scenario three consecutive times and audit fixture-owned processes/endpoints after each run.
+    - Run related activation/daemon lifecycle tests, then the full suite and build exactly once; repair only Candidate-caused failures.
+  deliverables:
+    - Deterministic detached activation lifecycle with one durable terminal result.
+    - Failure-safe exact-owner test cleanup that cannot leave a late temporary Daemon.
+    - Stress regression proving repeated completion without broad retries.
+  modules:
+    - name: Activation lifecycle
+      responsibility: Execute one consumed handoff and publish one validated runtime result even when startup is delayed.
+      consumes:
+        - Operation identity, one-use handoff, activation commands, and current daemon endpoint.
+      produces:
+        - Passed or failed runtime evidence and one durable Integration result.
+      boundaries:
+        - No command retry, no second runner, no observer-driven lifecycle mutation.
+    - name: Operation observer
+      responsibility: Report durable progress or a truthful bounded unknown state.
+      consumes:
+        - Persisted result and in-flight operation evidence.
+      produces:
+        - running, outcome-unknown, or terminal view without side effects.
+      boundaries:
+        - Never starts or replaces a Daemon and never guesses completion.
+    - name: Exact-owner test cleanup
+      responsibility: Keep a fixture alive until its runner is terminal and remove only its own processes, endpoint, and home.
+      consumes:
+        - Exact temporary home, fixture-created/adopted PIDs, and durable operation state.
+      produces:
+        - Verified zero fixture-owned residue after success or failure.
+      boundaries:
+        - No global process/temp scans, untracked signals, user daemon, or silent leak suppression.
+  callChain:
+    - Main starts one Integration operation and receives a running view immediately.
+    - Coordinator applies/verifies/builds, writes one-use handoff, and launches exactly one detached runner.
+    - Runner consumes the handoff, runs activation/check once, ensures the correct daemon endpoint, and submits terminal evidence once.
+    - Observer reads the durable result; an early timeout remains outcome-unknown without mutation.
+    - Test teardown waits for the owned lifecycle or performs exact-owner cleanup, then proves its endpoint and processes are gone.
+  scenarios:
+    - name: Artificially slow detached startup
+      given: Runner startup is delayed beyond the early observer window.
+      when: The operation is observed twice.
+      then: The first view is outcome-unknown and the later view is one completed result from one runner.
+    - name: Test body fails before runner completion
+      given: The fixture owns a still-running activation lifecycle.
+      when: An assertion throws and teardown begins.
+      then: Teardown waits or adopts exact owned processes, leaves no endpoint, and never starts an untracked replacement.
+    - name: Activation failure
+      given: The activation command or completion request fails.
+      when: The runner terminates.
+      then: Failure remains truthful and inspectable, with no fake completed result or process leak.
+    - name: Repeated focused stress
+      given: The same scenario runs three times under ordinary suite load.
+      when: Each run finishes.
+      then: All pass and each fixture independently proves zero owned residue.
+  risks:
+    - Closing the in-process daemon while an unobserved runner is alive can make ensureDaemon create a replacement after teardown.
+    - Tracking a detached PID without durable operation identity can create unsafe cleanup authority; require both exact home and fixture creation/adoption.
+    - A larger timeout can hide but not remove late-process leakage; completion and cleanup evidence are both required.
+    - Waiting for the runner during an authorized production daemon shutdown can deadlock; do not make daemon close depend on the runner in that path.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1200
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/activation/runner.ts
+    - src/activation/main.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/client.ts
+    - src/daemon/server.ts
+    - tests/integration-operation.test.ts
+    - tests/helpers/detached-daemon.ts
+    - tests/activation.test.ts
+acceptance:
+  criteria:
+    - A slow detached runner produces one durable terminal result without a second runner, retry, or fake success.
+    - Early observer timeout remains outcome-unknown and never starts or replaces a daemon.
+    - Success, assertion failure, activation failure, and delayed completion all leave zero fixture-owned process/socket/home residue.
+    - Cleanup authority is limited to the exact fixture home and exact created/adopted PIDs; no user daemon or untracked process can be signalled.
+    - Production authorization, one-use handoff, observer read-only behavior, privacy, and fail-closed evidence remain unchanged.
+  commands:
+    - for i in 1 2 3; do node --disable-warning=ExperimentalWarning --test --import tsx --test-name-pattern='detached activation completes|integration starts non-blocking' tests/integration-operation.test.ts || exit 1; done
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/activation.test.ts tests/integration-operation.test.ts tests/detached-daemon-fixture.test.ts tests/daemon-cli.test.ts
+    - npm test
+    - npm run build
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

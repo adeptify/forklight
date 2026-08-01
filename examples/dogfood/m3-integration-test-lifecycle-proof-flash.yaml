@@ -1,0 +1,195 @@
+version: 2
+name: Prove Integration lifecycle without public PID or wall-clock gates
+project: ../..
+taskClass: m3-integration-test-lifecycle-proof
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: The prior Pro task supplied the causal evidence but its public-PID design was rejected. This replacement changes only deterministic test lifecycle, so Main selects the requested lower-cost Flash worker. History is still insufficient to claim Flash is objectively best.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek-flash-1m: 0
+      default: 0
+      volcengine-glm52-1m: 0
+      local-grok-builder: 0
+
+contract:
+  outcome: >-
+    ForkLight tests prove one durable detached Integration and exact fixture cleanup
+    without exposing runner PID or using scheduler-sensitive wall-clock thresholds.
+  presentation:
+    summary: 测试跟随同一次后台合入到明确终局，并用真实副作用证明没有误启动或残留，不再用固定毫秒数判断正确性。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-integration-test-lifecycle-proof-contract.md.
+    - Read tests/integration-operation.test.ts, tests/daemon-cli.test.ts, tests/helpers/detached-daemon.ts, tests/detached-daemon-fixture.test.ts, src/daemon/coordinator.ts, src/daemon/client.ts, and src/activation/main.ts before editing.
+    - Task 040d4acc-092d-49f2-8fd3-b5ed3ba759f5 is intentionally stopped. Do not copy its public runnerPid, reachDaemon replacement, one-second polling, or PID-signalling test design.
+    - Its final reverify proved the new activation cases can pass under full load, while only two pre-existing daemon-cli elapsed-time assertions failed. The correct replacement is lifecycle evidence, not a larger fixed threshold.
+    - Production observer and activation behavior is already correct; this task may edit tests only.
+  inScope:
+    - Add a test-local observer helper that follows one operation through repeated read-only waits until terminal, with a finite final escape bound and no lifecycle mutation.
+    - Make detached activation teardown wait for terminal operation evidence before closing its exact-home daemon, including assertion-failure and activation-failure scenarios.
+    - Prove handoff cleanup, durable single result, exact stage truth, marker truth, endpoint disappearance, and safe home cleanup using existing fixture boundaries.
+    - Replace daemon-cli elapsedMs and waitElapsed pass/fail assertions with deterministic before/after evidence that no daemon, endpoint, log, Task, result, event, or PID changed unexpectedly.
+    - Keep useful elapsed values diagnostic-only if desired; they cannot decide correctness.
+    - Add regression assertions that public Integration views and CLI output do not contain runnerPid.
+  outOfScope:
+    - Do not edit src production files, public types, protocol, CLI/MCP/Hub implementation, Settings, Provider, Worker, routing, Competition, pricing, or credentials.
+    - Do not expose runner PID, process command, raw path/log, or any test-only hook through a public response.
+    - Do not increase a fixed timing threshold as the solution, add retries, lower suite concurrency, or launch a second Integration.
+    - Do not scan process names, signal untracked PIDs, touch user homes, other repositories, SDK/consumer paths, commit, or push.
+  executionSteps:
+    - Freeze the no-public-PID and exact-home no-side-effect expectations in tests first.
+    - Replace the detached test's fixed 10-second terminal assumption with bounded observation of the same durable operation and finally-safe teardown.
+    - Replace the two daemon-cli wall-clock assertions with lifecycle and before/after state evidence.
+    - Run focused stress three times, then the related lifecycle set, full suite, build, and diff hygiene once; repair only candidate-caused failures.
+  deliverables:
+    - Deterministic detached Integration tests that cannot close before their one operation is terminal.
+    - Observer CLI tests based on no-mutation evidence rather than machine speed.
+    - Regression proof that runnerPid is absent from public Integration output.
+  modules:
+    - name: Detached Integration test observer
+      responsibility: Follow one durable operation to completed or failed before fixture shutdown.
+      consumes:
+        - Exact temporary home, operation id, and read-only Integration wait/status responses.
+      produces:
+        - Terminal result and finally-safe teardown evidence.
+      boundaries:
+        - No second runner, no process scan, no public PID, no observer mutation.
+    - name: Observer CLI lifecycle proof
+      responsibility: Prove status, wait, and history never bootstrap a Daemon and completed wait is side-effect free.
+      consumes:
+        - CLI result plus exact-home endpoint, pid, log, event, Task, and result facts.
+      produces:
+        - Deterministic no-mutation assertions independent of scheduler latency.
+      boundaries:
+        - Wall-clock values are diagnostic only and never a correctness gate.
+    - name: Exact-home teardown
+      responsibility: Close and remove only the fixture-owned Daemon/home after operation terminality.
+      consumes:
+        - Existing fixture ownership and socket helpers.
+      produces:
+        - Endpoint absent and home removable with no late replacement Daemon.
+      boundaries:
+        - No user daemon, global temp cleanup, process-name scanning, or untracked signals.
+  callChain:
+    - Test starts one exact-home Daemon and one Integration operation.
+    - A 5ms read-only wait may return outcome-unknown.
+    - A bounded observer loop continues reading that same operation until terminal.
+    - Test validates stages/result/marker and finally closes the Daemon only after terminality.
+    - CLI observer tests compare exact-home state before and after calls and reject any lifecycle mutation.
+  scenarios:
+    - name: Slow detached completion
+      given: Source verification or runner startup is delayed by ordinary suite load.
+      when: The early observer window expires.
+      then: The test keeps the same operation, later receives one terminal result, and never starts a replacement.
+    - name: Assertion before runner completion
+      given: The test body throws while the one operation is still running.
+      when: Finally executes.
+      then: Finally waits for durable terminality before daemon close, then proves the exact endpoint/home is gone.
+    - name: Observer on absent home
+      given: No Daemon exists for the test home.
+      when: status, wait, and history are called under high machine load.
+      then: They fail with observer guidance and create no endpoint, log, Task, or process regardless of elapsed time.
+    - name: Completed wait
+      given: One durable applied result already exists.
+      when: CLI wait reads it.
+      then: It returns the same result and leaves daemon pid and durable counts unchanged without a speed assertion.
+  risks:
+    - A helper that calls ensureDaemon would hide the bug; use observer requests only.
+    - Closing the daemon before terminality recreates the original late-runner leak; teardown order must be explicit.
+    - Removing elapsed assertions without replacement evidence would weaken tests; require exact before/after lifecycle facts.
+    - Broad helper rewrites can affect many suites; keep changes local and reuse existing ownership helpers.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 600
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 4
+  fileLimitMode: warn
+  changedLineLimit: 600
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-boundary-capture
+    - .forklight-dev
+    - .forklight-daemon-test
+    - .forklight-receipt-retry
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - tests/integration-operation.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/helpers/detached-daemon.ts
+    - tests/detached-daemon-fixture.test.ts
+acceptance:
+  criteria:
+    - Detached activation tests keep one operation and wait for durable terminality before exact-home daemon close on success, failure, delay, or thrown assertion.
+    - Fresh-home Integration observers and completed waits are judged by no-mutation evidence, never scheduler-sensitive elapsed thresholds.
+    - No public Integration response, CLI output, or source type contains runnerPid or another temporary runner identity.
+    - Tests scan no process names, signal no untracked PID, start no second Integration, and touch no user home.
+    - Full tests, build, and diff hygiene pass without retry or reduced concurrency.
+  commands:
+    - for i in 1 2 3; do node --disable-warning=ExperimentalWarning --test --import tsx --test-name-pattern='detached activation completes|integration starts non-blocking|Integration status/wait/history on a fresh home|Integration status/history/wait succeed' tests/integration-operation.test.ts tests/daemon-cli.test.ts || exit 1; done
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/activation.test.ts tests/integration-operation.test.ts tests/detached-daemon-fixture.test.ts tests/daemon-cli.test.ts
+    - npm test
+    - npm run build
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

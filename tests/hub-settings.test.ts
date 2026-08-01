@@ -285,6 +285,118 @@ test("Hub status prefers exact-build Daemon launch truth over contradictory loca
   }
 });
 
+test("Hub status uses exact-build Daemon runtime truth and never false-blocks saved Workers", async () => {
+  const ctx = await makeHub();
+  try {
+    const effective = ctx.settings.get();
+    const daemonProviders = Object.fromEntries(providerNames().map((name) => {
+      const ready = name === "deepseek" || name === "volcengine" || name === "xai";
+      return [name, {
+        ready,
+        authMode: name === "xai" && ready ? "local-sign-in" : ready ? "api-key" : "none",
+        endpoint: effective.providerDefaults[name].defaultEndpoint,
+        defaultModel: effective.providerDefaults[name].defaultModel,
+        keychainService: effective.providerDefaults[name].defaultKeychainService,
+        ...(ready ? {} : { error: "Local authentication not found" }),
+      }];
+    }));
+    ctx.setHealth({
+      ok: true,
+      pid: 4242,
+      buildIdentity: currentBuildIdentity(),
+      providers: daemonProviders,
+      runtimes: {
+        "claude-code": { ok: true, displayName: "Claude Code", executable: "claude", issues: [], capabilities: {} },
+        "grok-build": { ok: true, displayName: "Grok Build", executable: "grok", issues: [], capabilities: {} },
+      },
+    });
+    const status = await doHttp(`http://127.0.0.1:${ctx.port}/api/status`, "GET", ctx.token);
+    assert.equal(status.status, 200);
+    const body = status.body as {
+      runtimeReadinessSource: string;
+      runtimeReadinessSourceDetail: string;
+      runtimes: Record<string, { ok: boolean }>;
+      workerReadiness: Array<{ workerId: string; canLaunch: boolean; reason?: string }>;
+    };
+    assert.equal(body.runtimeReadinessSource, "daemon");
+    assert.equal(body.runtimeReadinessSourceDetail, "build-matched daemon");
+    assert.equal(body.runtimes["claude-code"]?.ok, true);
+    assert.equal(body.runtimes["grok-build"]?.ok, true);
+    const defaultWorker = body.workerReadiness.find((w) => w.workerId === "default")!;
+    const volcengineWorker = body.workerReadiness.find((w) => w.workerId === "volcengine-glm52-1m")!;
+    assert.equal(defaultWorker.canLaunch, true, "claude-code Worker must not be runtime-blocked");
+    assert.notEqual(defaultWorker.reason, "runtime-unavailable");
+    assert.equal(volcengineWorker.canLaunch, true);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("Hub status honors exact-build Daemon runtime unavailability over any local ready doctor", async () => {
+  const ctx = await makeHub();
+  try {
+    const effective = ctx.settings.get();
+    const daemonProviders = Object.fromEntries(providerNames().map((name) => {
+      const ready = name === "deepseek" || name === "volcengine" || name === "xai";
+      return [name, {
+        ready,
+        authMode: name === "xai" && ready ? "local-sign-in" : ready ? "api-key" : "none",
+        endpoint: effective.providerDefaults[name].defaultEndpoint,
+        defaultModel: effective.providerDefaults[name].defaultModel,
+        keychainService: effective.providerDefaults[name].defaultKeychainService,
+        ...(ready ? {} : { error: "Local authentication not found" }),
+      }];
+    }));
+    ctx.setHealth({
+      ok: true,
+      pid: 4242,
+      buildIdentity: currentBuildIdentity(),
+      providers: daemonProviders,
+      runtimes: {
+        "claude-code": { ok: false, displayName: "Claude Code", executable: "claude", issues: [], capabilities: {} },
+        "grok-build": { ok: true, displayName: "Grok Build", executable: "grok", issues: [], capabilities: {} },
+      },
+    });
+    const status = await doHttp(`http://127.0.0.1:${ctx.port}/api/status`, "GET", ctx.token);
+    assert.equal(status.status, 200);
+    const body = status.body as {
+      runtimeReadinessSource: string;
+      runtimes: Record<string, { ok: boolean }>;
+      workerReadiness: Array<{ workerId: string; canLaunch: boolean; reason?: string }>;
+    };
+    assert.equal(body.runtimeReadinessSource, "daemon");
+    assert.equal(body.runtimes["claude-code"]?.ok, false);
+    const defaultWorker = body.workerReadiness.find((w) => w.workerId === "default")!;
+    assert.equal(defaultWorker.canLaunch, false);
+    assert.equal(defaultWorker.reason, "runtime-unavailable");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("Hub status falls back to the complete local runtime snapshot when Daemon runtime evidence is missing", async () => {
+  const ctx = await makeHub();
+  try {
+    ctx.setHealth({
+      ok: true,
+      pid: 4242,
+      buildIdentity: currentBuildIdentity(),
+    });
+    const status = await doHttp(`http://127.0.0.1:${ctx.port}/api/status`, "GET", ctx.token);
+    assert.equal(status.status, 200);
+    const body = status.body as {
+      runtimeReadinessSource: string;
+      runtimeReadinessSourceDetail: string;
+      runtimes: Record<string, { ok: boolean }>;
+    };
+    assert.equal(body.runtimeReadinessSource, "local-fallback");
+    assert.equal(body.runtimeReadinessSourceDetail, "malformed daemon evidence");
+    assert.ok(body.runtimes["claude-code"] !== undefined);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test("buildModelRoutingPatch preserves shape for canonical SettingsService validation", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "fl-hub-mr-patch-"));
   const store = new StateStore(home);
@@ -2428,6 +2540,45 @@ test("projectTaskActivityTimeline stays empty for narrative-only Tasks and bound
       summary: "checks ok",
     },
   ]);
+});
+
+test("projectTaskActivityTimeline carries only a closed applicability presentation hint", async () => {
+  const { projectTaskActivityTimeline } = await import("../src/hub/server.js");
+  const rawReason = "Patch does not apply cleanly: error: patch failed at private/path.ts";
+  const projected = projectTaskActivityTimeline([
+    {
+      timestamp: "2026-08-01T10:00:00.000Z",
+      type: "integration.preflight.completed",
+      summary: rawReason,
+      payload: {
+        applicabilityIssue: { code: "patch-not-applicable" },
+        rejectionReasons: [rawReason],
+        privateExtra: "must-not-project",
+      },
+    },
+    {
+      timestamp: "2026-08-01T10:00:01.000Z",
+      type: "integration.preflight.completed",
+      summary: "ordinary rejection",
+      payload: { applicabilityIssue: { code: "future-code" } },
+    },
+  ]);
+
+  assert.deepEqual(projected, [
+    {
+      timestamp: "2026-08-01T10:00:00.000Z",
+      type: "integration.preflight.completed",
+      summary: rawReason,
+      presentationCode: "integration-patch-not-applicable",
+    },
+    {
+      timestamp: "2026-08-01T10:00:01.000Z",
+      type: "integration.preflight.completed",
+      summary: "ordinary rejection",
+    },
+  ]);
+  assert.ok(!JSON.stringify(projected).includes("must-not-project"),
+    "ordinary Task Detail never receives the raw event payload");
 });
 
 test("Hub task detail endpoint ships projected activity without mutating inspect events", async () => {

@@ -1,0 +1,180 @@
+version: 2
+name: Reuse one truthful Daemon health environment snapshot
+project: ../..
+taskClass: daemon-health-snapshot-efficiency
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: Exact-class evidence is empty and no comparable cohort exists. Main selects Flash for one bounded deterministic cache-consistency implementation; Competition would duplicate cost without decision evidence.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek-flash-1m: 0
+      default: 0
+      volcengine-glm52-1m: 0
+      local-grok-builder: 0
+
+contract:
+  outcome: >-
+    Immediate CLI and Hub readers reuse one truthful, bounded Daemon execution-
+    environment snapshot, so overlapping health requests do not repeat expensive
+    Keychain and Runtime inspection until callers falsely fall back and block Workers.
+  presentation:
+    summary: 后台刚重启时，多处状态读取共享同一份真实环境检查，不再重复检查到超时并误报 Worker 不可用。
+    language: zh-CN
+  context:
+    - The aligned contract is docs/m3-daemon-health-snapshot-efficiency-contract.md.
+    - Inspect DaemonCoordinator.health, Settings mutation paths, Worker doctor adapters, daemon transport timeout, and focused tests before editing.
+    - Real sequential daemon status reads varied from about 1.6 to 8.6 seconds; overlapping synchronous environment checks can approach the 15-second transport bound.
+    - Historical EPIPE logs are stale and current disconnect handling already has regression coverage; do not change that boundary.
+  inScope:
+    - Add one bounded in-memory cache for the complete expensive Daemon execution-environment snapshot.
+    - Reuse Provider readiness, Runtime doctor metadata, and the compatibility claudeCode header from the same snapshot.
+    - Keep PID, build identity, active/queued Tasks, Provider verification, default Runtime, and max concurrency fresh on every health call.
+    - Invalidate Provider-default-dependent cached facts after Settings update/reset and refresh after a bounded TTL.
+    - Add deterministic fake-clock/counting-loader tests plus focused compatibility regressions.
+  outOfScope:
+    - No client retry, generic timeout increase, background refresh, Provider network request, auto-start, routing, Competition, Task retry, Integration, activation, Hub redesign, new user setting, commit, or push.
+    - Do not touch Elsewhere, Client-Core, Adeptify Shell, SDK/release paths, or SDK/consumer/Nexus docs.
+  executionSteps:
+    - Trace the exact expensive and dynamic fields in DaemonCoordinator.health.
+    - Introduce the smallest testable complete-snapshot cache with injected loader and clock seams.
+    - Rewire health without changing its public payload shape.
+    - Prove immediate reuse, TTL refresh, Settings invalidation, fresh dynamic fields, negative facts, and privacy.
+    - Run the focused acceptance, then the full suite/build/syntax/diff checks once.
+  deliverables:
+    - Bounded memory-only execution-environment snapshot cache.
+    - Daemon health integration that keeps dynamic facts live.
+    - Deterministic regressions covering reuse and refresh semantics.
+  modules:
+    - name: Health environment snapshot
+      responsibility: Reuse one complete privacy-safe result of expensive local execution-environment inspection.
+      consumes:
+        - Provider-default identity, loader, monotonic clock, and bounded TTL.
+      produces:
+        - Complete Provider readiness, Runtime doctor facts, and compatibility Claude header.
+      boundaries:
+        - Memory-only; no credentials, persistence, network, background work, or partial-source mixing.
+    - name: Daemon health projection
+      responsibility: Combine the reusable environment snapshot with current operational facts.
+      consumes:
+        - Environment snapshot, Settings, verification evidence, queue state, PID, and build identity.
+      produces:
+        - Existing compatible health response.
+      boundaries:
+        - Dynamic facts remain fresh and cache metadata is not exposed.
+  callChain:
+    - Daemon receives the first health request after startup.
+    - Snapshot cache loads existing Keychain and Runtime doctor facts once.
+    - Immediate CLI and Hub health reads reuse the complete unexpired snapshot.
+    - Settings mutation or TTL expiry makes the next health load one replacement snapshot.
+    - Each response combines that snapshot with current queue, Settings, verification, PID, and build facts.
+  scenarios:
+    - name: Immediate concurrent readers
+      given: One readiness health call has completed.
+      when: CLI and Hub read health within the bounded TTL.
+      then: Expensive inspection count stays one and all readers receive the same complete environment truth.
+    - name: Dynamic state stays live
+      given: The environment snapshot is still valid.
+      when: Queue or current Settings operational values change.
+      then: Health reflects the new dynamic values without repeating environment inspection.
+    - name: Refresh boundaries
+      given: TTL expires or Provider defaults change/reset.
+      when: Health is read again.
+      then: Exactly one complete new environment snapshot replaces the old result.
+  risks:
+    - Caching the entire health payload would hide queue and Settings changes; cache only expensive environment facts.
+    - Caching credential material or raw diagnostics would violate privacy; retain only existing bounded readiness fields.
+    - Extending the client timeout hides repeated work rather than removing it; timeout changes are forbidden.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 750
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 750
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+    - .forklight-boundary-capture
+    - .forklight-receipt-retry
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/daemon/coordinator.ts
+    - src/daemon/health-environment.ts
+    - tests/daemon-health-environment.test.ts
+    - tests/daemon.test.ts
+acceptance:
+  criteria:
+    - Immediate health reads reuse one complete expensive environment snapshot without changing public response fields.
+    - TTL expiry and Settings update/reset refresh Provider-default-dependent facts exactly once.
+    - PID, build, queue, Provider verification, default Runtime, and max concurrency remain fresh on every response.
+    - No credential value, cache metadata, retry, timeout increase, Provider request, lifecycle mutation, commit, or push is introduced.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon-health-environment.test.ts tests/daemon.test.ts tests/cli-health.test.ts tests/setup-doctor.test.ts tests/hub-settings.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

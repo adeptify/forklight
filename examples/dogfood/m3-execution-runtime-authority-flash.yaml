@@ -1,0 +1,194 @@
+version: 2
+name: Prefer actual Daemon runtime truth across CLI and Hub
+project: ../..
+taskClass: execution-runtime-authority
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: user-specified
+    note: The exact class has no comparable evidence. Main follows the user's preference to use DeepSeek Flash more often for a bounded implementation task with a frozen contract and executable acceptance.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek-flash-1m: 0
+      default: 0
+      volcengine-glm52-1m: 0
+      local-grok-builder: 0
+
+contract:
+  outcome: >-
+    CLI and Hub use exact-build Daemon runtime launch facts as the single
+    authority, with an explicit local fallback only when Daemon evidence is
+    unavailable or unsafe, so saved Workers are never false-blocked by the
+    caller shell PATH.
+  presentation:
+    summary: 让健康检查回答“真正执行 Worker 的后台能不能启动”，不再被当前终端 PATH 误导。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-execution-runtime-authority-contract.md.
+    - Inspect src/setup/doctor.ts, src/cli.ts, src/cli/health-readiness.ts, src/hub/server.ts, src/daemon/coordinator.ts and focused tests before editing.
+    - A live exact-build Daemon currently reports both runtimes ready while a non-login CLI reports both unavailable and blocks all five saved Workers.
+    - Provider authority already prefers exact-build Daemon evidence; runtime authority must follow the same fail-closed source-selection rule.
+  inScope:
+    - Add one pure, shared execution-runtime fact resolver with exact-build Daemon authority and bounded local fallback reasons.
+    - Strictly allowlist and validate Daemon runtime evidence for all supported built-in runtimes; never mix Daemon and local booleans.
+    - Make CLI health runtimes and Worker readiness consume the effective facts and expose source/detail in JSON and human output.
+    - Make Hub status and its current Worker readiness path consume the same effective facts and expose source/detail.
+    - Preserve existing cache, read-only behavior, response compatibility, privacy boundaries, and local fallback behavior.
+    - Add focused resolver, CLI adapter/surface, and Hub contradictory-environment regression coverage.
+  outOfScope:
+    - Do not change Worker launch, routing, Competition, retry, correction, Integration, statistics, Provider probing, auth, Settings persistence, or Daemon lifecycle.
+    - Do not redesign Hub UI or change runtime capability semantics.
+    - Do not touch Elsewhere, Client-Core, Adeptify Shell, SDK release directories, SDK/consumer/Nexus docs, or any other repository.
+    - Do not commit or push.
+  executionSteps:
+    - Trace all CLI and Hub runtime doctor call sites and the exact Daemon health payload.
+    - Implement one pure source selector parallel to Provider execution facts.
+    - Rewire CLI health and both Hub readiness/status paths to consume its output.
+    - Add contradiction and fallback tests before running the focused acceptance once.
+    - Repair only Candidate-caused failures, then run the full suite/build/syntax/diff checks once.
+  deliverables:
+    - Canonical runtime authority resolver with source provenance.
+    - CLI and Hub projections that agree with the actual build-matched execution Daemon.
+    - Regression tests for contradictory PATH, fallback, mismatch, malformed evidence, privacy, and non-mutation.
+  modules:
+    - name: Runtime authority resolver
+      responsibility: Choose one trustworthy runtime readiness source for the process that actually launches Workers.
+      consumes:
+        - Client build identity, Daemon health evidence, and local runtime doctor facts.
+      produces:
+        - Allowlisted runtime facts plus daemon/local-fallback source and bounded detail.
+      boundaries:
+        - Pure and read-only; no subprocess, Provider, credential, lifecycle, Task, or Settings mutation.
+    - name: CLI health projection
+      responsibility: Present the selected runtime facts and compute Worker readiness from them.
+      consumes:
+        - Effective runtime facts, Provider facts, and saved Worker Profiles.
+      produces:
+        - Compatible JSON/human health with runtime source explanation and truthful Worker launchability.
+      boundaries:
+        - No extra Daemon exchange or Provider request.
+    - name: Hub status projection
+      responsibility: Use the same runtime authority for status and saved Worker readiness.
+      consumes:
+        - Existing cached Daemon probe, local inspection, Settings, and the shared resolver.
+      produces:
+        - One coherent status snapshot for the UI.
+      boundaries:
+        - No new polling, no auto-start, no visual redesign, and no secret/raw diagnostic exposure.
+  callChain:
+    - CLI or Hub performs its existing local inspection and one existing Daemon health read.
+    - Shared resolver verifies exact build identity and validates the complete Daemon runtime payload.
+    - Exact-build Daemon facts win; otherwise one labelled local snapshot wins as a whole.
+    - CLI/Hub pass the selected ok flags to the canonical saved-Worker readiness resolver.
+    - User sees truthful launchability and the evidence source without any execution side effect.
+  scenarios:
+    - name: Caller PATH contradicts healthy Daemon
+      given: Local doctors report both runtimes unavailable and exact-build Daemon reports both ready.
+      when: CLI health or Hub status is read.
+      then: Daemon facts are shown and saved Workers are not runtime-blocked.
+    - name: Daemon says runtime unavailable
+      given: Local doctor is ready but exact-build Daemon reports one runtime unavailable.
+      when: Status is projected.
+      then: The runtime and affected Workers remain unavailable because Daemon launches the work.
+    - name: Safe fallback
+      given: Daemon is absent, mismatched, unreadable, or has malformed runtime evidence.
+      when: Status is projected.
+      then: The complete local snapshot is used with one bounded fallback reason and no mixed source.
+  risks:
+    - Reusing only Daemon provider evidence while retaining local runtime flags preserves the current false-blocking bug.
+    - Partially accepting malformed Daemon runtimes can invent mixed authority; require a complete allowlisted snapshot.
+    - Adding another Daemon call in Hub would increase polling cost; reuse existing evidence.
+    - Passing through arbitrary daemon fields can leak diagnostics; return only bounded presentation fields already supported by health.
+  changeBudget:
+    maxFiles: 9
+    maxDiffLines: 1000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 9
+  fileLimitMode: warn
+  changedLineLimit: 1000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/setup/doctor.ts
+    - src/cli.ts
+    - src/cli/health-readiness.ts
+    - src/hub/server.ts
+    - tests/setup-doctor.test.ts
+    - tests/cli-health.test.ts
+    - tests/hub-settings.test.ts
+acceptance:
+  criteria:
+    - Exact-build Daemon runtime facts override contradictory local PATH facts in CLI and Hub without mixing sources.
+    - Daemon absence, mismatch, unreadable identity, or malformed runtime evidence falls back to the complete local snapshot with a bounded source detail.
+    - Saved Worker readiness uses the selected effective runtime facts and no longer false-blocks healthy Workers.
+    - Health remains read-only, privacy-safe, compatible, and adds no Provider probe, Daemon poll, Task mutation, Settings mutation, restart, commit, or push.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/setup-doctor.test.ts tests/cli-health.test.ts tests/hub-settings.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

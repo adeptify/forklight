@@ -1,0 +1,162 @@
+version: 2
+name: Make Hub CLI test cleanup deterministic without orphan startup windows
+project: ../..
+taskClass: forklight-test-daemon-lifecycle
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: Pro exposed the incompatible real-timeout ownership boundary in two failed attempts. The revised implementation is narrow and test-only, so Main selects Flash for one final bounded slice.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek-flash-1m: 0
+      default: 3
+
+contract:
+  outcome: >-
+    Real Hub CLI tests wait for normal readiness, then prove their exact Hub,
+    daemon, socket, and home are gone; pre-readiness timeout behavior is covered
+    deterministically without launching an ownerless background process.
+  presentation:
+    summary: 真实进程负责证明真实清理，启动竞态用可控场景证明，不再让测试自己制造残留。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-hub-cli-test-daemon-cleanup-v2-contract.md.
+    - Read tests/hub-cli.test.ts and tests/helpers/detached-daemon.ts first.
+    - Do not reuse revision c2163e6c-6888-4420-bbad-54e2ff172d92 blindly; it was rejected because a 15-second wait still lacked ownership evidence.
+    - The original source cleanup swallows stopDaemon errors and removes the home too early.
+  inScope:
+    - Add or compose one test-only exact-owner Hub cleanup fixture.
+    - Migrate JSON and human detached Hub CLI tests to the shared fixture.
+    - Use the normal CLI readiness window in those two real-process tests, not the forced one-second timeout.
+    - Assert the cleanup result and zero PID/socket/home residue in both real tests.
+    - Cover pre-readiness timeout, thrown assertion, owner mismatch, and idempotency with deterministic lightweight seams.
+  outOfScope:
+    - No src files, production timeout/return/lifecycle changes, Provider calls, Hub UI, Integration, activation, other repositories, commit, or push.
+    - No pgrep, pkill, process-name scan, port scan, global temp glob, suite-level sweep, test retry, or reduced concurrency.
+    - Do not convert a timeout into success or delete a home before ownership proof.
+  executionSteps:
+    - Rebuild the helper from current source and prior failure evidence; do not copy the rejected patch wholesale.
+    - Keep only two real detached Hub launches; all remaining lifecycle edges use injected deterministic seams.
+    - Run the exact acceptance suite once and stop if it fails.
+  deliverables:
+    - Shared test-only Hub lifecycle owner.
+    - JSON/human real CLI tests with explicit cleanup assertions.
+    - Lightweight lifecycle regressions with no extra detached daemons.
+  modules:
+    - name: Hub lifecycle fixture
+      responsibility: Bind one temporary home to an exact Hub PID and endpoint-proven Daemon PID.
+      consumes:
+        - Exclusive home, CLI result PID, endpoint health, deterministic test seams.
+      produces:
+        - Idempotent cleanup result and zero-residue proof.
+      boundaries:
+        - Tests only; no untracked signals or hidden cleanup failure.
+    - name: Hub CLI scenarios
+      responsibility: Preserve privacy/no-open behavior while using a reachable real lifecycle.
+      consumes:
+        - JSON and human detached restart output under normal readiness.
+      produces:
+        - Existing output evidence plus explicit cleanup evidence.
+      boundaries:
+        - Exactly two real Hub launches; timeout edge is seam-driven.
+  callChain:
+    - Create fixture before CLI invocation.
+    - Run detached CLI with normal readiness and capture the exact Hub PID.
+    - Stop/prove Hub first, then adopt the exact home endpoint Daemon owner.
+    - Stop/prove Daemon and socket, remove only the fixture home, assert result.
+  scenarios:
+    - name: Real ready cleanup
+      given: JSON or human CLI reports a ready/current detached Hub.
+      when: finally executes.
+      then: Exact Hub, Daemon, socket, and home are proven gone.
+    - name: Pre-readiness timeout seam
+      given: The lifecycle has not exposed a Daemon endpoint yet.
+      when: Deterministic cleanup is evaluated.
+      then: It never invents ownership, hides failure, or starts a real process.
+    - name: Assertion and mismatch
+      given: The body throws or endpoint owner conflicts.
+      when: Cleanup runs.
+      then: Cleanup remains visible, bounded, idempotent, and refuses untracked signals.
+  risks:
+    - A real one-second timeout cannot expose an exact Daemon PID; this version removes that incompatible setup from real-process tests.
+    - Heavy fixture regressions can destabilize the full parallel suite; only the two product-level tests launch background processes.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 650
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 4
+  fileLimitMode: warn
+  changedLineLimit: 650
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+    - .forklight-boundary-capture
+    - .forklight-receipt-retry
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - tests/hub-cli.test.ts
+    - tests/helpers/detached-daemon.ts
+    - tests/detached-daemon-fixture.test.ts
+acceptance:
+  criteria:
+    - Real JSON and human CLI paths prove exact Hub/Daemon/socket/home cleanup after normal readiness.
+    - Pre-readiness timeout and failure edges are deterministic, test-only, and launch no additional detached daemon.
+    - No production behavior, privacy assertion, concurrency, or unrelated source is changed.
+  commands:
+    - for i in 1 2 3; do node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-cli.test.ts tests/detached-daemon-fixture.test.ts || exit 1; done
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-cli.test.ts tests/detached-daemon-fixture.test.ts tests/daemon-cli.test.ts tests/hub-instance.test.ts
+    - npm test
+    - npm run build
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

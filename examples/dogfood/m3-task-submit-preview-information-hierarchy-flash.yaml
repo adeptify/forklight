@@ -1,0 +1,192 @@
+version: 2
+name: Make Hub Task submission preview tell one clear story
+project: ../..
+taskClass: m3-task-submit-preview-information-hierarchy
+taskFamily: hub-product-comprehension
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: hub-product-comprehension
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: Exact comparable evidence is absent. Main selected Flash because the user asked to use it more and this bounded incumbent UI refinement has deterministic tests; this is not a superiority claim.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    The Hub Task submission preview preserves every useful fact while presenting
+    one plain-language reading path: what will run, why it was assigned, the
+    execution boundaries, and what the user should do next.
+  presentation:
+    summary: 不减信息，把任务提交预览从参数堆叠整理成一条看得懂的执行故事。
+    language: zh-CN
+  context:
+    - The aligned contract is docs/m3-task-submit-preview-information-hierarchy-contract.md.
+    - Inspect src/hub/public/app.js, src/hub/public/app.css, src/hub/public/i18n.js, tests/hub-ui-assets.test.ts, and tests/hub-ops-mutations.test.ts before editing.
+    - The current preview renders Task, Worker, provider/model/runtime/effort, boundaries, routing, classification and technical evidence as one mostly uniform vertical list.
+    - The routing section repeats the selected Worker already shown above, and established family choices dominate the scan even when the current classification can simply be reused.
+    - Preserve the incumbent Hub visual world. This is an information-hierarchy refinement, not a redesign.
+  inScope:
+    - Recompose renderSubmitPreviewFacts and its presentation helpers into the exact contract reading order.
+    - Show Task plus one non-duplicated Worker execution summary first.
+    - Keep selection basis, shortlist, evidence, Competition intent and routing next action together without repeating Worker identity.
+    - Group budget, Attempts, follow-up Tasks, task-brief quality and Integration safety as execution boundaries.
+    - Keep class, family and classification next action visible while moving the complete established-family list into an accessible native disclosure.
+    - Add submit-preview-scoped responsive CSS using existing variables and bilingual copy for meaningful group headings.
+    - Add tests proving DOM order, no repeated selected-Worker row, disclosures, responsive rules, privacy boundaries and unchanged submit behavior.
+  outOfScope:
+    - Do not change SafeTaskAdmissionPreview, Core types, daemon/MCP/CLI, routing or classification semantics, admission, settings, database, economics or Task lifecycle.
+    - Do not remove any user-useful fact, add nested fact cards, gradients, decorative icons, broad animation, automatic Task submission, Competition, retry, Integration, commit or push.
+    - Do not render raw routingDecision, Main private notes, task contents, commands, paths, endpoints, credentials or secrets.
+    - Do not touch other repositories, Elsewhere or Client-Core SDK.
+  executionSteps:
+    - Trace the current renderer, submit invalidation/confirmation path, CSS tokens and Hub asset tests.
+    - Implement one semantic DOM reading order, using shared fact helpers rather than a second preview model.
+    - Add narrowly scoped CSS for grouping, wrapping, wide layout and single-column narrow layout.
+    - Add bilingual human copy and executable tests for the new hierarchy and invariants.
+    - Run the focused commands once; repair only Candidate-caused failures; then run the full acceptance suite once.
+  deliverables:
+    - Human-readable Task submission preview with one Worker identity and four-stage reading flow.
+    - Responsive incumbent-style presentation and accessible progressive disclosure.
+    - Focused regression coverage without changing execution semantics.
+  modules:
+    - name: Submission preview composition
+      responsibility: Organize existing safe facts into a scan-first semantic DOM.
+      consumes:
+        - SafeTaskAdmissionPreview already returned by Hub preview.
+      produces:
+        - Task/Worker summary, routing explanation, boundaries, classification guidance and technical disclosure.
+      boundaries:
+        - Presentation only; no duplicated domain logic, mutations or execution.
+    - name: Preview visual hierarchy
+      responsibility: Express grouping, rhythm, wrapping and responsive stacking inside the submit preview.
+      consumes:
+        - Existing Hub design tokens and the semantic DOM.
+      produces:
+        - One clear desktop reading path and the same single-column narrow order.
+      boundaries:
+        - Submit-preview-scoped CSS only; no global redesign or nested card grid.
+    - name: Bilingual explanation
+      responsibility: Name each group in plain English and Chinese and preserve honest next actions.
+      consumes:
+        - Existing closed route/classification meanings.
+      produces:
+        - Human headings and disclosure labels.
+      boundaries:
+        - Never translate private implementation data into UI.
+  callChain:
+    - User enters an absolute Task Contract path and chooses Preview.
+    - Existing admission returns the unchanged safe preview and digest.
+    - Hub composes the same facts in semantic reading order without recomputation.
+    - User scans what/why/boundaries/next, optionally expands family candidates or technical evidence, then explicitly submits or edits the file.
+  scenarios:
+    - name: Ordinary direct assignment
+      given: Four candidates were considered, Main judgment was used, evidence is insufficient and Competition intent is none.
+      when: The preview renders.
+      then: The Worker appears once and the user sees a direct, ordered explanation ending in an explicit next action.
+    - name: Reused classification
+      given: taskClass and taskFamily have finished history and several established family choices exist.
+      when: The preview renders.
+      then: Current classification and reuse action remain visible while the full family list is available in a disclosure.
+    - name: Legacy evidence
+      given: Routing or classification advice is absent.
+      when: The preview renders.
+      then: The execution summary and limits remain readable and missing evidence is stated honestly.
+    - name: Narrow and long content
+      given: Task, Worker and Model values are long and the viewport is narrow.
+      when: The preview renders.
+      then: Values wrap, sections stack in DOM order and no horizontal overflow is introduced.
+  risks:
+    - Hiding the recommended classification action would make the screen prettier but less useful; hide only the complete candidate list.
+    - Repeating selected Worker in routing makes rationale look like a second decision; render identity once.
+    - Reusing global preview selectors can regress unrelated policy panels; scope all new styling to submit preview.
+    - A new readiness badge could duplicate admission logic; do not invent a second readiness state.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 900
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/public/app.js
+    - src/hub/public/app.css
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+    - tests/hub-ops-mutations.test.ts
+acceptance:
+  criteria:
+    - The preview tells what/why/boundaries/next in DOM order, preserves all useful facts, and renders selected Worker identity once.
+    - Classification next action stays visible while established family choices and technical evidence remain accessible disclosures.
+    - New CSS is submit-preview-scoped, uses incumbent tokens, wraps long values, and stacks in the same order on narrow screens.
+    - Preview invalidation, explicit confirmation, safe projection privacy, and no-execution-before-submit behavior are unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts tests/hub-ops-mutations.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

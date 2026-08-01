@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
+
+const execFileAsync = promisify(execFile);
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ProviderModelSummary } from "../src/core/statistics.js";
@@ -209,6 +213,100 @@ test("MCP model_routing returns privacy-safe advisory for empty history", async 
     assert.doesNotMatch(json, /api[_-]?key/);
     assert.doesNotMatch(json, /\/tasks\//);
     assert.doesNotMatch(json, /credential/);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP model_routing tool schema exposes mutually exclusive workerProfileIds", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-mr-schema-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tools = await client.listTools();
+    const routingTool = tools.tools.find((t) => t.name === "forklight_model_routing")!;
+    const props = (routingTool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    assert.ok("workerProfileIds" in props, "workerProfileIds is a first-class tool input");
+    assert.ok("candidates" in props, "legacy candidates remain available");
+    // Mixed input fails closed before any daemon call.
+    const mixed = await client.callTool({
+      name: "forklight_model_routing",
+      arguments: {
+        taskClass: "t",
+        candidates: [{ provider: "deepseek", model: "v4" }, { provider: "qwen", model: "plus" }],
+        workerProfileIds: ["a", "b"],
+      },
+    });
+    assert.equal(mixed.isError, true);
+    assert.match(toolErrorText(mixed), /exactly one of candidates or workerProfileIds/i);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP model_routing resolves saved Worker Profiles and preserves identity", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-mr-profile-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  await daemonRequest("settings_update", {
+    patch: {
+      workerProfiles: {
+        defaultProfileId: "deepseek-primary",
+        profiles: [
+          {
+            id: "deepseek-primary", label: "DeepSeek Primary",
+            runtime: "claude-code", modelConfigId: "deepseek-flash", effort: "high",
+          },
+          {
+            id: "qwen-secondary", label: "Qwen Secondary",
+            runtime: "claude-code", modelConfigId: "qwen-plus", effort: "medium",
+          },
+        ],
+      },
+    },
+  }, home);
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({
+      name: "forklight_model_routing",
+      arguments: {
+        taskClass: "nonexistent-class",
+        workerProfileIds: ["deepseek-primary", "qwen-secondary"],
+      },
+    });
+    assert.equal(result.isError, undefined);
+    const advisory = result.structuredContent as Record<string, unknown>;
+    const cands = advisory.candidates as Array<Record<string, unknown>>;
+    assert.equal(cands.length, 2);
+    const deepseek = cands.find((c) => c.workerProfileId === "deepseek-primary")!;
+    assert.equal(deepseek.workerLabel, "DeepSeek Primary");
+    assert.equal(deepseek.provider, "deepseek");
+    assert.equal(deepseek.runtime, "claude-code");
+    assert.equal(deepseek.effort, "high");
+    const qwen = cands.find((c) => c.workerProfileId === "qwen-secondary")!;
+    assert.equal(qwen.workerLabel, "Qwen Secondary");
+    assert.equal(qwen.provider, "qwen");
+    // Duplicate profile ids fail closed before evidence.
+    const dup = await client.callTool({
+      name: "forklight_model_routing",
+      arguments: {
+        taskClass: "nonexistent-class",
+        workerProfileIds: ["deepseek-primary", "deepseek-primary"],
+      },
+    });
+    assert.equal(dup.isError, true);
+    assert.match(toolErrorText(dup), /duplicate/i);
   } finally {
     await client.close();
     await server.close();
@@ -1524,6 +1622,55 @@ test("MCP validate inherits null default when maxBudgetUsd is omitted (FL-D92)",
     const budget = body.budget as Record<string, unknown>;
     assert.equal(budget.source, "inherited-null");
     assert.equal(budget.generatesRuntimeFlag, false);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP validate surfaces the canonical workspace boundary advice", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-boundary-"));
+  const project = path.join(home, "project");
+  await mkdir(project, { recursive: true });
+  for (const dir of ["secret-root-alpha", "secret-root-beta"]) {
+    await mkdir(path.join(project, dir), { recursive: true });
+    await writeFile(path.join(project, dir, "placeholder.txt"), "ignored\n");
+  }
+  await writeFile(
+    path.join(project, ".gitignore"),
+    "secret-root-alpha/\nsecret-root-beta/\n",
+  );
+  await execFileAsync("git", ["init", "-q"], { cwd: project });
+
+  const store = new StateStore(home);
+  store.close();
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(project),
+    });
+    assert.equal(result.isError, undefined, toolErrorText(result));
+    const body = result.structuredContent as Record<string, unknown>;
+    const advice = body.workspaceBoundaryAdvice as Record<string, unknown>;
+    assert.ok(advice, "forklight_validate consumes the canonical boundary advice");
+    assert.equal(advice.status, "review");
+    assert.equal(advice.ignoredDirectoryRootCount, 2);
+    assert.equal(advice.coveredCount, 0);
+    assert.equal(advice.visibleBusinessCount, 2);
+    assert.equal(advice.nextAction, "review-workspace-boundaries");
+    // Privacy: no ignored names, project path, Git output, or diagnostics.
+    const serialized = JSON.stringify(body);
+    assert.ok(!serialized.includes("secret-root-alpha"));
+    assert.ok(!serialized.includes("secret-root-beta"));
+    assert.ok(!serialized.includes(project));
+    assert.ok(!serialized.includes("fatal"));
   } finally {
     await client.close();
     await server.close();

@@ -427,6 +427,19 @@ export class ForkLightDaemon {
         return this.coordinator.health();
       case "validate_file":
         return this.coordinator.validateFile(requiredString(params.taskFile, "taskFile"));
+      case "reuse_task_class":
+        if (params.confirm !== true) {
+          throw new Error("reuse_task_class requires explicit confirm: true");
+        }
+        return this.coordinator.reuseTaskClass({
+          taskFile: requiredString(params.taskFile, "taskFile"),
+          expectedPreviewRevisionDigest: requiredString(
+            params.expectedPreviewRevisionDigest,
+            "expectedPreviewRevisionDigest",
+          ),
+          taskClass: requiredString(params.taskClass, "taskClass"),
+          confirm: true,
+        });
       case "submit_file":
         return this.coordinator.submitFile(
           requiredString(params.taskFile, "taskFile"),
@@ -891,21 +904,37 @@ export class ForkLightDaemon {
       }
       case "model_routing": {
         const taskClass = requiredBoundedString(params.taskClass, "taskClass");
-        const rawCandidates = requireArray(params.candidates, "candidates");
-        if (rawCandidates.length < 2 || rawCandidates.length > 10) {
-          throw new Error("candidates must contain 2 to 10 entries");
+        const hasCandidates = params.candidates !== undefined;
+        const hasProfiles = params.workerProfileIds !== undefined;
+        if (hasCandidates === hasProfiles) {
+          throw new Error("model_routing requires exactly one of candidates or workerProfileIds");
         }
-        const candidates = rawCandidates.map((c, i) => {
-          const obj = strictObject(c, `candidates[${i}]`);
-          return {
-            provider: requiredBoundedString(obj.provider, `candidates[${i}].provider`),
-            model: requiredBoundedString(obj.model, `candidates[${i}].model`),
-            ...(typeof obj.runtime === "string" && obj.runtime.trim().length > 0
-              ? { runtime: obj.runtime.trim() } : {}),
-            ...(typeof obj.effort === "string" && obj.effort.trim().length > 0
-              ? { effort: obj.effort.trim() } : {}),
-          };
-        });
+        let candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }> | undefined;
+        let workerProfileIds: string[] | undefined;
+        if (hasCandidates) {
+          const rawCandidates = requireArray(params.candidates, "candidates");
+          if (rawCandidates.length < 2 || rawCandidates.length > 10) {
+            throw new Error("candidates must contain 2 to 10 entries");
+          }
+          candidates = rawCandidates.map((c, i) => {
+            const obj = strictObject(c, `candidates[${i}]`);
+            return {
+              provider: requiredBoundedString(obj.provider, `candidates[${i}].provider`),
+              model: requiredBoundedString(obj.model, `candidates[${i}].model`),
+              ...(typeof obj.runtime === "string" && obj.runtime.trim().length > 0
+                ? { runtime: obj.runtime.trim() } : {}),
+              ...(typeof obj.effort === "string" && obj.effort.trim().length > 0
+                ? { effort: obj.effort.trim() } : {}),
+            };
+          });
+        } else {
+          const rawProfiles = requireArray(params.workerProfileIds, "workerProfileIds");
+          if (rawProfiles.length < 2 || rawProfiles.length > 10) {
+            throw new Error("workerProfileIds must contain 2 to 10 entries");
+          }
+          workerProfileIds = rawProfiles.map((value, i) =>
+            requiredBoundedString(value, `workerProfileIds[${i}]`));
+        }
         const taskFamily = typeof params.taskFamily === "string" && params.taskFamily.trim().length > 0
           ? params.taskFamily.trim()
           : undefined;
@@ -921,7 +950,7 @@ export class ForkLightDaemon {
               .filter((t) => t.length > 0)
           : undefined;
         return this.coordinator.modelRouting(
-          taskClass, candidates, taskFamily, competitionIntent, competitionTriggers,
+          taskClass, candidates, taskFamily, competitionIntent, competitionTriggers, workerProfileIds,
         );
       }
       case "self_upgrade_evidence": {

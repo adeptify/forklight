@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -14,8 +14,11 @@ import {
   restartHubDetached,
   type DetachedHubRestartResult,
 } from "../src/hub/instance.js";
-import { stopDaemon } from "../src/daemon/client.js";
-import { sleepMs } from "../src/core/time.js";
+import {
+  HubCliLifecycleFixture,
+  type HubCliCleanupResult,
+} from "./helpers/hub-cli-fixture.js";
+import { probeSocketAlive } from "./helpers/detached-daemon.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -62,42 +65,6 @@ async function runCli(
   }
 }
 
-async function stopTrackedPid(pid: number | undefined): Promise<void> {
-  if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) return;
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return;
-  }
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0);
-      await sleepMs(50);
-    } catch {
-      return;
-    }
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // best effort
-  }
-}
-
-async function cleanupDetachedHome(
-  home: string,
-  result?: DetachedHubRestartResult & { browserOpened?: boolean },
-): Promise<void> {
-  await stopTrackedPid(result?.pid);
-  try {
-    await stopDaemon(home);
-  } catch {
-    // best effort — home may never have started a daemon
-  }
-  await rm(home, { recursive: true, force: true }).catch(() => undefined);
-}
-
 function assertPrivacySafeJson(text: string, home: string): void {
   assert.ok(!/"token"\s*:/.test(text), "JSON must not contain token key");
   assert.ok(!/"nonce"\s*:/.test(text), "JSON must not contain nonce key");
@@ -106,6 +73,22 @@ function assertPrivacySafeJson(text: string, home: string): void {
   assert.ok(!text.includes(root), "JSON must not contain workspace path");
   assert.ok(!text.includes("http://"), "JSON must not contain URL");
   assert.ok(!text.includes("#"), "JSON must not contain URL fragment");
+}
+
+async function assertLifecycleResidueGone(
+  fixture: HubCliLifecycleFixture,
+  cleanup: HubCliCleanupResult,
+): Promise<void> {
+  const hubPid = cleanup.hubPid;
+  if (hubPid !== undefined) {
+    assert.throws(() => process.kill(hubPid, 0), /ESRCH/, "Hub PID must be gone");
+  }
+  const daemonPid = cleanup.daemonPid;
+  if (daemonPid !== undefined) {
+    assert.throws(() => process.kill(daemonPid, 0), /ESRCH/, "daemon PID must be gone");
+  }
+  assert.equal(await probeSocketAlive(fixture.home), false, "daemon socket must be gone");
+  await assert.rejects(stat(fixture.home), /ENOENT/, "fixture home must be removed");
 }
 
 test("hub restart without --confirm is rejected before lifecycle work", async () => {
@@ -175,12 +158,13 @@ test("hub restart rejects unknown flags", async () => {
 });
 
 test("detached restart CLI returns finite privacy-safe JSON and honors --no-open", async () => {
-  const home = await mkdtemp(path.join(tmpdir(), "forklight-hub-cli-json-privacy-"));
+  const fixture = await HubCliLifecycleFixture.create("forklight-hub-cli-json-privacy-");
   let parsed: (DetachedHubRestartResult & { browserOpened?: boolean }) | undefined;
+  let cleanup: HubCliCleanupResult | undefined;
   try {
-    // Use the minimum timeout so the parent always returns quickly even if the
-    // child is still starting. Cleanup always stops any tracked child PID.
-    const result = await runCli(home, [
+    // This real-process scenario waits for normal readiness so both lifecycle
+    // owners are observable. The pre-readiness timeout edge is seam-tested.
+    const result = await runCli(fixture.home, [
       "hub",
       "restart",
       "--confirm",
@@ -188,53 +172,68 @@ test("detached restart CLI returns finite privacy-safe JSON and honors --no-open
       "--no-open",
       "--json",
       "--startup-timeout-ms",
-      String(MIN_HUB_STARTUP_TIMEOUT_MS),
-    ], 30_000);
+      String(DEFAULT_HUB_STARTUP_TIMEOUT_MS),
+    ], DEFAULT_HUB_STARTUP_TIMEOUT_MS + 20_000);
     assert.ok(result.stdout.trim().length > 0, "must print one JSON document");
+    const rawPidMatch = /"pid"\s*:\s*(\d+)/.exec(result.stdout);
+    if (rawPidMatch) fixture.registerHubPid(Number(rawPidMatch[1]));
     parsed = JSON.parse(result.stdout) as DetachedHubRestartResult & {
       browserOpened?: boolean;
     };
+    fixture.registerHubPid(parsed.pid);
+    assert.equal(result.code, 0);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.state, "ready");
+    assert.ok(Number.isSafeInteger(parsed.pid) && (parsed.pid ?? 0) > 0);
     assert.equal(typeof parsed.ok, "boolean");
     assert.ok(["current", "ready", "failed"].includes(parsed.state));
     assert.ok(
       ["none-needed", "replaced", "started", "not-started"].includes(parsed.replacement),
     );
     assert.equal(parsed.browserOpened, false, "--no-open must never open a browser");
-    assertPrivacySafeJson(result.stdout, home);
-    // Command must return (not occupy the caller). A non-zero code is fine on timeout.
-    assert.ok(result.code === 0 || result.code === 1);
+    assertPrivacySafeJson(result.stdout, fixture.home);
   } finally {
-    await cleanupDetachedHome(home, parsed);
+    cleanup = await fixture.cleanup();
   }
+  assert.ok(cleanup);
+  assert.equal(cleanup.homeRemoved, true);
+  assert.equal(cleanup.ownershipConflict, undefined);
+  assert.equal(cleanup.hubPid, parsed?.pid);
+  assert.ok(Number.isSafeInteger(cleanup.daemonPid) && (cleanup.daemonPid ?? 0) > 0);
+  await assertLifecycleResidueGone(fixture, cleanup);
 });
 
 test("detached restart human mode reports browser not opened with --no-open", async () => {
-  const home = await mkdtemp(path.join(tmpdir(), "forklight-hub-cli-human-noopen-"));
+  const fixture = await HubCliLifecycleFixture.create("forklight-hub-cli-human-noopen-");
   let pid: number | undefined;
+  let cleanup: HubCliCleanupResult | undefined;
   try {
-    const result = await runCli(home, [
+    const result = await runCli(fixture.home, [
       "hub",
       "restart",
       "--confirm",
       "--detach",
       "--no-open",
       "--startup-timeout-ms",
-      String(MIN_HUB_STARTUP_TIMEOUT_MS),
-    ], 30_000);
-    assert.match(result.stdout, /browser: not opened/);
-    assert.ok(!result.stdout.includes("http://"), "human output must not print the token URL");
-    assert.ok(!result.stdout.includes(home), "human output must not print the home path");
+      String(DEFAULT_HUB_STARTUP_TIMEOUT_MS),
+    ], DEFAULT_HUB_STARTUP_TIMEOUT_MS + 20_000);
     const pidMatch = /pid=(\d+)/.exec(result.stdout);
     if (pidMatch) pid = Number(pidMatch[1]);
+    fixture.registerHubPid(pid);
+    assert.equal(result.code, 0);
+    assert.ok(Number.isSafeInteger(pid) && (pid ?? 0) > 0);
+    assert.match(result.stdout, /browser: not opened/);
+    assert.ok(!result.stdout.includes("http://"), "human output must not print the token URL");
+    assert.ok(!result.stdout.includes(fixture.home), "human output must not print the home path");
   } finally {
-    await stopTrackedPid(pid);
-    try {
-      await stopDaemon(home);
-    } catch {
-      // ignore
-    }
-    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+    cleanup = await fixture.cleanup();
   }
+  assert.ok(cleanup);
+  assert.equal(cleanup.homeRemoved, true);
+  assert.equal(cleanup.ownershipConflict, undefined);
+  assert.equal(cleanup.hubPid, pid);
+  assert.ok(Number.isSafeInteger(cleanup.daemonPid) && (cleanup.daemonPid ?? 0) > 0);
+  await assertLifecycleResidueGone(fixture, cleanup);
 });
 
 test("foreground hub restart remains available and still requires confirm", async () => {

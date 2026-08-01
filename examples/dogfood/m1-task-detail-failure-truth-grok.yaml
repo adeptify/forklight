@@ -1,0 +1,188 @@
+version: 2
+name: Make failed Task Detail truthful via available Grok runtime
+project: ../..
+taskClass: m1-task-detail-failure-truth
+taskFamily: hub-product-comprehension
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: hub-product-comprehension
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: main-judgment
+    note: The first Flash task produced zero source output because the Claude Code runtime could not read its local NVM executable path inside isolation. Main selected the already available Grok runtime for one bounded fallback; this is an infrastructure routing decision, not a model-quality ranking.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Failed Task Detail presents one truthful failure reason, separates machine
+    verification from Main judgment, and tells the user exactly what will not
+    happen automatically and what decision is needed to continue.
+  presentation:
+    summary: 失败页不再拿通过行解释失败，并把“已拒绝”改成真正可执行的下一步。
+    language: zh-CN
+  context:
+    - The authoritative aligned contract is docs/m1-task-detail-failure-truth-contract.md; follow it exactly and do not invent a new visual direction.
+    - Read src/hub/server.ts, src/hub/public/app.js, src/hub/public/i18n.js, tests/hub-settings.test.ts, and tests/hub-ui-assets.test.ts before editing.
+    - Real rejected Task e00d171d-ec9a-45a0-98f1-58cd97b59f33 currently shows a passing check-mark line as npm test failure evidence, labels a failed check as all automated behavior tests passed, and repeats rejection as the next step.
+    - Successful integrated Task 38c2dc62-678d-4f0e-a453-cfa7f7da950b is the regression baseline.
+    - An earlier Flash Task ended before model work because the Claude Code executable under .nvm was blocked by isolation. Rebuild from this current source; there is no Candidate to reuse and no model-quality conclusion.
+    - Main already decided the layout, hierarchy and copy behavior. Implement the contract; do not redesign the Hub or improvise decorative UI.
+  inScope:
+    - Make buildSafeFailureSummary prefer safe failure diagnostics and suppress explicit success/progress lines when the command failed.
+    - Keep existing redaction, private-path trimming, noise filtering, length bounds and undefined fail-closed behavior.
+    - Make verification check labels result-neutral in English and Chinese; badges and conclusions alone express pass/fail.
+    - Make Main reject/revise explanations branch on actual verification failure so machine-failed and machine-passed cases cannot contradict each other.
+    - Turn rejected/revision next-step copy into an explicit bounded action and permission statement, including no automatic retry or Integration.
+    - Clarify the Checks tab count so zero failures cannot be read as zero checks, without redesigning the tab system.
+    - Add executable fixtures for passing output before a later failure, compile errors, no safe diagnostic, machine-failed reject/revise, machine-passed reject/revise and successful integrated regression.
+  outOfScope:
+    - Do not change Task, verification, Main review, Candidate, Integration, routing, Competition, economics, Settings, database, Provider, credentials or retry semantics.
+    - Do not parse raw logs in the browser, expose full stdout/stderr, translate original Main/Worker text, or add Provider calls.
+    - Do not redesign Task Detail, add nested cards, broad CSS, animation, new actions, automatic correction, retry, reverify or Integration.
+    - Do not restart Daemon or Hub, touch Adeptify/Nexus, Flyleaf, Elsewhere, Client-Core SDK or any other repository, commit or push.
+  executionSteps:
+    - Freeze the real contradictory states as focused pure/server and UI asset tests before changing presentation logic.
+    - Refactor safe failure-line selection behind the existing projection boundary and prove redaction/bounds stay intact.
+    - Replace result-bearing check names with neutral names and branch Main decision/next-action wording from existing safe facts only.
+    - Run the focused suite once, repair only Candidate-caused failures, then run the full acceptance suite once.
+  deliverables:
+    - Truthful privacy-safe failure summaries for Task Detail.
+    - Neutral bilingual check names and non-contradictory Main decision explanations.
+    - Actionable bounded next steps and unambiguous check counts.
+    - Focused regressions protecting failure and success journeys.
+  modules:
+    - name: Safe failure evidence selection
+      responsibility: Select one bounded diagnostic from failed command output after privacy filtering.
+      consumes:
+        - Failed verification command stderr/stdout.
+      produces:
+        - One safe failure summary or no summary.
+      boundaries:
+        - No raw output projection, inferred fix or changed verification result.
+    - name: Task Detail truth composition
+      responsibility: Present verification, Main decision and next action as separate consistent facts.
+      consumes:
+        - Existing safe Journey verification, cause, finalDelivery, nextAction and retainedCandidate.
+      produces:
+        - Human-readable Hero, Overview checks and bounded next step.
+      boundaries:
+        - Presentation only; no new domain decision or automatic action.
+    - name: Bilingual semantic labels
+      responsibility: Name check types and recovery permissions without embedding result in labels.
+      consumes:
+        - Existing closed check categories and decision labels.
+      produces:
+        - Neutral English and Chinese strings.
+      boundaries:
+        - Historical Main and Worker prose remains original and bounded.
+  callChain:
+    - Verification records command result and bounded output.
+    - Hub server redacts and chooses a failure-oriented safe summary.
+    - Safe Journey carries check verdicts, Main decision, retained evidence and next-action code.
+    - Hub renders one consistent failure explanation and one bounded next action; deeper evidence stays optional.
+  scenarios:
+    - name: Passing lines before test failure
+      given: A failed test command emits many passing lines before its real failure.
+      when: Task Detail builds the failure summary.
+      then: A real failure diagnostic or honest unavailable fallback is shown, never a check-mark line.
+    - name: Verification failed and Main rejected
+      given: Independent checks failed, Main rejected, and one Candidate is retained.
+      when: Overview opens.
+      then: Failure, Main decision, retained-evidence limit and no-automatic-retry next step agree.
+    - name: Machine passed but Main rejected
+      given: Machine checks passed and Main found an additional problem.
+      when: Overview opens.
+      then: The UI preserves Main authority without claiming machine verification failed.
+    - name: Successful corrected delivery
+      given: A later correction passed, Main accepted and Integration completed.
+      when: Overview opens.
+      then: The existing successful delivery loop remains clear and no failure copy leaks into it.
+  risks:
+    - Ranking output can expose a private but error-looking line; redact first and retain all privacy tests.
+    - Removing result words from labels can make them vague; keep the check type specific and verdict adjacent.
+    - An actionable sentence must not bypass Main authority; explain the decision needed without starting work.
+    - Broad tab restructuring would make this slice hard to verify; defer keyboard, tone and dialog redesign.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 700
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 700
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 3
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/hub/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Failed command summaries prefer privacy-safe failure diagnostics and never present explicit passing lines as the failure cause.
+    - Check names are result-neutral in both locales; verdicts, Main decisions and next actions remain logically consistent.
+    - Rejected or revision-required Tasks state that no automatic retry or Integration will occur and name the Main decision needed to continue.
+    - Existing redaction, bounds, safe projection and successful corrected/integrated journey behavior do not regress.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

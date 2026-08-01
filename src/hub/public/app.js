@@ -2467,6 +2467,10 @@ var boardScope = "now";
 var boardSubmitPath = "";
 var boardPreview = null;
 var boardPreviewRequestId = 0;
+/* Pending state for the preview-bound class reuse action. While a confirmed
+ * reuse request is in flight the reuse buttons, Preview, and Submit are all
+ * disabled so a stale confirmation can never race a fresh preview. */
+var boardReusePending = false;
 function submitPreviewRequestIsCurrent(requestId, requestedPath, currentPath){
   return requestId === boardPreviewRequestId
     && requestedPath === String(currentPath || "").trim();
@@ -2625,8 +2629,8 @@ function taskMatchesBoardFilter(task, query, lane){
  * beginner copy shows only Worker/model/runtime/budget/Attempts/adaptation/
  * quality/Integration facts. No path, command, endpoint, credential, or Task
  * text is rendered. */
-function submitFactRow(label, value){
-  var r = h("div", "summary-line submit-fact");
+function submitFactRow(cls, label, value){
+  var r = h("div", "summary-line submit-fact" + (cls ? " " + cls : ""));
   r.appendChild(h("span", "fact-label", label + ": "));
   r.appendChild(h("span", "fact-val", value));
   return r;
@@ -2665,27 +2669,320 @@ function submitIntegrationText(preview){
   if(!integ.applicable) return t("taskSubmitIntegrationNa");
   return integ.integratable ? t("taskSubmitIntegrationOk") : t("taskSubmitIntegrationWarn");
 }
-function submitWorkerText(preview){
-  var id = String(preview.workerProfileId || "");
-  var label = preview.workerProfileLabel ? String(preview.workerProfileLabel) : id;
-  return label === id ? id : label + " (" + id + ")";
-}
-function renderSubmitPreviewFacts(preview){
-  var wrap = h("div", "submit-preview-facts");
-  wrap.appendChild(submitFactRow(t("taskSubmitFactTask"), String(preview.taskName || "")));
-  if(preview.workerProfileId){
-    wrap.appendChild(submitFactRow(t("taskSubmitFactWorker"), submitWorkerText(preview)));
+/* Privacy-safe workspace boundary advice inside the execution-boundaries
+ * group. Consumes only the safe workspaceBoundaryAdvice: bounded counts and
+ * closed codes, never paths, names, Git output, commands, or diagnostics.
+ * Git ignore is explicitly labelled a review signal, never proof of generated
+ * output. Missing, unknown, or malformed advice (older daemon or corrupt
+ * payload) fails closed to a bounded manual-review note so an unknown boundary
+ * is never presented as clear and raw advice content is never echoed. */
+function submitBoundaryAdviceText(advice){
+  if(!advice || typeof advice !== "object"){
+    return t("taskSubmitBoundaryLegacy");
   }
-  wrap.appendChild(submitFactRow(t("taskSubmitFactProvider"), String(preview.provider || "")));
-  wrap.appendChild(submitFactRow(t("taskSubmitFactModel"), String(preview.model || "")));
-  wrap.appendChild(submitFactRow(t("taskSubmitFactRuntime"), String(preview.runtime || "")));
-  wrap.appendChild(submitFactRow(t("taskSubmitFactEffort"), String(preview.effort || "")));
-  wrap.appendChild(submitFactRow(t("taskSubmitFactBudget"), submitBudgetText(preview)));
-  wrap.appendChild(submitFactRow(t("taskSubmitFactAttempts"), submitAttemptsText(preview)));
-  wrap.appendChild(submitFactRow(t("taskSubmitFactAdaptation"), submitAdaptationText(preview)));
-  wrap.appendChild(submitFactRow(t("taskSubmitFactQuality"), submitQualityText(preview)));
-  wrap.appendChild(submitFactRow(t("taskSubmitFactIntegration"), submitIntegrationText(preview)));
-  wrap.appendChild(h("div", "summary-line dim mt-4", t("taskSubmitNoTaskStarted")));
+  function boundedCount(value){
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  }
+  var countsOk = boundedCount(advice.ignoredDirectoryRootCount)
+    && boundedCount(advice.coveredCount)
+    && boundedCount(advice.visibleBusinessCount);
+  var countsAgree = countsOk
+    && Number.isSafeInteger(advice.coveredCount + advice.visibleBusinessCount)
+    && advice.ignoredDirectoryRootCount === advice.coveredCount + advice.visibleBusinessCount;
+  switch(advice.status){
+    case "review":
+      if(!countsAgree || advice.visibleBusinessCount < 1 || advice.reason !== "checked"
+        || advice.nextAction !== "review-workspace-boundaries") return t("taskSubmitBoundaryLegacy");
+      return t("taskSubmitBoundaryReview", {
+        count: advice.visibleBusinessCount,
+        observed: advice.ignoredDirectoryRootCount,
+        covered: advice.coveredCount
+      }) + " " + t("taskSubmitBoundaryReviewHint");
+    case "clear":
+      if(!countsAgree || advice.visibleBusinessCount !== 0 || advice.reason !== "checked"
+        || advice.nextAction !== "continue") return t("taskSubmitBoundaryLegacy");
+      return t("taskSubmitBoundaryClear");
+    case "unavailable":
+      if(!countsAgree || advice.ignoredDirectoryRootCount !== 0 || advice.reason === "checked"
+        || !["not-git", "command-failed", "timed-out", "output-truncated", "malformed-output", "unsafe-count"].includes(advice.reason)
+        || advice.nextAction !== "manual-review") return t("taskSubmitBoundaryLegacy");
+      return t("taskSubmitBoundaryUnavailable");
+    default:
+      return t("taskSubmitBoundaryLegacy");
+  }
+}
+/* Worker identity is resolved once and rendered only in the "what will run"
+ * section; the routing explanation never repeats it. Falls back to the frozen
+ * routing record when an older daemon omits the top-level profile fields. */
+function submitWorkerIdentity(preview){
+  if(preview.workerProfileId){
+    return { id: String(preview.workerProfileId), label: preview.workerProfileLabel ? String(preview.workerProfileLabel) : null };
+  }
+  var ex = preview.routingExplanation && preview.routingExplanation.selectedWorker;
+  if(ex && ex.workerProfileId){
+    return { id: String(ex.workerProfileId), label: ex.workerProfileLabel ? String(ex.workerProfileLabel) : null };
+  }
+  return null;
+}
+function submitWorkerText(preview){
+  var identity = submitWorkerIdentity(preview);
+  if(!identity) return "";
+  return identity.label && identity.label !== identity.id
+    ? identity.label + " (" + identity.id + ")"
+    : identity.id;
+}
+function submitFieldValue(preview, key){
+  if(preview[key]) return String(preview[key]);
+  var ex = preview.routingExplanation && preview.routingExplanation.selectedWorker;
+  if(ex && ex[key]) return String(ex[key]);
+  return "";
+}
+/* Explanation-first routing block: why this Worker was selected, how many
+ * candidates Main compared, aggregate historical evidence, and whether a
+ * Competition is planned. Consumes only the safe routingExplanation; never
+ * the raw routingDecision, private notes, or identity-key maps. Missing
+ * explanation (older daemon) degrades to a bounded note. The selected Worker
+ * identity itself is rendered once in the "what will run" section above and
+ * is deliberately not repeated here. */
+function submitRoutingBasisText(code){
+  switch(code){
+    case "user-specified": return t("taskSubmitRoutingBasisUserSpecified");
+    case "only-available": return t("taskSubmitRoutingBasisOnlyAvailable");
+    case "historical-evidence": return t("taskSubmitRoutingBasisHistoricalEvidence");
+    case "runtime-capability": return t("taskSubmitRoutingBasisRuntimeCapability");
+    case "main-judgment": return t("taskSubmitRoutingBasisMainJudgment");
+    case "other": return t("taskSubmitRoutingBasisOther");
+    default: return null;
+  }
+}
+function submitRoutingScopeText(scope){
+  switch(scope){
+    case "exact-class": return t("taskSubmitRoutingScopeExactClass");
+    case "task-family": return t("taskSubmitRoutingScopeTaskFamily");
+    case "none": return t("taskSubmitRoutingScopeNone");
+    default: return null;
+  }
+}
+function submitRoutingTriggerText(tr){
+  switch(tr){
+    case "critical": return t("taskSubmitRoutingTriggerCritical");
+    case "multiple-plausible-solutions": return t("taskSubmitRoutingTriggerMultiple");
+    case "new-family": return t("taskSubmitRoutingTriggerNewFamily");
+    case "user-requested": return t("taskSubmitRoutingTriggerUserRequested");
+    default: return null;
+  }
+}
+function submitRoutingCompetitionText(comp){
+  if(!comp) return t("taskSubmitRoutingCompetitionMissing");
+  var text;
+  switch(comp.intent){
+    case "required": text = t("taskSubmitRoutingCompetitionRequired"); break;
+    case "consider": text = t("taskSubmitRoutingCompetitionConsider"); break;
+    default: text = t("taskSubmitRoutingCompetitionNone");
+  }
+  var triggers = Array.isArray(comp.triggers) ? comp.triggers : [];
+  if(triggers.length > 0){
+    var labels = [];
+    triggers.forEach(function(tr){
+      var label = submitRoutingTriggerText(tr);
+      if(label) labels.push(label);
+    });
+    if(labels.length > 0) text += " - " + labels.join(", ");
+  }
+  return text;
+}
+function submitRoutingNextActionText(code){
+  switch(code){
+    case "submit-directly": return t("taskSubmitRoutingNextSubmitDirectly");
+    case "consider-competition": return t("taskSubmitRoutingNextConsiderCompetition");
+    case "run-competition": return t("taskSubmitRoutingNextRunCompetition");
+    case "not-recorded": return t("taskSubmitRoutingNextNotRecorded");
+    default: return null;
+  }
+}
+function renderSubmitRoutingExplanation(ex){
+  var wrap = h("section", "submit-group submit-group-why");
+  wrap.setAttribute("data-fl-role", "submit-why");
+  wrap.appendChild(h("h3", "submit-group-title", t("taskSubmitRoutingTitle")));
+  wrap.appendChild(h("div", "summary-line dim", t("taskSubmitRoutingBody")));
+  if(!ex){
+    wrap.appendChild(h("div", "summary-line dim", t("taskSubmitRoutingUnavailable")));
+    return wrap;
+  }
+  if(!ex.present){
+    wrap.appendChild(h("div", "summary-line dim", t("taskSubmitRoutingNotRecorded")));
+    var notRecordedNext = submitRoutingNextActionText(ex.nextAction);
+    if(notRecordedNext) wrap.appendChild(submitFactRow("", t("taskSubmitRoutingFactNext"), notRecordedNext));
+    return wrap;
+  }
+  wrap.appendChild(submitFactRow("", t("taskSubmitRoutingFactShortlist"), t("taskSubmitRoutingShortlistValue", { count: typeof ex.shortlistSize === "number" ? ex.shortlistSize : 0 })));
+  var basisText = submitRoutingBasisText(ex.basis);
+  if(basisText) wrap.appendChild(submitFactRow("", t("taskSubmitRoutingFactBasis"), basisText));
+  if(ex.evidence){
+    var scopeText = submitRoutingScopeText(ex.evidence.scope) || String(ex.evidence.scope);
+    wrap.appendChild(submitFactRow("", t("taskSubmitRoutingFactScope"), scopeText));
+    wrap.appendChild(submitFactRow("", t("taskSubmitRoutingFactEvidence"), t("taskSubmitRoutingEvidenceValue", {
+      candidate: typeof ex.evidence.candidateCount === "number" ? ex.evidence.candidateCount : 0,
+      total: typeof ex.evidence.totalSamples === "number" ? ex.evidence.totalSamples : 0
+    })));
+  }
+  wrap.appendChild(submitFactRow("", t("taskSubmitRoutingFactCompetition"), submitRoutingCompetitionText(ex.competition)));
+  var nextKey = submitRoutingNextActionText(ex.nextAction);
+  if(nextKey) wrap.appendChild(submitFactRow("", t("taskSubmitRoutingFactNext"), nextKey));
+  return wrap;
+}
+/* Explanation-first classification reuse block. Shows whether the exact class
+ * and family are reused and lists established families with truthful counts.
+ * Never a semantic guess, never a ranking, and never Task identity or private
+ * content. Missing advice (older daemon) degrades to a bounded note. */
+function submitClassificationStateText(evidence){
+  if(evidence && evidence.state === "existing"){
+    var text = t("taskSubmitClassExisting", { count: evidence.terminalCount });
+    if(evidence.completeSelectionCount > 0){
+      text += " - " + t("taskSubmitClassExistingComplete", { complete: evidence.completeSelectionCount });
+    }
+    return text;
+  }
+  if(evidence && evidence.state === "new") return t("taskSubmitClassNew");
+  return t("taskSubmitClassMissing");
+}
+function submitClassificationNextActionKey(code, hasClassChoices){
+  switch(code){
+    case "reuse-classification": return "taskSubmitNextReuse";
+    case "extend-family": return hasClassChoices ? "taskSubmitNextExtendWithChoices" : "taskSubmitNextExtend";
+    case "add-class": return hasClassChoices ? "taskSubmitNextAddClassWithChoices" : "taskSubmitNextAddClass";
+    case "add-family": return "taskSubmitNextAddFamily";
+    case "confirm-new-family": return "taskSubmitNextConfirmFamily";
+    case "fill-classification": return "taskSubmitNextFill";
+    default: return null;
+  }
+}
+function renderSubmitClassificationAdvice(advice, options){
+  var wrap = h("section", "submit-group submit-group-classify");
+  wrap.setAttribute("data-fl-role", "submit-classify");
+  wrap.appendChild(h("h3", "submit-group-title", t("taskSubmitClassTitle")));
+  wrap.appendChild(h("div", "summary-line dim", t("taskSubmitClassBody")));
+  if(!advice){
+    wrap.appendChild(h("div", "summary-line dim", t("taskSubmitClassUnavailable")));
+    return wrap;
+  }
+  var c = advice.taskClass || null;
+  var f = advice.taskFamily || null;
+  wrap.appendChild(submitFactRow("", t("taskSubmitClassFactClass"), submitClassificationStateText(c)));
+  wrap.appendChild(submitFactRow("", t("taskSubmitClassFactFamily"), submitClassificationStateText(f)));
+  // Full established-family list stays in a native disclosure; the current
+  // class/family and the next action above/below remain directly visible.
+  var choices = Array.isArray(advice.familyChoices) ? advice.familyChoices : [];
+  var familyList = h("div", "submit-family-list");
+  if(choices.length > 0){
+    choices.forEach(function(choice){
+      familyList.appendChild(h("div", "summary-line dim", t("taskSubmitFamilyChoice", {
+        family: String(choice.family || ""),
+        terminal: typeof choice.terminalCount === "number" ? choice.terminalCount : 0,
+        complete: typeof choice.completeSelectionCount === "number" ? choice.completeSelectionCount : 0,
+        classes: typeof choice.distinctClassCount === "number" ? choice.distinctClassCount : 0
+      })));
+    });
+  } else {
+    familyList.appendChild(h("div", "summary-line dim", t("taskSubmitFamilyChoicesEmpty")));
+  }
+  wrap.appendChild(collapsedSection(t("taskSubmitFamilyChoices"), familyList));
+  // Within-family class candidates are revealed only when the current class is
+  // missing or new inside an already-established family, so Main can reuse a
+  // stable name instead of inventing a one-off class. They are existing names
+  // with truthful counts - never a semantic recommendation, never selected by
+  // ForkLight, and no Task identity.
+  var classState = c ? c.state : null;
+  var familyState = f ? f.state : null;
+  var classChoices = Array.isArray(advice.classChoices) ? advice.classChoices : [];
+  if((classState === "missing" || classState === "new") && familyState === "existing" && classChoices.length > 0){
+    wrap.appendChild(h("div", "summary-line dim", t("taskSubmitClassChoicesHint")));
+    var classList = h("div", "submit-family-list");
+    // Per-choice draft-only actions appear only when the caller supplies a
+    // handler for the exact current preview (file path + digest). ForkLight
+    // never preselects a choice; every button requires its own confirmation.
+    var showActions = !!(options && options.onReuse && options.eligible);
+    var actionsDisabled = showActions && !!(options && options.pending);
+    classChoices.forEach(function(choice){
+      var name = String(choice.taskClass || "");
+      var rowText = t("taskSubmitClassChoice", {
+        taskClass: name,
+        terminal: typeof choice.terminalCount === "number" ? choice.terminalCount : 0,
+        complete: typeof choice.completeSelectionCount === "number" ? choice.completeSelectionCount : 0
+      });
+      if(showActions){
+        var row = h("div", "reuse-class-row");
+        row.appendChild(h("span", "summary-line dim reuse-class-name", rowText));
+        var reuseBtn = h("button", "btn sm reuse-class-btn", t("taskSubmitClassReuseBtn"));
+        reuseBtn.type = "button";
+        reuseBtn.setAttribute("data-fl-role", "reuse-class");
+        reuseBtn.setAttribute("aria-label", t("taskSubmitClassReuseBtn") + ": " + name);
+        if(actionsDisabled) reuseBtn.disabled = true;
+        reuseBtn.addEventListener("click", function(){
+          if(actionsDisabled || !options || !options.onReuse) return;
+          options.onReuse(name, reuseBtn);
+        });
+        row.appendChild(reuseBtn);
+        classList.appendChild(row);
+      } else {
+        classList.appendChild(h("div", "summary-line dim", rowText));
+      }
+    });
+    // The disclosure is expanded by default because this list is the point of
+    // the guidance; it stays a native keyboard-focusable details element.
+    var classDetails = document.createElement("details");
+    classDetails.className = "audit-details";
+    classDetails.setAttribute("open", "");
+    var classSummary = document.createElement("summary");
+    classSummary.textContent = t("taskSubmitClassChoices");
+    classDetails.appendChild(classSummary);
+    classDetails.appendChild(classList);
+    wrap.appendChild(classDetails);
+  }
+  var nextKey = submitClassificationNextActionKey(advice.nextAction, classChoices.length > 0);
+  if(nextKey){
+    wrap.appendChild(h("strong", "summary-line submit-next-label", t("taskSubmitNextAction")));
+    wrap.appendChild(h("div", "summary-line submit-next-action", t(nextKey)));
+  }
+  return wrap;
+}
+function renderSubmitPreviewFacts(preview, options){
+  var wrap = h("div", "submit-preview-facts");
+  // 1. What will run: the Task and the single Worker identity that executes it.
+  var what = h("section", "submit-group submit-group-what");
+  what.setAttribute("data-fl-role", "submit-what");
+  what.appendChild(h("h3", "submit-group-title", t("taskSubmitGroupWhat")));
+  what.appendChild(submitFactRow("submit-fact-task", t("taskSubmitFactTask"), String(preview.taskName || "")));
+  if(submitWorkerIdentity(preview)){
+    what.appendChild(submitFactRow("submit-fact-worker", t("taskSubmitFactWorker"), submitWorkerText(preview)));
+  }
+  what.appendChild(submitFactRow("", t("taskSubmitFactProvider"), submitFieldValue(preview, "provider")));
+  what.appendChild(submitFactRow("", t("taskSubmitFactModel"), submitFieldValue(preview, "model")));
+  what.appendChild(submitFactRow("", t("taskSubmitFactRuntime"), submitFieldValue(preview, "runtime")));
+  what.appendChild(submitFactRow("", t("taskSubmitFactEffort"), submitFieldValue(preview, "effort")));
+  what.appendChild(h("div", "summary-line dim mt-4", t("taskSubmitNoTaskStarted")));
+  wrap.appendChild(what);
+  // 2. Why this Worker: selection basis, evidence, Competition intent and the
+  // routing next action; the selected Worker is not repeated here.
+  wrap.appendChild(renderSubmitRoutingExplanation(preview.routingExplanation));
+  // 3. Execution boundaries: budget, attempts, follow-up Tasks, brief check
+  // and Integration safety.
+  var bounds = h("section", "submit-group submit-group-boundaries");
+  bounds.setAttribute("data-fl-role", "submit-boundaries");
+  bounds.appendChild(h("h3", "submit-group-title", t("taskSubmitGroupBoundaries")));
+  bounds.appendChild(submitFactRow("", t("taskSubmitFactBudget"), submitBudgetText(preview)));
+  bounds.appendChild(submitFactRow("", t("taskSubmitFactAttempts"), submitAttemptsText(preview)));
+  bounds.appendChild(submitFactRow("", t("taskSubmitFactAdaptation"), submitAdaptationText(preview)));
+  bounds.appendChild(submitFactRow("", t("taskSubmitFactQuality"), submitQualityText(preview)));
+  bounds.appendChild(submitFactRow("", t("taskSubmitFactIntegration"), submitIntegrationText(preview)));
+  var boundaryText = submitBoundaryAdviceText(preview.workspaceBoundaryAdvice);
+  if(boundaryText){
+    bounds.appendChild(submitFactRow("", t("taskSubmitFactBoundary"), boundaryText));
+  }
+  wrap.appendChild(bounds);
+  // 4. Classification and next step: current class/family plus the visible
+  // user action; the full established-family list stays in a disclosure.
+  wrap.appendChild(renderSubmitClassificationAdvice(preview.classificationAdvice, options));
   // Technical disclosure: raw digest and full effective policy values only.
   var tech = h("div", "summary-line mono fs11");
   tech.appendChild(h("span", "", t("taskSubmitDigestLabel") + ": " + String(preview.previewRevisionDigest || "")));
@@ -2709,12 +3006,14 @@ function rTasks(){
   pathIn.type = "text";
   pathIn.value = boardSubmitPath;
   pathIn.placeholder = t("taskSubmitPathPlaceholder");
+  pathIn.disabled = boardReusePending;
   pathLab.appendChild(pathIn);
   submitCard.appendChild(pathLab);
 
   var previewArea = h("div", "preview-panel submit-preview-panel");
   var previewBtn = h("button", "btn sm", t("taskSubmitPreviewBtn"));
   previewBtn.type = "button";
+  previewBtn.disabled = boardReusePending;
   var submitBtn = h("button", "btn primary sm", t("taskSubmitBtn"));
   submitBtn.type = "button";
   submitBtn.disabled = true;
@@ -2726,13 +3025,73 @@ function rTasks(){
       submitBtn.disabled = true;
       return;
     }
-    previewArea.appendChild(renderSubmitPreviewFacts(boardPreview.preview));
-    submitBtn.disabled = false;
+    // Per-choice reuse actions are wired only to the exact current preview;
+    // while a reuse request is pending every action and Submit stay disabled.
+    previewArea.appendChild(renderSubmitPreviewFacts(boardPreview.preview, {
+      onReuse: applyReuseClass,
+      eligible: true,
+      pending: boardReusePending
+    }));
+    if(boardReusePending){ submitBtn.disabled = true; } else { submitBtn.disabled = false; }
   }
 
   function clearSubmitPreview(){
     boardPreview = null;
     renderSubmitPreview();
+  }
+
+  function applyReuseClass(taskClass, button){
+    if(boardReusePending || !boardPreview) return;
+    if(!window.confirm(t("taskSubmitClassReuseConfirm", { taskClass: taskClass }))) return;
+    // Capture the exact preview authority before the async request. A periodic
+    // board render must not make a successful write dereference newer global
+    // preview state or turn success into a client-side failure.
+    var reuseFilePath = boardPreview.filePath;
+    var reuseDigest = boardPreview.digest;
+    boardReusePending = true;
+    submitBtn.disabled = true;
+    previewBtn.disabled = true;
+    pathIn.disabled = true;
+    if(button) button.disabled = true;
+    var reuseButtons = previewArea.querySelectorAll("[data-fl-role=reuse-class]");
+    reuseButtons.forEach(function(b){ b.disabled = true; });
+    flashError("");
+    postJSON("/api/ops/tasks/reuse-class", {
+      filePath: reuseFilePath,
+      previewRevisionDigest: reuseDigest,
+      taskClass: taskClass,
+      confirm: true
+    }).then(function(res){
+      var pv = res && res.preview;
+      if(!pv || typeof pv.previewRevisionDigest !== "string" || !pv.previewRevisionDigest){
+        throw new Error("no fresh preview");
+      }
+      // Success renders ONLY the daemon-returned fresh preview; the old
+      // preview is replaced. Ordinary explicit Submit still requires its own
+      // separate click and digest-bound confirmation.
+      boardPreview = { filePath: reuseFilePath, digest: pv.previewRevisionDigest, preview: pv };
+      toast(t("taskSubmitClassReuseOk", { taskClass: taskClass }));
+    }).catch(function(e){
+      // Stale, forged, repeated or unsafe actions all invalidate submission:
+      // clear the preview and ask the user to preview again. Never echoes raw
+      // daemon/file diagnostics.
+      clearSubmitPreview();
+      var msg = e && e.message ? String(e.message) : "";
+      if(msg.indexOf("out of date") >= 0 || msg.indexOf("preview again") >= 0){
+        flashError(t("taskSubmitClassReuseStale"));
+      } else {
+        flashError(t("taskSubmitClassReuseFailed"));
+      }
+    }).finally(function(){
+      // Reset pending BEFORE re-rendering so the final DOM state is canonical
+      // even when a periodic poll re-rendered the board mid-request.
+      boardReusePending = false;
+      pathIn.disabled = false;
+      previewBtn.disabled = false;
+      submitBtn.disabled = !boardPreview;
+      renderSubmitPreview();
+      refresh();
+    });
   }
 
   pathIn.addEventListener("input", function(){
@@ -4894,35 +5253,26 @@ function renderModelRoutingSection(){
   candCard.appendChild(h("div", "card-title mb-4", t("mrCandidatesTitle")));
   candCard.appendChild(h("div", "summary-line dim mb-8", t("mrCandidatesHint")));
 
-  /* Build candidate list from catalog + profiles */
-  var seen = {};
+  /* Build candidate list from saved Worker Profiles only. The Profile id is the
+     selection key: same model on two different Workers stays two choices, and
+     catalog-only models (no saved Worker) never appear. */
   var candOptions = [];
-  /* From profile models */
   profiles.forEach(function(p){
     var configured = models.find(function(x){ return x.id === (p.modelConfigId || ""); });
     var provider = configured ? configured.provider : p.provider;
     var model = configured ? configured.model : p.model;
     if(!provider || !model) return;
-    var key = provider + "\0" + model;
-    if(seen[key]) return;
-    seen[key] = true;
+    var runtime = p.runtime || "?";
+    var effort = p.effort || "";
     candOptions.push({
-      key: key,
+      key: p.id,
+      profileId: p.id,
       provider: provider,
       model: model,
-      label: (p.label || p.id || "Worker") + ": " + provider + " / " + model,
-    });
-  });
-  /* From catalog models not already covered */
-  models.forEach(function(m){
-    var key = (m.provider || "") + "\0" + (m.model || "");
-    if(!m.provider || !m.model || seen[key]) return;
-    seen[key] = true;
-    candOptions.push({
-      key: key,
-      provider: m.provider || "",
-      model: m.model || "",
-      label: (m.label || m.id || "") + ": " + (m.provider || "?") + " / " + (m.model || "?"),
+      runtime: runtime,
+      effort: effort,
+      label: (p.label || p.id || "Worker") + ": " + provider + " / " + model
+        + " (" + runtime + (effort ? ", " + effort : "") + ")",
     });
   });
 
@@ -5020,20 +5370,19 @@ function renderModelRoutingSection(){
       var selOpts = cs.selectedOptions;
       var picks = [];
       for(var i = 0; i < selOpts.length; i++){
-        var parts = (selOpts[i].value || "").split("\0");
-        if(parts[0] && parts[1]) picks.push({ provider: parts[0], model: parts[1] });
+        var id = (selOpts[i].value || "").trim();
+        if(id) picks.push(id);
       }
-      /* Deduplicate */
+      /* Deduplicate profile ids */
       var deduped = [];
       var ds = {};
-      picks.forEach(function(p){
-        var k = p.provider + "\0" + p.model;
-        if(!ds[k]){ ds[k] = true; deduped.push(p); }
+      picks.forEach(function(id){
+        if(!ds[id]){ ds[id] = true; deduped.push(id); }
       });
       if(!taskClass){ toast(t("mrTaskClassLabel")); return; }
       if(deduped.length < 2){ toast(t("mrCandidatesMinError")); return; }
       if(deduped.length > 10) deduped = deduped.slice(0, 10);
-      S.mrCandidates = deduped.map(function(p){ return p.provider + "\0" + p.model; });
+      S.mrCandidates = deduped;
 
       /* Collect optional params */
       var tfEl = document.getElementById("fl-mr-taskFamily");
@@ -5052,7 +5401,7 @@ function renderModelRoutingSection(){
         return;
       }
 
-      var reqBody = { taskClass: taskClass, candidates: deduped };
+      var reqBody = { taskClass: taskClass, workerProfileIds: deduped };
       if(taskFamily) reqBody.taskFamily = taskFamily;
       if(compIntent && compIntent !== "") reqBody.competitionIntent = compIntent;
       if(compTriggers.length > 0) reqBody.competitionTriggers = compTriggers;
@@ -5172,12 +5521,69 @@ function renderMrResult(section, result){
   conc.appendChild(h("div", "summary-line dim mb-4",
     t("mrEvidenceScope") + ": " + scopeText));
 
+  /* Which saved Workers were actually compared: explanation first. */
+  var comparedNames = cands.filter(function(c){ return c.cohortParticipation === "compared"; }).map(function(c){
+    return c.workerLabel
+      ? c.workerLabel + " (" + c.provider + " / " + c.model + ")"
+      : c.provider + " / " + c.model;
+  });
+  if(comparedNames.length){
+    conc.appendChild(h("div", "summary-line dim mb-4",
+      t("mrComparedWorkers", { workers: comparedNames.join(", ") })));
+  }
+
+  /* Cohort coverage: how many candidates were actually compared. */
+  var allCompared = result.allCandidatesCompared === true;
+  var cohortCount = typeof result.cohortCandidateCount === "number" ? result.cohortCandidateCount : 0;
+  var totalCount = typeof result.totalCandidateCount === "number" ? result.totalCandidateCount : 0;
+  var excludedCount = typeof result.excludedCandidateCount === "number"
+    ? result.excludedCandidateCount
+    : Math.max(0, totalCount - cohortCount);
+  var recommendationCoverage = rec && rec.coverage
+    ? rec.coverage
+    : result.recommendationCoverage;
+  if(evidenceScope !== "none" && totalCount > 0){
+    if(allCompared){
+      conc.appendChild(h("div", "summary-line dim mb-4",
+        t("mrAllCandidatesCompared", { count: String(totalCount) })));
+    } else {
+      conc.appendChild(h("div", "summary-line dim mr-subset-warning mb-4",
+        t("mrEvidenceReadySubset", {
+          compared: String(cohortCount),
+          total: String(totalCount),
+          excluded: String(excludedCount)
+        })));
+    }
+  }
+
   if(rec){
     var recTitle = h("div", "mr-conclusion-title");
-    recTitle.appendChild(document.createTextNode(
-      t("mrRecommendation", { provider: rec.provider, model: rec.model, taskClass: taskClass })
-    ));
+    if(rec.workerLabel || rec.workerProfileId){
+      recTitle.appendChild(document.createTextNode(
+        t("mrRecommendationProfile", {
+          worker: rec.workerLabel || rec.workerProfileId,
+          taskClass: taskClass
+        })
+      ));
+    } else {
+      recTitle.appendChild(document.createTextNode(
+        t("mrRecommendation", { provider: rec.provider, model: rec.model, taskClass: taskClass })
+      ));
+    }
     conc.appendChild(recTitle);
+    /* Use the canonical recommendation boundary; do not infer it in the UI. */
+    if(recommendationCoverage === "evidence-ready-subset"){
+      conc.appendChild(h("div", "summary-line dim mr-subset-warning mt-4",
+        t("mrRecommendationSubsetOnly", {
+          compared: String(cohortCount),
+          total: String(totalCount),
+          excluded: String(excludedCount)
+        })));
+    }
+    if(rec.workerProfileId){
+      conc.appendChild(h("div", "summary-line dim fs11 mt-2",
+        t("mrWorkerProfileId", { profileId: rec.workerProfileId })));
+    }
     var cf = rec.confidence != null ? (rec.confidence * 100).toFixed(0) : "-";
     conc.appendChild(h("div", "summary-line mr-conf mt-4",
       t("mrRecommendationConfidence", { confidence: cf })));
@@ -5252,12 +5658,32 @@ function renderMrResult(section, result){
     cands.forEach(function(c){
       var cc = h("div", "mr-candidate-card");
       var name = hd("div", "mr-candidate-name");
-      name.appendChild(document.createTextNode(
-        t("mrCandidateEvidence", { provider: c.provider, model: c.model })));
+      if(c.workerLabel || c.workerProfileId){
+        name.appendChild(document.createTextNode(
+          t("mrCandidateWorker", {
+            worker: c.workerLabel || c.workerProfileId,
+            provider: c.provider,
+            model: c.model
+          })));
+      } else {
+        name.appendChild(document.createTextNode(
+          t("mrCandidateEvidence", { provider: c.provider, model: c.model })));
+      }
       cc.appendChild(name);
+      /* Cohort participation tag: first-class before any score or factor detail. */
+      if(c.cohortParticipation === "insufficient-evidence"){
+        cc.appendChild(h("div", "badge badge-dim mr-excluded-badge mt-2",
+          t("mrCandidateExcludedFromComparison")));
+      }
+      if(c.workerProfileId){
+        cc.appendChild(h("div", "summary-line dim fs11 mb-2",
+          t("mrWorkerProfileId", { profileId: c.workerProfileId })));
+      }
 
-      /* Human evidence facts; scoring arithmetic stays in technical detail. */
-      var ev = c.evidence || {};
+      /* Human evidence facts; scoring arithmetic stays in technical detail.
+       *  comparisonEvidence carries active-scope counts (family evidence when
+       *  scope is task-family); fall back to legacy evidence when absent. */
+      var ev = c.comparisonEvidence || c.evidence || {};
       var cov = c.sampleCoverage;
       if(cov && typeof cov.exactRelevantCount === "number"){
         cc.appendChild(h("div", "summary-line dim mb-2",
@@ -5426,8 +5852,11 @@ function renderMrResult(section, result){
 
   /* Per-candidate factor detail */
   cands.forEach(function(c){
+    var techName = c.workerLabel
+      ? c.workerLabel + " (" + c.provider + " / " + c.model + ")"
+      : c.provider + " / " + c.model;
     tBody.appendChild(h("div", "card-subtitle mt-8 mb-4",
-      c.provider + " / " + c.model + " (score " + Number(c.totalScore).toFixed(4) + ")"));
+      techName + " (score " + Number(c.totalScore).toFixed(4) + ")"));
     if(rec && rec.provider === c.provider && rec.model === c.model && rec.reasoning){
       tBody.appendChild(h("div", "summary-line mono fs11", rec.reasoning));
     }
@@ -5567,8 +5996,18 @@ function buildMrReasons(cands, policy, result){
   var noActive = cands.every(function(c){
     return (c.uncertainty && c.uncertainty.reasons && c.uncertainty.reasons.indexOf("no-active-factors") >= 0);
   });
-  if(noActive){
-    reasons.push(t("mrNoActiveFactors"));
+  var insufficientForComparison = cands.some(function(c){
+    return c.uncertainty && Array.isArray(c.uncertainty.reasons)
+      && c.uncertainty.reasons.indexOf("insufficient-relevant-samples") >= 0;
+  });
+  if(noActive && !insufficientForComparison){
+    var configuredWeights = (policy && policy.weights) || {};
+    var configuredWeightKeys = Object.keys(configuredWeights);
+    var allWeightsZero = configuredWeightKeys.length > 0
+      && configuredWeightKeys.every(function(key){
+        return Number(configuredWeights[key]) <= 0;
+      });
+    reasons.push(t(allWeightsZero ? "mrAllWeightsZero" : "mrNoActiveFactors"));
   }
   var missingComparableEvidence = cands.some(function(c){
     return c.uncertainty && Array.isArray(c.uncertainty.reasons)
@@ -9906,14 +10345,31 @@ function renderPreflightResult(result){
   card.setAttribute("data-fl-role", "preflight-result");
   card.appendChild(h("div", "card-title mb-4", t("taskPreflightTitle")));
   var verdict = result && Array.isArray(result.rejectionReasons) && result.rejectionReasons.length ? "reject" : "ok";
+  var applicabilityIssue = result && result.applicabilityIssue
+    && typeof result.applicabilityIssue === "object"
+    && result.applicabilityIssue.code === "patch-not-applicable"
+    ? result.applicabilityIssue : null;
   var headlineKey = verdict === "reject" ? "taskPreflightHeadlineReject"
     : "taskPreflightHeadlineOk";
   var summaryKey = verdict === "reject" ? "taskPreflightSummaryReject"
     : "taskPreflightSummaryOk";
-  var nextKey = verdict === "reject" ? "taskPreflightNextReject"
-    : "taskPreflightNextOk";
+  // One coherent next action: applicability-specific guidance for the
+  // patch-not-applicable case. The generic correct-the-source footer would
+  // contradict the explanation, so it is replaced (not duplicated) here. Raw
+  // git diagnostics stay only in the collapsed technical disclosure below.
+  var nextKey = applicabilityIssue
+    ? "taskPreflightApplicabilityNext"
+    : verdict === "reject" ? "taskPreflightNextReject" : "taskPreflightNextOk";
   card.appendChild(h("div", "preflight-headline " + verdict, t(headlineKey)));
   card.appendChild(h("div", "preflight-summary", t(summaryKey)));
+  if(applicabilityIssue){
+    var expl = h("div", "preflight-applicability");
+    expl.setAttribute("data-fl-role", "preflight-applicability");
+    expl.appendChild(h("div", "summary-line", t("taskPreflightApplicabilityTitle")));
+    expl.appendChild(h("div", "summary-line fs11", t("taskPreflightApplicabilityHappened")));
+    expl.appendChild(h("div", "summary-line fs11", t("taskPreflightApplicabilityMeaning")));
+    card.appendChild(expl);
+  }
   var affectedFiles = result && Array.isArray(result.affectedFiles) ? result.affectedFiles : null;
   var files = affectedFiles === null ? null : affectedFiles.length;
   var affLine = h("div", "preflight-affected", t("taskPreflightAffected") + " ");
@@ -9925,7 +10381,10 @@ function renderPreflightResult(result){
   }
   card.appendChild(affLine);
   var rejects = (result && Array.isArray(result.rejectionReasons)) ? result.rejectionReasons : [];
-  if(rejects.length){
+  // For the applicability case, raw git diagnostics are kept only inside the
+  // collapsed technical disclosure. Other rejection types preserve their
+  // existing readable rejection list.
+  if(rejects.length && !applicabilityIssue){
     var rej = h("div", "preflight-rejects");
     rej.appendChild(h("div", "summary-line", t("taskPreflightRejectTitle")));
     if(rejects.length === 0){
@@ -10067,6 +10526,12 @@ function timelineEventLabel(type){
   };
   var key = map[String(type || "")];
   return key ? t(key) : t("tlOther");
+}
+function timelineEventSummary(event){
+  if(event && event.presentationCode === "integration-patch-not-applicable"){
+    return t("tlPreflightPatchNotApplicable");
+  }
+  return boundedDiagnostic(event && event.summary || "");
 }
 function reportCard(title, hint, bodyNodes, role){
   var card = h("div", "task-report-card");
@@ -10488,7 +10953,7 @@ function renderTaskWorkbench(task, extraTabs){
       var te = h("div", "timeline-entry");
       te.appendChild(h("span", "ts", fmtTm(e.timestamp)));
       te.appendChild(h("span", "tl-kind", timelineEventLabel(e.type)));
-      te.appendChild(h("span", "tl-summary", boundedDiagnostic(e.summary || "")));
+      te.appendChild(h("span", "tl-summary", timelineEventSummary(e)));
       tl.appendChild(te);
     });
     var tlWrap = h("div", "task-report-block");

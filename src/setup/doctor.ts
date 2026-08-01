@@ -17,6 +17,10 @@ import {
   type ProviderName,
   type ProviderReadiness,
 } from "../core/providers.js";
+import {
+  SUPPORTED_RUNTIME_NAMES,
+  type RuntimeName,
+} from "../core/runtime-names.js";
 import type { SetupPrerequisite } from "./types.js";
 
 // ── Public result types ─────────────────────────────────────────────
@@ -165,6 +169,198 @@ export function projectExecutionProviderReadiness(
     };
   }
   return { anyReady, providers };
+}
+
+// ── Runtime authority ───────────────────────────────────────────────
+
+/** Lightweight runtime fact from one local doctor() call. */
+export interface LocalRuntimeFact {
+  name: RuntimeName;
+  ok: boolean;
+}
+
+/** Non-secret catalog metadata used only to enrich runtime presentation.
+ *  Never contains credentials, endpoints, paths, or raw diagnostics. */
+export interface RuntimeDisplayMetadata {
+  displayName: string;
+  executable: string;
+  version?: string;
+  issues?: string[];
+  capabilities?: unknown;
+}
+
+/** The one selected runtime readiness authority for the process that
+ *  actually launches Workers. */
+export interface ExecutionRuntimeFactsResult {
+  source: DoctorSource;
+  sourceDetail: string;
+  /** Allowlisted per-runtime ok flags from exactly one source. */
+  runtimes: Partial<Record<RuntimeName, { ok: boolean }>>;
+}
+
+export interface ExecutionRuntimeFactsInput {
+  clientBuildIdentity: BuildIdentity;
+  daemonEvidence?: DaemonHealthEvidence;
+  localRuntimes: readonly LocalRuntimeFact[];
+}
+
+/** Resolve the one runtime readiness authority used by the process that
+ *  actually launches Workers. Mirrors resolveExecutionProviderFacts: an
+ *  exact-build Daemon wins only as a complete allowlisted snapshot; otherwise
+ *  the complete local snapshot wins with one bounded fallback reason. Daemon
+ *  and local runtime booleans are never mixed within one result. Pure and
+ *  read-only: no subprocess, Provider, credential, lifecycle, Task, or
+ *  Settings mutation. */
+export function resolveExecutionRuntimeFacts(
+  input: ExecutionRuntimeFactsInput,
+): ExecutionRuntimeFactsResult {
+  if (input.daemonEvidence !== undefined && input.daemonEvidence.ok) {
+    const { serverIdentity } = input.daemonEvidence;
+    if (isBuildIdentity(serverIdentity)) {
+      const comparison = compareBuildIdentity(input.clientBuildIdentity, serverIdentity);
+      if (comparison.sameBuild) {
+        const daemonRuntimes = daemonRuntimeFacts(input.daemonEvidence.result);
+        if (daemonRuntimes !== undefined) {
+          return {
+            source: "daemon",
+            sourceDetail: "build-matched daemon",
+            runtimes: daemonRuntimes,
+          };
+        }
+        return localRuntimeFacts(input.localRuntimes, "malformed daemon evidence");
+      }
+      return localRuntimeFacts(
+        input.localRuntimes,
+        comparison.protocolCompatible ? "daemon build mismatch" : "daemon protocol mismatch",
+      );
+    }
+    return localRuntimeFacts(input.localRuntimes, "unreadable daemon identity");
+  }
+  return localRuntimeFacts(input.localRuntimes, "daemon unavailable");
+}
+
+function daemonRuntimeFacts(
+  result: unknown,
+): Partial<Record<RuntimeName, { ok: boolean }>> | undefined {
+  if (result === null || typeof result !== "object") return undefined;
+  const obj = result as Record<string, unknown>;
+  const runtimes = obj.runtimes;
+  if (runtimes === null || typeof runtimes !== "object" || Array.isArray(runtimes)) {
+    return undefined;
+  }
+  const runtimeObject = runtimes as Record<string, unknown>;
+  const facts: Partial<Record<RuntimeName, { ok: boolean }>> = {};
+  for (const name of SUPPORTED_RUNTIME_NAMES) {
+    const value = runtimeObject[name];
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.ok !== "boolean") return undefined;
+    facts[name] = { ok: entry.ok };
+  }
+  return facts;
+}
+
+function localRuntimeFacts(
+  locals: readonly LocalRuntimeFact[],
+  sourceDetail: string,
+): ExecutionRuntimeFactsResult {
+  const runtimes: Partial<Record<RuntimeName, { ok: boolean }>> = {};
+  for (const local of locals) {
+    runtimes[local.name] = { ok: local.ok };
+  }
+  return { source: "local-fallback", sourceDetail, runtimes };
+}
+
+/** Project the selected runtime facts into a bounded display record. The ok
+ *  flag always comes from the selected source. Local catalog metadata
+ *  (displayName/executable/capabilities) is non-secret and PATH-independent,
+ *  but local version/issues are surfaced only for a local-fallback source
+ *  because they describe the caller shell PATH, not the execution Daemon. */
+export function projectExecutionRuntimeDisplay(
+  facts: ExecutionRuntimeFactsResult,
+  local: Partial<Record<RuntimeName, RuntimeDisplayMetadata>>,
+): Record<string, {
+  ok: boolean;
+  displayName?: string;
+  executable?: string;
+  version?: string;
+  issues?: string[];
+  capabilities?: unknown;
+}> {
+  const display: Record<string, {
+    ok: boolean;
+    displayName?: string;
+    executable?: string;
+    version?: string;
+    issues?: string[];
+    capabilities?: unknown;
+  }> = {};
+  for (const name of SUPPORTED_RUNTIME_NAMES) {
+    const fact = facts.runtimes[name];
+    if (fact === undefined) continue;
+    const metadata = local[name];
+    const entry: {
+      ok: boolean;
+      displayName?: string;
+      executable?: string;
+      version?: string;
+      issues?: string[];
+      capabilities?: unknown;
+    } = { ok: fact.ok };
+    if (metadata !== undefined) {
+      entry.displayName = metadata.displayName;
+      entry.executable = metadata.executable;
+      if (metadata.capabilities !== undefined) entry.capabilities = metadata.capabilities;
+      if (facts.source === "local-fallback") {
+        if (metadata.version !== undefined) entry.version = metadata.version;
+        if (metadata.issues !== undefined) entry.issues = metadata.issues;
+      }
+    }
+    display[name] = entry;
+  }
+  return display;
+}
+
+/** Bounded CLI health header: the single `ok` flag and the `claudeCode`
+ *  string shown at the top of `forklight health`. */
+export interface ExecutionClaudeOk {
+  ok: boolean;
+  claudeCode: string;
+}
+
+/** Local caller facts used only for an explicitly labelled fallback. */
+export interface LocalClaudeOkInput {
+  ok: boolean;
+  claudeCode: string;
+}
+
+/** Project the CLI health header from the same runtime authority. When an
+ *  exact-build Daemon is authoritative, claudeCode comes from the bounded
+ *  Daemon health payload (never the caller shell PATH) and ok stays consistent
+ *  with the effective Provider readiness; otherwise the local caller snapshot
+ *  wins as a whole. Pure and read-only. */
+export function projectExecutionClaudeOk(
+  runtimeFacts: ExecutionRuntimeFactsResult,
+  daemonEvidence: DaemonHealthEvidence | undefined,
+  readinessAnyReady: boolean,
+  local: LocalClaudeOkInput,
+): ExecutionClaudeOk {
+  if (runtimeFacts.source === "daemon") {
+    const claudeCode = daemonClaudeCode(daemonEvidence?.result);
+    return {
+      claudeCode,
+      ok: claudeCode !== "unavailable" && readinessAnyReady,
+    };
+  }
+  return { claudeCode: local.claudeCode, ok: local.ok };
+}
+
+function daemonClaudeCode(result: unknown): string {
+  if (result === null || typeof result !== "object") return "unavailable";
+  const obj = result as Record<string, unknown>;
+  return typeof obj.claudeCode === "string" && obj.claudeCode.length > 0
+    ? obj.claudeCode
+    : "unavailable";
 }
 
 // ── Resolver ────────────────────────────────────────────────────────

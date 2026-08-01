@@ -1,0 +1,194 @@
+version: 2
+name: Explain Worker selection and Competition intent before Task submission
+project: ../..
+taskClass: m3-task-admission-routing-explanation
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: Exact comparable evidence is absent. Main selects Flash because the user asked to use it more and this bounded explanation surface has deterministic checks; this is not a model superiority claim.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Before submission, CLI, MCP, daemon and Hub truthfully explain the frozen
+    Worker selection, evidence scope and Competition intent using one safe,
+    beginner-readable projection without exposing Main private notes.
+  presentation:
+    summary: 提交前讲清楚选了谁、为什么这样派、有没有足够历史证据，以及为什么这次没有竞争。
+    language: zh-CN
+  context:
+    - The aligned contract is docs/m3-task-admission-routing-explanation-contract.md.
+    - "Inspect first: src/core/task-preview.ts, src/core/types.ts, src/cli.ts, src/hub/public/app.js, src/hub/public/i18n.js, tests/task-preview.test.ts, tests/hub-ops-mutations.test.ts, and tests/hub-ui-assets.test.ts."
+    - Task Detail already renders the raw stored routing decision after submission, while admission preview currently shows only resolved Worker identity and classification reuse guidance.
+    - The safe pre-submit projection must not expose selectedBecause.note, custom reason codes, settings digests, identity-key maps, paths, commands, prompts, logs, endpoints, credentials, or Provider responses.
+    - This Task has no exact comparable cohort, so Main uses judgment and intentionally does not manufacture a Competition.
+  inScope:
+    - Add one canonical safe routing-explanation projection to Task admission preview.
+    - Report whether a frozen routing decision exists, the selected Worker identity and public Profile label, shortlist size, a closed selection-basis category, aggregate evidence coverage, Competition intent and closed triggers, and one closed next-action code.
+    - Derive aggregate sample counts without exposing raw candidate identity keys or settings digests.
+    - Render concise human output in CLI validate and bilingual explanation-first copy in Hub before classification guidance.
+    - Make missing decisions and unrecognized custom reason codes degrade honestly without inventing evidence.
+    - Add tests for privacy, immutability, aggregate counts, every closed state, adapter propagation, Hub copy and digest stability.
+  outOfScope:
+    - Do not auto-route, modify Task files, choose or replace Worker Profiles, start Competition, submit a Task, probe Providers, or mutate Settings.
+    - Do not change routing scores, sample thresholds, admission rules, preview confirmation, digest semantics, database schema, retry, Integration, Review Graph, or economics.
+    - Do not expose or render selectedBecause.note, arbitrary custom reason codes, raw sample identity keys, settingsDigest, Task content, paths, commands, logs, endpoints, Keychain values, or credentials.
+    - Do not touch other repositories, Elsewhere, Client-Core SDK, commit, or push.
+  executionSteps:
+    - Trace current admission preview and post-submit routing rendering before editing.
+    - Define the closed safe type and one pure projector in Core; keep it detached from mutable Task data.
+    - Attach it to the existing preview without changing digest construction or Task admission authority.
+    - Extend CLI text and Hub submit preview by consuming only the safe projection.
+    - Run focused checks once, correct only Candidate-caused failures, then run full tests, build, syntax checks and diff check once.
+  deliverables:
+    - Canonical privacy-safe pre-submit routing explanation.
+    - CLI and daemon/MCP propagation through the existing admission preview.
+    - Beginner-readable bilingual Hub explanation of selection, evidence and Competition intent.
+    - Regression tests for privacy, immutability, missing decision and unchanged digest behavior.
+  modules:
+    - name: Safe routing explanation projector
+      responsibility: Convert the immutable routing decision into bounded user-facing facts.
+      consumes:
+        - Parsed routingDecision, resolved Worker identity, and optional public Worker Profile label.
+      produces:
+        - Closed selection basis, shortlist size, aggregate evidence, Competition record, and next action.
+      boundaries:
+        - No private note, custom code, identity key, settings digest, history scan, mutation, or execution.
+    - name: Admission preview composition
+      responsibility: Attach the explanation beside the already resolved Worker and policy facts.
+      consumes:
+        - One prepared admission and safe routing projection.
+      produces:
+        - Shared CLI, daemon, MCP and Hub preview output.
+      boundaries:
+        - Do not add a second parser or alter previewRevisionDigest.
+    - name: Human presentation
+      responsibility: Answer why this Worker and whether Competition is planned in plain language.
+      consumes:
+        - Safe routingExplanation only.
+      produces:
+        - Concise CLI lines and bilingual Hub cards.
+      boundaries:
+        - Do not render the raw routingDecision or duplicate Core inference rules.
+  callChain:
+    - Main previews an absolute Task Contract through CLI, MCP or Hub.
+    - Canonical admission resolves the exact Worker, policy and immutable route snapshot once.
+    - Core projects closed, privacy-safe route facts and retains the existing digest.
+    - CLI or Hub explains selected Worker, basis, evidence scope and Competition record.
+    - Main may edit and re-preview or explicitly confirm the unchanged existing submit path.
+  scenarios:
+    - name: Main judgment without comparable evidence
+      given: A multi-candidate shortlist records scope none and main-judgment.
+      when: The Task is previewed.
+      then: The user sees that Main chose among four candidates without enough fair historical evidence and no Competition will be started by this Task.
+    - name: Historical evidence
+      given: A route snapshot has exact-class or task-family counts for candidates.
+      when: The explanation is projected.
+      then: Only aggregate candidate and sample counts appear, with no raw identity keys.
+    - name: Missing decision
+      given: A legacy Task uses explicit provider fields but no routingDecision.
+      when: It is previewed.
+      then: The resolved Worker remains visible and the explanation says selection reasoning was not recorded rather than inventing it.
+    - name: Private reason stays private
+      given: selectedBecause.note and a custom code contain distinctive secret markers.
+      when: JSON, CLI and Hub outputs are inspected.
+      then: Neither marker appears anywhere in the pre-submit preview.
+  risks:
+    - Rendering selectedBecause.note before submission leaks Main working context; use closed basis categories only.
+    - Raw evidence maps contain encoded Worker identities and are too technical; aggregate them in Core.
+    - Saying intent required means Competition is already running would be false; describe it only as the recorded next action.
+    - Re-deriving the decision in Hub can drift from Core; Hub must render safe fields only.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1500
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 10
+  fileLimitMode: warn
+  changedLineLimit: 1500
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-preview.ts
+    - src/cli.ts
+    - src/daemon
+    - src/mcp
+    - src/hub
+    - tests
+acceptance:
+  criteria:
+    - Preview exposes one closed safe explanation for selection basis, shortlist size, aggregate evidence and Competition intent while hiding private route fields.
+    - Missing routingDecision degrades honestly and the projection is detached from mutable Task data.
+    - CLI, daemon/MCP and Hub consume the same Core meaning and Hub answers why, evidence and Competition in beginner-readable bilingual copy.
+    - Routing explanation does not alter previewRevisionDigest, admission authority or execution state.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-preview.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

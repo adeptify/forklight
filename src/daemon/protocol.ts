@@ -2,6 +2,7 @@ export type DaemonMethod =
   | "health"
   | "validate_file"
   | "submit_file"
+  | "reuse_task_class"
   | "submit"
   | "status"
   | "inspect"

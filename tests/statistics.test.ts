@@ -22,6 +22,11 @@ import {
   type FailureCategory,
   type TaskEvidence,
 } from "../src/core/statistics.js";
+import {
+  CLASS_CHOICES_MAX,
+  computeClassificationAdvice,
+  FAMILY_CHOICES_MAX,
+} from "../src/core/classification-advice.js";
 import { REVIEW_GRAPH_TASK_FILE_PREFIX } from "../src/core/task.js";
 import type {
   AttemptRecord,
@@ -2212,6 +2217,378 @@ test("StatisticsService.routingEvidenceCoverage is read-only over durable Tasks"
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// --- Classification reuse advice ---------------------------------------------
+
+test("classification advice reports exact reuse with truthful counts", () => {
+  const history = [
+    coverageTask("a", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+    coverageTask("b", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+    }),
+    coverageTask("c", "failed", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+    // Same family, different class — contributes to family evidence only.
+    coverageTask("d", "succeeded", {
+      taskClass: "lint-fix",
+      taskFamily: "refactor",
+    }),
+  ];
+
+  const advice = computeClassificationAdvice("migration", "refactor", history);
+  assert.equal(advice.taskClass.state, "existing");
+  assert.equal(advice.taskClass.terminalCount, 3);
+  assert.equal(advice.taskClass.completeSelectionCount, 2);
+  assert.equal(advice.taskFamily.state, "existing");
+  assert.equal(advice.taskFamily.terminalCount, 4);
+  assert.equal(advice.taskFamily.completeSelectionCount, 2);
+  assert.equal(advice.nextAction, "reuse-classification");
+  const refactor = advice.familyChoices.find((choice) => choice.family === "refactor");
+  assert.ok(refactor);
+  assert.equal(refactor!.terminalCount, 4);
+  assert.equal(refactor!.completeSelectionCount, 2);
+  assert.equal(refactor!.distinctClassCount, 2);
+});
+
+test("classification advice distinguishes new class inside an existing family", () => {
+  const history = [
+    coverageTask("a", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+  ];
+  const advice = computeClassificationAdvice("fresh-class", "refactor", history);
+  assert.equal(advice.taskClass.state, "new");
+  assert.equal(advice.taskClass.terminalCount, 0);
+  assert.equal(advice.taskFamily.state, "existing");
+  assert.equal(advice.taskFamily.terminalCount, 1);
+  assert.equal(advice.nextAction, "extend-family");
+});
+
+test("classification advice asks Main to confirm a deliberately new family", () => {
+  const history = [
+    coverageTask("a", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+  ];
+  const advice = computeClassificationAdvice("migration", "new-family", history);
+  assert.equal(advice.taskFamily.state, "new");
+  assert.equal(advice.nextAction, "confirm-new-family");
+  // Established families stay available as candidates, never auto-selected.
+  assert.deepEqual(
+    advice.familyChoices.map((choice) => choice.family),
+    ["refactor"],
+  );
+});
+
+test("classification advice reports missing family and fill-classification states", () => {
+  const history = [
+    coverageTask("a", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+  ];
+  const missingFamily = computeClassificationAdvice("migration", undefined, history);
+  assert.equal(missingFamily.taskFamily.state, "missing");
+  assert.equal(missingFamily.nextAction, "add-family");
+  assert.equal(missingFamily.taskClass.state, "existing");
+
+  const missingClass = computeClassificationAdvice(undefined, "refactor", history);
+  assert.equal(missingClass.taskClass.state, "missing");
+  assert.equal(missingClass.taskFamily.state, "existing");
+  assert.equal(missingClass.nextAction, "add-class");
+
+  const bothMissing = computeClassificationAdvice(undefined, undefined, history);
+  assert.equal(bothMissing.taskClass.state, "missing");
+  assert.equal(bothMissing.taskFamily.state, "missing");
+  assert.equal(bothMissing.nextAction, "fill-classification");
+});
+
+test("classification advice excludes active Tasks and Review Graph reviewers", () => {
+  const running = coverageTask("running", "running", {
+    taskClass: "migration",
+    taskFamily: "refactor",
+    routingDecision: completeRoutingDecision(),
+  });
+  const reviewer = coverageTask("reviewer", "succeeded", {
+    taskFile: `${REVIEW_GRAPH_TASK_FILE_PREFIX}graph-1/assignment-1`,
+    taskClass: "migration",
+    taskFamily: "refactor",
+    routingDecision: completeRoutingDecision({
+      taskFamily: "refactor",
+      selectedBecause: { code: "reviewer-identity", note: "reviewer private reason" },
+    }),
+  });
+  const advice = computeClassificationAdvice("migration", "refactor", [running, reviewer]);
+  assert.equal(advice.taskClass.state, "new");
+  assert.equal(advice.taskClass.terminalCount, 0);
+  assert.equal(advice.taskFamily.state, "new");
+  assert.equal(advice.taskFamily.terminalCount, 0);
+  assert.deepEqual(advice.familyChoices, []);
+  assert.equal(advice.nextAction, "confirm-new-family");
+});
+
+test("classification advice bounds established families to eight with stable ordering", () => {
+  const history: TaskRecord[] = [];
+  // Families named by zero-padded index; give "family-01" the most complete
+  // records and "family-02" the most terminals at the same complete count.
+  for (let i = 1; i <= 12; i += 1) {
+    const family = `family-${String(i).padStart(2, "0")}`;
+    const complete = i === 1 ? 3 : 0;
+    for (let c = 0; c < complete; c += 1) {
+      history.push(coverageTask(`c-${family}-${c}`, "succeeded", {
+        taskClass: `class-${i}`,
+        taskFamily: family,
+        routingDecision: completeRoutingDecision(),
+      }));
+    }
+    const terminal = i === 2 ? 2 : 1;
+    for (let t = 0; t < terminal; t += 1) {
+      history.push(coverageTask(`t-${family}-${t}`, "succeeded", {
+        taskClass: `class-${i}`,
+        taskFamily: family,
+      }));
+    }
+  }
+
+  const advice = computeClassificationAdvice("migration", "refactor", history);
+  assert.equal(advice.familyChoices.length, FAMILY_CHOICES_MAX);
+  // family-01 has 3 complete records (first), family-02 has 2 terminals and 0
+  // complete (second), then the rest tie on 1 terminal and sort by name.
+  const names = advice.familyChoices.map((choice) => choice.family);
+  assert.equal(names[0], "family-01");
+  assert.equal(names[1], "family-02");
+  assert.deepEqual(
+    [...names].sort(),
+    names,
+    "remaining families are in stable lexicographic order",
+  );
+  // Deterministic across repeated calls.
+  assert.deepEqual(
+    computeClassificationAdvice("migration", "refactor", history),
+    advice,
+  );
+});
+
+test("classification advice is detached and deeply immutable across calls", () => {
+  const history = [
+    coverageTask("a", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+  ];
+  const first = computeClassificationAdvice("migration", "refactor", history);
+  const second = computeClassificationAdvice("migration", "refactor", history);
+  assert.notEqual(first, second, "advice objects must not be shared");
+  assert.notEqual(first.familyChoices, second.familyChoices);
+  assert.notEqual(first.taskClass, second.taskClass);
+
+  // Every fresh result graph is deeply frozen, so a caller cannot mutate a
+  // detached projection (the contract's non-shared guarantee).
+  assert.ok(Object.isFrozen(first), "advice root is frozen");
+  assert.ok(Object.isFrozen(first.taskClass), "taskClass label evidence is frozen");
+  assert.ok(Object.isFrozen(first.taskFamily), "taskFamily label evidence is frozen");
+  assert.ok(Object.isFrozen(first.familyChoices), "familyChoices array is frozen");
+  assert.ok(first.familyChoices.length === 0 || Object.isFrozen(first.familyChoices[0]!),
+    "family rows are frozen");
+
+  // Attempted mutation cannot change either call's result graph.
+  assert.throws(() => { first.familyChoices[0]!.terminalCount = 999; }, TypeError);
+  assert.throws(() => { first.taskClass.terminalCount = 999; }, TypeError);
+  assert.equal(second.familyChoices[0]!.terminalCount, 1, "second call is unaffected");
+  assert.equal(second.taskClass.terminalCount, 1);
+});
+
+test("classification advice is privacy-safe: no Task id, name, path, or private reason", () => {
+  const history = [
+    coverageTask("private-task-id-a", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+  ];
+  const advice = computeClassificationAdvice("migration", "refactor", history);
+  const json = JSON.stringify(advice);
+  assert.ok(!json.includes("private-task-id-a"));
+  assert.ok(!json.includes("private Main reason"));
+  assert.ok(!json.includes("/tasks/"));
+  assert.ok(!json.includes("task.yaml"));
+  assert.ok(!json.includes("session-"));
+  assert.ok(!json.includes("local-grok-builder"));
+  // Only the family name and counts are exposed.
+  assert.ok(json.includes("refactor"));
+});
+
+test("classification advice scopes class choices to the selected existing family", () => {
+  const history = [
+    coverageTask("a", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+    coverageTask("b", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+    }),
+    coverageTask("c", "succeeded", {
+      taskClass: "lint-fix",
+      taskFamily: "refactor",
+    }),
+    // The same class name in a different family must never leak into the
+    // selected family's class choices.
+    coverageTask("d", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "data-migration",
+      routingDecision: completeRoutingDecision(),
+    }),
+  ];
+
+  // New class inside an established family: only same-family classes appear.
+  const newClass = computeClassificationAdvice("fresh-class", "refactor", history);
+  assert.deepEqual(
+    newClass.classChoices,
+    [
+      { taskClass: "migration", terminalCount: 2, completeSelectionCount: 1 },
+      { taskClass: "lint-fix", terminalCount: 1, completeSelectionCount: 0 },
+    ],
+  );
+  assert.equal(newClass.taskClass.state, "new");
+  assert.equal(newClass.taskFamily.state, "existing");
+
+  // Missing class inside an established family: the data is carried safely and
+  // the Hub decides when to expand it.
+  const missingClass = computeClassificationAdvice(undefined, "refactor", history);
+  assert.deepEqual(missingClass.classChoices, newClass.classChoices);
+
+  // Exact class already exists: data is still carried; the Hub adds no noise.
+  const existingClass = computeClassificationAdvice("migration", "refactor", history);
+  assert.equal(existingClass.taskClass.state, "existing");
+  assert.deepEqual(existingClass.classChoices, newClass.classChoices);
+});
+
+test("classification advice returns empty class choices for missing or new family", () => {
+  const history = [
+    coverageTask("a", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+  ];
+  const newFamily = computeClassificationAdvice("migration", "brand-new-family", history);
+  assert.deepEqual(newFamily.classChoices, []);
+  assert.equal(newFamily.taskFamily.state, "new");
+
+  const missingFamily = computeClassificationAdvice("migration", undefined, history);
+  assert.deepEqual(missingFamily.classChoices, []);
+  assert.equal(missingFamily.taskFamily.state, "missing");
+
+  const bothMissing = computeClassificationAdvice(undefined, undefined, history);
+  assert.deepEqual(bothMissing.classChoices, []);
+});
+
+test("classification advice bounds class choices to eight with stable transparent ordering", () => {
+  const history: TaskRecord[] = [];
+  // 12 classes in one family. class-01 gets 3 complete records; class-02 gets
+  // the most terminals at the same (zero) complete count; the rest tie on one
+  // terminal and sort by stable name.
+  for (let i = 1; i <= 12; i += 1) {
+    const taskClass = `class-${String(i).padStart(2, "0")}`;
+    const complete = i === 1 ? 3 : 0;
+    for (let c = 0; c < complete; c += 1) {
+      history.push(coverageTask(`c-${taskClass}-${c}`, "succeeded", {
+        taskClass,
+        taskFamily: "refactor",
+        routingDecision: completeRoutingDecision(),
+      }));
+    }
+    const terminal = i === 2 ? 2 : 1;
+    for (let t = 0; t < terminal; t += 1) {
+      history.push(coverageTask(`t-${taskClass}-${t}`, "succeeded", {
+        taskClass,
+        taskFamily: "refactor",
+      }));
+    }
+  }
+
+  const advice = computeClassificationAdvice("new-class", "refactor", history);
+  assert.equal(advice.classChoices.length, CLASS_CHOICES_MAX);
+  const names = advice.classChoices.map((choice) => choice.taskClass);
+  assert.equal(names[0], "class-01", "complete records sort first");
+  assert.equal(names[1], "class-02", "terminals break the tie");
+  assert.deepEqual([...names].sort(), names, "remaining classes are stable by name");
+  // Deterministic across repeated calls.
+  assert.deepEqual(computeClassificationAdvice("new-class", "refactor", history), advice);
+});
+
+test("classification advice classChoices exclude active and reviewer Tasks and stay privacy-safe", () => {
+  const running = coverageTask("running", "running", {
+    taskClass: "migration",
+    taskFamily: "refactor",
+    routingDecision: completeRoutingDecision(),
+  });
+  const reviewer = coverageTask("reviewer", "succeeded", {
+    taskFile: `${REVIEW_GRAPH_TASK_FILE_PREFIX}graph-1/assignment-1`,
+    taskClass: "migration",
+    taskFamily: "refactor",
+    routingDecision: completeRoutingDecision({
+      taskFamily: "refactor",
+      selectedBecause: { code: "reviewer-identity", note: "reviewer private reason" },
+    }),
+  });
+  const real = coverageTask("real-task-id-a", "succeeded", {
+    taskClass: "migration",
+    taskFamily: "refactor",
+    routingDecision: completeRoutingDecision(),
+  });
+
+  const advice = computeClassificationAdvice("fresh", "refactor", [running, reviewer, real]);
+  assert.deepEqual(
+    advice.classChoices,
+    [{ taskClass: "migration", terminalCount: 1, completeSelectionCount: 1 }],
+  );
+  const json = JSON.stringify(advice);
+  assert.ok(!json.includes("real-task-id-a"));
+  assert.ok(!json.includes("running"));
+  assert.ok(!json.includes("reviewer"));
+  assert.ok(!json.includes("reviewer private reason"));
+  assert.ok(!json.includes("/tasks/"));
+  assert.ok(!json.includes("session-"));
+  assert.ok(!json.includes("local-grok-builder"));
+});
+
+test("classification advice classChoices are detached and deeply frozen", () => {
+  const history = [
+    coverageTask("a", "succeeded", {
+      taskClass: "migration",
+      taskFamily: "refactor",
+      routingDecision: completeRoutingDecision(),
+    }),
+  ];
+  const first = computeClassificationAdvice("fresh", "refactor", history);
+  const second = computeClassificationAdvice("fresh", "refactor", history);
+  assert.notEqual(first.classChoices, second.classChoices, "classChoices arrays are detached");
+  assert.notEqual(first.classChoices[0], second.classChoices[0], "rows are detached");
+  assert.ok(Object.isFrozen(first.classChoices), "classChoices array is frozen");
+  assert.ok(Object.isFrozen(first.classChoices[0]!), "classChoices row is frozen");
+
+  // Attempted mutation cannot change either call's result graph.
+  assert.throws(() => { first.classChoices[0]!.terminalCount = 999; }, TypeError);
+  assert.equal(second.classChoices[0]!.terminalCount, 1, "second call is unaffected");
+  assert.equal(second.classChoices[0]!.taskClass, "migration");
 });
 
 // --- Decision readiness classifier regression --------------------------------

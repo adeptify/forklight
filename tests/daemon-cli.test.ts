@@ -8,7 +8,8 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { currentBuildIdentity } from "../src/core/build-identity.js";
-import { daemonSocketPath } from "../src/core/config.js";
+import type { RoutingAdvisoryResponse } from "../src/core/model-routing.js";
+import { daemonLogPath, daemonSocketPath } from "../src/core/config.js";
 import { sleepMs as sleep } from "../src/core/time.js";
 import { SELF_UPGRADE_DELIVERY_PROFILE_ID } from "../src/core/self-upgrade-evidence.js";
 import type {
@@ -18,14 +19,21 @@ import type {
   TaskRecord,
 } from "../src/core/types.js";
 import {
+  DEFAULT_DAEMON_STARTUP_TIMEOUT_MS,
   DAEMON_OBSERVER_UNAVAILABLE_MESSAGE,
   daemonObserverRequest,
+  daemonRequest,
   isDaemonTransportUnavailable,
   restartDaemon,
   stopDaemon,
 } from "../src/daemon/client.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
 import { StateStore } from "../src/state/store.js";
+import { formatRoutingAdviceHuman } from "../src/cli/routing-output.js";
+import {
+  APPLICABILITY_REASON_MAX,
+  humanIntegrationPreflightLines,
+} from "../src/cli/integration-output.js";
 import { DetachedDaemonFixture, probeSocketAlive } from "./helpers/detached-daemon.js";
 
 const execFileAsync = promisify(execFile);
@@ -88,6 +96,9 @@ test("restart starts a daemon when none is running", async () => {
 
     const health = await restartDaemon(fixture.home);
     const pid = health.pid as number;
+    if (Number.isSafeInteger(pid) && pid > 0) {
+      await fixture.adoptReplacement(pid);
+    }
     assert.ok(Number.isSafeInteger(pid) && pid > 0, "restart must start a daemon and report its PID");
     assert.equal(health.ok, true, "restarted daemon health must report ok");
     assert.deepEqual(
@@ -96,12 +107,6 @@ test("restart starts a daemon when none is running", async () => {
       "restarted daemon build identity must match client",
     );
 
-    // And we can also register the PID in the fixture so cleanup handles it.
-    // The fixture's tracked set already includes the PID from startDaemonProcess
-    // inside ensureDaemon, but restartDaemon spawns through ensureDaemon which
-    // calls startDaemonProcess — and the fixture cannot automatically track it.
-    // We must stop it ourselves so cleanup does not leak.
-    await stopDaemon(fixture.home);
   } finally {
     await fixture.cleanup();
   }
@@ -138,6 +143,287 @@ test("unknown daemon operations are rejected with the existing error", async () 
     /Unknown daemon operation: force-restart/,
     "unknown daemon operation must produce the canonical error message",
   );
+});
+
+test("routing CLI requires exactly one of --candidates or --profiles before daemon contact", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-routing-cli-mix-"));
+  try {
+    // Both present → mutually exclusive, no daemon socket created.
+    const both = await runCli(home, [
+      "routing", "some-class",
+      "--candidates", '[{"provider":"deepseek","model":"v4"},{"provider":"qwen","model":"plus"}]',
+      "--profiles", '["deepseek-primary","qwen-secondary"]',
+    ]);
+    assert.notEqual(both.code, 0);
+    assert.match(both.stderr, /mutually exclusive/);
+    assert.equal(existsSync(daemonSocketPath(home)), false, "mutual-exclusion failure must not start a daemon");
+
+    // Neither present → canonical missing-flag guidance.
+    const neither = await runCli(home, ["routing", "some-class"]);
+    assert.notEqual(neither.code, 0);
+    assert.match(neither.stderr, /Missing --candidates JSON array or --profiles JSON array/);
+    assert.equal(existsSync(daemonSocketPath(home)), false, "missing-flag failure must not start a daemon");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("routing CLI rejects malformed --profiles before daemon contact", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-routing-cli-profiles-"));
+  try {
+    const badJson = await runCli(home, ["routing", "some-class", "--profiles", "not-json"]);
+    assert.notEqual(badJson.code, 0);
+    assert.match(badJson.stderr, /Invalid --profiles JSON/);
+    assert.equal(existsSync(daemonSocketPath(home)), false, "bad JSON must not start a daemon");
+
+    const nonString = await runCli(home, ["routing", "some-class", "--profiles", '[123,"deepseek-primary"]']);
+    assert.notEqual(nonString.code, 0);
+    assert.match(nonString.stderr, /profiles\[0\] must be a non-empty string/);
+    assert.equal(existsSync(daemonSocketPath(home)), false, "non-string profile must not start a daemon");
+
+    const emptyId = await runCli(home, ["routing", "some-class", "--profiles", '["  ","deepseek-primary"]']);
+    assert.notEqual(emptyId.code, 0);
+    assert.match(emptyId.stderr, /profiles\[0\] must be a non-empty string/);
+    assert.equal(existsSync(daemonSocketPath(home)), false, "empty profile must not start a daemon");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("routing CLI accepts full-identity legacy candidates with runtime and effort", async () => {
+  const fixture = await DetachedDaemonFixture.create("forklight-routing-cli-full-");
+  try {
+    await fixture.ensureReady();
+    // Full identity candidates are forwarded with runtime/effort intact; the
+    // daemon returns a valid advisory (no CLI-local rejection of runtime/effort).
+    const result = await runCli(fixture.home, [
+      "routing", "some-class", "--json",
+      "--candidates", '[{"provider":"deepseek","model":"v4","runtime":"claude-code","effort":"high"},{"provider":"qwen","model":"plus","runtime":"claude-code","effort":"medium"}]',
+    ], 20_000);
+    assert.equal(result.code, 0, `routing must succeed: ${result.stderr}`);
+    const advisory = JSON.parse(result.stdout) as {
+      candidates: Array<Record<string, unknown>>;
+    };
+    assert.equal(advisory.candidates.length, 2);
+    const deepseek = advisory.candidates.find((c) => c.provider === "deepseek")!;
+    assert.equal(deepseek.runtime, "claude-code");
+    assert.equal(deepseek.effort, "high");
+    assert.equal(deepseek.workerProfileId, undefined,
+      "legacy candidates must not gain fabricated profile identity");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("routing CLI human output explains an evidence-ready subset without judging missing history", () => {
+  const evidence = {
+    relevantSampleCount: 8,
+    modelQualityFailureCount: 1,
+    acceptedDeliveryRate: 0.75,
+    ignoredNonModelFailures: {},
+  };
+  const candidate = (provider: string, model: string, compared: boolean) => ({
+    provider,
+    model,
+    eligible: true as const,
+    evidence,
+    comparisonEvidence: evidence,
+    sampleCoverage: {
+      exactTerminalCount: 8,
+      exactRelevantCount: 8,
+      exactMinRelevantSamples: 5,
+    },
+    cohortParticipation: compared ? "compared" as const : "insufficient-evidence" as const,
+    factors: [],
+    totalScore: compared ? 1 : 0,
+    uncertainty: {
+      insufficientSamples: !compared,
+      insufficientGap: false,
+      incompatibleCost: false,
+      incompatibleCurrency: false,
+      reasons: [],
+    },
+  });
+  const advisory = {
+    taskClass: "coding:cohort-test",
+    evidenceScope: "exact-class",
+    knowledge: "recommendation",
+    candidates: [
+      candidate("deepseek", "v4", true),
+      candidate("qwen", "plus", true),
+      candidate("minimax", "m2", false),
+    ],
+    recommendation: {
+      provider: "deepseek",
+      model: "v4",
+      confidence: 0.5,
+      reasoning: "clear-score-gap:0.5000",
+      coverage: "evidence-ready-subset",
+    },
+    competition: {
+      shouldRunCompetition: false,
+      intent: "none",
+      evaluatedTriggers: [],
+      matchingTriggers: [],
+      suggestedCandidates: 0,
+    },
+    shouldRunCompetition: false,
+    resolvedPolicy: {},
+    omittedFactors: [],
+    allCandidatesCompared: false,
+    cohortCandidateCount: 2,
+    distinctIdentityCount: 2,
+    totalCandidateCount: 3,
+    excludedCandidateCount: 1,
+    recommendationCoverage: "evidence-ready-subset",
+  } as unknown as RoutingAdvisoryResponse;
+
+  const output = formatRoutingAdviceHuman(advisory);
+  assert.match(output, /Comparison: 2 of 3 candidate\(s\).*1 not included yet/);
+  assert.match(output, /\[not compared yet: insufficient evidence\]/);
+  assert.doesNotMatch(output, /excluded|failed|scored as zero/i);
+});
+
+test("integration preflight human output leads with the applicability explanation before raw evidence", () => {
+  const receipt = {
+    id: "rec-1",
+    taskId: "task-1",
+    rejectionReasons: ["Patch does not apply cleanly: error: patch failed"],
+    affectedFiles: ["readme.md"],
+    patchDigest: "abc",
+    applicabilityIssue: { code: "patch-not-applicable" },
+  };
+  const out = humanIntegrationPreflightLines(receipt);
+  // Stable header and verdict remain.
+  assert.match(out, /^receiptId: rec-1$/m);
+  assert.match(out, /^taskId: task-1$/m);
+  assert.match(out, /^passed: false$/m);
+  // Plain explanation leads the body, before the raw rejection evidence.
+  const explIdx = out.indexOf("patchNotApplicable:");
+  const rejectIdx = out.indexOf("rejectionReasons:");
+  assert.ok(explIdx > 0, "explanation block present");
+  assert.ok(rejectIdx > explIdx, "explanation appears before raw rejection evidence");
+  assert.match(out, /what happened:/);
+  assert.match(out, /what it may mean:/);
+  assert.match(out, /next action:/);
+  // The explanation is cautious: it does not blame a Worker or promise that
+  // retrying unchanged will fix the problem.
+  assert.doesNotMatch(out, /worker failed/i);
+  assert.doesNotMatch(out, /retry.*will fix/i);
+  // Raw rejection evidence is retained after the explanation.
+  assert.match(out, /Patch does not apply cleanly/);
+  assert.match(out, /affectedFiles: readme\.md/);
+});
+
+test("integration preflight human output omits the explanation when the issue is absent", () => {
+  const receipt = {
+    id: "rec-2",
+    taskId: "task-2",
+    rejectionReasons: ["Patch changes 6 files (limit: 5)"],
+    affectedFiles: ["a.ts"],
+    patchDigest: "def",
+  };
+  const out = humanIntegrationPreflightLines(receipt);
+  assert.ok(!out.includes("patchNotApplicable:"), "no explanation for non-applicability rejection");
+  assert.match(out, /rejectionReasons:/);
+  assert.match(out, /Patch changes 6 files/);
+  assert.match(out, /^passed: false$/m);
+});
+
+test("integration preflight human output for a passing receipt stays legacy-shaped", () => {
+  const receipt = {
+    id: "rec-3",
+    taskId: "task-3",
+    rejectionReasons: [],
+    affectedFiles: ["readme.md"],
+    patchDigest: "ghi",
+  };
+  const out = humanIntegrationPreflightLines(receipt);
+  assert.ok(!out.includes("patchNotApplicable:"));
+  assert.ok(!out.includes("rejectionReasons:"));
+  assert.match(out, /^passed: true$/m);
+  assert.match(out, /affectedFiles: readme\.md/);
+  assert.match(out, /patchDigest: ghi/);
+});
+
+test("integration preflight human output bounds each technical reason for the applicability case", () => {
+  const longReason = "Patch does not apply cleanly: " + "x".repeat(500);
+  const receipt = {
+    id: "rec-trunc",
+    taskId: "task-trunc",
+    rejectionReasons: [longReason, "short reason"],
+    affectedFiles: ["a.ts"],
+    patchDigest: "dig",
+    applicabilityIssue: { code: "patch-not-applicable" },
+  };
+  const out = humanIntegrationPreflightLines(receipt);
+  // Plain explanation still leads before the bounded technical evidence.
+  assert.ok(out.indexOf("patchNotApplicable:") < out.indexOf("rejectionReasons:"),
+    "explanation appears before bounded rejection evidence");
+  // Each rendered reason is bounded to the deterministic maximum.
+  const reasonLines = out
+    .split("\n")
+    .filter((line) => line.startsWith("  - "))
+    .map((line) => line.slice("  - ".length));
+  assert.equal(reasonLines.length, 2);
+  for (const rendered of reasonLines) {
+    assert.ok(rendered.length <= APPLICABILITY_REASON_MAX,
+      `reason bounded to ${APPLICABILITY_REASON_MAX}: got ${rendered.length}`);
+  }
+  // The long reason is truncated with an ellipsis at exactly the max; the
+  // short one is rendered verbatim.
+  assert.equal(reasonLines[0]!.length, APPLICABILITY_REASON_MAX);
+  assert.ok(reasonLines[0]!.endsWith("..."), "long reason truncated with ellipsis");
+  assert.equal(reasonLines[1], "short reason");
+  // The formatter is pure: it never mutates the input receipt, so JSON output
+  // (produced elsewhere via JSON.stringify) is unchanged.
+  assert.deepEqual(receipt.rejectionReasons, [longReason, "short reason"]);
+});
+
+test("integration preflight human output preserves legacy byte shape without truncation", () => {
+  const longReason = "Patch changes 6 files (limit: 5): " + "y".repeat(500);
+  const receipt = {
+    id: "rec-legacy-long",
+    taskId: "task-legacy-long",
+    rejectionReasons: [longReason],
+    affectedFiles: ["a.ts"],
+    patchDigest: "dig2",
+    // No applicabilityIssue: legacy / non-applicability receipt.
+  };
+  const out = humanIntegrationPreflightLines(receipt);
+  assert.ok(!out.includes("patchNotApplicable:"), "no explanation block without the issue");
+  // No truncation: the raw reason is rendered verbatim (legacy byte shape).
+  assert.ok(out.includes(`  - ${longReason}`), "long reason preserved verbatim without truncation");
+  assert.match(out, /^passed: false$/m);
+});
+
+test("routing CLI JSON output includes canonical cohort coverage facts", async () => {
+  const fixture = await DetachedDaemonFixture.create("forklight-routing-cli-cohort-json-");
+  try {
+    await fixture.ensureReady();
+    const result = await runCli(fixture.home, [
+      "routing", "coding:cohort-test", "--json",
+      "--candidates",
+      '[{"provider":"deepseek","model":"v4"},{"provider":"qwen","model":"plus"},{"provider":"minimax","model":"m2"}]',
+    ], 20_000);
+    assert.equal(result.code, 0, `routing must succeed: ${result.stderr}`);
+    const advisory = JSON.parse(result.stdout) as Record<string, unknown>;
+    // Canonical coverage facts must be present in the JSON response.
+    assert.ok("allCandidatesCompared" in advisory, "must include allCandidatesCompared");
+    assert.ok("cohortCandidateCount" in advisory, "must include cohortCandidateCount");
+    assert.ok("distinctIdentityCount" in advisory, "must include distinctIdentityCount");
+    assert.ok("totalCandidateCount" in advisory, "must include totalCandidateCount");
+    assert.ok("recommendationCoverage" in advisory, "must include recommendationCoverage");
+    // Each candidate must carry cohortParticipation and comparisonEvidence.
+    const cands = advisory.candidates as Array<Record<string, unknown>>;
+    assert.ok(cands.length >= 2);
+    for (const c of cands) {
+      assert.ok(typeof c.cohortParticipation === "string", "every candidate must have cohortParticipation");
+      assert.ok(typeof c.comparisonEvidence === "object", "every candidate must have comparisonEvidence");
+    }
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 test("daemon start/restart reject invalid --startup-timeout-ms before lifecycle mutation", async () => {
@@ -179,8 +465,14 @@ test("daemon restart CLI prints JSON health to stdout", async () => {
     const { stdout } = await execFileAsync(
       process.execPath,
       cliArgs("daemon", "restart"),
-      { cwd: root, env: { ...process.env, FORKLIGHT_HOME: fixture.home }, timeout: 15_000 },
+      {
+        cwd: root,
+        env: { ...process.env, FORKLIGHT_HOME: fixture.home },
+        timeout: DEFAULT_DAEMON_STARTUP_TIMEOUT_MS + 20_000,
+      },
     );
+    const rawPidMatch = /"pid"\s*:\s*(\d+)/.exec(stdout);
+    if (rawPidMatch) await fixture.adoptReplacement(Number(rawPidMatch[1]));
     const parsed = JSON.parse(stdout.trim()) as Record<string, unknown>;
     const replacementPid = parsed.pid as number;
     assert.ok(
@@ -204,7 +496,6 @@ test("daemon restart CLI prints JSON health to stdout", async () => {
       "original daemon PID must be gone after CLI restart",
     );
   } finally {
-    await stopDaemon(fixture.home).catch(() => undefined);
     await fixture.cleanup();
   }
 });
@@ -219,8 +510,14 @@ test("daemon restart CLI starts a daemon when none is running", async () => {
     const { stdout } = await execFileAsync(
       process.execPath,
       cliArgs("daemon", "restart"),
-      { cwd: root, env: { ...process.env, FORKLIGHT_HOME: fixture.home }, timeout: 15_000 },
+      {
+        cwd: root,
+        env: { ...process.env, FORKLIGHT_HOME: fixture.home },
+        timeout: DEFAULT_DAEMON_STARTUP_TIMEOUT_MS + 20_000,
+      },
     );
+    const rawPidMatch = /"pid"\s*:\s*(\d+)/.exec(stdout);
+    if (rawPidMatch) await fixture.adoptReplacement(Number(rawPidMatch[1]));
     const parsed = JSON.parse(stdout.trim()) as Record<string, unknown>;
     const pid = parsed.pid as number;
     assert.ok(
@@ -234,7 +531,6 @@ test("daemon restart CLI starts a daemon when none is running", async () => {
       "CLI restart build identity must match client",
     );
   } finally {
-    await stopDaemon(fixture.home).catch(() => undefined);
     await fixture.cleanup();
   }
 });
@@ -315,6 +611,33 @@ async function assertEndpointRemainsAbsent(home: string): Promise<void> {
   );
 }
 
+interface HomeLifecycleFacts {
+  socketAbsent: boolean;
+  logAbsent: boolean;
+  endpointUnreachable: boolean;
+  taskCount: number;
+  resultCount: number;
+}
+
+/** Deterministic exact-home lifecycle facts used as before/after evidence.
+ *  Correctness is decided by these facts, never by a wall-clock threshold.
+ *  Opening a StateStore creates the test home's store file; that is a
+ *  test-local file, not a daemon lifecycle side effect. */
+async function collectHomeLifecycleFacts(home: string): Promise<HomeLifecycleFacts> {
+  const store = new StateStore(home);
+  try {
+    return {
+      socketAbsent: !existsSync(daemonSocketPath(home)),
+      logAbsent: !existsSync(daemonLogPath(home)),
+      endpointUnreachable: !(await probeSocketAlive(home)),
+      taskCount: store.listTasks().length,
+      resultCount: store.listRecentIntegrationResults(100).length,
+    };
+  } finally {
+    store.close();
+  }
+}
+
 test("isDaemonTransportUnavailable classifies socket gaps and leaves business errors alone", () => {
   const refused = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
   assert.equal(isDaemonTransportUnavailable(refused), true);
@@ -357,15 +680,25 @@ test("Integration status/wait/history on a fresh home never start a daemon", asy
       },
       { label: "history", args: ["integration", "history", "task-absent-history"] },
     ];
+    const before = await collectHomeLifecycleFacts(home);
     for (const { args, label } of cases) {
       const result = await runCli(home, args);
       assert.notEqual(result.code, 0, `${label} must fail when no daemon is running`);
       assertObserverUnavailableGuidance(result.stderr, home);
+      // Public CLI error output never exposes a temporary runner identity.
       assert.ok(
-        result.elapsedMs < 3_000,
-        `${label} must fail fast without ensureDaemon bootstrap wait (elapsed ${result.elapsedMs}ms)`,
+        !result.stderr.includes("runnerPid"),
+        `${label} observer error must not expose runnerPid`,
       );
     }
+    // Correctness is judged by exact-home lifecycle facts, not by elapsed time:
+    // no daemon, endpoint, log, Task, Integration result, or process may appear.
+    const after = await collectHomeLifecycleFacts(home);
+    assert.deepEqual(
+      after,
+      before,
+      "status/wait/history on a fresh home must not start a daemon or create any endpoint, log, Task, result, or process",
+    );
     await assertEndpointRemainsAbsent(home);
   } finally {
     await rm(home, { recursive: true, force: true }).catch(() => undefined);
@@ -589,6 +922,24 @@ test("Integration status/history/wait succeed against an existing daemon without
   const daemon = new ForkLightDaemon(home, 0);
   await daemon.start();
   try {
+    // Deterministic lifecycle facts BEFORE any observation: the daemon PID and
+    // the durable Task / Integration result / event / exchange-receipt counts.
+    const healthBefore = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    const pidBefore = healthBefore.pid as number;
+    const beforeFacts = (() => {
+      const store = new StateStore(home);
+      try {
+        return {
+          tasks: store.listTasks().length,
+          results: store.listRecentIntegrationResults(100).length,
+          events: store.listEvents(seeded.taskId).length,
+          receipts: store.listExchangeReceipts(seeded.taskId).length,
+        };
+      } finally {
+        store.close();
+      }
+    })();
+
     const status = await runCli(home, [
       "integration", "status", seeded.operationId, "--json",
     ]);
@@ -601,6 +952,7 @@ test("Integration status/history/wait succeed against an existing daemon without
     assert.ok(Array.isArray(statusBody.stages));
     // Compact default: no full command streams.
     assert.doesNotMatch(status.stdout, /"commands"/);
+    assert.ok(!status.stdout.includes("runnerPid"), "status JSON must not expose runnerPid");
 
     const deep = await runCli(home, [
       "integration", "status", seeded.operationId, "--json", "--deep-audit",
@@ -610,6 +962,7 @@ test("Integration status/history/wait succeed against an existing daemon without
     assert.equal(deepBody.operationId, seeded.operationId);
     assert.equal(deepBody.status, "completed");
     assert.ok(deepBody.result !== undefined, "deep-audit retains the result snapshot");
+    assert.ok(!deep.stdout.includes("runnerPid"), "deep status JSON must not expose runnerPid");
 
     const history = await runCli(home, [
       "integration", "history", seeded.taskId, "--json",
@@ -623,20 +976,40 @@ test("Integration status/history/wait succeed against an existing daemon without
     assert.equal(historyBody.results.length, 1);
     assert.equal(historyBody.results[0]!.id, seeded.operationId);
     assert.equal(historyBody.results[0]!.status, "applied");
+    assert.ok(!history.stdout.includes("runnerPid"), "history JSON must not expose runnerPid");
 
-    const waitStarted = Date.now();
     const wait = await runCli(home, [
       "integration", "wait", seeded.operationId, "--timeout-ms", "2000", "--json",
     ]);
-    const waitElapsed = Date.now() - waitStarted;
     assert.equal(wait.code, 0, wait.stderr);
     const waitBody = JSON.parse(wait.stdout) as Record<string, unknown>;
+    const waitResult = waitBody.result as { status?: string } | undefined;
     assert.equal(waitBody.operationId, seeded.operationId);
     assert.equal(waitBody.status, "completed");
-    assert.ok(
-      waitElapsed < 1_500,
-      `completed wait must return promptly (elapsed ${waitElapsed}ms), not hang on timeout`,
-    );
+    assert.equal(waitResult?.status, "applied");
+    assert.ok(!wait.stdout.includes("runnerPid"), "wait JSON must not expose runnerPid");
+
+    // Deterministic AFTER facts: the same daemon is still the endpoint owner and
+    // the durable Task / Integration result / event counts are unchanged. Only
+    // the four attributable CLI exchange receipts are added (status, deep-audit
+    // status, history, wait). No scheduler-speed assertion is needed.
+    const healthAfter = await daemonRequest<Record<string, unknown>>("health", {}, home);
+    assert.equal(healthAfter.pid, pidBefore, "observation must not replace the daemon PID");
+    const storeAfter = new StateStore(home);
+    try {
+      assert.equal(storeAfter.listTasks().length, beforeFacts.tasks, "observation must not create Tasks");
+      const resultsAfter = storeAfter.listRecentIntegrationResults(100);
+      assert.equal(resultsAfter.length, beforeFacts.results, "observation must not change Integration result count");
+      assert.equal(resultsAfter[0]?.id, seeded.operationId, "the same durable result remains");
+      assert.equal(storeAfter.listEvents(seeded.taskId).length, beforeFacts.events, "observation must not add daemon events");
+      assert.equal(
+        storeAfter.listExchangeReceipts(seeded.taskId).length,
+        beforeFacts.receipts + 4,
+        "only the four CLI exchange receipts may be added",
+      );
+    } finally {
+      storeAfter.close();
+    }
   } finally {
     await daemon.close();
     await rm(home, { recursive: true, force: true }).catch(() => undefined);

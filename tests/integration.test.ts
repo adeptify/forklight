@@ -609,6 +609,152 @@ test("dry-run git apply failure is rejected at preflight", async () => {
   );
 });
 
+test("dry-run git apply failure emits one canonical privacy-safe applicability issue without mutating source", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-applic-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir } = await buildSucceededTask(store, ["true"]);
+    const before = await readFile(path.join(sourceDir, "readme.md"), "utf8");
+
+    // Well-formed diff that fails the real `git apply --check` dry-run
+    // (modifies a file absent from source), within size limits.
+    const badDiff =
+      "diff --git a/baseline/nonexistent.txt b/workspace/nonexistent.txt\n" +
+      "--- a/baseline/nonexistent.txt\n" +
+      "+++ b/workspace/nonexistent.txt\n" +
+      "@@ -1,1 +1,1 @@\n" +
+      "-original\n" +
+      "+changed\n";
+    await writeFile(task.paths.diff, badDiff);
+
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(receipt.rejectionReasons.length > 0);
+    assert.ok(
+      receipt.rejectionReasons.some((r) => r.includes("does not apply cleanly")),
+    );
+    // Exactly one closed privacy-safe issue, naming only the known stage.
+    assert.ok(receipt.applicabilityIssue, "applicability issue must be present");
+    assert.deepEqual(receipt.applicabilityIssue, { code: "patch-not-applicable" });
+    // Source remains unchanged - preflight never mutates source.
+    assert.equal(await readFile(path.join(sourceDir, "readme.md"), "utf8"), before);
+    // Privacy: the structured issue carries no raw diagnostic, path, command,
+    // diff, or log - only the fixed closed code.
+    const issueJson = JSON.stringify(receipt.applicabilityIssue);
+    assert.equal(issueJson, '{"code":"patch-not-applicable"}');
+    assert.ok(!issueJson.includes("nonexistent.txt"), "no path in issue");
+    assert.ok(!issueJson.includes("does not apply cleanly"), "no raw reason in issue");
+    assert.ok(!issueJson.includes("error"), "no diagnostic in issue");
+    assert.ok(!issueJson.includes("diff --git"), "no diff in issue");
+  } finally {
+    store.close();
+  }
+});
+
+test("preflight event payload projects the applicability issue unchanged", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-applic-ev-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"]);
+    const badDiff =
+      "diff --git a/baseline/nonexistent.txt b/workspace/nonexistent.txt\n" +
+      "--- a/baseline/nonexistent.txt\n" +
+      "+++ b/workspace/nonexistent.txt\n" +
+      "@@ -1,1 +1,1 @@\n" +
+      "-original\n" +
+      "+changed\n";
+    await writeFile(task.paths.diff, badDiff);
+
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    const events = store.listEvents(task.id);
+    const preflightEvent = events.find((e) => e.type === "integration.preflight.completed");
+    assert.ok(preflightEvent, "preflight event must exist");
+    const payload = preflightEvent!.payload as Record<string, unknown> | undefined;
+    assert.ok(payload?.applicabilityIssue, "event carries the applicability issue");
+    assert.deepEqual(
+      payload!.applicabilityIssue,
+      receipt.applicabilityIssue,
+      "event issue is copied unchanged from the receipt",
+    );
+    assert.deepEqual(payload!.applicabilityIssue, { code: "patch-not-applicable" });
+  } finally {
+    store.close();
+  }
+});
+
+test("preflight event summary is a fixed privacy-safe marker for applicability failures", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-applic-sum-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"]);
+    const badDiff =
+      "diff --git a/baseline/nonexistent.txt b/workspace/nonexistent.txt\n" +
+      "--- a/baseline/nonexistent.txt\n" +
+      "+++ b/workspace/nonexistent.txt\n" +
+      "@@ -1,1 +1,1 @@\n" +
+      "-original\n" +
+      "+changed\n";
+    await writeFile(task.paths.diff, badDiff);
+
+    await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    const events = store.listEvents(task.id);
+    const preflightEvent = events.find((e) => e.type === "integration.preflight.completed");
+    assert.ok(preflightEvent, "preflight event must exist");
+    // The durable summary is a fixed closed marker - no raw git stdout/stderr,
+    // no fixture path, no apply diagnostic leaks into the durable summary.
+    assert.equal(
+      preflightEvent!.summary,
+      "Integration preflight rejected: patch-not-applicable",
+    );
+    assert.ok(!preflightEvent!.summary.includes("nonexistent.txt"), "no fixture path in summary");
+    assert.ok(
+      !preflightEvent!.summary.includes("does not apply cleanly"),
+      "no raw apply diagnostic in summary",
+    );
+    // Raw rejection reasons and the issue remain available in the payload for audit.
+    const payload = preflightEvent!.payload as Record<string, unknown> | undefined;
+    assert.ok(
+      Array.isArray(payload?.rejectionReasons) && (payload!.rejectionReasons as unknown[]).length > 0,
+      "payload keeps raw rejectionReasons for audit",
+    );
+    assert.ok(
+      (payload!.rejectionReasons as string[]).some((r) => r.includes("does not apply cleanly")),
+      "raw apply diagnostic remains in payload rejectionReasons",
+    );
+    assert.deepEqual(payload!.applicabilityIssue, { code: "patch-not-applicable" });
+  } finally {
+    store.close();
+  }
+});
+
+test("non-applicability rejection does not fabricate an applicability issue", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-applic-neg-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"]);
+    // A traversal path rejects at path validation, before the dry-run check.
+    const maliciousDiff =
+      "diff --git a/baseline/../outside.txt b/workspace/../outside.txt\n" +
+      "--- a/baseline/../outside.txt\n" +
+      "+++ b/workspace/../outside.txt\n" +
+      "@@ -0,0 +1 @@\n" +
+      "+danger\n";
+    await writeFile(task.paths.diff, maliciousDiff);
+
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(receipt.rejectionReasons.length > 0);
+    assert.ok(
+      receipt.rejectionReasons.some((r) => r.includes("Traversal path")),
+    );
+    assert.equal(
+      receipt.applicabilityIssue,
+      undefined,
+      "no applicability issue when preflight rejects before the dry-run check",
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test("verification timeout triggers rollback and records timedOut evidence", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "fl-int-"));
   const store = new StateStore(root);
@@ -1475,6 +1621,7 @@ test("legacy receipt without path evidence remains readable and still applies", 
     assert.ok(legacy);
     assert.equal(legacy!.pathEvidence, undefined, "legacy receipt has no path evidence");
     assert.equal(legacy!.recoveryGuidance, undefined, "legacy receipt has no guidance");
+    assert.equal(legacy!.applicabilityIssue, undefined, "legacy receipt has no applicability issue");
 
     // Applying the legacy receipt (evidence absent) still works
     const result = await applyIntegration(store, task.id, "leg-pe", INTEGRATION_DEFAULTS);

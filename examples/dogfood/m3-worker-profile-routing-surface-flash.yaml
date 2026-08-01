@@ -1,0 +1,204 @@
+version: 2
+name: Route model advice by real saved Worker Profiles
+project: ../..
+taskClass: worker-profile-routing-surface
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: user-specified
+    note: The user asked to use DeepSeek Flash 1M more often. This slice has a frozen cross-surface contract and executable acceptance, so Main selects Flash for implementation without claiming historical superiority.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    CLI, MCP, daemon, and Hub route advice through real saved Worker Profiles,
+    preserving profile identity and full runtime/model identity end to end while
+    keeping legacy provider/model-only calls compatible.
+  presentation:
+    summary: 让用户明确知道系统比较的是哪几个真实 Worker，同模型的不同 Worker 不再被错误合并。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-worker-profile-routing-surface-contract.md.
+    - "Inspect first: src/cli.ts, src/daemon/coordinator.ts, src/daemon/server.ts, src/mcp/server.ts, src/core/model-routing.ts, src/core/worker-profiles.ts, src/hub/public/app.js, and tests/model-routing.test.ts."
+    - The coordinator and statistics layer already support full provider/model/runtime/effort identity.
+    - The CLI currently strips runtime and effort from candidate JSON.
+    - The Hub currently collapses candidates by provider/model and mixes catalog-only models with saved Worker Profiles.
+    - Profile resolution must live in the daemon so CLI, MCP, and Hub do not create competing identity rules.
+  inScope:
+    - Add a first-class workerProfileIds routing input to daemon protocol/coordinator, CLI, MCP, and Hub.
+    - Resolve each Profile through current Settings and Model Catalog into one privacy-safe frozen Worker identity.
+    - Preserve workerProfileId and workerLabel on each candidate and on a recommendation after scoring and sorting.
+    - Keep legacy candidate routing compatible, including full provider/model/runtime/effort candidates.
+    - Make new and legacy routing inputs mutually exclusive and reject unknown, duplicate, malformed, or out-of-range Profile lists before evaluation.
+    - Make Hub candidate selection use saved Worker Profiles only and key selections by Profile ID without provider/model deduplication.
+    - Add focused Core/daemon/CLI/MCP/Hub coverage for identity preservation, strict validation, privacy, and non-mutation.
+  outOfScope:
+    - Do not change routing weights, sample thresholds, failure attribution, economics, Competition behavior, Task lifecycle, retry policy, Integration, or Settings persistence.
+    - Do not probe Providers, run a Competition, create a Task, launch a Worker, switch defaults, or mutate Settings from routing evaluation.
+    - Do not expose endpoint, Keychain service, credentials, budgets, Task content, logs, or private evidence rows.
+    - Do not redesign Hub layout or visual language; preserve the existing structure and improve only the truth of candidate identity and adjacent explanation.
+    - Do not touch other repositories, SDK consumers, Elsewhere, commit, or push.
+  executionSteps:
+    - Trace candidate parsing, daemon protocol, coordinator scoring, profile materialization, Hub projection, and existing routing tests before editing.
+    - Implement one daemon-owned Profile resolver and reuse the existing full-worker routing scorer.
+    - Thread profile identity through results without changing legacy result shapes when Profile input is absent.
+    - Replace Hub catalog-plus-profile candidate construction with Profile-only selection keyed by ID.
+    - Run focused tests once, repair only Candidate-caused failures, then run the full suite/build/syntax/diff checks once.
+  deliverables:
+    - First-class Profile routing across CLI, MCP, daemon, and Hub.
+    - Privacy-safe candidate and recommendation identity that survives sorting.
+    - Backward-compatible legacy candidate routing.
+    - Regression tests proving same-model Profile separation and fail-closed validation.
+  modules:
+    - name: Daemon Profile resolver
+      responsibility: Resolve saved Profile IDs into frozen, safe Worker identities from one authoritative Settings snapshot.
+      consumes:
+        - workerProfileIds, Worker Profiles, Model Catalog, provider defaults.
+      produces:
+        - workerProfileId, workerLabel, provider, model, runtime, and effort for each candidate.
+      boundaries:
+        - No Provider probe, endpoint output, credential access, mutation, or execution.
+    - name: Routing surface adapters
+      responsibility: Carry either Profile IDs or legacy candidates through CLI, MCP, and daemon protocol without identity loss.
+      consumes:
+        - Exact task class, optional family and Competition decision, plus one mutually exclusive candidate input.
+      produces:
+        - One canonical read-only advisory.
+      boundaries:
+        - No duplicated Profile materialization outside daemon and no mixed input modes.
+    - name: Hub Worker selector
+      responsibility: Let users compare saved Workers and understand which identities were evaluated.
+      consumes:
+        - Privacy-safe Worker Profile settings view and canonical routing advisory.
+      produces:
+        - Profile-keyed selection and explanation-first result rows.
+      boundaries:
+        - No catalog-only candidates, provider/model deduplication, auto-run, or visual redesign.
+  callChain:
+    - User chooses saved Worker Profile IDs in CLI, MCP, or Hub.
+    - Daemon validates and resolves all IDs from one Settings snapshot.
+    - Existing routing engine reads history by complete Worker identity and computes unknown or recommendation.
+    - Daemon binds Profile ID and label back to candidate and recommendation results.
+    - Caller explains exactly which Workers were compared without starting work.
+  scenarios:
+    - name: Same model, different runtime
+      given: Two saved Profiles share provider and model but use different runtimes.
+      when: Profile routing evaluates them.
+      then: Both survive as distinct candidates and read distinct full-worker evidence.
+    - name: Same executable identity, different Profiles
+      given: Two Profile IDs resolve to identical provider, model, runtime, and effort.
+      when: They are evaluated together.
+      then: Both identities remain visible and no result-to-Profile binding is lost after sorting.
+    - name: Unknown or duplicate Profile
+      given: A request includes a missing ID or repeats one ID.
+      when: Any routing surface validates the request.
+      then: It fails before statistics, Provider access, Task creation, or mutation.
+    - name: Legacy compatibility
+      given: An existing caller sends only provider/model candidates.
+      when: It requests routing advice.
+      then: Existing behavior and response shape remain available without fabricated Profile metadata.
+    - name: Hub source of truth
+      given: Model Catalog includes an entry without a Worker Profile and two Profiles share one model.
+      when: Hub renders routing candidates.
+      then: The catalog-only entry is absent and both Profile choices remain.
+  risks:
+    - Decorating sorted results by array index can attach the wrong Profile; binding must use an unambiguous identity carried through scoring.
+    - Deduplicating by full executable identity would erase a user's distinct Profile choice; only duplicate Profile IDs are rejected on the Profile path.
+    - Resolving profiles independently in clients can drift from daemon execution rules; daemon must own resolution.
+    - Returning resolved endpoints or auth settings would turn a read-only advisory into a privacy leak.
+  changeBudget:
+    maxFiles: 14
+    maxDiffLines: 1800
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 14
+  fileLimitMode: warn
+  changedLineLimit: 1800
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/model-routing.ts
+    - src/core/worker-profiles.ts
+    - src/daemon
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub
+    - tests/model-routing.test.ts
+    - tests
+acceptance:
+  criteria:
+    - Profile routing preserves workerProfileId, workerLabel, provider, model, runtime, and effort from daemon resolution through every candidate and recommendation.
+    - Two saved Profiles sharing provider/model are never collapsed, and duplicate Profile IDs or mixed Profile/legacy inputs fail before evaluation.
+    - Legacy provider/model and full-identity candidate calls remain compatible without fabricated Profile fields.
+    - Hub lists saved Worker Profiles only, keys selection by Profile ID, and keeps the existing explanation-first visual structure.
+    - Routing stays read-only and privacy-safe with no Provider request, Worker launch, Task creation, Competition, Settings mutation, endpoint, or credential output.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/model-routing.test.ts tests/daemon.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts tests/daemon-cli.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

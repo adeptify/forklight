@@ -5,6 +5,7 @@ import type { IntegrationSettings } from "./settings.js";
 import type { StateStore } from "../state/store.js";
 import type {
   DeliveryPlanView,
+  IntegrationApplicabilityIssue,
   IntegrationPathEvidenceEntry,
   IntegrationReceiptRecord,
   IntegrationRecoveryGuidance,
@@ -433,6 +434,7 @@ function buildReceipt(
   deliveryPlan?: DeliveryPlanView,
   pathEvidence?: IntegrationPathEvidenceEntry[],
   recoveryGuidance?: IntegrationRecoveryGuidance,
+  applicabilityIssue?: IntegrationApplicabilityIssue,
 ): IntegrationReceiptRecord {
   const now = new Date();
   return {
@@ -448,6 +450,7 @@ function buildReceipt(
     ...(deliveryPlan === undefined ? {} : { deliveryPlan }),
     ...(pathEvidence === undefined ? {} : { pathEvidence }),
     ...(recoveryGuidance === undefined ? {} : { recoveryGuidance }),
+    ...(applicabilityIssue === undefined ? {} : { applicabilityIssue }),
   };
 }
 
@@ -689,6 +692,7 @@ export async function preflightIntegration(
       : affectedFiles.map((file) => ({ path: file, ...pathPolicy.explain(file) }));
 
   // 6. Real dry-run applicability check
+  let applicabilityIssue: IntegrationApplicabilityIssue | undefined;
   if (reasons.length === 0) {
     const checkResult = await runCaptured(
       "git",
@@ -701,6 +705,11 @@ export async function preflightIntegration(
           checkResult.stderr || checkResult.stdout
         }`,
       );
+      // Record one closed privacy-safe issue naming only the known failure
+      // stage. The raw git diagnostic stays in rejectionReasons for audit; the
+      // issue itself carries no parsed conflict, path, command, diff, or log,
+      // and never guesses the underlying git conflict.
+      applicabilityIssue = { code: "patch-not-applicable" };
     }
   }
 
@@ -769,6 +778,7 @@ export async function preflightIntegration(
   const receipt = buildReceipt(
     task.id, diff, affectedFiles, sourceEvidence, reasons,
     settings.reviewReceiptTtlMs, deliveryPlan, pathEvidence, recoveryGuidance,
+    applicabilityIssue,
   );
   store.saveIntegrationReceipt(receipt);
   storePreflightEvent(store, task.id, receipt);
@@ -787,21 +797,30 @@ function storePreflightEvent(
   taskId: string,
   receipt: IntegrationReceiptRecord,
 ): void {
+  // The durable summary must never carry raw git stdout/stderr. For the
+  // patch-not-applicable case it is a fixed closed marker; raw rejection
+  // reasons remain only in the payload/receipt for audit. Hub localizes the
+  // marker via the payload applicabilityIssue, not this summary string.
+  const passed = receipt.rejectionReasons.length === 0;
+  const summary = passed
+    ? "Integration preflight passed"
+    : receipt.applicabilityIssue !== undefined
+      ? "Integration preflight rejected: patch-not-applicable"
+      : `Integration preflight rejected: ${receipt.rejectionReasons.join("; ")}`;
   store.addEvent(
     taskId,
     undefined,
     "integration.preflight.completed",
-    receipt.rejectionReasons.length === 0
-      ? "Integration preflight passed"
-      : `Integration preflight rejected: ${receipt.rejectionReasons.join("; ")}`,
+    summary,
     {
       receiptId: receipt.id,
-      passed: receipt.rejectionReasons.length === 0,
+      passed,
       rejectionReasons: receipt.rejectionReasons,
       affectedFiles: receipt.affectedFiles,
       ...(receipt.deliveryPlan === undefined ? {} : { deliveryPlan: receipt.deliveryPlan }),
       ...(receipt.pathEvidence === undefined ? {} : { pathEvidence: receipt.pathEvidence }),
       ...(receipt.recoveryGuidance === undefined ? {} : { recoveryGuidance: receipt.recoveryGuidance }),
+      ...(receipt.applicabilityIssue === undefined ? {} : { applicabilityIssue: receipt.applicabilityIssue }),
     },
   );
 }

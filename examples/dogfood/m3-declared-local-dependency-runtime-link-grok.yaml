@@ -1,0 +1,192 @@
+version: 2
+name: Safely resolve declared sibling packages inside node_modules
+project: ../..
+taskClass: m3-declared-local-dependency-runtime-link
+taskFamily: workspace-isolation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: workspace-isolation
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: main-judgment
+    note: This external-project blocker needs one bounded implementation. Grok is the available independent runtime while the Claude Code runtime path has a current local EPERM failure; Nexus keeps priority on the shared Grok worker queue.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    ForkLight safely prepares and verifies projects whose node_modules package
+    symlink resolves to the exact sibling package already declared by a root
+    relative file: or link: dependency, while every unrelated escape remains
+    fail-closed.
+  presentation:
+    summary: 让已声明的本地依赖在隔离区里正确接起来，但不放宽任何其他外链的安全门。
+    language: zh-CN
+  context:
+    - The authoritative contract is docs/m3-declared-local-dependency-runtime-link-contract.md; follow it exactly.
+    - Flyleaf Task 5a37f666-0298-477d-8acd-0c5b84c8fb6e failed before Worker work because node_modules/@adeptify/client-core points to the same sibling SDK declared as file:../adeptify/adeptify-next/client-core/ts/sdk.
+    - Current materializeSharedDependencies and copyForVerification mirror node_modules before declared local packages, so the generic escape gate rejects the package-manager link before the declared package can be isolated.
+    - Existing declared-local planning already validates source roots and destination containment; reuse that authority rather than inventing a second parser.
+    - Main owns final review and activation. Do not restart Daemon, integrate, commit, push, or touch Flyleaf/Adeptify.
+  inScope:
+    - "Plan validated root-manifest file:/link: local packages before runtime dependency-tree materialization."
+    - Allow one external node_modules link only when its exact package-relative path and exact resolved target match a validated declared-local plan.
+    - Rewrite that allowed link as a relative link to the copied package inside the owned isolation container.
+    - Keep all undeclared, wrong-target, nested-package-escape and malformed package-name paths fail-closed.
+    - Apply one consistent dependency-set behavior to prepareWorkspace, retained-workspace reverify, and copyForVerification.
+    - Add Flyleaf-shaped scoped-package fixtures plus negative security and immutability/diff regressions.
+  outOfScope:
+    - Do not weaken or remove the generic external-symlink escape gate.
+    - Do not allow arbitrary external directories, recurse package manifests, run package installation, mutate package.json/lockfiles, or change dependency versions.
+    - Do not change Task admission, Worker runtime, Provider, credentials, database, Hub, routing, retry, Candidate, Main review, Integration authorization or Git behavior.
+    - Do not modify /Users/yijunwang/code/flyleaf, /Users/yijunwang/code/adeptify, any other repository, daemon process state, commit, or push.
+  executionSteps:
+    - Freeze the Flyleaf-shaped failure as an isolated workspace fixture without reading or mutating the real Flyleaf/Adeptify sources.
+    - Reuse declared-local plans to build an exact package-path plus real-target authorization for runtime-link rewriting.
+    - Centralize or consistently route initial prepare, retained reverify and disposable verification through the same dependency-set rule.
+    - Add wrong-target, undeclared-link, package-internal-escape, scoped-name and source-immutability regressions.
+    - Run focused tests once, repair only Candidate-caused failures, then run the full acceptance suite once.
+  deliverables:
+    - Exact-match declared local-package runtime-link materialization.
+    - One consistent prepare/reverify/Integration verification behavior.
+    - Flyleaf-shaped positive regression and security-negative regressions.
+    - No change to the historical failed Flyleaf Task or any external project.
+  modules:
+    - name: Declared local plan authority
+      responsibility: Validate declared relative packages and derive the exact package path, real source target and isolated destination.
+      consumes:
+        - Root package.json and owned isolation paths.
+      produces:
+        - Validated declared local-package plans and a narrow runtime-link authorization.
+      boundaries:
+        - No recursive manifest graph, absolute targets or general external-link permission.
+    - name: Runtime link rewriter
+      responsibility: Rewrite only one exact declared-package node_modules symlink to its isolated mirror.
+      consumes:
+        - Runtime tree symlink path, resolved target and validated authorization.
+      produces:
+        - Relative symlink whose resolved destination stays inside the owned container.
+      boundaries:
+        - Name and target must both match; every other escape uses the unchanged hard rejection.
+    - name: Shared dependency-set materialization
+      responsibility: Give Worker prepare, retained reverify and disposable verification the same safe package topology.
+      consumes:
+        - Source project, destination project, isolation container and runtime directory names.
+      produces:
+        - Local package mirrors plus local runtime dependency tree.
+      boundaries:
+        - No baseline/Candidate pollution, source mutation, package install or process activation.
+  callChain:
+    - ForkLight copies a dependency-free project snapshot into an owned container.
+    - Declared local packages are validated and copied to their relative isolated destinations.
+    - node_modules is mirrored; an exact declared package link is redirected to the isolated package copy.
+    - Worker or verifier commands resolve only container-owned paths.
+    - Patch generation excludes all dependency mirrors and preserves source immutability.
+  scenarios:
+    - name: Flyleaf scoped local dependency
+      given: A scoped package is declared with file:../sibling/sdk and node_modules contains a symlink to that exact SDK.
+      when: ForkLight prepares or verification-copies the project.
+      then: The link resolves to a copied SDK inside the owned container and no original path is exposed.
+    - name: Declared name with wrong target
+      given: The package name is declared but its node_modules link resolves to a different external directory.
+      when: Runtime dependencies are materialized.
+      then: ForkLight fails closed with no external command-ready link.
+    - name: Undeclared escaping link
+      given: node_modules contains another external symlink not authorized by a root declaration.
+      when: Runtime dependencies are materialized.
+      then: The existing dependency escape rejection is preserved.
+    - name: Escape inside declared package
+      given: The declared sibling package itself contains a symlink outside its package root.
+      when: ForkLight copies the declared package.
+      then: ForkLight fails closed instead of copying or linking external content.
+    - name: Candidate hygiene
+      given: The isolated mirrors exist and a Worker changes business files.
+      when: ForkLight builds the Candidate diff.
+      then: Dependency mirrors do not appear and original dependencies remain unchanged.
+  risks:
+    - A target-only allowlist could authorize the same package from another node_modules path; require exact package-relative path too.
+    - Scoped names add a directory level; test normalized @scope/name mapping and reject traversal-like segments.
+    - Separate call-site implementations can drift; prefer one canonical helper or prove identical behavior across all three consumers.
+    - A failed later runtime copy can leave a partial local mirror; retain cleanup and prove no external link survives.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 800
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 800
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 3
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workspace/dependency-materializer.ts
+    - src/workspace/copy.ts
+    - src/core/integration-verification-copy.ts
+    - tests/workspace.test.ts
+acceptance:
+  criteria:
+    - "An exact declared file:/link: package symlink in node_modules is rewritten only to its mirror inside the owned isolation container."
+    - Package name and resolved target must both match; undeclared, wrong-target and nested escaping links still fail closed.
+    - Initial prepare, retained Candidate reverify and Integration/Main-remediation verification use the same behavior.
+    - Source packages remain immutable and dependency mirrors never enter the Candidate patch.
+    - No external project, runtime process, credential, database, commit or push is changed.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/workspace.test.ts
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts tests/integration-operation.test.ts
+    - npm test
+    - npm run build
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

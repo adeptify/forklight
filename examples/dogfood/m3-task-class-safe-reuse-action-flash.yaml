@@ -1,0 +1,197 @@
+version: 2
+name: Let Hub safely apply an existing Task class to a draft
+project: ../..
+taskClass: m3-task-class-reuse-within-family-guidance
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: The exact class has one accepted Flash delivery but not enough cross-Worker evidence for a recommendation. Main selected Flash because the user asked to use it more and this continuation has a frozen safety contract; this is not a superiority claim.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek|deepseek-v4-flash[1M]|claude-code|high: 1
+      deepseek|deepseek-v4-pro[1M]|claude-code|high: 0
+
+contract:
+  outcome: >-
+    From the Hub admission preview, a user can explicitly apply one currently
+    listed same-family taskClass to the unsubmitted Task Contract, receive a
+    fresh preview, and still decide separately whether to submit the Task.
+  presentation:
+    summary: 用户可以在 Hub 一键复用已有工作类型，但任何写入都绑定当前预览，且绝不自动提交任务。
+    language: zh-CN
+  context:
+    - The aligned contract is docs/m3-task-class-safe-reuse-action-contract.md and is authoritative.
+    - Inspect the existing task parser, canonical admission preview, daemon mutation dispatch, Hub ops routes, submit preview renderer, atomic file utilities and focused tests before editing.
+    - The current Hub already shows safe classChoices for a missing/new class inside an existing family, but tells the user to edit the Task file manually.
+    - Preserve the current what/why/boundaries/classification preview hierarchy and incumbent Hub visual system.
+    - This Task deliberately reuses the existing exact taskClass because it extends the same classification-reuse capability.
+  inScope:
+    - Add one canonical preview-bound operation that changes only root taskClass in an unsubmitted Task Contract.
+    - Require absolute regular non-symlink file, confirm true, exact current preview digest, missing/new current class, existing family and an exact current classChoices member.
+    - Serialize same-path mutations, construct and fully validate the new document before atomic replacement, preserve original permissions and clean temporary files on ordinary failures.
+    - Preserve YAML comments and keep JSON contracts JSON; prove all non-taskClass parsed content is unchanged.
+    - Return a fresh SafeTaskAdmissionPreview generated from the written file; do not create a Task or lifecycle record.
+    - Expose the operation through a bounded Daemon method and one Hub ops route; the Daemon must independently recheck every authority condition.
+    - Render accessible bilingual per-choice actions only when the existing classChoices block is eligible; require explicit confirmation and disable submit/actions while pending.
+    - On success replace the old preview with the returned preview; on failure invalidate submission and instruct the user to preview again without leaking raw diagnostics.
+    - Add focused executable tests for Core file safety, Daemon authority, Hub route privacy/no-submit behavior and browser renderer state transitions.
+  outOfScope:
+    - Do not infer semantic similarity, preselect a choice, auto-edit on preview, or expose a generic file/field editing API.
+    - Do not change family, routingDecision, Worker, policy, acceptance, project, commands, paths, Settings, database, Task lifecycle, Competition, retries, Integration or economics.
+    - Do not rewrite already-created Tasks, backfill history, adjust evidence thresholds or manufacture model samples.
+    - Do not add a page, redesign global Hub styling, touch other repositories, commit or push.
+  executionSteps:
+    - Trace current parsing/formatting and identify the smallest shared Core operation that can prove single-field semantic change before write.
+    - Implement fail-closed path/digest/candidate/concurrency checks and atomic format-preserving replacement.
+    - Wire Daemon and Hub through the canonical operation without duplicating preview or classification logic.
+    - Add focused behavior tests before changing presentation; then add bilingual UI actions and pending/error states.
+    - Run focused acceptance once, make at most one same-Candidate correction for Candidate-caused gaps, then run full suite/build/syntax/diff once.
+  deliverables:
+    - Preview-bound safe taskClass reuse operation with atomic file behavior.
+    - Daemon and Hub operation surfaces that cannot submit or start work.
+    - Accessible bilingual class-choice controls with fresh-preview handoff.
+    - Regression evidence for stale, forged, concurrent, symlink, formatting, privacy and no-side-effect cases.
+  modules:
+    - name: Draft classification mutation
+      responsibility: Validate and atomically apply one explicit existing class to a Task Contract.
+      consumes:
+        - Absolute file path, expected preview digest, exact chosen class and canonical history/settings context.
+      produces:
+        - A file differing semantically only at root taskClass and a fresh safe preview.
+      boundaries:
+        - No arbitrary patching, semantic guessing, Task creation, database mutation or execution.
+    - name: Daemon authority
+      responsibility: Own the mutation gate and same-path serialization.
+      consumes:
+        - Explicit confirmed request from Hub.
+      produces:
+        - Safe success preview or closed rejection.
+      boundaries:
+        - Recompute all facts; never trust UI state or echo file contents and private diagnostics.
+    - name: Hub classification action
+      responsibility: Let the user deliberately choose one displayed existing class and understand what happens next.
+      consumes:
+        - Current board file path, preview digest and safe classChoices.
+      produces:
+        - Confirmed request, pending state, fresh preview and plain-language success/error feedback.
+      boundaries:
+        - No optimistic success, automatic selection or automatic Task submission.
+  callChain:
+    - User previews an absolute Task Contract through the existing Hub Board form.
+    - Hub renders canonical same-family classChoices without selecting one.
+    - User chooses one class and confirms the draft-only change.
+    - Hub calls the bounded ops route with file path, digest, class and confirm.
+    - Daemon locks the path, recomputes preview and authority, validates a single-field document change, atomically replaces the draft and returns a fresh preview.
+    - Hub redraws the fresh preview; ordinary explicit submit remains the only way to create a Task.
+  scenarios:
+    - name: Safe successful reuse
+      given: A regular YAML draft has a new class, existing family and listed existing class.
+      when: The user confirms that exact choice.
+      then: Only taskClass changes, comments and mode remain, fresh preview says existing and no Task is created.
+    - name: Stale or forged action
+      given: The digest is stale or the requested class is absent from current choices.
+      when: The operation is requested.
+      then: It rejects before write, leaves the file byte-identical and starts nothing.
+    - name: Unsafe target
+      given: A relative path, symlink, directory, unreadable or malformed file.
+      when: The operation is requested.
+      then: It fails closed without target corruption or leaked diagnostics.
+    - name: Concurrent confirmation
+      given: One mutation for a path is still in progress.
+      when: A second request reaches the Daemon.
+      then: The second request is rejected and cannot overwrite the first result.
+    - name: Hub lifecycle boundary
+      given: A valid class choice is visible.
+      when: The user applies it successfully.
+      then: Buttons are pending-safe, a fresh preview appears and Submit still requires a separate click and digest-bound confirmation.
+  risks:
+    - A generic writer would broaden authority; keep the API closed to one root taskClass and revalidate the entire document.
+    - Rewriting YAML can destroy comments; use a document-preserving parser and test comments plus JSON separately.
+    - A stale preview can overwrite a concurrent edit; compare canonical digest inside a serialized same-path gate immediately before atomic replace.
+    - Optimistic UI can show false success; render only the Daemon-returned fresh preview.
+  changeBudget:
+    maxFiles: 12
+    maxDiffLines: 1800
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 12
+  fileLimitMode: warn
+  changedLineLimit: 1800
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-preview.ts
+    - src/core/classification-advice.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/hub/server.ts
+    - src/hub/public
+    - tests
+acceptance:
+  criteria:
+    - A confirmed operation can change only root taskClass to an exact current same-family classChoice and returns a fresh canonical preview without creating a Task.
+    - Stale, forged, repeated, concurrent and unsafe-path requests fail before destructive write and preserve the real file.
+    - YAML comments, JSON format, file permissions and every non-taskClass parsed field remain unchanged; ordinary failures clean temporary artifacts.
+    - Daemon owns authority and Hub never trusts or recomputes eligibility, counts, digest or file success.
+    - Hub actions are bilingual, accessible, pending-safe, invalidate stale submit state, and never auto-submit or start a Worker.
+    - Existing preview, submission, routing, Competition, Settings, Task lifecycle, Integration and economics behavior remain unchanged.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-class-reuse.test.ts tests/daemon.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

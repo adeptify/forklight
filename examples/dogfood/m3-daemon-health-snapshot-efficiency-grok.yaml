@@ -1,0 +1,167 @@
+version: 2
+name: Reuse one truthful Daemon health environment snapshot via Grok
+project: ../..
+taskClass: daemon-health-snapshot-efficiency
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: main-judgment
+    note: Flash failed before its first model turn because Claude Code could not resolve the local NVM path. It produced zero source changes and zero usage, so Main uses the already-shortlisted Grok runtime for the same frozen contract instead of retrying the broken runtime.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek-flash-1m: 0
+      local-grok-builder: 0
+
+contract:
+  outcome: >-
+    Immediate CLI and Hub readers reuse one complete bounded Daemon execution-
+    environment snapshot, preventing repeated synchronous Keychain and Runtime
+    inspection from making a healthy Worker fleet look unavailable.
+  presentation:
+    summary: 后台刚重启时，多处状态读取共享同一份真实环境检查，不再重复检查到超时并误报 Worker 不可用。
+    language: zh-CN
+  context:
+    - Follow docs/m3-daemon-health-snapshot-efficiency-contract.md as the authoritative aligned contract.
+    - Inspect DaemonCoordinator.health, Settings update/reset, Runtime doctors, daemon request timing, and focused tests first.
+    - Sequential real daemon health reads varied from about 1.6 to 8.6 seconds; overlapping synchronous inspection can approach the 15-second transport bound.
+    - The previous Flash Task failed before a model turn with local EPERM and produced no reusable diff; do not change the contract to compensate.
+  inScope:
+    - Add one bounded memory-only cache for complete expensive Daemon execution-environment facts.
+    - Reuse Provider readiness, Runtime doctor metadata, and compatibility claudeCode from the same snapshot.
+    - Keep PID, build identity, active/queued Tasks, Provider verification, default Runtime, and max concurrency fresh on every response.
+    - Refresh after a bounded TTL and invalidate Provider-default-dependent facts after Settings update/reset.
+    - Add deterministic fake-clock/counting-loader tests and compatibility regressions.
+  outOfScope:
+    - No client retry, generic timeout increase, background refresh, Provider request, auto-start, routing, Competition, Task retry, Integration, activation, Hub redesign, new user setting, commit, or push.
+    - Do not touch Elsewhere, Client-Core, Adeptify Shell, SDK/release paths, or SDK/consumer/Nexus docs.
+  executionSteps:
+    - Separate expensive environment facts from dynamic health facts.
+    - Implement a complete-snapshot cache with deterministic loader and clock seams.
+    - Integrate it without changing the public health payload.
+    - Test reuse, TTL refresh, Settings invalidation, dynamic freshness, negative facts, and privacy.
+    - Run the focused suite, then full tests/build/syntax/diff checks once.
+  deliverables:
+    - Bounded health environment snapshot cache.
+    - Compatible Daemon health projection with fresh operational facts.
+    - Deterministic regression coverage.
+  modules:
+    - name: Health environment snapshot
+      responsibility: Reuse one complete privacy-safe result of expensive local environment inspection.
+      consumes:
+        - Provider-default identity, loader, clock, and TTL.
+      produces:
+        - Provider readiness, Runtime doctor facts, and compatibility Claude header.
+      boundaries:
+        - Memory-only; no credentials, network, persistence, background work, or mixed snapshots.
+    - name: Daemon health projection
+      responsibility: Combine the reusable snapshot with current operational state.
+      consumes:
+        - Snapshot, Settings, verification evidence, queue state, PID, and build identity.
+      produces:
+        - Existing compatible health response.
+      boundaries:
+        - Dynamic facts remain fresh and cache metadata stays private.
+  callChain:
+    - First Daemon health request loads the existing Keychain and Runtime facts once.
+    - Immediate CLI and Hub readers reuse that complete snapshot.
+    - Every response separately reads current queue, Settings, verification, PID, and build facts.
+    - TTL expiry or Settings invalidation triggers one complete replacement snapshot.
+  scenarios:
+    - name: Immediate readers
+      given: Startup readiness health has completed.
+      when: CLI and Hub read health inside the TTL.
+      then: Expensive inspection remains one and both see the same complete truth.
+    - name: Dynamic facts
+      given: A cached environment snapshot remains valid.
+      when: Queue or operational Settings change.
+      then: Health reflects the change without repeating environment inspection.
+    - name: Refresh boundary
+      given: TTL expires or Provider defaults change/reset.
+      when: Health is read.
+      then: One new complete snapshot replaces the prior snapshot.
+  risks:
+    - Caching the full response would hide queue changes; cache only environment facts.
+    - Caching secrets or raw diagnostics violates privacy; preserve only existing bounded fields.
+    - Increasing the timeout would hide repeated work rather than remove it and is forbidden.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 750
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 750
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+    - .forklight-boundary-capture
+    - .forklight-receipt-retry
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/daemon/coordinator.ts
+    - src/daemon/health-environment.ts
+    - tests/daemon-health-environment.test.ts
+    - tests/daemon.test.ts
+acceptance:
+  criteria:
+    - Immediate health reads reuse one complete environment snapshot without changing public response fields.
+    - TTL and Settings update/reset refresh Provider-default-dependent facts exactly once.
+    - PID, build, queue, verification, default Runtime, and max concurrency remain fresh.
+    - No secret, retry, timeout increase, Provider request, lifecycle mutation, commit, or push is introduced.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon-health-environment.test.ts tests/daemon.test.ts tests/cli-health.test.ts tests/setup-doctor.test.ts tests/hub-settings.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

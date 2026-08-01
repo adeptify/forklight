@@ -23,8 +23,11 @@ import type { SetupService } from "../setup/service.js";
 import type { SetupKeychainStore } from "../setup/types.js";
 import {
   projectExecutionProviderReadiness,
+  projectExecutionRuntimeDisplay,
   resolveExecutionProviderFacts,
+  resolveExecutionRuntimeFacts,
   type DaemonHealthEvidence,
+  type RuntimeDisplayMetadata,
 } from "../setup/doctor.js";
 import type { DaemonMethod } from "../daemon/protocol.js";
 import {
@@ -40,7 +43,6 @@ import { listWorkerAdapters } from "../workers/registry.js";
 import {
   resolveWorkerReadiness,
   type ProviderVerificationEvidence,
-  type RuntimeReadinessEvidence,
 } from "../core/worker-readiness.js";
 import { MIME, SECURITY_HEADERS, safeJson } from "../server-http.js";
 import {
@@ -90,7 +92,11 @@ import type {
   EventRecord,
   TaskRecord,
 } from "../core/types.js";
-import { isRuntimeName } from "../core/runtime-names.js";
+import {
+  isRuntimeName,
+  SUPPORTED_RUNTIME_NAMES,
+  type RuntimeName,
+} from "../core/runtime-names.js";
 import { validateContractQualityOverride } from "../core/worker-profiles.js";
 import { previewQualityPolicy } from "../core/contract-quality.js";
 import { buildDeliveryPlanView } from "../core/delivery-profiles.js";
@@ -1231,6 +1237,9 @@ export interface SafeActivityEvent {
   timestamp: string;
   type: string;
   summary: string;
+  /** Closed presentation hint derived from a safe event payload. The raw
+   *  payload is never transported to ordinary Task Detail. */
+  presentationCode?: "integration-patch-not-applicable";
 }
 
 /**
@@ -1243,7 +1252,12 @@ export interface SafeActivityEvent {
  * does not concatenate text deltas, and does not parse free-form summaries.
  */
 export function projectTaskActivityTimeline(
-  events: ReadonlyArray<{ timestamp?: unknown; type?: unknown; summary?: unknown }>,
+  events: ReadonlyArray<{
+    timestamp?: unknown;
+    type?: unknown;
+    summary?: unknown;
+    payload?: unknown;
+  }>,
   bound: number = TASK_ACTIVITY_TRANSPORT_BOUND,
 ): SafeActivityEvent[] {
   if (!Array.isArray(events)) return [];
@@ -1257,12 +1271,27 @@ export function projectTaskActivityTimeline(
   for (const event of events) {
     const type = typeof event?.type === "string" ? event.type : "";
     if (!type || type === "worker.message") continue;
+    const payload = event.payload !== null
+      && typeof event.payload === "object"
+      && !Array.isArray(event.payload)
+      ? event.payload as Record<string, unknown>
+      : undefined;
+    const issue = payload?.applicabilityIssue !== null
+      && typeof payload?.applicabilityIssue === "object"
+      && !Array.isArray(payload.applicabilityIssue)
+      ? payload.applicabilityIssue as Record<string, unknown>
+      : undefined;
+    const presentationCode = type === "integration.preflight.completed"
+      && issue?.code === "patch-not-applicable"
+      ? "integration-patch-not-applicable" as const
+      : undefined;
     // Fail closed for non-string timestamp/summary: never String() or
     // toString coercion that could execute hostile object methods.
     milestones.push({
       timestamp: typeof event.timestamp === "string" ? event.timestamp : "",
       type,
       summary: typeof event.summary === "string" ? event.summary : "",
+      ...(presentationCode === undefined ? {} : { presentationCode }),
     });
   }
   return milestones.slice(-limit);
@@ -1558,18 +1587,26 @@ export class HubServer {
       executionFacts.providers,
       localProviders.providers,
     );
-    const runtimes: Record<string, RuntimeReadinessEvidence> = {};
+    const localRuntimeDoctors: Partial<Record<RuntimeName, { ok: boolean }>> = {};
     for (const adapter of listWorkerAdapters()) {
       const doctor = adapter.doctor();
       if (doctor instanceof Promise) continue;
-      runtimes[adapter.name] = { ok: doctor.ok };
+      localRuntimeDoctors[adapter.name] = { ok: doctor.ok };
     }
+    const runtimeFacts = resolveExecutionRuntimeFacts({
+      clientBuildIdentity: currentBuildIdentity(),
+      daemonEvidence,
+      localRuntimes: SUPPORTED_RUNTIME_NAMES.map((name) => ({
+        name,
+        ok: localRuntimeDoctors[name]?.ok ?? false,
+      })),
+    });
     return resolveWorkerReadiness({
       workerProfiles: settings.workerProfiles,
       modelCatalog: settings.modelCatalog,
       providerDefaults: settings.providerDefaults,
       providers: providers.providers,
-      runtimes,
+      runtimes: runtimeFacts.runtimes,
     });
   }
 
@@ -1759,26 +1796,30 @@ export class HubServer {
         const prereqs = this.deps.setup.inspectPrerequisites();
         const localProviderReadiness = this.deps.inspectProviderReadiness?.()
           ?? providerReadiness(settings.providerDefaults);
-        const runtimes: Record<string, RuntimeReadinessEvidence & Record<string, unknown>> = {};
+        const localRuntimeDoctors: Partial<Record<RuntimeName, { ok: boolean }>> = {};
+        const localRuntimeDisplay: Partial<Record<RuntimeName, RuntimeDisplayMetadata>> = {};
         for (const adapter of listWorkerAdapters()) {
           const doctor = adapter.doctor();
           if (doctor instanceof Promise) continue;
-          runtimes[adapter.name] = {
-            ok: doctor.ok,
+          localRuntimeDoctors[adapter.name] = { ok: doctor.ok };
+          localRuntimeDisplay[adapter.name] = {
             displayName: adapter.displayName,
+            executable: adapter.defaultExecutable,
+            ...(doctor.version === undefined ? {} : { version: doctor.version }),
             issues: doctor.issues,
-            capabilities: doctor.capabilities,
+            capabilities: adapter.capabilities(),
           };
         }
         // Probe only — do not auto-start here so Hub stop control stays sticky.
         const daemon = await this.probeDaemonStatus();
+        const daemonEvidence: DaemonHealthEvidence = {
+          ok: daemon.running === true && daemon.ok !== false,
+          serverIdentity: daemon.buildIdentity,
+          result: daemon,
+        };
         const executionFacts = resolveExecutionProviderFacts({
           clientBuildIdentity: currentBuildIdentity(),
-          daemonEvidence: {
-            ok: daemon.running === true && daemon.ok !== false,
-            serverIdentity: daemon.buildIdentity,
-            result: daemon,
-          },
+          daemonEvidence,
           localProviders: providerNames().map((name) => ({
             name,
             label: providerLabel(name),
@@ -1788,6 +1829,15 @@ export class HubServer {
             defaultModel: localProviderReadiness.providers[name].defaultModel,
           })),
         });
+        const runtimeFacts = resolveExecutionRuntimeFacts({
+          clientBuildIdentity: currentBuildIdentity(),
+          daemonEvidence,
+          localRuntimes: SUPPORTED_RUNTIME_NAMES.map((name) => ({
+            name,
+            ok: localRuntimeDoctors[name]?.ok ?? false,
+          })),
+        });
+        const runtimes = projectExecutionRuntimeDisplay(runtimeFacts, localRuntimeDisplay);
         const effectiveProviderReadiness = projectExecutionProviderReadiness(
           executionFacts.providers,
           localProviderReadiness.providers,
@@ -1809,7 +1859,7 @@ export class HubServer {
           modelCatalog: settings.modelCatalog,
           providerDefaults: settings.providerDefaults,
           providers: effectiveProviderReadiness.providers,
-          runtimes,
+          runtimes: runtimeFacts.runtimes,
           ...(verification === undefined ? {} : { providerVerification: verification }),
         });
         const mains = await listMainSurfaceStatus(
@@ -1827,6 +1877,8 @@ export class HubServer {
           providers,
           providerReadinessSource: executionFacts.source,
           providerReadinessSourceDetail: executionFacts.sourceDetail,
+          runtimeReadinessSource: runtimeFacts.source,
+          runtimeReadinessSourceDetail: runtimeFacts.sourceDetail,
           runtimes,
           mains,
           daemon,
@@ -2290,51 +2342,87 @@ export class HubServer {
         this.sendJson(req, res, 422, { error: "taskClass must contain 1 to 200 characters" });
         return;
       }
+      const hasCandidates = body.candidates !== undefined;
+      const hasProfiles = body.workerProfileIds !== undefined;
+      if (hasCandidates === hasProfiles) {
+        this.sendJson(req, res, 422, {
+          error: "Provide exactly one of candidates or workerProfileIds",
+        });
+        return;
+      }
       const candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }> = [];
+      let workerProfileIds: string[] | undefined;
       try {
-        if (!Array.isArray(body.candidates)) {
-          this.sendJson(req, res, 422, { error: "candidates must be an array" });
-          return;
-        }
-        if (body.candidates.length < 2 || body.candidates.length > 10) {
-          this.sendJson(req, res, 422, { error: "candidates must contain 2 to 10 entries" });
-          return;
-        }
-        const seen = new Set<string>();
-        for (let i = 0; i < body.candidates.length; i++) {
-          const c = body.candidates[i];
-          if (c === null || typeof c !== "object" || Array.isArray(c)) {
-            this.sendJson(req, res, 422, { error: `candidates[${i}] must be an object with provider and model` });
+        if (hasCandidates) {
+          if (!Array.isArray(body.candidates)) {
+            this.sendJson(req, res, 422, { error: "candidates must be an array" });
             return;
           }
-          const provider = typeof c.provider === "string" && c.provider.trim()
-            ? c.provider.trim() : null;
-          const model = typeof c.model === "string" && c.model.trim()
-            ? c.model.trim() : null;
-          if (!provider || provider.length > 100) {
-            this.sendJson(req, res, 422, { error: `candidates[${i}].provider must contain 1 to 100 characters` });
+          if (body.candidates.length < 2 || body.candidates.length > 10) {
+            this.sendJson(req, res, 422, { error: "candidates must contain 2 to 10 entries" });
             return;
           }
-          if (!model || model.length > 200) {
-            this.sendJson(req, res, 422, { error: `candidates[${i}].model must contain 1 to 200 characters` });
+          const seen = new Set<string>();
+          for (let i = 0; i < body.candidates.length; i++) {
+            const c = body.candidates[i];
+            if (c === null || typeof c !== "object" || Array.isArray(c)) {
+              this.sendJson(req, res, 422, { error: `candidates[${i}] must be an object with provider and model` });
+              return;
+            }
+            const provider = typeof c.provider === "string" && c.provider.trim()
+              ? c.provider.trim() : null;
+            const model = typeof c.model === "string" && c.model.trim()
+              ? c.model.trim() : null;
+            if (!provider || provider.length > 100) {
+              this.sendJson(req, res, 422, { error: `candidates[${i}].provider must contain 1 to 100 characters` });
+              return;
+            }
+            if (!model || model.length > 200) {
+              this.sendJson(req, res, 422, { error: `candidates[${i}].model must contain 1 to 200 characters` });
+              return;
+            }
+            const runtime = typeof c.runtime === "string" && c.runtime.trim()
+              ? c.runtime.trim() : undefined;
+            const effort = typeof c.effort === "string" && c.effort.trim()
+              ? c.effort.trim() : undefined;
+            if ((runtime === undefined) !== (effort === undefined)) {
+              this.sendJson(req, res, 422, { error: `candidates[${i}] must include both runtime and effort, or neither` });
+              return;
+            }
+            const dedupKey = `${provider}\0${model}`
+              + (runtime !== undefined ? `\0${runtime}\0${effort}` : "");
+            if (seen.has(dedupKey)) {
+              this.sendJson(req, res, 422, { error: `Duplicate candidate at index ${i}: ${provider} / ${model}` });
+              return;
+            }
+            seen.add(dedupKey);
+            candidates.push({ provider, model, ...(runtime === undefined ? {} : { runtime, effort }) });
+          }
+        } else {
+          if (!Array.isArray(body.workerProfileIds)) {
+            this.sendJson(req, res, 422, { error: "workerProfileIds must be an array" });
             return;
           }
-          const runtime = typeof c.runtime === "string" && c.runtime.trim()
-            ? c.runtime.trim() : undefined;
-          const effort = typeof c.effort === "string" && c.effort.trim()
-            ? c.effort.trim() : undefined;
-          if ((runtime === undefined) !== (effort === undefined)) {
-            this.sendJson(req, res, 422, { error: `candidates[${i}] must include both runtime and effort, or neither` });
+          if (body.workerProfileIds.length < 2 || body.workerProfileIds.length > 10) {
+            this.sendJson(req, res, 422, { error: "workerProfileIds must contain 2 to 10 entries" });
             return;
           }
-          const dedupKey = `${provider}\0${model}`
-            + (runtime !== undefined ? `\0${runtime}\0${effort}` : "");
-          if (seen.has(dedupKey)) {
-            this.sendJson(req, res, 422, { error: `Duplicate candidate at index ${i}: ${provider} / ${model}` });
-            return;
+          const seen = new Set<string>();
+          workerProfileIds = [];
+          for (let i = 0; i < body.workerProfileIds.length; i++) {
+            const value = body.workerProfileIds[i];
+            if (typeof value !== "string" || !value.trim() || value.trim().length > 64) {
+              this.sendJson(req, res, 422, { error: `workerProfileIds[${i}] must be a non-empty string` });
+              return;
+            }
+            const id = value.trim();
+            if (seen.has(id)) {
+              this.sendJson(req, res, 422, { error: `Duplicate workerProfileId at index ${i}: ${id}` });
+              return;
+            }
+            seen.add(id);
+            workerProfileIds.push(id);
           }
-          seen.add(dedupKey);
-          candidates.push({ provider, model, ...(runtime === undefined ? {} : { runtime, effort }) });
         }
       } catch (error) {
         this.sendJson(req, res, 422, {
@@ -2344,7 +2432,9 @@ export class HubServer {
       }
       try {
         // Bridge is strictly read-only — calls daemon model_routing only.
-        const daemonParams: Record<string, unknown> = { taskClass, candidates };
+        const daemonParams: Record<string, unknown> = { taskClass };
+        if (workerProfileIds !== undefined) daemonParams.workerProfileIds = workerProfileIds;
+        else daemonParams.candidates = candidates;
         const taskFamily = typeof body.taskFamily === "string" && body.taskFamily.trim()
           ? body.taskFamily.trim() : undefined;
         if (taskFamily) daemonParams.taskFamily = taskFamily;
@@ -3826,6 +3916,74 @@ export class HubServer {
             });
           } else {
             this.sendJson(req, res, 422, { error: "Task contract submission rejected by daemon" });
+          }
+        }
+        return;
+      }
+
+      // POST /api/ops/tasks/reuse-class
+      // { filePath, previewRevisionDigest, taskClass, confirm: true }
+      // Preview-bound draft-only classification reuse. The daemon rechecks
+      // every authority condition; the Hub never recomputes eligibility,
+      // counts, digest, or file success. On success the browser replaces the
+      // old preview with the returned fresh preview; on failure the browser
+      // invalidates submission and asks the user to preview again. This route
+      // never creates a Task or starts a Worker.
+      if (opsRoute === "/tasks/reuse-class") {
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "Applying a class requires confirm: true" });
+          return;
+        }
+        const filePath = typeof body.filePath === "string" ? body.filePath.trim() : "";
+        if (!filePath || filePath.length > 8192 || !path.isAbsolute(filePath)) {
+          this.sendJson(req, res, 422, { error: "An absolute task contract file path is required" });
+          return;
+        }
+        const previewRevisionDigest = typeof body.previewRevisionDigest === "string"
+          ? body.previewRevisionDigest
+          : "";
+        if (!previewRevisionDigest) {
+          this.sendJson(req, res, 422, {
+            error: "Preview the task contract again before applying a class",
+          });
+          return;
+        }
+        const taskClass = typeof body.taskClass === "string" ? body.taskClass.trim() : "";
+        if (!taskClass || taskClass.length > 80) {
+          this.sendJson(req, res, 422, {
+            error: "Choose one displayed existing class to apply",
+          });
+          return;
+        }
+        try {
+          const preview = await this.daemonCall<Record<string, unknown>>(
+            "reuse_task_class",
+            {
+              taskFile: filePath,
+              expectedPreviewRevisionDigest: previewRevisionDigest,
+              taskClass,
+              confirm: true,
+            },
+          );
+          this.sendJson(req, res, 200, {
+            ok: true,
+            action: "reuse_task_class",
+            preview,
+          });
+        } catch (_daemonError) {
+          const msg = _daemonError instanceof Error ? _daemonError.message : String(_daemonError);
+          // Stale preview and forged/repeated candidates all become a
+          // "preview again and choose a listed class" instruction. Any other
+          // rejection stays behind the fixed bounded message so raw daemon
+          // text, file content, path, or command is never echoed.
+          if (msg.includes("out of date") || msg.includes("preview again")) {
+            this.sendJson(req, res, 422, {
+              error: "The task preview is out of date; preview again before applying",
+            });
+          } else {
+            this.sendJson(req, res, 422, {
+              error: "The class could not be applied; preview again and choose a listed class",
+            });
           }
         }
         return;

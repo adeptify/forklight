@@ -1,0 +1,196 @@
+version: 2
+name: Make Hub CLI tests prove zero detached process residue
+project: ../..
+taskClass: forklight-test-daemon-lifecycle
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: default
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-pro[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: default
+  selectedBecause:
+    code: main-judgment
+    note: Automatic recommendation is unavailable below five samples. For this reused exact class, Pro has one accepted first-pass delivery, GLM one accepted corrected delivery, and Flash/Grok none. Main selects Pro for the narrow ownership cleanup without Competition.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek-flash-1m: 0
+      default: 1
+      volcengine-glm52-1m: 1
+      local-grok-builder: 0
+
+contract:
+  outcome: >-
+    Every detached Hub CLI test proves that its exact Hub, daemon, socket, and
+    temporary home are gone before returning, including timeout and assertion
+    failure paths, so later Integration verification runs in a clean process environment.
+  presentation:
+    summary: Hub CLI 测试结束时自己清干净后台进程，不再把随机慢和失败传给后续任务。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-hub-cli-test-daemon-cleanup-contract.md.
+    - Inspect tests/hub-cli.test.ts and tests/helpers/detached-daemon.ts first, then only the exact lifecycle APIs they call.
+    - Main verified and stopped 13 old test daemons by exact PID, daemon command, and dedicated socket; their homes were hub-cli-json-privacy, hub-cli-human-noopen, or restart-stopped.
+    - Current Hub CLI cleanup swallows stopDaemon failure and removes the home before proving a late daemon cannot survive.
+    - A rejected activation candidate exposed runner PID and narrowed startup timing; do not reuse that approach or edit activation/Integration files.
+  inScope:
+    - Add one shared test-only Hub lifecycle cleanup path that owns the exact temporary home, returned Hub PID, and safely adopted daemon owner.
+    - Register cleanup before lifecycle awaits/assertions can throw, and make it bounded and idempotent.
+    - Stop the exact Hub child, prevent any later child-triggered daemon start, adopt only the exact owner on the exclusive home, and prove PID/socket exit before removing home.
+    - Replace JSON and human Hub CLI tests' duplicated best-effort cleanup with the shared proof-producing path.
+    - Add deterministic ready, timeout/late-start, assertion failure, owner mismatch, and repeated cleanup tests.
+    - Preserve all existing output, privacy, restart, ownership, and no-open assertions.
+  outOfScope:
+    - Do not modify activation runner, Integration operation, production Hub result shape, Provider, Worker, routing, Competition, credentials, Hub UI, or user-facing settings.
+    - Do not fix by increasing startup timeouts, reducing test concurrency, retrying tests, or adding a global after-suite process sweep.
+    - Do not use pgrep/pkill/process-name scans, ports, global temp globs, or signal any PID not returned/adopted by this exact fixture.
+    - Do not swallow cleanup errors, delete a home before proving owners are gone, or use SIGKILL without a final exit proof.
+    - Do not touch other repositories, SDK/Elsewhere/consumer/Nexus paths, commit, or push.
+  executionSteps:
+    - Reproduce the JSON/human detached Hub cleanup call chain and identify every point where a late child/daemon can outlive teardown.
+    - Extend or compose the existing exact-owner fixture instead of creating a second ownership policy.
+    - Migrate both Hub CLI tests and add failure-path tests before stress execution.
+    - Run JSON/human focused scenarios three consecutive times; each fixture must assert its own zero residue.
+    - Run related daemon lifecycle tests, the full suite, build, and diff hygiene once; repair only Candidate-caused failures.
+  deliverables:
+    - Shared exact-owner Hub CLI test fixture/cleanup.
+    - Migrated JSON and human detached Hub tests with failure-safe teardown.
+    - Regressions for late startup, thrown assertion, mismatch refusal, idempotency, and three-run stability.
+  modules:
+    - name: Hub test lifecycle owner
+      responsibility: Bind one temporary home to its exact Hub child and any daemon that child creates.
+      consumes:
+        - Fixture home, Hub restart result, exact endpoint health, and existing detached daemon cleanup primitives.
+      produces:
+        - A tracked owner set and one idempotent teardown result.
+      boundaries:
+        - Test-only, one home, no global discovery, no product response changes.
+    - name: Exact cleanup proof
+      responsibility: Stop tracked owners in safe order and prove process/socket absence before removing the home.
+      consumes:
+        - Tracked Hub PID, safely adopted Daemon PID, endpoint state, and bounded deadlines.
+      produces:
+        - Zero-residue proof or a precise failing assertion naming the owned resource.
+      boundaries:
+        - No untracked signals, swallowed errors, or best-effort success.
+    - name: Hub CLI lifecycle scenarios
+      responsibility: Preserve output/privacy assertions while always invoking the shared lifecycle proof.
+      consumes:
+        - Existing JSON and human CLI invocations with no-open and minimum startup timeout.
+      produces:
+        - Deterministic behavioral evidence plus cleanup evidence.
+      boundaries:
+        - No timeout inflation, CLI retry, browser open, or user home.
+  callChain:
+    - Test creates one exclusive lifecycle fixture and registers teardown immediately.
+    - CLI launches exactly one detached Hub and returns a bounded result containing the Hub PID after launch.
+    - Teardown stops and proves exit of that exact Hub child before it can initiate more work.
+    - The fixture inspects only its own home endpoint, safely adopts the exact daemon owner produced by the owned chain, and stops it.
+    - Cleanup proves all tracked PIDs and the socket are gone, then removes only the fixture home.
+  scenarios:
+    - name: Ready detached Hub
+      given: The child reaches authenticated current status before the deadline.
+      when: JSON or human assertions finish.
+      then: Shared teardown removes the exact Hub, daemon, socket, and home.
+    - name: Late startup after timeout
+      given: The CLI returns while the owned child may still be starting its daemon.
+      when: Teardown starts.
+      then: It freezes the child first, adopts/stops only the exact home daemon, and proves no late process survives.
+    - name: Assertion throws
+      given: Output validation throws after a child was launched.
+      when: Registered teardown runs.
+      then: Cleanup proof still completes and the original assertion remains visible.
+    - name: Foreign owner refusal
+      given: The exclusive endpoint reports a PID that cannot be bound to the fixture chain.
+      when: Cleanup evaluates authority.
+      then: It does not signal the PID or delete evidence and fails with a bounded ownership conflict.
+  risks:
+    - Killing the Hub after probing the daemon can race with a later daemon launch; stop/prove Hub first, then resolve endpoint ownership.
+    - Removing the home while a tracked daemon drains can unlink evidence without ending the process; verify PID and socket first.
+    - Treating exclusive home alone as unlimited authority could hide a forged owner; require the fixture's bounded adoption rule.
+    - Cleanup tests that only pass on the happy path will miss the exact leak; thrown and late-start paths are mandatory.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 900
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 5
+  fileLimitMode: warn
+  changedLineLimit: 900
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - tests/hub-cli.test.ts
+    - tests/helpers/detached-daemon.ts
+    - tests/detached-daemon-fixture.test.ts
+    - src/hub/instance.ts
+    - src/daemon/client.ts
+acceptance:
+  criteria:
+    - JSON and human detached Hub tests prove their exact Hub child, daemon owner, socket, and home are gone after success, timeout, or thrown assertion.
+    - Cleanup stops/proves the Hub before adopting the exclusive-home daemon, never signals an untracked owner, and never swallows proof failure.
+    - Startup timeout, privacy-safe output, no-open, single-launch, Hub ownership, and production lifecycle semantics remain unchanged.
+    - No global sweep, test retry, reduced concurrency, Provider call, user-home access, commit, or push is introduced.
+  commands:
+    - for i in 1 2 3; do node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-cli.test.ts tests/detached-daemon-fixture.test.ts || exit 1; done
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-cli.test.ts tests/detached-daemon-fixture.test.ts tests/daemon-cli.test.ts tests/hub-instance.test.ts
+    - npm test
+    - npm run build
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

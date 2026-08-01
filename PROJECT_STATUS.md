@@ -1,6 +1,6 @@
 # ForkLight Project Status
 
-Last updated: 2026-07-31
+Last updated: 2026-08-01
 
 ## Product boundary
 
@@ -60,9 +60,9 @@ and Elsewhere, using the user's current active-project rule; NovelRPGPlay is not
 mandatory. M1 stays open only because an independent new macOS user, disposable
 VM, or genuinely new Mac has not yet completed the install → configure → first
 Task → understand → review → integrate → restart journey.
-M3 is now the active product stage. It currently has **33 strict new-format
+M3 is now the active product stage. It currently has **41 strict new-format
 selection records, beyond the first 30-sample floor**. The portfolio now says
-what those records can actually support: 13 are single-Worker decisions, 20
+what those records can actually support: 13 are single-Worker decisions, 28
 considered multiple Workers without comparable same-scope evidence, and 0 are
 yet fair comparable cohorts. M3 therefore still needs natural, classified
 samples plus comparable candidate cohorts rather than retroactive guesses.
@@ -76,6 +76,137 @@ rewritten away.
 After every self-build, a long-lived Main must still re-check its MCP identity
 before mutation; the matched CLI remains the safe fallback while a client
 reload is pending.
+
+**Latest M3 Integration explanation slice (2026-08-01):** Task
+`377c5f31-0306-442c-a38d-70354d4e01b8` used Volcengine
+`glm-5.2[1M]` for a real cross-layer clarity problem: when an accepted Candidate
+no longer applies to current source, Core now records one closed
+`patch-not-applicable` issue without guessing the conflict or mutating source.
+CLI and Hub explain what happened, what it may mean, and what Main should do
+next before bounded technical evidence. Ordinary Task Detail no longer shows
+raw Git diagnostics as primary timeline copy; legacy receipts, path
+classification, size guidance, authorization, and raw audit evidence remain
+compatible.
+
+Main found three semantic gaps after the first Candidate's machine suite was
+already green: Hub still appended a contradictory generic next action, the
+durable event summary could carry raw Git diagnostics into the ordinary
+timeline, and the new CLI path left technical reasons unbounded. Main recorded
+`revise`, then explicitly authorized the single configured same-Candidate GLM
+correction with those three gaps and all reusable paths frozen. A first CLI
+invocation used obsolete option names and was rejected before Task mutation,
+Attempt creation, or Token use. No third Attempt, Competition, adaptation, or
+Provider probe ran.
+
+The final 11-file Candidate passed the original six-command suite, including
+**2,191/2,191** full tests, build, both Hub syntax checks, and diff hygiene.
+Main accepted revision `7f4786bc-cb15-4007-8468-efca9667931d`, digest
+`31a3649ed846e636b766ad78db3ff9bd5bdd156460b4ed0b823f83a175c3c7ce`.
+Integration `4ab9ca1e-0a92-41d1-ac59-c63c89cb9484` passed source apply,
+six-command source verification, artifact build, and runtime activation in
+17ms / 79,435ms / 3,311ms / 3,616ms. CLI and Daemon match build
+`1695c065982dfda78ac3bb12c5b9dc9d71fccaffb0ca7b1e6b804d6ae4bb9bd2`;
+Daemon PID `81285` sees both Claude Code and Grok Build, Hub `82347@58675` is
+current, and M0 remains **3/3 ready**.
+
+The authoritative M3 coverage is now `325 terminal / 211 class / 93 family /
+41 complete`, split into `13 single / 0 comparable / 28 unknown multi / 0
+unusable`. This task contributes one accepted GLM sample for its exact class,
+but the class still has no fair multi-model cohort, so routing remains unknown
+and Competition remains off. The two Attempts used **24,448,456 gross Worker
+Tokens**, including **24,013,376** cache-read Tokens; usage reconciliation is
+2/2 matched. Runtime estimates total USD 17.089367999, while official per-request
+cost is unavailable under the Volcengine subscription plan. The
+21,391,817-23,949,429 Token range is only Worker volume minus a broad estimate
+of Main/Worker exchange; the exact-pair Direct Codex baseline is missing, so it
+is not reported as measured Main Token savings. No commit or push.
+
+**Latest M3 evidence-ready subset slice (2026-08-01):** ForkLight no longer lets
+one zero-history Worker erase a fair comparison among other candidates. Exact
+evidence is preferred, then family evidence; either scope requires at least two
+distinct provider/model/runtime/effort identities above its configured sample
+threshold. Only those identities are scored. Every other requested Worker stays
+visible and eligible with an explicit “not compared yet” explanation, and a
+recommendation declares whether it covers all candidates or only that subset.
+Duplicate Profiles sharing one executable identity cannot manufacture a second
+comparison point or force an arbitrary Profile winner. Competition remains a
+separate Main decision.
+
+Task `2804385d-5808-478a-9a99-e765478457ad` completed with one bounded
+same-Candidate correction and one zero-Worker reverification. The final 9-file
+Candidate passed focused 225/225, full 2,180/2,180, build, Hub syntax and diff
+hygiene. Integration `238749b9-8e8b-41ea-aeb6-094b89991da4` completed all four
+self-upgrade stages; client and Daemon match build
+`b0f75537923ffd867896c22deb428b5827a9055ecedec28f1b140425fa92dfda`,
+and Hub `80802@58675` is current. A real four-Worker query still returns unknown:
+family evidence is Flash 5, Pro 2, GLM 0 and Grok 0, so only one identity reaches
+the five-sample gate. No tasks were replayed to manufacture a cohort. M0 remains
+3/3 ready; M3 remains open for natural comparable samples.
+
+**Latest M3 Worker Profile routing slice (2026-08-01):** DeepSeek Flash Task
+`302304cc-5e29-4058-b27f-821ff6a15aff` implemented
+`docs/m3-worker-profile-routing-surface-contract.md`. CLI, MCP and Hub can now
+send saved Worker Profile IDs to one daemon-owned resolver. The resolver freezes
+the exact provider, model, runtime and effort used for evidence matching, then
+returns the safe Profile ID and user-facing label with every candidate and any
+recommendation. Hub now lists saved Workers only: catalog-only models no longer
+appear as runnable candidates, and two Profiles that share a model are not
+collapsed. Legacy provider/model routing remains available and the CLI no
+longer drops optional runtime/effort fields.
+
+The first 165-turn Flash Attempt produced the complete 15-file Candidate. Its
+focused suite passed 422/424 and the repository passed 2,098/2,100; both failures
+came from one new U+2014 em dash in an `app.js` comment, while build, both Hub
+syntax checks and diff hygiene were already green. Main retained the exact
+Candidate instead of rerunning the task, marked the other 14 paths reusable and
+authorized the single configured correction. The 10-turn correction changed
+only that punctuation. The original acceptance then passed, including the full
+repository at **2,100/2,100**. Main accepted revision
+`0c532ed2-1c03-4606-853d-a3b479fe3fa9`, digest
+`bd84c41c859c6f317ca8617aed7b32bb724ae42ea53a55ae837536a9905839f1`.
+The 15-file result exceeded the 14-file guidance by one in `warn` mode but stayed
+within the 1,800-line bound at 1,336 changed lines; Main kept the cross-surface
+tests rather than reducing quality to satisfy a soft count.
+
+Integration `ff8f03b1-94d9-4029-85c1-56f863304148` passed source apply,
+six-command source verification, artifact build and runtime activation in
+15ms / 169,290ms / 7,389ms / 5,910ms. It activated build
+`0484fdea6265bd9d6af76e427b980e453d629245b9929ef2561ccba9bd4af67c`;
+Daemon PID was `17974`, and Hub replaced the previous build on port `58675`
+at PID `29564`. M0 remains **3/3 ready**.
+
+Production dogfood compared `deepseek-flash-1m`, `default` and
+`local-grok-builder` through the new `--profiles` path. All three returned the
+correct Profile label and complete Worker identity. Flash had one relevant
+sample, while Pro and Grok did not have an exact sample for this task class, so
+the advisory honestly returned `knowledge=unknown`, `evidenceScope=none` and no
+Competition. The authoritative M3 projection is now `318 terminal / 204 class /
+86 family / 34 complete`, split into `13 single / 0 comparable / 21 unknown
+multi / 0 unusable`.
+
+The two Flash Attempts used **47,962,676 gross Worker Tokens** and reconciled
+exactly; **47,537,664** were cache-read input Tokens. DeepSeek's official quote
+totals **USD 0.2112716592**; runtime estimates total USD 28.560252. The
+low-confidence 46,019,695–47,643,238 Token boundary range is Worker-side volume
+minus orchestration exchange, not measured Main Token savings. Exact-pair
+Direct Codex evidence is still missing. No commit or push.
+
+Authenticated Hub dogfood then found one explanation bug: the saved routing
+weights were non-zero, but the same insufficient-sample result also said “all
+weights are zero.” Main recorded a structured `small-clear-change` decision
+`2c58165b-28eb-4697-bf71-72b520483d0d` after considering Flash, Pro and Grok,
+then changed only the reason precedence, bilingual copy and its executable UI
+test. Sample shortage now explains only the shortage; actual zero weights and
+enabled-but-unavailable evidence have separate messages. No Worker, Provider
+probe, Competition, retry or adaptation ran. Hub passed **118/118**, routing
+core **59/59**, and the full repository **2,100/2,100**, followed by build,
+real Chinese browser evaluation and zero console warnings/errors. Current CLI
+and Daemon match build
+`5471b6fda036d718fb418992339256c01483fa757f707a9c3df1b53eacfce725`;
+Daemon PID is `52022`, and the current Hub remains on port `58675` at PID
+`52212`. This manual Main-direct activation is not counted as a new M0
+self-upgrade proof; the authoritative streak remains **3/3 ready**. No commit
+or push.
 
 **Latest M3 Main-direct decision slice (2026-07-31):** DeepSeek Task
 `8825e122-038c-4843-a50a-06e94d1adb54` implemented
@@ -2063,18 +2194,22 @@ evidence rather than another implementation retry.
    original acceptance, and reviewed Integrations. That product Goal strongly
    satisfies the M2 long-running chain. A 2026-07-30 live M3 follow-up then
    found 296 eligible terminal ordinary Tasks but only 12 complete new-format
-   selection records before that dogfood Task; after the latest first-pass and
-   reviewed-delivery dogfood, plus two natural Elsewhere M2 product Tasks,
-   the strict count is now **20/30 minimum** across 304 terminal ordinary Tasks.
-   No candidate pair reaches five relevant samples each in
-   one exact class or stable family. Task
+   selection records before that dogfood Task. The current authoritative
+   projection is now **40 complete selection records across 324 eligible
+   terminal Tasks**, split into `13 single / 0 comparable / 27 unknown multi /
+   0 unusable`. No candidate pair reaches five relevant samples each in one
+   exact class or stable family. The new evidence-ready subset resolver is live,
+   but the current orchestration-efficiency family still has only Flash 5 / Pro
+   2 / GLM 0 / Grok 0, so it correctly returns unknown rather than ranking or
+   launching Competition. Task
    `c9d8a2bc-ee01-44b5-8f64-d0b473a9078f` now exposes compact exact/family
    coverage, so a real asymmetric query shows MiniMax 2/5 and Grok 12/5 while
    remaining unknown, unrecommended, and non-competitive. Main repaired one
    resolved-scope wording regression with zero Worker execution. Do not backfill
    legacy selection reasons or launch work to increase the count. Next evidence targets are therefore
    parallel open exits: M1 clean new-Mac journey (the real-project portfolio is
-   already 13/10); M3 30–50 real classified samples (28 strict records today);
+   already 13/10); M3 natural same-scope samples across at least two Worker
+   identities for real task families (the 30–50 total sample floor is met);
    M4 exact-pair Direct Codex baselines; and M5 external users. A natural live
    judge disagreement remains useful open evidence and must not be manufactured.
 6. **M4 exact-pair evidence audit (2026-07-29):** two version-1 profile
@@ -2117,10 +2252,11 @@ evidence rather than another implementation retry.
     that this is the current Task policy rather than proof about the file, and
     offers two advisory recovery choices when a default-business classification
     contributes to a size rejection. It never reclassifies paths, changes
-    limits, mutates the Task, or retries automatically. Next translate the
-    existing raw patch-applicability diagnostic into a beginner-readable cause,
-    action and collapsed bounded technical detail; help Task authors preview
-    missing exclusions before Worker launch; distinguish
+    limits, mutates the Task, or retries automatically. Patch-applicability
+    failure now has a closed Core issue, beginner-readable cause, cautious
+    action, privacy-safe timeline copy, and collapsed bounded technical detail
+    across CLI and Hub. Next help Task authors preview missing exclusions before
+    Worker launch; distinguish
     `terminal result received`, Worker process cleanup failure, independent
     delivery verification, artifact build, and runtime activation, and continue
     requiring real browser/DOM QA for material Hub changes.
@@ -3355,6 +3491,47 @@ Codex App、5 个属于 Grok TUI，不具备“孤儿”证据，因此未终止
 identity guard 或 matched CLI。物理 kill 后中间阶段续跑仍是独立 resilience backlog，不改写本次 3/3。
 无 commit / push。
 
+## 2026-08-01 M3：Hub 可以安全把已有工作类型写回草稿
+
+Task `edf8f477-cc85-4584-a397-51ac4b13a938` 使用 `deepseek-v4-flash[1M]`，按
+`docs/m3-task-class-safe-reuse-action-contract.md` 把上一刀的只读分类提示变成一个明确动作：用户在 Hub 预览
+未提交的 Task Contract 后，可以选择同一 `taskFamily` 里已列出的一个 `taskClass`。Daemon 会重新核对当前
+文件、预览摘要、family/class 状态和候选列表，只允许修改根 `taskClass` 字段；不会创建 Task、Attempt、Worker、
+Competition 或设置变更。YAML 注释、JSON 格式和权限位保留，临时文件在失败时清理；链接或文件身份被替换时
+在写入前拒绝。
+
+第一 Attempt 交付 12 文件 / 1,589 changed lines，build、Hub syntax 和 diff 已通过；focused/full 的 14 个失败
+来自测试临时目录清理、四个低于当前 100 分质量门的 daemon 夹具和一个脆弱 UI 源码断言。Main 保留完整
+Candidate，在唯一一次结构化 correction 中同时要求关闭 symlink/path-swap 边界和提交后结果真实性。纠正后
+只剩一个 JSON 测试夹具仍只有 42 分；生产实现与其余 **2,161/2,162** 已通过。Main 只补全该测试夹具，零 Worker
+reverify 随后 6/6 全绿并捕获最终 revision `028f8f8e-9fc8-41f5-8cf9-2bbddf826e3b`，digest
+`e544c54373ddd8733e5262d9eb0df417f74af6eb63df12356182e4abde2255d4`。
+
+Integration `3aeb8b15-fb27-405f-a582-5e73bc1a8383` 四阶段通过：source apply 21ms、六条 source verification
+196,957ms、artifact build 6,133ms、runtime activation 5,968ms。Main 合入后又发现一个很窄的页面竞态：轮询
+重绘可能在请求期间重新启用路径输入，并让成功回调读取新的全局预览。Main 没有再启动 Worker，而是固定捕获
+本次路径/摘要、让重绘后的控件继续禁用，并把 JSON 也适用的文案从“只改一行”改为“只改字段”；未知返回只说
+“无法确认结果”，不谎称一定失败。focused **343/343**、full **2,162/2,162**、build、两份 Hub syntax 与 diff
+hygiene 全绿。当前 client/daemon build
+`ee0be819a7c7e12ab67a56965de7a060ac58b706e40ca2e77128d4756fbe4cf3`、source digest
+`b08a8b679e3d1aae07b77564b72e80b40e0fd60434df84243a582a4516bc295f`，Daemon `21638`、Hub
+`20964@58675`，identity matched。
+
+真实运行验证使用一次性 `/tmp` 草稿：操作前后 ForkLight Task 数均为 20，注释保持，`taskClass` 从新名称变为
+`m3-task-class-reuse-within-family-guidance`，新 preview digest 与 CLI 再预览完全一致，class/family 都显示 existing；
+草稿已删除。浏览器能打开 Hub，但自动化浏览器策略拒绝携带本地会话令牌，因此没有伪称完成真实点击；前端动作、
+pending、隐私和 no-submit 由 343 项聚焦测试覆盖，真实 Daemon 覆盖写回链路。
+
+M3 覆盖更新为 `323 terminal / 209 class / 91 family / 39 complete`，171 个不同 class、25 个不同 family；
+`13 single / 0 comparable / 26 unknown multi / 0 unusable`。该能力帮助未来自然任务复用稳定分类，但不自动判断
+语义、不回填历史、不为建立 cohort 人工重跑。
+
+两次 Flash Attempt gross **48,140,298 Tokens**，cache read **47,394,688**，usage reconciliation 2/2 matched；
+official quote 合计 **USD 0.2629033064**，runtime estimate 合计 USD 31.112934。86 条 receipts 的编排交换估计
+186,607–1,140,856 Tokens，对应 46,999,442–47,953,691 Tokens 的低置信度边界缩减；exact-pair Direct Codex
+baseline 缺失，仍不声明真实 Main Token 节约。零 Worker reverify 和 Main 页面修正新增模型 Token 为 0。
+无 commit / push。
+
 ## 2026-07-31 M3：Plan 依赖与 Task 来路已改成人话，并完成真实自升级
 
 Task `10bc361c-b199-4ab5-a070-dc92341e413d` 使用 `deepseek-v4-pro[1M]`，落实
@@ -3508,3 +3685,339 @@ Worker gross Token **10,363,825**，其中 cache read **10,154,240**；usage rec
 DeepSeek official cost **USD 0.146995055**，runtime estimate USD 6.999365。29 条 receipts 给出的边界缩减范围为
 9,107,605–10,158,283 Tokens（低置信度），但 exact-pair Direct Codex baseline 仍缺失，不能称为实际 Main Token
 节约。Candidate reverify 明确新增 Worker/model Token 为 0，但仍有本地验收时间和 Main exchange。无 commit / push。
+
+
+## 2026-08-01 M3：提交前先说明分类是否复用，避免历史样本继续碎片化
+
+Task `277a809d-1520-4f00-a085-b17218ec4ffa` 使用 `deepseek-v4-flash[1M]`，按
+`docs/m3-task-classification-reuse-guidance-contract.md` 完成一条只读准入提示。CLI `validate`、
+daemon/MCP `validate_file` 与 Hub 现在共用同一个分类投影：在 Task 真正提交前，说明
+`taskClass` / `taskFamily` 是未填写、首次出现还是已有记录，并列出最多 8 个已有稳定大类及真实终态数、
+完整选择记录数和不同 class 数。它不猜两个名称是否语义相同，不改 Task 文件，不自动选择 Worker，不启动
+Competition，也不把随历史变化的计数写进 preview digest。
+
+第一 Attempt 交付完整主链路，但独立验收暴露两个测试夹具问题：daemon 启动恢复把预先写入的 running 夹具转成
+终态，另一个空 `routingDecision` 夹具不能通过 TypeScript。Main 同时发现结果只做了 detached、没有满足契约的
+深冻结，因此只授权一次同 Candidate 纠正，保留原 11 个文件。第二 Attempt 修复机器问题后全绿；Main 仍拒绝一个
+测试未覆盖的人话矛盾：class 未填写、family 已存在时，状态说“未填写”，下一步却说“新 class”。Main 本地补上
+独立 `add-class` 动作和中英文文案，然后用一次零 Worker Token 的 Candidate reverification 跑原六条验收。
+
+最终 revision `70fe3391-1b17-4fdc-af68-8588d2f58d98`，digest
+`cd76d14832b6e05dd0838a67dd24cba4e7cee1df40895cad1b701ffdc1fb10c1`；focused **462/462**、
+full **2,115/2,115**、build、两份 Hub syntax 与 diff hygiene 全绿。自动 Integration
+`cdde2d32-9720-4ce5-aeaa-3cbd3aaaaeab` 四阶段全部通过：14ms / 114,566ms / 4,001ms / 3,916ms。
+daemon PID `38918`、Hub `39790@58675`，client / daemon build
+`edf5d3928adebeaa40853ab05cd79f894fbed8dcec7b92af5a3605b5bf65e3d9`，identity matched。
+
+真实 Hub 中文预览已验证：本任务显示 class 1 条、family 3 条，列出 8 个已有大类和明确下一步；预览没有提交
+Task，浏览器 console error 为 0。M3 权威覆盖更新为
+`319 terminal / 205 class / 87 family / 35 complete`，其中
+`13 single / 0 comparable / 22 unknown multi / 0 unusable`。这改善未来样本复用，但不会倒填历史，
+所以当前仍没有可诚实称为公平对照的 cohort。
+
+两次 Flash Attempt 的 Worker gross 为 **35,739,303 Tokens**，其中 cache read **35,149,952**；
+usage reconciliation matched。official quote 合计 **USD 0.1981947856**，runtime estimate 合计
+USD 22.988271。83 条 receipts 给出的边界缩减区间为 26,576,267–34,239,722 Tokens（低置信度），只表示
+Worker 计算没有全部进入 Main 编排交换；exact-pair Direct Codex baseline 缺失，**不声明实际节省了多少
+Main Token**。Main 最后一次本地复验明确新增 Worker Token / 模型运行成本均为 0。无 commit / push。
+
+## 2026-08-01 M3：提交前已能解释 Worker 选择与竞争安排
+
+Task `b67576d7-8edc-42f5-9989-ddb1cd941e47` 使用 `deepseek-v4-flash[1M]`，按
+`docs/m3-task-admission-routing-explanation-contract.md` 补齐 Task admission 的最后一段关键说明。CLI
+`validate`、daemon/MCP `validate_file` 与 Hub 现在共用一个脱敏只读投影：提交前直接显示最终 Worker、Main
+实际考虑的候选数量、选择依据、历史证据范围与聚合样本数，以及 Competition 是不需要、待考虑还是明确要求。
+没有 `routingDecision` 的旧 Task 会诚实显示“未记录选择依据”，不会伪造原因；Main 的自由文本 note、自定义
+reason code、候选 identity key 与 settings digest 均不进入预览。
+
+第一 Attempt 交付了完整 8 文件主链路，但 focused/full 各失败 10 条，build 也因 TypeScript exact optional
+写法失败。机器原因主要是新增测试夹具的 top-level family 未与 route snapshot 对齐、macOS Unix socket 路径过长，
+以及 Hub 违反既有 em-dash 禁令。Main 还发现一个机器测试没有先覆盖的产品矛盾：`relevant-delivery` 配上
+`scope=none` 时会误称“历史证据支持”。唯一一次结构化 correction 保留原 8 个路径，修复上述问题，并规定只有
+exact/family 范围且聚合样本大于 0 才能显示历史支持；否则回落为 Main 判断。“none”也改写为“可比历史不足”，
+不再写成“未记录”。
+
+最终 revision `fcee7918-61e5-4fd5-8302-1e737e9b038f`，digest
+`f071e88f2eac02c44ef4c147534375ae173fedf397867abc3172656273378864`；focused **393/393**、full
+**2,126/2,126**、build、两份 Hub syntax 与 diff hygiene 全绿。Integration
+`a7f8f7a6-8e49-41ef-b357-919cc0bf4fd0` 四阶段全部通过：13ms / 110,857ms / 2,940ms / 3,706ms。
+client / daemon build `371dd33aa19f107008a516427e43d0b9e504d73fcecfcc1364d993f2d9a25503`、source digest
+`491820f8c91fadac9a5e5444041588023b7321b48320f8ca5527765c30a2f6ef`，identity matched；Hub 已安全替换为
+`55786@58675` current。
+
+真实 Hub 中文预览已验证本任务显示：4 个候选、Main 判断、可比历史不足、0 个候选有样本、本任务不启动
+Competition，以及沿用已有 class/family；没有点击提交，console error 为 0。M3 覆盖为
+`320 terminal / 206 class / 88 family / 36 complete`，其中
+`13 single / 0 comparable / 23 unknown multi / 0 unusable`。因此解释链路更完整，但 M3 仍没有公平可比较 cohort，
+不会为了制造数字主动重跑相同任务。
+
+两次 Flash Attempt gross **23,784,714 Tokens**，其中 cache read **23,470,720**；usage reconciliation
+matched。official quote 合计 **USD 0.125991376**，runtime estimate 合计 USD 15.63593。38 条 receipts 给出的
+边界缩减区间为 19,471,724–23,077,981 Tokens（低置信度）；exact-pair Direct Codex baseline 缺失，仍不能
+称为真实 Main Token 节约。无 commit / push。
+
+## 2026-08-01 M3：Hub 任务提交预览形成清楚的执行故事
+
+Task `10ebb792-b491-4350-9e2a-951985fadb7d` 使用 `deepseek-v4-flash[1M]`，按
+`docs/m3-task-submit-preview-information-hierarchy-contract.md` 重排 Hub 的 Task admission 预览。信息没有删减，
+但不再是等权重参数堆叠：现在固定按“将执行什么 → 为什么这样派 → 执行边界 → 分类与下一步”阅读。Task、
+Worker Profile、Provider、Model、Runtime 与 effort 在第一段一次说明；路由段只解释候选、选择依据、证据范围、
+Competition 和下一步，不再重复 Worker。预算、Attempts、后继任务、合同检查与 Integration 集中到边界区；
+class/family 和需要用户做的动作直接可见，完整 family 候选与技术 digest 仍保留在原生 disclosure 中。
+
+第一 Attempt 交付的 4 个文件均可复用；独立验收的唯一根因是新增 fake DOM 测试把函数参数 `tag` 写成未定义的
+`tagName`，导致两条测试在进入产品 renderer 前报错，同时拖累 build。Main 没有重做 UI，只授权一次结构化
+same-Candidate correction，保留 revision `985d184b-d150-4b1e-bb5d-5a10ee94c83e` 的全部路径并只修测试绑定。
+最终 revision `0f4680c9-43d4-4dd8-9b4e-4d2af6561701`，digest
+`533ad5ec7bc4909f284d390569bdda1cc7f9cff2030446e14c257eed3f70ea77`；focused **171/171**、full
+**2,130/2,130**、build、两份 Hub syntax 与 diff hygiene 全绿。
+
+Integration `a155af0c-7842-4c69-b535-4bb35ce00006` 四阶段全部通过：source-applied 14ms、
+source-verified 79,946ms、artifact-built 4,729ms、runtime-activated 5,114ms。daemon PID `86621`，Hub
+`87383@58675`；client / daemon build `e2f9d610a844f13e4134fb9f611b4fea8d226f4792a3fb98aadc2c859b062fd5`，
+source digest `d08172f9d5f9a30869664149fde45f4096c83ac0897216648ab48ae80363bd73`，identity matched。
+
+真实 Hub 中文预览使用本 Task YAML 验证：Worker 只出现一次；4 候选、Main 判断、可比历史不足、0 样本、
+不启动 Competition、1 次基础 Attempt、无自动后继任务、检查 100/100 与可安全合入均在正确分区；分类下一步
+直接可见，family/技术证据默认收起。476px 窄屏 `scrollWidth=innerWidth=476`，console error 为 0；没有点击
+“提交任务”。Impeccable 最终机械扫描只命中 8 个本切片外既有 side-accent border，本次新增 submit-preview 样式
+没有新增同类命中，未扩范围清理全站旧样式。
+
+M3 覆盖更新为 `321 terminal / 207 class / 89 family / 37 complete`；其中
+`13 single / 0 comparable / 24 unknown multi / 0 unusable`。本任务为 Flash 增加 1 条已验收且已合入的精确样本，
+但仍低于 5 条门槛，没有公平多模型 cohort，不启动 Competition。
+
+两次 Flash Attempt gross **8,438,122 Tokens**，cache read **8,263,680**；usage reconciliation matched。
+official quote 合计 **USD 0.060874884**，runtime estimate 合计 USD 6.90615。34 条 receipts 给出的边界缩减范围为
+5,372,823–7,935,588 Tokens（低置信度）；exact-pair Direct Codex baseline 缺失，仍不把它称为真实 Main Token
+节约。无 commit / push。
+
+## 2026-08-01 M3：同一大类里的已有工作类型现在可以直接复用
+
+Task `1b3851ec-ed4b-4b27-9cc0-a6193fe0df79` 使用 `deepseek-v4-flash[1M]`，按
+`docs/m3-task-class-reuse-within-family-guidance-contract.md` 补齐分类引导的下一层：当用户已经选中一个历史
+`taskFamily`，但 `taskClass` 未填写或是新名称时，CLI、daemon/MCP 与 Hub 会列出该 family 内最多 8 个已有
+taskClass，并显示各自已结束任务数和完整选择记录数。顺序只按完整记录数、终态数和稳定名称确定；系统不猜语义、
+不自动改 Task、不推荐模型，也不会启动 Competition。当前 class 已经复用时不增加额外 UI 噪声。
+
+第一 Attempt 的 8 个文件主体可用，focused/full 的唯一失败原因是 `app.js` 新注释含长破折号，触发仓库既有源码
+规则；新增功能测试本身已通过。Main 保留全部 Candidate，只进行一次同 Candidate 结构化 correction，把字符改成
+ASCII hyphen，没有扩路径、换 Worker 或启动新一轮策略调参。最终 revision
+`9cec1fb1-0453-41bc-b1d2-3dc5300487a8`，digest
+`6a6ab00bdaa271e791f6670f058963d70b91e90f669c29fd773d0c8406d90042`，Main review accepted。
+
+Integration `46926b08-2973-443e-ae66-093f250d26a4` 四阶段全部通过：source-applied 21ms、
+source-verified 221,070ms、artifact-built 28,630ms、runtime-activated 11,972ms。最初 180 秒只发生观察超时，
+operation 仍在后台继续并最终成功，未误判为执行失败。最终源码 full **2,139/2,139**、Hub focused
+**126/126**、build、两份 Hub syntax 与 diff hygiene 全绿。daemon PID `51813`、Hub `52109@58675`，build
+`0d4de0ed902c9079baa2b8d513c880c23d601149ed852fb714b56a20e0bb5a39`，source digest
+`9ef1305eee23868dd0f9ca63525daa8bade6d6b68e1290387c4bcc9d8f89fea5`，identity matched。
+
+真实 Hub 窄屏验收又发现一处机器测试没覆盖的人话矛盾：页面一边列出可复用 class，一边仍鼓励建立新 class。
+Main 只修正文案为“含义相同就复用；确实不同才保留新名称”并补回归，没有再次调用 Worker。476px 下无水平溢出，
+console warning/error 为 0，测试时没有提交 Task；Impeccable 扫描只报告 8 个本切片外既有 side-accent border，
+没有扩范围清理。
+
+M3 覆盖更新为 `322 terminal / 208 class / 90 family / 38 complete`，包含 171 个不同 class、25 个不同 family；
+决策就绪分布为 `13 single / 0 comparable / 25 unknown multi / 0 unusable`。本 family 现在已有 5 条终态且 5 条完整
+记录，UI 可见 5 个已有 class，但仍没有公平多模型 cohort，因此没有为了制造数字启动 Competition。
+
+两次 Flash Attempt gross **8,143,575 Tokens**，其中 cache read **7,966,336**；usage reconciliation 为
+2/2 matched。official quote 合计 **USD 0.0551907608**，runtime estimate 合计 USD 6.022443。编排交换估计为
+314,563–1,922,526 Tokens，对应 6,221,049–7,829,012 Tokens 的低置信度边界缩减；这只说明 Worker 工作量没有
+全部进入 Main 上下文。exact-pair Direct Codex baseline 仍缺失，**不声明真实主线程 Token 节约**。无 commit / push。
+
+## 2026-08-01 M3：未知 Worker 不再抹掉已有的公平比较
+
+Task `2804385d-5808-478a-9a99-e765478457ad` 使用 `deepseek-v4-pro[1M]`，按
+`docs/m3-routing-evidence-ready-subset-contract.md` 把路由从“所有候选都必须有足够历史”改为“只比较证据够用的
+独立 Worker 身份”。只要至少两个不同的 provider/model/runtime/effort 身份达到同一 exact 或 family 门槛，Core
+就只用这组历史计算；其余 Worker 仍在返回结果里、仍然可选，不会因为没历史被记成 0 分或永久淘汰。重复 Profile
+不能伪造第二个比较对象，也不会在共享同一身份时被随意挑一个作为胜者。Competition 继续只服从 Main 的明确意图，
+未知候选本身不会自动触发竞争。
+
+CLI 和 Hub 现在消费 Core 给出的同一组事实：总候选、实际参与、暂未参与、独立身份数，以及推荐是覆盖全部候选还是
+只覆盖证据充分的子集。Hub 中英文改为“暂未纳入、仍然可选”，推荐边界显示在分数细节之前；CLI 的人话输出也不再
+使用 `excluded` 作为用户结论。family 比较时展示 family 证据，不再误拿 exact 列；exact 与 family 的可配置样本
+门槛分别作用于所有质量因子。
+
+Worker 两次 Attempt 的 9 个最终文件全部保留。第一次 focused 218/220，并暴露 em dash、测试 evidence key 错位和
+build 未使用变量；Main 审查还发现推荐边界、family 显示和 Hub 参数没有完全闭合，因此只授权一次 same-Candidate
+correction。第二次机器只剩 3 个局部问题：空历史 daemon 夹具错误、双语安全文案的否定句被测试误判，以及重复
+Profile 仍把 score gap 压成 0。Main 没有启动第三个 Worker，而是修正独立身份排名、抽出可测试的 CLI formatter、
+让 recommendation 自带 coverage，并补 canonical `excludedCandidateCount`。一次零 Worker Token reverification
+随后 6/6 通过：focused **225/225**、full **2,180/2,180**、build、两份 Hub syntax 与 diff hygiene 全绿。
+
+Main 接受 revision `b19cc4bd-f1bc-4a2a-b005-97434744078e`，digest
+`979a673f80c25420e9f576e3e252ca38631f65e2798b03f6d3bad6e4b7aa29f1`。Integration
+`238749b9-8e8b-41ea-aeb6-094b89991da4` 四阶段全部通过：16ms / 93,857ms / 3,619ms / 5,410ms。
+client/daemon build `b0f75537923ffd867896c22deb428b5827a9055ecedec28f1b140425fa92dfda`，identity matched；
+旧 Hub 在原端口 `58675` 安全替换为 PID `80802`，`hub status=current`。M0 自升级证据仍为 **3/3 ready**。
+
+合入后的真实只读查询保持诚实：本 taskClass 下 Pro 只有 1 条，family 下 Flash 5 条、Pro 2 条、GLM/Grok 0 条，
+因此尚不能组成两个达到门槛的独立身份；返回 `scope=none / knowledge=unknown / cohort=0/4 / Competition=false`，
+四个 Worker 全部仍然 eligible。M3 总覆盖为 `324 terminal / 210 class / 92 family / 40 complete`，其中
+`13 single / 0 comparable / 27 unknown multi / 0 unusable`。功能已经能处理真实子集，但生产历史还没有自然形成
+公平 cohort；不会为制造数字重跑任务。
+
+两次 Pro Attempt gross **14,922,789 Tokens**，cache read **14,721,664**，usage reconciliation 2/2 matched；
+official quote 合计 **USD 0.167020222**，runtime estimate 合计 USD 9.569437。45 条 receipts 的编排交换范围为
+701,530–4,284,327 Tokens，对应 10,638,462–14,221,259 Tokens 的低置信度边界缩减。它仍不是 Direct Codex
+对照；exact-pair baseline 缺失，**不声明真实主线程 Token 节约**。最后的 reverify 新增 Worker Token 与模型
+运行成本均为 0。无 commit / push。
+
+补充实机 QA：在已激活的新 Hub 中用 Flash、Pro、GLM、Grok 四个 Profile 做只读评估，中文与英文都显示
+`0/4` 进入公平比较、四个 Worker “暂未纳入但仍可选”，没有把缺历史写成失败。390px 窄屏无横向溢出；修正了
+英文 `completion intent` 为 `competition intent`，并将本切片提示边框降为 1px。源码入口 Hub 测试
+**181/181**、build 与 diff hygiene 通过；daemon `96120`、Hub `96645@58675` 使用当前 build
+`6e7e263e0d0b40eb90ea48db51b2d5e3360409bacbbab2d66e81fb1ef73f57d5`。机械扫描仍只命中 8 个既有
+side-accent warning，本次新增样式不再命中。无 commit / push。
+
+## 2026-08-01 M3 checkpoint：运行时就绪来源修复已验收，因既有 Integration 时序门禁暂未合入
+
+Task `1a7a4d13-3eca-4e35-a552-d4e8e3f75a34` 使用 `deepseek-v4-flash[1M]` 修复一个真实误报：当 CLI 或 Hub
+所在进程的 PATH 看不到 Claude / Grok，但与当前构建完全一致的 Daemon 实际可以启动它们时，界面会错误地把全部
+Worker 标成不可用。候选将同一构建 Daemon 的运行时事实作为执行权威；Daemon 不可用、身份不匹配或证据不完整时，
+整组回退到本地检查，不拼接两套真假不一的状态。
+
+Main 只授权了一次同 Candidate correction，补齐 CLI 顶层 `ok` / `claudeCode` 与 Worker 列表的一致性。最终
+revision `ffc224ed-e34b-47fc-8316-42538975c46f`，digest
+`f4630b2e89e52170539092833a815b9372ca5316baa615400924ecfb0679735a`，7 files / 880 changed lines；聚焦
+**123/123**、独立全量 **2,211/2,211**、build、Hub syntax 与 diff hygiene 均通过，Main 已接受。
+
+两次安全 Integration 都在 source verification 后自动回滚，没有留下半合入源码。第一次 operation
+`2c373511-f36e-4266-9bad-8a7fc15e2c9a` 与另一个全量验证并发，2,209/2,211；待 Daemon 队列清空后只重试一次，
+operation `2d2ac776-2b64-4161-852d-53c8d785933e` 为 2,210/2,211。第二次唯一失败仍是未改动的
+`integration-operation.test.ts` detached activation 时序断言返回 `outcome-unknown`；候选自己的 123 条测试继续全过。
+因此停止循环重试，保留已接受 Candidate，下一步应先把 Integration 激活门禁的确定性修好，再重新 preflight 合入。
+**该运行时修复目前尚未进入原项目和运行中的 Daemon。**
+
+两次 Attempt gross **24,862,827 Tokens**，cache read **24,536,576**，usage reconciliation 2/2 matched；
+official quote 合计 **USD 0.1302542528**，runtime estimate 合计 USD 16.167643。144 条 receipts 给出的编排交换
+范围为 836,166–5,124,215 Tokens，对应 19,738,612–24,026,661 Tokens 的低置信度边界缩减；缺少 exact-pair
+Direct Codex baseline，**不声明真实主线程 Token 节约**。无 commit / push；SDK / Elsewhere freeze 未触碰。
+
+## 2026-08-01 M3：Worker 启动前可以看见被 Git 忽略但仍会进入上下文的目录
+
+Task `65204225-716b-47d5-ab38-cd1782cce8f0` 使用 `deepseek-v4-flash[1M]`，按
+`docs/m3-prelaunch-workspace-boundary-advice-contract.md` 增加只读的 workspace 边界提示。用户在真正提交 Task、
+消耗模型 Token 前，就能看见 Git 忽略目录中有多少已被 `workspace.exclude` / `generatedPaths` 覆盖、多少仍会按
+普通源码复制给 Worker。它不展示目录名，不把 Git ignore 当成生成物证明，不自动修改配置，也不阻断用户继续。
+
+Worker 的跨 CLI、daemon/MCP、Hub 主链路被完整保留；Main 只做一次结构化 Worker correction 和一次不调用模型的
+有界修正。第一轮暴露真实查询漏报和 legacy 降级问题；第二轮又证明 `git ls-files --directory` 会同时返回未被忽略
+的父容器与真正 ignored 的子目录。Main 去掉这种父容器重复计数，要求生成规则同时覆盖直接与嵌套子路径，并让
+CLI/Hub 对计数、状态、原因或下一步自相矛盾的数据统一降级为手动检查。没有第三个 Worker、额外 Attempt、
+Competition、adaptation 或 Provider probe。
+
+最终 revision `89255d19-f92f-475c-8896-0a4724c84044`，digest
+`3e987e08bda88d14f496a29932b4c48be72df3af23d92a6ee820a05a2c678bd8`；10 files / 1,237 changed lines，
+Main accepted。零 Worker Token reverification 的 5/5 命令全部通过：focused、full **2,210/2,210**、build、
+两份 Hub syntax 与 diff hygiene 全绿。Integration `7f2fb427-81c4-43db-b6b1-3ffe41ac4135` 四阶段
+20ms / 392,772ms / 14,740ms / 13,123ms 全部 passed。client / daemon build
+`180920d46415af5e809e66cc87a537b226e6a48316b7deb78907a1ca418b591b`，source digest
+`3c41f8151f56e35d521757f8ba3f8f49a98c8f6f5e76bf451a2db0d37f92db7d`，identity matched；daemon PID
+`81158`，Hub `82735@58675` current。此前两次已回滚的 Integration 打断连续证明，因此 M0 streak 当前为
+**1/3**，不是假装保持 3/3。
+
+真实只读预览返回 `7 observed / 4 covered / 3 visible-business`；CLI 与 Hub 英文、中文均说明 Git ignore 不是
+生成物证明，并提示先检查 workspace 边界。浏览器没有点击提交，console warning/error 为 0；390px 下
+`scrollWidth=clientWidth=390`，没有水平溢出。M3 覆盖为
+`327 terminal / 213 class / 95 family / 43 complete`，分布
+`13 single / 0 comparable / 30 unknown multi / 0 unusable`，仍没有公平 cohort。
+
+两次 Flash Attempt gross **46,033,177 Tokens**，cache read **45,558,144**，usage reconciliation 2/2 matched；
+official quote 合计 **USD 0.2189648832**，runtime estimate 合计 USD 28.711017。169 条 receipts 得到的
+33,843,769–44,044,295 Tokens 是低置信度“Worker 工作量减编排交换”边界，不是 Direct Codex 对照；
+exact-pair baseline 缺失，**不声明真实主线程 Token 节约**。最后一次本地复验明确新增 Worker Token 与模型运行
+成本均为 0，但本地测试时间和 Main exchange 不为 0。无 commit / push；SDK / Elsewhere freeze 全程未触碰。
+
+## 2026-08-01 M0 重新达到 3/3：时序门禁确定化，保留候选完成真实激活
+
+Task `38c2dc62-678d-4f0e-a453-cfa7f7da950b` 使用 `deepseek-v4-flash[1M]`，把 Integration 与 CLI 的测试判定从
+“必须在某个毫秒数内返回”改为可验证的生命周期事实：始终观察同一个 durable operation 到终态；测试异常时先等终态，
+再关闭 exact-home Daemon；fresh-home observer 用 endpoint/socket/log/Task/result 前后事实证明没有启动服务；已有
+Daemon observer 则证明 PID、Task、Integration result 与 event 不被改写。没有把临时 runner PID 放进公开接口，
+没有加入进程名扫描、广泛重试或降低并发，也没有修改生产源码。
+
+首个 Attempt 的方向可用，但把 `TerminalObservation` 当成 `IntegrationOperationView`，导致相关测试 58/59、全量
+2,211/2,212，build 有同源类型错误。Main 只授权一次 same-Candidate correction，修正终态对象读取和 JSON 类型收窄；
+没有第三轮 Worker、Competition、adaptation 或 Provider probe。最终 revision
+`7eae788f-45ca-4245-8f2f-fe7e536daa43`，digest
+`4f12b134c1613bbc8e1e1b9d606e447b7bf1ebc5655d5b13c44d493eac3e0ad8`；只改 3 个测试文件。3 轮聚焦压力测试、
+59/59 相关测试、全量 **2,212/2,212**、build 与 diff hygiene 全绿，Main accepted。
+
+Integration `fd86eed9-02d3-4ab6-b807-472f59e6cb37` 四阶段通过：12ms / 353,097ms / 17,193ms /
+14,529ms，M0 streak 从 1/3 到 2/3。随后不重跑 Worker，重新 preflight 已接受的 runtime-authority revision
+`ffc224ed-e34b-47fc-8316-42538975c46f`；当前源码仍可安全应用。Integration
+`21d31822-6c93-4e67-899f-be9aeed0a1ca` 四阶段 15ms / 285,131ms / 20,058ms / 43,608ms 全部 passed，
+此前“尚未合入”的运行时权威修复现已进入原项目和运行态。CLI 与 Daemon build
+`0788f8e7a9828d7bcabe0cf46bac95e8da5b0af4966012c781027550a674add8`、source digest
+`629ad9c5b13201931f7671b4e813c4d7ba414842c8f5a75124fdbc58cc18d741` matched；Hub 已安全替换为
+`23675@58675`，单 listener、`hub status=current`。权威 `upgrade status --required 3` 为
+**3/3 ready / milestone-ready / breakCategory=none**，M0 重新满足连续自动 self-upgrade 出口。
+
+本次 Flash Task 两次 Attempt gross **12,540,539 Tokens**，cache read **12,295,936**，usage reconciliation
+2/2 matched；official quote 合计 **USD 0.0824669608**，runtime estimate 合计 USD 9.341543。68 条 receipts 的
+11,797,575–12,423,548 Tokens 只是低置信度“Worker 工作量减编排交换”边界；exact-pair Direct Codex baseline
+缺失，**不声明真实主线程 Token 节约**。第二次 runtime-authority Integration 复用既有 accepted Candidate，新增
+Worker Token 和模型成本均为 0。
+
+并行的 Hub CLI 清理 Task `79e8a67a-a1f1-4756-9558-c77cf09e78ca` 在自升级替换 Daemon 时被标记为
+`interrupted`；其隔离 workspace 与上下文保留。Main 比对三个 focus 文件后确认尚无源码差异、无 CandidateRevision，
+因此不会伪称存在可合入成果，也不会对原 Task 盲目 resume。若继续该切片，必须基于当前 3/3 稳定源码重新 validate
+同一 v2 contract，并作为有界替代 Task 执行。无 commit / push。Client-Core SDK 1.0 最终 publish source-stability
+freeze 继续保持，未触碰 Elsewhere、client-core、client-app-adeptify、client-core/.release、发布目录或相关消费者文档。
+
+## 2026-08-01 M3 checkpoint：Hub CLI cleanup 替代 Task 停止，M0 3/3 保持
+
+冻结解除前提交的替代 Task `e00d171d-ec9a-45a0-98f1-58cd97b59f33` 使用 Flash、1 base Attempt、0 extra、
+0 correction、0 adaptation。workspace boundary 从 `7 observed / 4 covered / 3 visible` 收敛为 `7 / 6 / 1`，仅保留
+有意义的 `plans/`；合同 Quality 100/100、可 Integration。Worker 最终只新增 `tests/hub-cli.test.ts` 23 行显式
+residue assertions。3 轮真实进程压力测试和 100 个相关测试通过，但全量 `npm test` 运行 826,467ms 后 exit 1，
+build 又有两处 PID `number | undefined` 类型错误；同时 affected source 文件发生并发变化，source compatibility
+fail closed。Main 绑定 revision `93769eec-f287-4f99-a6cd-7b623e68b362` 后 reject；没有 reverify、resume 或
+Integration，候选未进入源码。
+
+此前被 self-upgrade 中断的 Task `79e8a67a-a1f1-4756-9558-c77cf09e78ca` 消耗 1,443,785 gross Tokens 但零源码差异；
+替代 Task 消耗 2,219,246 gross Tokens并形成被拒候选。两者 receipts 的边界估计分别为
+1,284,569–1,417,306 与 1,439,514–2,091,719 Tokens，均缺 Direct Codex baseline，不能解释为主线程真实节约。
+停止规则生效：不再为这条测试切片追加 Worker 循环。M0 权威 self-upgrade 仍为 **3/3 ready**。
+
+SDK 线程随后明确通知：Client-Core SDK 1.0 final RC、最终审计与不可变 tag `client-core-sdk-v1.0.0` 已完成并推送，
+Elsewhere source-stability freeze 已解除。本轮冻结期间保持零写入；恢复 Elsewhere 前仍需 preflight，并先确认保存的
+Candidate 是否已经集成，禁止重复合入。
+
+Elsewhere 只读 preflight 随后确认：accepted revision `c4daf5a5-bab7-4218-8a42-82472a8027d1` / digest
+`3dc9ae7106d5def184158447b47aebd2f3f04264013ae2d4ab02f525cec0215e` 已由 Integration
+`c09f453a-dc00-4ee0-b101-2f84013139a4` 于 2026-07-30 applied，53/53 focused、183/183 full、check、build 与
+diff hygiene 全绿；当前 Elsewhere `main` clean，提交 `93fbd87` 已包含 M2 world archive review / story direction loop，
+后续 SDK final RC 又验证当前消费者。因此本轮**没有重复 Integration、没有 Elsewhere 写入**。
+
+失败测试切片结束后 ForkLight Daemon 被安全恢复为 PID `64324`；CLI/Daemon build
+`599ee1046f030889a317cb8eb742a4422819defc67411b032fe8fee83626405c` matched，Hub `64897@58675`
+current 且单 listener；M0 保持 **3/3 milestone-ready**。
+
+## 2026-08-01 M3 checkpoint：测试进程归属收口，真实运行态重新对齐
+
+Hub CLI 清理没有继续追加 Worker 循环。Main 保留了被中断 Flash workspace 中可复用的精确 PID 所有权 helper，
+同时拒绝了验证器长时间无进展、留下 4 个 task-owned Daemon 的重复 Candidate；只把其中 23 行明确的 cleanup 后置
+断言人工纳入。根因最终落在测试自身：`daemon-cli` 的 restart-stopped 用例在断言前没有接管 replacement PID，且测试
+包装器 15 秒上限短于产品允许的 30 秒启动窗口。修复只改变测试所有权与测试包装器，不改生产生命周期策略。
+
+Main Direct `fde60d6a-b8a0-42aa-8f56-6bb51398290e` 已以 passed 收口：3 个受影响 restart 用例 **3/3**，
+Hub/Daemon 生命周期组合 **100/100**，build、diff hygiene 全绿，精确进程审计为零测试 Daemon 残留。Integration
+四项生命周期用例在正确 Node PATH 下连续三轮 **12/12**；一次缺 Node 的验证环境导致内部 `node` 命令失败，已明确
+归类为命令环境错误，不计作产品回归。
+
+runtime-authority Task 的权威历史确认第三次 Integration `21d31822-6c93-4e67-899f-be9aeed0a1ca` 早已
+四阶段 applied；新 preflight 因当前源码继续演化而返回 `patch-not-applicable`，因此没有重复套用旧补丁。最新聚焦
+回归 **123/123**，build、Hub JS/i18n syntax 与 diff hygiene 通过。真实运行态现为 Daemon `83712`、Hub
+`82770@58675`，build `680a619c4dc7643debe341123ed64d1cc8413cf5792cf21d5e7cd545f9adb078`，
+CLI 报告 `runtimeReadinessSource=daemon`、identity matched，Claude Code 与 Grok Build 均 ready；Hub current。
+
+一次“重启完成后立刻 health”观察到短暂 local fallback，稳定后复验正常。它记录为下一轮 bounded backlog：让刚完成
+restart 的只读 health 对 endpoint readiness 更稳，不在本轮继续无休止重试或扩大生产修改。M0 权威状态仍为
+**3/3 ready / milestone-ready / breakCategory=none**。无 commit / push。当前 SDK 1.0 package 已实际发布，但最终
+post-publish verifier dependency 仍在 SDK 线程收口，source-stability freeze 持续；本轮未触碰 Elsewhere、
+client-core、client-app-adeptify、发布目录或相关消费者文档。

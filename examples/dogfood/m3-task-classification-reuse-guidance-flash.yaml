@@ -1,0 +1,201 @@
+version: 2
+name: Explain and reuse stable Task classifications before submission
+project: ../..
+taskClass: m3-task-classification-reuse-guidance
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: Exact evidence is empty and the stable family has only sparse history, so routing is unknown and Competition is not justified. Main selects Flash because the user asked to use it more often and this bounded cross-surface contract has deterministic acceptance; this is not a superiority claim.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Task admission preview tells Main whether its exact class and stable family
+    reuse existing M3 evidence, shows a bounded catalog of established families,
+    and keeps every classification decision manual and read-only.
+  presentation:
+    summary: 在提交任务前讲清楚这次分类是沿用、首次出现还是缺失，并给出已有大类供 Main 自己判断是否复用。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-task-classification-reuse-guidance-contract.md.
+    - "Inspect first: src/core/task-preview.ts, src/core/statistics.ts, src/daemon/coordinator.ts, src/cli.ts, src/mcp/server.ts, src/hub/server.ts, src/hub/public/app.js, and their focused tests."
+    - The canonical admission preview already resolves one TaskSpec and binds submission to file bytes plus effective settings.
+    - Routing coverage already defines the eligible cohort as terminal ordinary Tasks excluding Review Graph reviewers.
+    - M3 has 34 complete selection records but no comparable multi-Worker cohort because classes and families remain fragmented.
+    - Classification advice must improve future evidence reuse without manufacturing history or changing current Task admission.
+  inScope:
+    - Add one pure privacy-safe classification-advice projection over terminal ordinary Tasks.
+    - Report current taskClass and taskFamily as missing, new, or existing with terminal and complete-selection counts.
+    - Return at most eight existing family choices with terminal count, complete-selection count, and distinct class count in deterministic order.
+    - Attach the advisory to canonical CLI and daemon validate-file previews without including mutable history in previewRevisionDigest.
+    - Render the advisory in Hub Task preview with bilingual explanation, current meaning, and a manual next action.
+    - Add executable coverage for cohort exclusions, stable ordering, bounds, immutability, privacy, digest stability, CLI/daemon propagation, and Hub copy.
+  outOfScope:
+    - Do not auto-generate, infer, rename, merge, migrate, or write taskClass or taskFamily.
+    - Do not use string similarity, embeddings, a model call, or historical model scores to recommend semantic equivalence.
+    - Do not change submission admission, preview confirmation, digest rules, Settings schema, database schema, routing weights, thresholds, Worker selection, Competition, retry, Integration, or economics.
+    - Do not expose Task ids, names, paths, commands, prompts, logs, Main private reasons, endpoints, Keychain data, or credentials.
+    - Do not touch other repositories, SDK consumers, Elsewhere, commit, or push.
+  executionSteps:
+    - Trace the existing Task preview and routing-coverage eligibility call chains before editing.
+    - Define one closed advice type and pure projection before wiring adapters.
+    - Reuse the same projection from CLI validate and daemon validate_file; keep submission digest construction unchanged.
+    - Add one explanation-first Hub block under the existing preview facts and keep raw codes secondary or absent.
+    - Run focused tests once, correct only Candidate-caused failures, then run the full suite, build, syntax, and diff checks once.
+  deliverables:
+    - Canonical classification advice shared by CLI and daemon/MCP preview.
+    - Bounded existing-family catalog with honest counts and no semantic guess.
+    - Beginner-readable bilingual Hub preview showing state and manual next action.
+    - Regression tests proving history cannot stale a bound preview or mutate task admission.
+  modules:
+    - name: Classification evidence projection
+      responsibility: Summarize whether the requested class and family already exist and list bounded established families.
+      consumes:
+        - Parsed taskClass, parsed taskFamily, and terminal ordinary Task records.
+      produces:
+        - Closed states, counts, bounded family choices, and one next-action code.
+      boundaries:
+        - No semantic inference, model outcomes, private content, mutation, or execution.
+    - name: Admission preview composition
+      responsibility: Add current classification advice beside the immutable Worker, Quality, and Integration preview.
+      consumes:
+        - One prepared Task admission and a read-only history snapshot.
+      produces:
+        - Safe preview plus classificationAdvice for CLI, daemon, MCP, and Hub.
+      boundaries:
+        - History must not enter previewRevisionDigest or submission authority.
+    - name: Hub classification explanation
+      responsibility: Explain reuse state and available families before the user confirms Task submission.
+      consumes:
+        - Safe classificationAdvice only.
+      produces:
+        - Bilingual current state, meaning, existing options, and manual next action.
+      boundaries:
+        - No file editing, auto-selection, ranking, Provider call, or Task submission.
+  callChain:
+    - Main previews an absolute Task Contract through CLI, MCP, or Hub.
+    - Canonical admission parsing resolves the Task and existing preview digest exactly once.
+    - Classification projection reads a terminal ordinary history snapshot and creates bounded advice.
+    - CLI or Hub explains whether class/family are reused and shows established family options.
+    - Main keeps or edits the Task file; an edit requires a fresh preview through the unchanged bound-submit path.
+  scenarios:
+    - name: Reuse exact class and family
+      given: Terminal ordinary history contains both requested labels and complete selection records.
+      when: Main previews a new Task Contract.
+      then: Both labels are existing with truthful counts and the advice says the classification is being reused.
+    - name: New class inside existing family
+      given: The exact class is absent but the family already has terminal Tasks.
+      when: Main previews the Task.
+      then: The UI explains that exact evidence starts new while broader evidence is reused, without suggesting Competition.
+    - name: Deliberately new family
+      given: The supplied family never appears in eligible history.
+      when: Main previews the Task.
+      then: The UI asks Main to confirm the new family and lists established alternatives without choosing one.
+    - name: Mutable history does not stale admission
+      given: The Task file and Settings are unchanged while another Task becomes terminal.
+      when: Main previews before and after that history change.
+      then: Advice counts may change but previewRevisionDigest remains identical.
+    - name: Excluded records
+      given: Matching labels exist only on active Tasks or Review Graph reviewer Tasks.
+      when: Classification advice is built.
+      then: Those records do not contribute counts or family choices.
+  risks:
+    - Putting history counts into the preview digest would make unrelated completions invalidate submit confirmations.
+    - Sorting families by a score could look like a semantic recommendation; sort only by transparent coverage counts and stable name.
+    - Reimplementing cohort filters in Hub could drift from Core; Hub must consume the safe projection only.
+    - Showing raw Task metadata beyond class/family can leak project context; keep an explicit allowlist and test JSON privacy.
+  changeBudget:
+    maxFiles: 13
+    maxDiffLines: 1800
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 13
+  fileLimitMode: warn
+  changedLineLimit: 1800
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/daemon
+    - src/cli.ts
+    - src/mcp/server.ts
+    - src/hub
+    - tests
+acceptance:
+  criteria:
+    - Preview classifies taskClass and taskFamily as missing, new, or existing using only terminal ordinary Tasks and truthful complete-selection counts.
+    - Existing family choices are bounded to eight, deterministically ordered, detached, and contain no Task identity or private content.
+    - CLI validate and daemon/MCP validate_file share one classification meaning; Hub only renders the safe projection.
+    - Classification history never enters previewRevisionDigest, never stales submission by itself, and never mutates Task files, Tasks, Settings, or execution.
+    - Hub explains reuse, new-family, and missing-family states bilingually without auto-selection, model ranking, or Competition advice.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-preview.test.ts tests/statistics.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts tests/hub-ops-mutations.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

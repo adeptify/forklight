@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
+
+const execFileAsync = promisify(execFile);
 import type {
   DependencyRecord,
   PlanItemRecord,
   PlanRecord,
+  RoutingDecisionSnapshot,
   TaskRecord,
+  TaskSpec,
   TaskStatus,
   VerificationResult,
 } from "../src/core/types.js";
@@ -34,7 +40,7 @@ import { DetachedDaemonFixture } from "./helpers/detached-daemon.js";
 import { DaemonCoordinator, probeProvidersBounded } from "../src/daemon/coordinator.js";
 import { assertWorkPlan } from "../src/core/plan.js";
 import { buildTaskRecord, checkReviseEligibility, executeAttempt, prepareTaskWorkspace, registerTaskFromSpec } from "../src/core/runner.js";
-import { parseTaskSpec } from "../src/core/task.js";
+import { parseTaskSpec, REVIEW_GRAPH_TASK_FILE_PREFIX } from "../src/core/task.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
 import { SettingsService, type ForkLightSettings } from "../src/core/settings.js";
 import { StateStore } from "../src/state/store.js";
@@ -72,9 +78,10 @@ test("identity matching protects state changes but lets a new build stop an old 
   assert.equal(requiresMatchingBuildIdentity("integration_apply"), true);
   assert.equal(requiresMatchingBuildIdentity("shutdown"), false);
   assert.equal(requiresMatchingBuildIdentity("health"), false);
-  // Task-file admission preview is read-only; submit is mutating.
+  // Task-file admission preview is read-only; submit and draft-class reuse are mutating.
   assert.equal(requiresMatchingBuildIdentity("validate_file"), false);
   assert.equal(requiresMatchingBuildIdentity("submit_file"), true);
+  assert.equal(requiresMatchingBuildIdentity("reuse_task_class"), true);
   // Adaptation preview is read-only; apply is mutating.
   assert.equal(requiresMatchingBuildIdentity("adaptation_preview"), false);
   assert.equal(requiresMatchingBuildIdentity("adaptation_apply"), true);
@@ -1123,6 +1130,674 @@ test("validate_file is read-only on success and rejection", async () => {
     await daemon.close();
   }
 });
+
+test("validate_file propagates the canonical workspace boundary advice over the socket", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-validate-boundary-"));
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+  } finally {
+    seedStore.close();
+  }
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const taskFile = await writeAdmissionTaskFile("local-grok-builder", {
+      name: "Boundary Daemon Validate",
+    });
+    const project = path.join(path.dirname(taskFile), "project");
+    await execFileAsync("git", ["init", "-q"], { cwd: project });
+    for (const dir of ["secret-root-alpha", "secret-root-beta"]) {
+      await mkdir(path.join(project, dir), { recursive: true });
+      await writeFile(path.join(project, dir, "placeholder.txt"), "ignored\n");
+    }
+    await writeFile(
+      path.join(project, ".gitignore"),
+      "secret-root-alpha/\nsecret-root-beta/\n",
+    );
+
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+    const advice = preview.workspaceBoundaryAdvice;
+    assert.equal(advice.status, "review");
+    assert.equal(advice.ignoredDirectoryRootCount, 2);
+    assert.equal(advice.coveredCount, 0);
+    assert.equal(advice.visibleBusinessCount, 2);
+    assert.equal(advice.nextAction, "review-workspace-boundaries");
+    // Privacy: no dir names, project path, Git output, or diagnostics.
+    const serialized = JSON.stringify(preview);
+    assert.ok(!serialized.includes("secret-root-alpha"));
+    assert.ok(!serialized.includes("secret-root-beta"));
+    assert.ok(!serialized.includes(project));
+    assert.ok(!serialized.includes("fatal"));
+  } finally {
+    await daemon.close();
+  }
+});
+
+/** Write an admission Task Contract embedding a frozen routing decision. */
+async function writeRoutingAdmissionTaskFile(
+  workerProfileId: string,
+  routingDecision: RoutingDecisionSnapshot,
+): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-validate-routing-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  const rdYaml = JSON.stringify(routingDecision, null, 2)
+    .split("\n")
+    .map((line) => `  ${line}`)
+    .join("\n");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: Daemon Routing Validate
+project: ./project
+workerProfileId: ${workerProfileId}
+taskFamily: refactor
+provider:
+  endpoint: https://secret-daemon-endpoint.example.invalid/v1
+  keychainService: forklight.secret.daemon-preview
+worker:
+  focusPaths: [src]
+contract:
+  outcome: Daemon validate_file propagates the safe routing explanation
+  context: [current settings]
+  inScope: [preview]
+  outOfScope: [mutation]
+  executionSteps: [validate]
+  deliverables: [safe preview]
+  modules:
+    - name: daemon
+      responsibility: expose read-only admission preview over the socket
+      consumes: [file path]
+      produces: [safe preview]
+      boundaries: [no Task mutation]
+  callChain: [client, daemon, preview]
+  scenarios:
+    - name: custom
+      given: saved profile
+      when: validate_file
+      then: exact selection
+    - name: missing
+      given: absent profile
+      when: validate_file
+      then: reject closed
+  risks: [policy drift]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 100
+acceptance:
+  criteria: [safe]
+  commands:
+    - "true"
+routingDecision:
+${rdYaml}
+`,
+  );
+  return taskFile;
+}
+
+test("validate_file propagates the safe routing explanation over the socket", async () => {
+  // Short home path: macOS Unix sockets fail when the socket path exceeds the
+  // sockaddr_un limit, so a compact prefix keeps the socket under ~100 bytes.
+  const home = await mkdtemp(path.join(tmpdir(), "fl-rt-"));
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+  } finally {
+    seedStore.close();
+  }
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const worker = {
+      provider: "xai",
+      model: "grok-4.5",
+      runtime: "grok-build",
+      effort: "high",
+      workerProfileId: "local-grok-builder",
+    };
+    const decision: RoutingDecisionSnapshot = {
+      taskFamily: "refactor",
+      shortlist: [
+        worker,
+        { provider: "qwen", model: "qwen3.7-plus", runtime: "claude-code", effort: "high" },
+      ],
+      selectedWorker: worker,
+      selectedBecause: {
+        code: "main-judgment",
+        note: "PRIVATE_DAEMON_NOTE_SECRET",
+      },
+      competition: { intent: "consider", triggers: ["critical"] },
+      evidenceSnapshot: {
+        scope: "exact-class",
+        exactSampleCounts: { "encoded-key-a": 3, "encoded-key-b": 0 },
+      },
+    };
+    const taskFile = await writeRoutingAdmissionTaskFile("local-grok-builder", decision);
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+    const explanation = preview.routingExplanation;
+    assert.equal(explanation.present, true);
+    assert.equal(explanation.shortlistSize, 2);
+    assert.equal(explanation.basis, "main-judgment");
+    assert.equal(explanation.evidence!.scope, "exact-class");
+    assert.equal(explanation.evidence!.candidateCount, 1);
+    assert.equal(explanation.evidence!.totalSamples, 3);
+    assert.equal(explanation.competition!.intent, "consider");
+    assert.deepEqual(explanation.competition!.triggers, ["critical"]);
+    assert.equal(explanation.nextAction, "consider-competition");
+    assert.equal(explanation.selectedWorker.workerProfileLabel, "Local Grok Builder");
+
+    const json = JSON.stringify(preview);
+    assert.ok(!json.includes("PRIVATE_DAEMON_NOTE_SECRET"));
+    assert.ok(!json.includes("encoded-key-a"));
+    assert.ok(!json.includes("encoded-key-b"));
+    assert.ok(!json.includes("secret-daemon-endpoint"));
+    assert.ok(!json.includes("forklight.secret.daemon-preview"));
+
+    // The shared preview builder derives the exact same safe explanation.
+    const store2 = new StateStore(home);
+    try {
+      const viaShared = await buildTaskAdmissionPreview(taskFile, new SettingsService(store2).get());
+      assert.deepEqual(viaShared.routingExplanation, explanation);
+    } finally {
+      store2.close();
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+/** Fully typed valid routing decision — never an empty object, so stored
+ *  TaskSpec records compile without an unsafe cast. */
+function validRoutingDecision(taskFamily = "refactor"): RoutingDecisionSnapshot {
+  const worker = {
+    provider: "xai",
+    model: "grok-4.5",
+    runtime: "grok-build",
+    effort: "high",
+    workerProfileId: "local-grok-builder",
+  };
+  return {
+    taskFamily,
+    shortlist: [worker],
+    selectedWorker: worker,
+    selectedBecause: { code: "user-specified", note: "stored decision for classification advice" },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
+  };
+}
+
+/** Minimal stored TaskRecord for classification history. Fully typed TaskSpec —
+ *  no `as` cast, no empty routingDecision. */
+function storedClassificationTask(
+  id: string,
+  status: TaskStatus,
+  taskClass: string,
+  taskFamily: string,
+  hasDecision: boolean,
+  taskFile = `/tasks/${id}.yaml`,
+): TaskRecord {
+  const spec: TaskSpec = {
+    version: 2,
+    name: id,
+    project: "/source",
+    provider: { name: "xai", model: "grok-4.5", endpoint: "https://api.x.ai", keychainService: "fk" },
+    runtime: { name: "grok-build", executable: "grok", effort: "high", maxBudgetUsd: 1 },
+    workspace: { exclude: [] },
+    worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+    contract: {
+      outcome: "o", context: [], inScope: [], outOfScope: [],
+      executionSteps: [], deliverables: [], modules: [], callChain: [],
+      scenarios: [], risks: [], changeBudget: { maxFiles: 1, maxDiffLines: 10 },
+    },
+    acceptance: { criteria: [], commands: ["true"] },
+    ...(hasDecision ? { routingDecision: validRoutingDecision(taskFamily) } : {}),
+    taskClass,
+    taskFamily,
+  };
+  return {
+    id,
+    name: id,
+    status,
+    sourcePath: "/source",
+    taskFile,
+    spec,
+    paths: { root: "/x", baseline: "/x", workspace: "/x", logs: "/x", claudeConfig: "/x", diff: "/x" },
+    sessionId: `session-${id}`,
+    createdAt: "2026-07-30T00:00:00.000Z",
+    updatedAt: "2026-07-30T00:00:00.000Z",
+  };
+}
+
+test("validate_file attaches classificationAdvice derived from terminal ordinary history", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-validate-classadvice-"));
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+  } finally {
+    seedStore.close();
+  }
+  // Seed terminal ordinary history plus the excluded reviewer record. The
+  // running record is inserted AFTER daemon startup so startup recovery cannot
+  // terminalize it into the eligible cohort.
+  const seeded = new StateStore(home);
+  try {
+    seeded.createTask(storedClassificationTask("hist-1", "succeeded", "migration", "refactor", true));
+    seeded.createTask(storedClassificationTask("hist-2", "succeeded", "lint-fix", "refactor", false));
+    seeded.createTask(
+      storedClassificationTask(
+        "reviewer-1",
+        "succeeded",
+        "migration",
+        "refactor",
+        true,
+        `${REVIEW_GRAPH_TASK_FILE_PREFIX}graph-1/assignment-1`,
+      ),
+    );
+  } finally {
+    seeded.close();
+  }
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    // Insert the non-terminal ordinary record now, after recovery already ran.
+    const lateStore = new StateStore(home);
+    try {
+      lateStore.createTask(storedClassificationTask("active-1", "running", "migration", "refactor", true));
+    } finally {
+      lateStore.close();
+    }
+
+    const taskFile = await writeClassifiedAdmissionTaskFile("local-grok-builder");
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+
+    // Only the two terminal ordinary Tasks contribute; the running record and
+    // the Review Graph reviewer stay excluded.
+    assert.equal(preview.classificationAdvice.taskClass.state, "existing");
+    assert.equal(preview.classificationAdvice.taskClass.terminalCount, 1);
+    assert.equal(preview.classificationAdvice.taskClass.completeSelectionCount, 1);
+    assert.equal(preview.classificationAdvice.taskFamily.state, "existing");
+    assert.equal(preview.classificationAdvice.taskFamily.terminalCount, 2);
+    assert.equal(preview.classificationAdvice.taskFamily.completeSelectionCount, 1);
+    assert.equal(preview.classificationAdvice.nextAction, "reuse-classification");
+    const refactor = preview.classificationAdvice.familyChoices.find((c) => c.family === "refactor");
+    assert.ok(refactor);
+    assert.equal(refactor!.distinctClassCount, 2);
+
+    // Privacy: no stored Task id, path, session, or endpoint in the preview.
+    const json = JSON.stringify(preview);
+    assert.ok(!json.includes("hist-1"));
+    assert.ok(!json.includes("active-1"));
+    assert.ok(!json.includes("reviewer-1"));
+    assert.ok(!json.includes("/tasks/"));
+    assert.ok(!json.includes("session-"));
+    assert.ok(!json.includes("api.x.ai"));
+    assert.ok(!json.includes("secret-daemon-endpoint"));
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("validate_file preview revision stays valid when sibling history changes", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-validate-hist-stable-"));
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+  } finally {
+    seedStore.close();
+  }
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const taskFile = await writeClassifiedAdmissionTaskFile("local-grok-builder");
+    const before = await daemonRequest<SafeTaskAdmissionPreview>("validate_file", { taskFile }, home);
+    assert.equal(before.classificationAdvice.taskClass.state, "new");
+    const digest = before.previewRevisionDigest;
+
+    // A sibling Task becoming terminal changes advice counts but must not
+    // change the preview revision digest.
+    const seeded = new StateStore(home);
+    try {
+      seeded.createTask(storedClassificationTask("hist-new", "succeeded", "migration", "refactor", true));
+    } finally {
+      seeded.close();
+    }
+    const after = await daemonRequest<SafeTaskAdmissionPreview>("validate_file", { taskFile }, home);
+    assert.equal(after.classificationAdvice.taskClass.state, "existing");
+    assert.equal(after.classificationAdvice.taskClass.terminalCount, 1);
+    assert.equal(after.previewRevisionDigest, digest);
+
+    // The original bound digest still submits the exact same Task.
+    const task = await daemonRequest<TaskRecord>("submit_file", {
+      taskFile,
+      expectedPreviewRevisionDigest: digest,
+    }, home);
+    assert.equal(task.status, "queued");
+    assert.equal(task.spec.taskClass, "migration");
+    assert.equal(task.spec.taskFamily, "refactor");
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("validate_file propagates bounded classChoices through the safe preview", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-validate-classchoices-"));
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+  } finally {
+    seedStore.close();
+  }
+  const seeded = new StateStore(home);
+  try {
+    seeded.createTask(storedClassificationTask("hist-1", "succeeded", "migration", "refactor", true));
+    seeded.createTask(storedClassificationTask("hist-2", "succeeded", "lint-fix", "refactor", false));
+  } finally {
+    seeded.close();
+  }
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const taskFile = await writeClassifiedAdmissionTaskFile("local-grok-builder");
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
+      "validate_file",
+      { taskFile },
+      home,
+    );
+
+    // The current class already exists, so the data is carried but the daemon
+    // never attaches any recommendation beyond the canonical projection.
+    assert.deepEqual(preview.classificationAdvice.classChoices, [
+      { taskClass: "migration", terminalCount: 1, completeSelectionCount: 1 },
+      { taskClass: "lint-fix", terminalCount: 1, completeSelectionCount: 0 },
+    ]);
+    assert.equal(preview.classificationAdvice.taskClass.state, "existing");
+
+    // Privacy: no stored Task id, path, or session in the classChoices rows.
+    const json = JSON.stringify(preview);
+    assert.ok(!json.includes("hist-1"));
+    assert.ok(!json.includes("hist-2"));
+    assert.ok(!json.includes("/tasks/"));
+    assert.ok(!json.includes("session-"));
+    assert.ok(!json.includes("api.x.ai"));
+  } finally {
+    await daemon.close();
+  }
+});
+
+// --- preview-bound draft classification reuse (reuse_task_class) ---
+
+async function writeReusableDraft(workerProfileId: string, taskFamily = "refactor"): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-reuse-draft-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: Reuse Draft Preview
+project: ./project
+# draft-only reuse comment
+taskFamily: ${taskFamily}
+workerProfileId: ${workerProfileId}
+worker:
+  focusPaths: [src]
+contract:
+  outcome: Draft-only class reuse
+  context: [history]
+  inScope: [class]
+  outOfScope: [submit]
+  executionSteps: [apply]
+  deliverables: [preview]
+  modules:
+    - name: daemon
+      responsibility: reuse a listed class in the draft only
+      consumes: [path, digest, class]
+      produces: [fresh preview]
+      boundaries: [no Task]
+  callChain: [hub, daemon, core]
+  scenarios:
+    - name: reuse
+      given: missing class
+      when: confirmed
+      then: class changes
+    - name: stale
+      given: stale preview digest
+      when: confirmed
+      then: reject before write
+  risks: [stale]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 100
+acceptance:
+  criteria: [safe]
+  commands:
+    - "true"
+`,
+  );
+  return taskFile;
+}
+
+async function startSeededRefactorDaemon(home: string): Promise<ForkLightDaemon> {
+  const seedStore = new StateStore(home);
+  try {
+    seedGrokBuilderSettings(new SettingsService(seedStore));
+    seedStore.createTask(storedClassificationTask("hist-1", "succeeded", "migration", "refactor", true));
+    seedStore.createTask(storedClassificationTask("hist-2", "succeeded", "lint-fix", "refactor", false));
+  } finally {
+    seedStore.close();
+  }
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  return daemon;
+}
+
+test("reuse_task_class applies one listed class to the draft and creates no Task", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-reuse-ok-"));
+  const daemon = await startSeededRefactorDaemon(home);
+  try {
+    const taskFile = await writeReusableDraft("local-grok-builder");
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>("validate_file", { taskFile }, home);
+    assert.equal(preview.classificationAdvice.taskClass.state, "missing");
+    assert.ok(preview.classificationAdvice.classChoices.some((c) => c.taskClass === "migration"));
+
+    const after = await daemonRequest<SafeTaskAdmissionPreview>("reuse_task_class", {
+      taskFile,
+      expectedPreviewRevisionDigest: preview.previewRevisionDigest,
+      taskClass: "migration",
+      confirm: true,
+    }, home);
+    assert.equal(after.classificationAdvice.taskClass.state, "existing");
+    assert.equal(after.classificationAdvice.taskClass.terminalCount, 1);
+    assert.notEqual(after.previewRevisionDigest, preview.previewRevisionDigest);
+
+    // Only the draft changed; no Task, event, or queue was created.
+    const store = new StateStore(home);
+    try {
+      assert.deepEqual(store.listTasks().map((t) => t.id).sort(), ["hist-1", "hist-2"]);
+    } finally {
+      store.close();
+    }
+    const raw = await readFile(taskFile, "utf8");
+    assert.ok(raw.includes("# draft-only reuse comment"), "YAML comment preserved");
+    assert.ok(raw.includes("taskClass: migration"), "class line written");
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("reuse_task_class rejects confirm-less, malformed and stale digests before any mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-reuse-stale-"));
+  const daemon = await startSeededRefactorDaemon(home);
+  try {
+    const taskFile = await writeReusableDraft("local-grok-builder");
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>("validate_file", { taskFile }, home);
+    const beforeBytes = await readFile(taskFile, "utf8");
+
+    await assert.rejects(
+      () => daemonRequest("reuse_task_class", {
+        taskFile,
+        expectedPreviewRevisionDigest: preview.previewRevisionDigest,
+        taskClass: "migration",
+      }, home),
+      /confirm/,
+    );
+    await assert.rejects(
+      () => daemonRequest("reuse_task_class", {
+        taskFile,
+        expectedPreviewRevisionDigest: "not-a-digest",
+        taskClass: "migration",
+        confirm: true,
+      }, home),
+      /out of date/,
+    );
+    await assert.rejects(
+      () => daemonRequest("reuse_task_class", {
+        taskFile,
+        expectedPreviewRevisionDigest: "0".repeat(64),
+        taskClass: "migration",
+        confirm: true,
+      }, home),
+      /out of date/,
+    );
+
+    assert.equal(await readFile(taskFile, "utf8"), beforeBytes, "real file untouched");
+    const store = new StateStore(home);
+    try {
+      assert.deepEqual(store.listTasks().map((t) => t.id).sort(), ["hist-1", "hist-2"]);
+    } finally {
+      store.close();
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("reuse_task_class rejects a forged class absent from current classChoices", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-reuse-forged-"));
+  const daemon = await startSeededRefactorDaemon(home);
+  try {
+    const taskFile = await writeReusableDraft("local-grok-builder");
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>("validate_file", { taskFile }, home);
+    const beforeBytes = await readFile(taskFile, "utf8");
+    await assert.rejects(
+      () => daemonRequest("reuse_task_class", {
+        taskFile,
+        expectedPreviewRevisionDigest: preview.previewRevisionDigest,
+        taskClass: "not-a-choice",
+        confirm: true,
+      }, home),
+      /exact current classChoice/,
+    );
+    assert.equal(await readFile(taskFile, "utf8"), beforeBytes, "real file untouched");
+    const store = new StateStore(home);
+    try {
+      assert.deepEqual(store.listTasks().map((t) => t.id).sort(), ["hist-1", "hist-2"]);
+    } finally {
+      store.close();
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("reuse_task_class serializes same-path writes so a concurrent stale confirmation cannot overwrite", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-reuse-concurrent-"));
+  const daemon = await startSeededRefactorDaemon(home);
+  try {
+    const taskFile = await writeReusableDraft("local-grok-builder");
+    const preview = await daemonRequest<SafeTaskAdmissionPreview>("validate_file", { taskFile }, home);
+    const base = {
+      taskFile,
+      expectedPreviewRevisionDigest: preview.previewRevisionDigest,
+      confirm: true,
+    };
+    const [a, b] = await Promise.allSettled([
+      daemonRequest("reuse_task_class", { ...base, taskClass: "migration" }, home),
+      daemonRequest("reuse_task_class", { ...base, taskClass: "lint-fix" }, home),
+    ]);
+    const fulfilled = [a, b].filter((entry) => entry.status === "fulfilled");
+    const rejected = [a, b].filter((entry) => entry.status === "rejected");
+    assert.equal(fulfilled.length, 1, "exactly one concurrent write succeeds");
+    assert.equal(rejected.length, 1, "the second concurrent write is rejected");
+    // Exactly one of the two candidate classes was written; never both.
+    const raw = await readFile(taskFile, "utf8");
+    const hasMigration = raw.includes("taskClass: migration");
+    const hasLintFix = raw.includes("taskClass: lint-fix");
+    assert.notEqual(hasMigration, hasLintFix, "exactly one class was applied");
+    const store = new StateStore(home);
+    try {
+      assert.deepEqual(store.listTasks().map((t) => t.id).sort(), ["hist-1", "hist-2"]);
+    } finally {
+      store.close();
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+async function writeClassifiedAdmissionTaskFile(workerProfileId: string): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-validate-classified-"));
+  await mkdir(path.join(root, "project"));
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(
+    taskFile,
+    `version: 2
+name: Classified Validate Preview
+project: ./project
+taskClass: migration
+taskFamily: refactor
+workerProfileId: ${workerProfileId}
+worker:
+  focusPaths: [src]
+contract:
+  outcome: Daemon validate_file attaches classification reuse advice
+  context: [history]
+  inScope: [advice]
+  outOfScope: [mutation]
+  executionSteps: [validate]
+  deliverables: [advice]
+  modules:
+    - name: daemon
+      responsibility: attach classification reuse advice to the safe preview
+      consumes: [history]
+      produces: [advice]
+      boundaries: [no Task mutation]
+  callChain: [client, daemon, preview]
+  scenarios:
+    - name: reuse
+      given: matching terminal history
+      when: validate_file
+      then: existing counts
+    - name: excluded
+      given: reviewer or active labels
+      when: validate_file
+      then: no counts
+  risks: [history staleness]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 100
+acceptance:
+  criteria: [safe]
+  commands:
+    - "true"
+`,
+  );
+  return taskFile;
+}
 
 test("validate_file reflects current settings without mutating prior Tasks", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-validate-settings-"));
@@ -4717,6 +5392,251 @@ test("model_routing coordinator returns privacy-safe advisory for empty history"
     assert.doesNotMatch(json, /error/i);
     assert.doesNotMatch(json, /api[_-]?key/i);
     assert.doesNotMatch(json, /\/tasks\//);
+  } finally {
+    store.close();
+  }
+});
+
+function seedProfileRoutingSettings(settings: SettingsService): void {
+  settings.update({
+    workerProfiles: {
+      defaultProfileId: "deepseek-primary",
+      profiles: [
+        {
+          id: "deepseek-primary",
+          label: "DeepSeek Primary",
+          runtime: "claude-code",
+          modelConfigId: "deepseek-flash",
+          effort: "high",
+        },
+        {
+          id: "qwen-secondary",
+          label: "Qwen Secondary",
+          runtime: "claude-code",
+          modelConfigId: "qwen-plus",
+          effort: "medium",
+        },
+      ],
+    },
+  });
+}
+
+test("model_routing coordinator resolves saved Worker Profiles into distinct identity-preserving candidates", () => {
+  const store = new StateStore(path.join(tmpdir(), "fl-mr-profile-resolve-"));
+  const settings = new SettingsService(store);
+  seedProfileRoutingSettings(settings);
+  const coordinator = new DaemonCoordinator(store, settings);
+  try {
+    const result = coordinator.modelRouting(
+      "nonexistent-class",
+      undefined, undefined, undefined, undefined,
+      ["deepseek-primary", "qwen-secondary"],
+    );
+    assert.equal(result.candidates.length, 2);
+    const deepseek = result.candidates.find((c) => c.workerProfileId === "deepseek-primary")!;
+    assert.equal(deepseek.workerLabel, "DeepSeek Primary");
+    assert.equal(deepseek.provider, "deepseek");
+    assert.equal(deepseek.model, "deepseek-v4-flash");
+    assert.equal(deepseek.runtime, "claude-code");
+    assert.equal(deepseek.effort, "high");
+    const qwen = result.candidates.find((c) => c.workerProfileId === "qwen-secondary")!;
+    assert.equal(qwen.workerLabel, "Qwen Secondary");
+    assert.equal(qwen.provider, "qwen");
+    assert.equal(qwen.model, "qwen3.7-plus");
+    assert.equal(qwen.runtime, "claude-code");
+    assert.equal(qwen.effort, "medium");
+    // Privacy-safe: no endpoint, Keychain service, credential, or budget fields.
+    const json = JSON.stringify(result);
+    assert.doesNotMatch(json, /endpoint/i);
+    assert.doesNotMatch(json, /keychain/i);
+    assert.doesNotMatch(json, /api[_-]?key/i);
+    assert.doesNotMatch(json, /maxBudget/i);
+  } finally {
+    store.close();
+  }
+});
+
+test("model_routing coordinator keeps two Profiles with identical executable identity distinct", () => {
+  const store = new StateStore(path.join(tmpdir(), "fl-mr-profile-same-"));
+  const settings = new SettingsService(store);
+  settings.update({
+    workerProfiles: {
+      defaultProfileId: "xai-a",
+      profiles: [
+        { id: "xai-a", label: "Grok A", runtime: "grok-build", modelConfigId: "xai-grok", effort: "high" },
+        { id: "xai-b", label: "Grok B", runtime: "grok-build", modelConfigId: "xai-grok", effort: "high" },
+      ],
+    },
+  });
+  const coordinator = new DaemonCoordinator(store, settings);
+  try {
+    const result = coordinator.modelRouting(
+      "nonexistent-class",
+      undefined, undefined, undefined, undefined,
+      ["xai-a", "xai-b"],
+    );
+    assert.equal(result.candidates.length, 2);
+    const ids = result.candidates.map((c) => c.workerProfileId).sort();
+    assert.deepEqual(ids, ["xai-a", "xai-b"]);
+    const a = result.candidates.find((c) => c.workerProfileId === "xai-a")!;
+    const b = result.candidates.find((c) => c.workerProfileId === "xai-b")!;
+    assert.equal(a.provider, "xai");
+    assert.equal(a.model, b.model);
+    assert.equal(a.runtime, "grok-build");
+    assert.equal(a.effort, b.effort);
+    assert.equal(a.workerLabel, "Grok A");
+    assert.equal(b.workerLabel, "Grok B");
+  } finally {
+    store.close();
+  }
+});
+
+test("model_routing coordinator rejects unknown, duplicate, malformed, and out-of-range profile lists", () => {
+  const store = new StateStore(path.join(tmpdir(), "fl-mr-profile-validate-"));
+  const settings = new SettingsService(store);
+  seedProfileRoutingSettings(settings);
+  const coordinator = new DaemonCoordinator(store, settings);
+  try {
+    // Unknown profile id
+    assert.throws(
+      () => coordinator.modelRouting("t", undefined, undefined, undefined, undefined, ["missing", "deepseek-primary"]),
+      /Unknown worker profile/,
+    );
+    // Duplicate profile id
+    assert.throws(
+      () => coordinator.modelRouting("t", undefined, undefined, undefined, undefined, ["deepseek-primary", "deepseek-primary"]),
+      /duplicate/,
+    );
+    // Too few profiles
+    assert.throws(
+      () => coordinator.modelRouting("t", undefined, undefined, undefined, undefined, ["deepseek-primary"]),
+      /2 to 10/,
+    );
+    // Too many profiles
+    assert.throws(
+      () => coordinator.modelRouting(
+        "t", undefined, undefined, undefined, undefined,
+        Array.from({ length: 11 }, (_, i) => `p${i}`),
+      ),
+      /2 to 10/,
+    );
+    // Malformed profile id
+    assert.throws(
+      () => coordinator.modelRouting("t", undefined, undefined, undefined, undefined, ["bad id!", "deepseek-primary"]),
+      /valid worker profile id/,
+    );
+    // Non-string entry
+    assert.throws(
+      () => coordinator.modelRouting(
+        "t", undefined, undefined, undefined, undefined,
+        [123 as unknown as string, "deepseek-primary"],
+      ),
+      /non-empty string/,
+    );
+    // Legacy candidates path stays available without profile resolution.
+    const legacy = coordinator.modelRouting("t", [{ provider: "a", model: "b" }, { provider: "c", model: "d" }]);
+    assert.equal(legacy.candidates.length, 2);
+    assert.equal(legacy.candidates[0]!.workerProfileId, undefined);
+  } finally {
+    store.close();
+  }
+});
+
+test("model_routing coordinator rejects mixed profile and candidate inputs", () => {
+  const store = new StateStore(path.join(tmpdir(), "fl-mr-profile-mix-"));
+  const settings = new SettingsService(store);
+  seedProfileRoutingSettings(settings);
+  const coordinator = new DaemonCoordinator(store, settings);
+  try {
+    assert.throws(
+      () => coordinator.modelRouting(
+        "t",
+        [{ provider: "deepseek", model: "v4" }, { provider: "qwen", model: "plus" }],
+        undefined, undefined, undefined,
+        ["deepseek-primary", "qwen-secondary"],
+      ),
+      /exactly one of workerProfileIds or candidates/,
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("model_routing coordinator binds profile identity to the recommendation after sorting", () => {
+  const store = new StateStore(path.join(tmpdir(), "fl-mr-profile-recommend-"));
+  const settings = new SettingsService(store);
+  settings.update({
+    workerProfiles: {
+      defaultProfileId: "aaa-weak",
+      profiles: [
+        { id: "aaa-weak", label: "A Weak", runtime: "claude-code", modelConfigId: "deepseek-flash", effort: "low" },
+        { id: "zzz-strong", label: "Z Strong", runtime: "claude-code", modelConfigId: "qwen-plus", effort: "max" },
+      ],
+    },
+  });
+  const coordinator = new DaemonCoordinator(store, settings);
+  try {
+    const now = new Date().toISOString();
+    const seed = (
+      provider: "deepseek" | "qwen",
+      model: string,
+      effort: "low" | "max",
+      passed: boolean,
+    ): void => {
+      const task = registerTaskFromSpec(store, {
+        version: 1,
+        name: `${provider}-${effort}-${passed}-${Date.now()}-${Math.random()}`,
+        project: "/src",
+        goal: "Profile routing recommendation evidence",
+        constraints: [],
+        provider: { name: provider, model, keychainService: "forklight.test" },
+        runtime: { name: "claude-code", executable: "claude", effort, maxBudgetUsd: 0.5 },
+        workspace: { exclude: [] },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+        acceptance: { commands: ["npm test"] },
+        taskClass: "coding:profile-recommend",
+      }, `forklight://test/profile-${Date.now()}-${Math.random()}`);
+      store.setTaskStatus(task.id, passed ? "succeeded" : "failed", {
+        finishedAt: now, workerPid: null,
+        ...(passed ? {} : { error: "Independent verification failed" }),
+      });
+      store.createAttempt({
+        id: `${task.id}-a1`, taskId: task.id, ordinal: 1,
+        status: passed ? "succeeded" : "failed",
+        sessionId: task.sessionId, rawLogPath: "/dev/null", startedAt: now, finishedAt: now,
+        ...(passed ? {} : { exitCode: 1 }),
+      });
+      store.addEvent(task.id, undefined, "verification.completed",
+        passed ? "Verification passed" : "Verification failed",
+        {
+          passed,
+          behaviorPassed: passed,
+          policyPassed: true,
+          sourceCompatible: true,
+          commands: passed
+            ? [{ command: "npm test", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }]
+            : [{ command: "npm test", exitCode: 1, stdout: "", stderr: "failed", durationMs: 1, timedOut: false }],
+        });
+    };
+    // Strong: 6 passed deliveries. Weak: 6 failed verifications.
+    for (let i = 0; i < 6; i += 1) seed("qwen", "qwen3.7-plus", "max", true);
+    for (let i = 0; i < 6; i += 1) seed("deepseek", "deepseek-v4-flash", "low", false);
+
+    const result = coordinator.modelRouting(
+      "coding:profile-recommend",
+      undefined, undefined, undefined, undefined,
+      ["aaa-weak", "zzz-strong"],
+    );
+    assert.equal(result.knowledge, "recommendation");
+    assert.equal(result.recommendation?.workerProfileId, "zzz-strong");
+    assert.equal(result.recommendation?.workerLabel, "Z Strong");
+    // The sorted top candidate keeps the same Profile binding.
+    assert.equal(result.candidates[0]!.workerProfileId, "zzz-strong");
+    const weak = result.candidates.find((c) => c.workerProfileId === "aaa-weak")!;
+    assert.equal(weak.workerProfileId, "aaa-weak");
+    assert.equal(weak.provider, "deepseek");
+    assert.equal(weak.runtime, "claude-code");
+    assert.equal(weak.effort, "low");
   } finally {
     store.close();
   }

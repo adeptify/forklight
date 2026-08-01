@@ -1281,6 +1281,16 @@ export interface IntegrationRecoveryGuidance {
   reviewedPatchMaxLines: number;
 }
 
+/** Closed, privacy-safe applicability issue recorded when the real
+ *  `git apply --check` dry-run exits non-zero. It names only the known
+ *  failure stage - never a parsed conflict, absolute path, command, diff,
+ *  prompt, credential, or log. Carried unchanged in the receipt and the
+ *  durable preflight event; legacy receipts without it remain readable. */
+export interface IntegrationApplicabilityIssue {
+  /** Fixed closed code identifying this issue. */
+  code: "patch-not-applicable";
+}
+
 // --- Integration records ---
 
 export interface IntegrationReceiptRecord {
@@ -1304,6 +1314,12 @@ export interface IntegrationReceiptRecord {
    *  line limit rejected Preflight and at least one affected path is default
    *  business. Never alters rejection or retry authority. */
   recoveryGuidance?: IntegrationRecoveryGuidance;
+  /** Closed privacy-safe applicability issue, present only when the real
+   *  dry-run `git apply --check` exited non-zero. It names only the known
+   *  failure stage and never carries a parsed conflict, path, command, diff,
+   *  or diagnostic. Absent on legacy receipts and on receipts that rejected
+   *  before reaching the dry-run check. */
+  applicabilityIssue?: IntegrationApplicabilityIssue;
 }
 
 export interface IntegrationResultRecord {

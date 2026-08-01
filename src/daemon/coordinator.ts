@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  HealthEnvironmentCache,
+  loadHealthEnvironmentSnapshot,
+} from "./health-environment.js";
 import type {
   AdaptationPreview,
   AdaptationProposedReasonCategory,
@@ -36,10 +40,12 @@ import {
   type MainCorrectionAuthorization,
 } from "../core/attempt-authorization.js";
 import { latestMainReview, recordMainReview } from "../core/main-review.js";
-import type { ProviderAuthInspector, ProviderName } from "../core/providers.js";
-import { providerNames, realProviderAuthInspector } from "../core/providers.js";
+import type { ProviderAuthInspector, ProviderName, ProviderReadiness } from "../core/providers.js";
+import { providerNames, realProviderAuthInspector, resolveProvider } from "../core/providers.js";
 import {
   createClaudeProbeRunner,
+  deriveProviderHealthStatus,
+  normalizeProbeStatusWithLocalSignIn,
   ProviderProbeService,
   realClock,
   realExecFile,
@@ -127,6 +133,7 @@ import {
   type RoutingAdvisoryResponse,
   type RoutingPolicySettings,
 } from "../core/model-routing.js";
+import { resolveProfileRoutingCandidates } from "../core/profile-routing.js";
 import {
   SettingsService,
   type ForkLightSettings,
@@ -196,6 +203,10 @@ import {
   PREVIEW_REVISION_DIGEST_PATTERN,
   type SafeTaskAdmissionPreview,
 } from "../core/task-preview.js";
+import {
+  applyReusedTaskClass,
+  CLASS_REUSE_STALE_REASON,
+} from "../core/task-class-reuse.js";
 import {
   deriveChildEffectivePolicy,
   evaluateAdaptationGate,
@@ -327,56 +338,42 @@ export class DaemonCoordinator {
   private readonly activeIntegrations = new Map<string, Promise<void>>();
   private readonly integrationOperations = new Map<string, IntegrationOperationContext>();
   private readonly authorizedHandoffShutdowns = new Set<string>();
+  /** Same-path serialization gate for preview-bound draft classification writes.
+   *  A second in-progress write to the same Task Contract is rejected so a
+   *  stale confirmation can never overwrite a concurrent first result. */
+  private readonly classReuseInFlight = new Set<string>();
   private closing = false;
+  /** Process-local complete snapshot of expensive Keychain/Runtime inspection. */
+  private readonly healthEnvironment: HealthEnvironmentCache;
 
   constructor(
     private readonly store: StateStore,
     private readonly settings: SettingsService,
     private readonly maxConcurrencyOverride?: number,
     private readonly providerAuthInspector: ProviderAuthInspector = realProviderAuthInspector(),
-  ) {}
+    healthEnvironment?: HealthEnvironmentCache,
+  ) {
+    this.healthEnvironment = healthEnvironment ?? new HealthEnvironmentCache({
+      load: (defaults) => loadHealthEnvironmentSnapshot(defaults, this.providerAuthInspector),
+    });
+  }
 
   health(): Record<string, unknown> {
-    let claudeCode = "unavailable";
-    try {
-      claudeCode = execFileSync("claude", ["--version"], { encoding: "utf8" }).trim();
-    } catch {
-      // Reported below.
-    }
     const effectiveSettings = this.settings.get();
-    const readiness = providerReadiness(effectiveSettings.providerDefaults);
-    const verification = this.safeVerificationSnapshot();
-    const runtimes: Record<string, unknown> = {};
-    for (const adapter of listWorkerAdapters()) {
-      const doctorResult = adapter.doctor();
-      // Built-ins are sync; Promise would be a custom adapter contract change.
-      if (doctorResult instanceof Promise) {
-        runtimes[adapter.name] = {
-          ok: false,
-          displayName: adapter.displayName,
-          executable: adapter.defaultExecutable,
-          issues: ["async doctor not supported in health snapshot"],
-          capabilities: adapter.capabilities(),
-        };
-        continue;
-      }
-      runtimes[adapter.name] = {
-        ok: doctorResult.ok,
-        displayName: adapter.displayName,
-        executable: doctorResult.executable,
-        ...(doctorResult.version === undefined ? {} : { version: doctorResult.version }),
-        issues: doctorResult.issues,
-        capabilities: doctorResult.capabilities,
-      };
-    }
+    // Expensive environment facts are reused as one complete snapshot.
+    const environment = this.healthEnvironment.get(effectiveSettings.providerDefaults);
+    // Dynamic operational facts are always read fresh. Verification reuses the
+    // snapshot's authentication truth so health never re-opens Keychain or
+    // local-sign-in paths for the same unexpired generation.
+    const verification = this.safeVerificationSnapshotFromAuth(environment.providers);
     return {
       // Transition: ok still requires Claude for daemon liveness + any provider.
-      ok: claudeCode !== "unavailable" && readiness.anyReady,
+      ok: environment.claudeCode !== "unavailable" && environment.anyReady,
       pid: process.pid,
-      claudeCode,
-      runtimes,
+      claudeCode: environment.claudeCode,
+      runtimes: environment.runtimes,
       defaultRuntime: effectiveSettings.execution.defaultRuntime,
-      providers: readiness.providers,
+      providers: environment.providers,
       providerVerification: verification,
       maxConcurrency: this.maxConcurrencyOverride ?? effectiveSettings.execution.maxConcurrency,
       activeTaskIds: [...this.active.keys()],
@@ -400,13 +397,68 @@ export class DaemonCoordinator {
 
   /**
    * Read-only Task Contract admission preview under current saved settings.
-   * Never registers, queues, prepares, verifies, integrates, or probes.
+   * Terminal ordinary Task history feeds only the classification reuse advice;
+   * it never enters the preview revision digest. Never registers, queues,
+   * prepares, verifies, integrates, or probes.
    */
   async validateFile(taskFile: string): Promise<SafeTaskAdmissionPreview> {
     if (!path.isAbsolute(taskFile)) {
       throw new Error("validate_file requires an absolute Task Contract file path");
     }
-    return buildTaskAdmissionPreview(taskFile, this.settings.get());
+    return buildTaskAdmissionPreview(taskFile, this.settings.get(), this.store.listTasks());
+  }
+
+  /**
+   * Preview-bound draft classification reuse. Daemon authority owns the
+   * mutation gate and same-path serialization: it recomputes every authority
+   * condition (file digest, effective preview digest, family/class state and
+   * exact current classChoice) and never trusts Hub-displayed state or file
+   * contents. Only the root taskClass of an unsubmitted Task Contract draft
+   * may change; the operation never submits a Task, starts a Worker, or
+   * mutates settings/history/lifecycle. Returns the fresh SafeTaskAdmissionPreview
+   * generated from the written file.
+   */
+  async reuseTaskClass(params: {
+    taskFile: string;
+    expectedPreviewRevisionDigest: string;
+    taskClass: string;
+    confirm: true;
+  }): Promise<SafeTaskAdmissionPreview> {
+    if (params.confirm !== true) {
+      throw new Error("reuse_task_class requires explicit confirm: true");
+    }
+    if (typeof params.taskFile !== "string" || !path.isAbsolute(params.taskFile)) {
+      throw new Error("reuse_task_class requires an absolute Task Contract file path");
+    }
+    if (
+      typeof params.expectedPreviewRevisionDigest !== "string"
+      || !PREVIEW_REVISION_DIGEST_PATTERN.test(params.expectedPreviewRevisionDigest)
+    ) {
+      throw new Error(CLASS_REUSE_STALE_REASON);
+    }
+    const taskClass = typeof params.taskClass === "string" ? params.taskClass.trim() : "";
+    if (taskClass.length === 0 || taskClass.length > 80) {
+      throw new Error("reuse_task_class requires a taskClass of 1 to 80 characters");
+    }
+    const lockKey = path.resolve(params.taskFile);
+    if (this.classReuseInFlight.has(lockKey)) {
+      throw new Error(
+        "A classification change is already in progress for this Task contract; preview again before applying",
+      );
+    }
+    this.classReuseInFlight.add(lockKey);
+    try {
+      const result = await applyReusedTaskClass({
+        taskFileInput: params.taskFile,
+        expectedPreviewRevisionDigest: params.expectedPreviewRevisionDigest,
+        taskClass,
+        settings: this.settings.get(),
+        tasks: this.store.listTasks(),
+      });
+      return result.preview;
+    } finally {
+      this.classReuseInFlight.delete(lockKey);
+    }
   }
 
   /**
@@ -1488,10 +1540,11 @@ export class DaemonCoordinator {
    *  Worker, disables a model, mutates settings, retries, commits, or pushes. */
   modelRouting(
     taskClass: string,
-    candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }>,
+    candidates?: Array<{ provider: string; model: string; runtime?: string; effort?: string }>,
     taskFamily?: string,
     competitionIntent?: "none" | "consider" | "required",
     competitionTriggers?: string[],
+    workerProfileIds?: string[],
   ): RoutingAdvisoryResponse {
     if (
       typeof taskClass !== "string"
@@ -1500,44 +1553,76 @@ export class DaemonCoordinator {
     ) {
       throw new Error("modelRouting requires a taskClass of 1 to 200 characters");
     }
-    if (!Array.isArray(candidates) || candidates.length < 2 || candidates.length > 10) {
-      throw new Error("modelRouting requires 2 to 10 provider/model candidates");
-    }
-    const seen = new Set<string>();
-    const identityModes = new Set<"legacy" | "full" | "partial">();
-    for (const c of candidates) {
-      if (
-        typeof c.provider !== "string"
-        || c.provider.trim().length === 0
-        || c.provider.trim().length > 100
-      ) {
-        throw new Error("Each candidate provider must contain 1 to 100 characters");
-      }
-      if (
-        typeof c.model !== "string"
-        || c.model.trim().length === 0
-        || c.model.trim().length > 200
-      ) {
-        throw new Error("Each candidate model must contain 1 to 200 characters");
-      }
-      const hasRuntime = typeof c.runtime === "string" && c.runtime.trim().length > 0;
-      const hasEffort = typeof c.effort === "string" && c.effort.trim().length > 0;
-      identityModes.add(hasRuntime && hasEffort ? "full" : (!hasRuntime && !hasEffort ? "legacy" : "partial"));
-      const key = c.provider.trim() + "\0" + c.model.trim()
-        + (hasRuntime && hasEffort ? `\0${c.runtime!.trim()}\0${c.effort!.trim()}` : "");
-      if (seen.has(key)) throw new Error("modelRouting candidates must be unique");
-      seen.add(key);
+    const settings = this.settings.get();
+    const profilePath = workerProfileIds !== undefined;
+    if (profilePath && candidates !== undefined) {
+      throw new Error("modelRouting accepts exactly one of workerProfileIds or candidates");
     }
 
-    if (identityModes.has("partial") || identityModes.size !== 1) {
-      throw new Error("modelRouting candidates must either all include runtime and effort, or all omit both for legacy comparison");
+    // Resolved candidates always carry runtime+effort; profile-bound rows also
+    // carry workerProfileId/workerLabel for identity-preserving output.
+    let resolvedCandidates: Array<{
+      provider: string;
+      model: string;
+      runtime?: string;
+      effort?: string;
+      workerProfileId?: string;
+      workerLabel?: string;
+    }>;
+    let fullIdentity: boolean;
+    if (profilePath) {
+      resolvedCandidates = resolveProfileRoutingCandidates(workerProfileIds, {
+        workerProfiles: settings.workerProfiles,
+        modelCatalog: settings.modelCatalog,
+        providerDefaults: settings.providerDefaults,
+        defaultEffort: settings.execution.defaultEffort,
+      });
+      fullIdentity = true;
+    } else {
+      if (!Array.isArray(candidates) || candidates.length < 2 || candidates.length > 10) {
+        throw new Error("modelRouting requires 2 to 10 provider/model candidates");
+      }
+      const seen = new Set<string>();
+      const identityModes = new Set<"legacy" | "full" | "partial">();
+      for (const c of candidates) {
+        if (
+          typeof c.provider !== "string"
+          || c.provider.trim().length === 0
+          || c.provider.trim().length > 100
+        ) {
+          throw new Error("Each candidate provider must contain 1 to 100 characters");
+        }
+        if (
+          typeof c.model !== "string"
+          || c.model.trim().length === 0
+          || c.model.trim().length > 200
+        ) {
+          throw new Error("Each candidate model must contain 1 to 200 characters");
+        }
+        const hasRuntime = typeof c.runtime === "string" && c.runtime.trim().length > 0;
+        const hasEffort = typeof c.effort === "string" && c.effort.trim().length > 0;
+        identityModes.add(hasRuntime && hasEffort ? "full" : (!hasRuntime && !hasEffort ? "legacy" : "partial"));
+        const key = c.provider.trim() + "\0" + c.model.trim()
+          + (hasRuntime && hasEffort ? `\0${c.runtime!.trim()}\0${c.effort!.trim()}` : "");
+        if (seen.has(key)) throw new Error("modelRouting candidates must be unique");
+        seen.add(key);
+      }
+
+      if (identityModes.has("partial") || identityModes.size !== 1) {
+        throw new Error("modelRouting candidates must either all include runtime and effort, or all omit both for legacy comparison");
+      }
+      fullIdentity = identityModes.has("full");
+      resolvedCandidates = candidates.map((c) => ({
+        provider: c.provider.trim(),
+        model: c.model.trim(),
+        ...(c.runtime !== undefined ? { runtime: c.runtime.trim() } : {}),
+        ...(c.effort !== undefined ? { effort: c.effort.trim() } : {}),
+      }));
     }
-    const fullIdentity = identityModes.has("full");
 
     const stats = new StatisticsService(this.store);
     const identityMode = fullIdentity ? "full-worker" : "provider-model";
     const evidenceMap = stats.routingEvidence(taskClass.trim(), identityMode);
-    const settings = this.settings.get();
     const policy: RoutingPolicySettings = {
       minRelevantSamples: settings.modelRouting.minRelevantSamples,
       familyMinRelevantSamples: settings.modelRouting.familyMinRelevantSamples,
@@ -1581,12 +1666,7 @@ export class DaemonCoordinator {
 
     const adviceInput: Parameters<typeof provideRoutingAdvice>[0] = {
       taskClass: taskClass.trim(),
-      candidates: candidates.map((c) => ({
-        provider: c.provider.trim(),
-        model: c.model.trim(),
-        ...(c.runtime !== undefined ? { runtime: c.runtime.trim() } : {}),
-        ...(c.effort !== undefined ? { effort: c.effort.trim() } : {}),
-      })),
+      candidates: resolvedCandidates,
       evidenceMap,
       policy,
     };
@@ -1655,10 +1735,17 @@ export class DaemonCoordinator {
   }
 
   updateSettings(patch: Record<string, unknown>): ForkLightSettings {
-    return this.settings.update(patch);
+    const next = this.settings.update(patch);
+    // Provider-default-dependent readiness must not outlive a defaults change.
+    if (Object.prototype.hasOwnProperty.call(patch, "providerDefaults")) {
+      this.healthEnvironment.invalidate();
+    }
+    return next;
   }
 
   resetSettings(): ForkLightSettings {
+    // Reset restores Provider defaults; drop any readiness derived from the old ones.
+    this.healthEnvironment.invalidate();
     return this.settings.reset();
   }
 
@@ -2026,11 +2113,44 @@ export class DaemonCoordinator {
     return this._probeService;
   }
 
-  private safeVerificationSnapshot(): Record<ProviderName, Omit<ProviderStatus, "keychainExists">> {
+  /**
+   * Project providerVerification for health without a second Keychain or
+   * local-sign-in inspection. Persisted probe evidence and live model/endpoint
+   * Settings are read fresh; authentication readiness comes only from the
+   * cached environment snapshot. Never probes a Provider network endpoint.
+   */
+  private safeVerificationSnapshotFromAuth(
+    providers: Readonly<Record<ProviderName, ProviderReadiness>>,
+  ): Record<ProviderName, Omit<ProviderStatus, "keychainExists">> {
+    const settings = this.settings.get();
+    const policy = this.probeService.probePolicy();
+    const nowMs = realClock();
     const result = {} as Record<ProviderName, Omit<ProviderStatus, "keychainExists">>;
     for (const name of providerNames()) {
-      const { keychainExists: _, ...safe } = this.probeService.getProviderStatus(name);
-      result[name] = safe;
+      const readiness = providers[name];
+      const config = resolveProvider(name, {}, settings.providerDefaults[name]);
+      const evidence = this.store.getProbeEvidence(name);
+      let status = deriveProviderHealthStatus(
+        readiness.ready,
+        evidence ?? null,
+        config.model,
+        new URL(config.endpoint).origin,
+        policy.cacheLifetimeMs,
+        nowMs,
+      );
+      if (name === "xai") {
+        status = normalizeProbeStatusWithLocalSignIn(
+          status,
+          evidence,
+          readiness.authMode === "local-sign-in",
+        );
+      }
+      result[name] = {
+        provider: name,
+        model: config.model,
+        status,
+        ...(evidence === undefined ? {} : { evidence }),
+      };
     }
     return result;
   }

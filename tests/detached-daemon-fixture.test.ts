@@ -14,6 +14,7 @@ import {
   waitForDaemonReady,
   waitForPidExit,
 } from "./helpers/detached-daemon.js";
+import { HubCliLifecycleFixture } from "./helpers/hub-cli-fixture.js";
 
 // These tests prove the detached-daemon fixture's cleanup discipline using
 // isolated temporary homes and no Provider or user-home access. Each test
@@ -189,5 +190,83 @@ test("adoptReplacement is a no-op when the PID is already tracked", async () => 
     assert.throws(() => process.kill(pid, 0), /ESRCH/);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("Hub CLI cleanup seam preserves an assertion error while proving owned resources gone", async () => {
+  const alive = new Set([101, 202]);
+  const fixture = await HubCliLifecycleFixture.createWithSeams({
+    pidAlive: (pid) => alive.has(pid),
+    signal: (pid) => { alive.delete(pid); },
+    probeHealth: async () => ({ pid: 202 }),
+    shutdown: async () => { alive.delete(202); },
+    probeSocket: async () => false,
+    waitForExit: async (pids) => [...pids].filter((pid) => alive.has(pid)),
+  });
+  fixture.registerHubPid(101);
+
+  await assert.rejects(
+    async () => {
+      try {
+        throw new Error("simulated Hub assertion failure");
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    /simulated Hub assertion failure/,
+  );
+
+  const first = fixture.lastCleanup;
+  assert.ok(first);
+  assert.equal(first.homeRemoved, true);
+  assert.equal(first.hubPid, 101);
+  assert.equal(first.daemonPid, 202);
+  assert.deepEqual(alive.size, 0);
+  assert.deepEqual(await fixture.cleanup(), first, "cleanup is idempotent");
+  await assert.rejects(stat(fixture.home), /ENOENT/);
+});
+
+test("Hub CLI cleanup seam fails closed before daemon ownership is observable", async () => {
+  const fixture = await HubCliLifecycleFixture.createWithSeams({
+    pidAlive: () => false,
+    probeHealth: async () => {
+      const error = new Error("connect ENOENT");
+      Object.assign(error, { code: "ENOENT" });
+      throw error;
+    },
+    probeSocket: async () => false,
+    waitForExit: async () => [],
+  }, "forklight-hub-cli-seam-timeout-");
+  try {
+    const result = await fixture.cleanup();
+    assert.equal(result.homeRemoved, false);
+    assert.equal(result.daemonPid, undefined);
+    assert.match(result.ownershipConflict ?? "", /never reported an owner/);
+    assert.doesNotThrow(() => process.kill(process.pid, 0));
+  } finally {
+    await rm(fixture.home, { recursive: true, force: true });
+  }
+});
+
+test("Hub CLI cleanup seam refuses a changed endpoint owner", async () => {
+  const reportedOwners = [202, 303];
+  const signalled: number[] = [];
+  const fixture = await HubCliLifecycleFixture.createWithSeams({
+    pidAlive: () => false,
+    signal: (pid) => { signalled.push(pid); },
+    probeHealth: async () => ({ pid: reportedOwners.shift() }),
+    shutdown: async () => undefined,
+    probeSocket: async () => false,
+    waitForExit: async () => [],
+  }, "forklight-hub-cli-seam-mismatch-");
+  try {
+    assert.equal(await fixture.adoptDaemonOwner(), 202);
+    const result = await fixture.cleanup();
+    assert.equal(result.homeRemoved, false);
+    assert.equal(result.untrackedOwnerPid, 303);
+    assert.match(result.ownershipConflict ?? "", /refusing shutdown and signal/);
+    assert.deepEqual(signalled, []);
+  } finally {
+    await rm(fixture.home, { recursive: true, force: true });
   }
 });

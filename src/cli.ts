@@ -15,7 +15,7 @@ import type { DirectCodexInboxItem } from "./core/direct-codex-workflow-service.
 import { forklightHome } from "./core/config.js";
 import { providerProbeBatchFailed } from "./core/provider-probe.js";
 import { providerLabel, providerNames, providerReadiness } from "./core/providers.js";
-import type { RuntimeName } from "./core/runtime-names.js";
+import { SUPPORTED_RUNTIME_NAMES, type RuntimeName } from "./core/runtime-names.js";
 import type {
   CompactProviderModelSummary,
   ProviderModelSummary,
@@ -44,6 +44,7 @@ import {
 } from "./core/candidate-revision.js";
 import { buildCompactIntegrationOperationView } from "./core/integration-operation.js";
 import type { IntegrationOperationView } from "./core/types.js";
+import { humanIntegrationPreflightLines } from "./cli/integration-output.js";
 import {
   parseRequiredStreakCountFromString,
   type SelfUpgradeEvidenceProjection,
@@ -85,6 +86,8 @@ import {
 } from "./hub/instance.js";
 import { StateStore } from "./state/store.js";
 import { withCliExchangeReceipt, humanTokenReportLines } from "./cli/exchange-receipts.js";
+import { formatRoutingAdviceHuman } from "./cli/routing-output.js";
+import type { RoutingAdvisoryResponse } from "./core/model-routing.js";
 import {
   buildHealthWorkerReadiness,
   humanWorkerReadinessLines,
@@ -93,13 +96,17 @@ import {
   type RuntimeDoctorSnapshot,
 } from "./cli/health-readiness.js";
 import {
+  projectExecutionClaudeOk,
   projectExecutionProviderReadiness,
+  projectExecutionRuntimeDisplay,
   resolveExecutionProviderFacts,
+  resolveExecutionRuntimeFacts,
   resolveDoctorResult,
   renderDoctorHuman,
   renderDoctorJson,
   type DaemonHealthEvidence,
   type LocalProviderFact,
+  type RuntimeDisplayMetadata,
 } from "./setup/doctor.js";
 import {
   buildCompactInspection,
@@ -211,6 +218,8 @@ Usage:
   forklight stats [--json] [--provider <name>] [--model <name>] [--since <ISO>] [--until <ISO>] [--deep-audit]
       # default JSON is aggregate-only; --deep-audit requires --json for full failure evidence
   forklight routing <task-class> --candidates <json> [--json]
+      # --candidates <json>: legacy provider/model pairs (runtime/effort optional)
+      # --profiles <json-array>: saved Worker Profile ids (mutually exclusive with --candidates)
   forklight daemon <start|status|stop|restart>
       # start|restart accept optional --startup-timeout-ms <1000-600000>; default 30000
   forklight health [--json]
@@ -343,24 +352,10 @@ function humanInspectLines(
   return `${lines.join("\n")}\n`;
 }
 
-/** Render the human integration preflight block as a single exact
- *  string.  Field order, indentation, and `"(none)"` fallbacks match
- *  the legacy output byte-for-byte. */
-function humanIntegrationPreflightLines(receipt: Record<string, unknown>): string {
-  const lines: string[] = [];
-  lines.push(`receiptId: ${receipt.id}`);
-  lines.push(`taskId: ${receipt.taskId}`);
-  const reasons = receipt.rejectionReasons as string[];
-  lines.push(`passed: ${reasons.length === 0}`);
-  if (reasons.length > 0) {
-    lines.push("rejectionReasons:");
-    for (const reason of reasons) lines.push(`  - ${reason}`);
-  }
-  const files = receipt.affectedFiles as string[];
-  lines.push(`affectedFiles: ${files.join(", ") || "(none)"}`);
-  lines.push(`patchDigest: ${receipt.patchDigest || "(none)"}`);
-  return `${lines.join("\n")}\n`;
-}
+/** Render the human integration preflight block as a single exact string.
+ *  The plain patch-not-applicable explanation (when present) and the raw
+ *  rejection evidence are produced by `humanIntegrationPreflightLines` in
+ *  `./cli/integration-output.js`, which is unit-tested directly. */
 
 /** Render the human integration apply block as a single exact string. */
 function humanIntegrationApplyLines(result: Record<string, unknown>): string {
@@ -938,19 +933,18 @@ async function health(json: boolean): Promise<void> {
     const settings = new SettingsService(store).get();
     const localReadiness = providerReadiness(settings.providerDefaults);
     const { listWorkerAdapters } = await import("./workers/registry.js");
-    const runtimes: Record<string, unknown> = {};
     const runtimeDoctors: Partial<Record<RuntimeName, RuntimeDoctorSnapshot>> = {};
+    const localRuntimeDisplay: Partial<Record<RuntimeName, RuntimeDisplayMetadata>> = {};
     for (const adapter of listWorkerAdapters()) {
       const doctor = adapter.doctor();
       if (doctor instanceof Promise) continue;
-      runtimes[adapter.name] = {
-        ok: doctor.ok,
+      runtimeDoctors[adapter.name] = { ok: doctor.ok };
+      localRuntimeDisplay[adapter.name] = {
         displayName: adapter.displayName,
         executable: doctor.executable,
         ...(doctor.version === undefined ? {} : { version: doctor.version }),
         issues: doctor.issues,
       };
-      runtimeDoctors[adapter.name] = { ok: doctor.ok };
     }
     const clientBuildIdentity = currentBuildIdentity();
     let daemonBuildIdentity: unknown;
@@ -994,6 +988,15 @@ async function health(json: boolean): Promise<void> {
         defaultModel: localReadiness.providers[name].defaultModel,
       })),
     });
+    const runtimeFacts = resolveExecutionRuntimeFacts({
+      clientBuildIdentity,
+      ...(daemonEvidence === undefined ? {} : { daemonEvidence }),
+      localRuntimes: SUPPORTED_RUNTIME_NAMES.map((name) => ({
+        name,
+        ok: runtimeDoctors[name]?.ok ?? false,
+      })),
+    });
+    const runtimes = projectExecutionRuntimeDisplay(runtimeFacts, localRuntimeDisplay);
     const readiness = projectExecutionProviderReadiness(
       executionFacts.providers,
       localReadiness.providers,
@@ -1007,18 +1010,31 @@ async function health(json: boolean): Promise<void> {
     const workerReadiness = buildHealthWorkerReadiness({
       settings,
       providers: readiness.providers,
-      runtimeDoctors,
+      runtimeDoctors: runtimeFacts.runtimes,
       providerVerification,
     });
+    // The header must agree with the selected runtime authority: when the
+    // exact-build Daemon wins, ok/claudeCode come from its bounded health
+    // payload; local fallback preserves the caller-shell behavior exactly.
+    const executionOk = projectExecutionClaudeOk(
+      runtimeFacts,
+      daemonEvidence,
+      readiness.anyReady,
+      {
+        ok: claudeVersion !== "unavailable" && readiness.anyReady,
+        claudeCode: claudeVersion,
+      },
+    );
     const result = {
-      // Transition: ok still requires Claude + any provider (daemon submit can still pick Grok when doctor ok).
-      ok: claudeVersion !== "unavailable" && readiness.anyReady,
+      ok: executionOk.ok,
       node: process.version,
-      claudeCode: claudeVersion,
+      claudeCode: executionOk.claudeCode,
       runtimes,
       defaultRuntime: settings.execution.defaultRuntime,
       providerReadinessSource: executionFacts.source,
       providerReadinessSourceDetail: executionFacts.sourceDetail,
+      runtimeReadinessSource: runtimeFacts.source,
+      runtimeReadinessSourceDetail: runtimeFacts.sourceDetail,
       providers: readiness.providers,
       workers: projectWorkerReadinessJson(workerReadiness),
       home: forklightHome(),
@@ -1033,6 +1049,9 @@ async function health(json: boolean): Promise<void> {
       process.stdout.write(`defaultRuntime: ${result.defaultRuntime}\n`);
       process.stdout.write(
         `providerReadinessSource: ${result.providerReadinessSource} (${result.providerReadinessSourceDetail})\n`,
+      );
+      process.stdout.write(
+        `runtimeReadinessSource: ${result.runtimeReadinessSource} (${result.runtimeReadinessSourceDetail})\n`,
       );
       process.stdout.write("runtimes:\n");
       for (const [name, runtime] of Object.entries(result.runtimes)) {
@@ -1314,6 +1333,7 @@ async function main(): Promise<void> {
       const preview = await buildTaskAdmissionPreview(
         required(positional, "task file"),
         settings,
+        store.listTasks(),
       );
       if (json) {
         process.stdout.write(`${JSON.stringify(preview, null, 2)}\n`);
@@ -1691,25 +1711,59 @@ async function main(): Promise<void> {
 
   if (command === "routing") {
     const taskClass = required(positional, "task class");
-    const rawCandidates = required(option(rest, "--candidates"), "--candidates JSON array");
+    const rawCandidates = option(rest, "--candidates");
+    const rawProfiles = option(rest, "--profiles");
+    if (rawCandidates === undefined && rawProfiles === undefined) {
+      throw new Error(
+        "Missing --candidates JSON array or --profiles JSON array\n\n" + usage(),
+      );
+    }
+    if (rawCandidates !== undefined && rawProfiles !== undefined) {
+      throw new Error("--candidates and --profiles are mutually exclusive");
+    }
     const taskFamily = option(rest, "--family");
     const compIntentRaw = option(rest, "--comp-intent");
     const compTriggersRaw = option(rest, "--comp-triggers");
-    let candidates: Array<{ provider: string; model: string }>;
-    try {
-      const parsed: unknown = JSON.parse(rawCandidates);
-      if (!Array.isArray(parsed)) throw new Error("not an array");
-      candidates = (parsed as Array<Record<string, unknown>>).map((c, i) => {
-        if (typeof c.provider !== "string" || !c.provider.trim()) {
-          throw new Error(`candidates[${i}].provider must be a non-empty string`);
-        }
-        if (typeof c.model !== "string" || !c.model.trim()) {
-          throw new Error(`candidates[${i}].model must be a non-empty string`);
-        }
-        return { provider: c.provider.trim(), model: c.model.trim() };
-      });
-    } catch (e) {
-      throw new Error(`Invalid --candidates JSON: ${e instanceof Error ? e.message : String(e)}`);
+    let candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }> | undefined;
+    let workerProfileIds: string[] | undefined;
+    if (rawCandidates !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(rawCandidates);
+        if (!Array.isArray(parsed)) throw new Error("not an array");
+        candidates = (parsed as Array<Record<string, unknown>>).map((c, i) => {
+          if (typeof c.provider !== "string" || !c.provider.trim()) {
+            throw new Error(`candidates[${i}].provider must be a non-empty string`);
+          }
+          if (typeof c.model !== "string" || !c.model.trim()) {
+            throw new Error(`candidates[${i}].model must be a non-empty string`);
+          }
+          const runtime = typeof c.runtime === "string" && c.runtime.trim()
+            ? c.runtime.trim() : undefined;
+          const effort = typeof c.effort === "string" && c.effort.trim()
+            ? c.effort.trim() : undefined;
+          return {
+            provider: c.provider.trim(),
+            model: c.model.trim(),
+            ...(runtime === undefined ? {} : { runtime }),
+            ...(effort === undefined ? {} : { effort }),
+          };
+        });
+      } catch (e) {
+        throw new Error(`Invalid --candidates JSON: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else {
+      try {
+        const parsed: unknown = JSON.parse(rawProfiles!);
+        if (!Array.isArray(parsed)) throw new Error("not an array");
+        workerProfileIds = (parsed as unknown[]).map((value, i) => {
+          if (typeof value !== "string" || !value.trim()) {
+            throw new Error(`profiles[${i}] must be a non-empty string`);
+          }
+          return value.trim();
+        });
+      } catch (e) {
+        throw new Error(`Invalid --profiles JSON: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
     let compIntent: string | undefined;
     if (compIntentRaw !== undefined) {
@@ -1729,70 +1783,16 @@ async function main(): Promise<void> {
       }
     }
     await ensureDaemon();
-    const advisory = await daemonRequest<Record<string, unknown>>("model_routing", {
+    const advisory = await daemonRequest<RoutingAdvisoryResponse>("model_routing", {
       taskClass,
-      candidates,
+      ...(candidates !== undefined ? { candidates } : { workerProfileIds }),
       ...(taskFamily !== undefined ? { taskFamily } : {}),
       ...(compIntent !== undefined ? { competitionIntent: compIntent } : {}),
       ...(compTriggers !== undefined ? { competitionTriggers: compTriggers } : {}),
     });
     if (json) {
       process.stdout.write(`${JSON.stringify(advisory, null, 2)}\n`);
-    } else {
-      process.stdout.write(`Task class: ${advisory.taskClass}\n`);
-      if (advisory.taskFamily) {
-        process.stdout.write(`Task family: ${advisory.taskFamily}\n`);
-      }
-      process.stdout.write(`Evidence scope: ${advisory.evidenceScope}\n`);
-      process.stdout.write(`Knowledge: ${advisory.knowledge}\n`);
-      const comp = advisory.competition as Record<string, unknown> | undefined;
-      process.stdout.write(`Should run competition: ${advisory.shouldRunCompetition}\n`);
-      if (comp) {
-        process.stdout.write(`Competition intent: ${comp.intent}\n`);
-        const matching = comp.matchingTriggers as string[] | undefined;
-        if (matching && matching.length > 0) {
-          process.stdout.write(`Matching triggers: ${matching.join(", ")}\n`);
-        }
-      }
-      if (advisory.recommendation) {
-        const rec = advisory.recommendation as Record<string, unknown>;
-        process.stdout.write(
-          `Recommendation: ${rec.provider}/${rec.model} (confidence ${rec.confidence})\n  ${rec.reasoning}\n`,
-        );
-      } else {
-        process.stdout.write("Recommendation: none (insufficient or incompatible evidence)\n");
-      }
-      const cands = advisory.candidates as Array<Record<string, unknown>>;
-      for (const cand of cands) {
-        process.stdout.write(
-          `${cand.provider}/${cand.model}: score=${cand.totalScore}\n`,
-        );
-        const ev = cand.evidence as Record<string, unknown>;
-        process.stdout.write(`  samples: ${ev.relevantSampleCount} | model-quality failures: ${ev.modelQualityFailureCount} | accepted delivery: ${ev.acceptedDeliveryRate !== undefined ? (Number(ev.acceptedDeliveryRate) * 100).toFixed(1) + "%" : "0%"}\n`);
-        const nonModel = ev.ignoredNonModelFailures as Record<string, number> | undefined;
-        if (nonModel) {
-          const entries = Object.entries(nonModel);
-          if (entries.length > 0) {
-            process.stdout.write(`  ignored non-model failures: ${entries.map(([k, v]) => `${k}=${v}`).join(", ")}\n`);
-          }
-        }
-        const unc = cand.uncertainty as Record<string, boolean>;
-        if (unc.insufficientSamples || unc.insufficientGap || unc.incompatibleCost) {
-          const reasons: string[] = [];
-          if (unc.insufficientSamples) reasons.push("insufficient samples");
-          if (unc.insufficientGap) reasons.push("score gap too small");
-          if (unc.incompatibleCost) reasons.push("cost evidence not comparable");
-          process.stdout.write(`  uncertainty: ${reasons.join(", ")}\n`);
-        }
-        const factors = cand.factors as Array<Record<string, unknown>>;
-        for (const f of factors) {
-          const avail = f.available ? "✓" : "✗";
-          process.stdout.write(
-            `  ${avail} ${f.factor}: raw=${f.rawValue ?? "—"} norm=${Number(f.normalizedScore).toFixed(3)} weighted=${Number(f.weightedScore).toFixed(3)} [w=${f.weight}]${!f.available && f.unavailableReason ? ` — ${f.unavailableReason}` : ""}\n`,
-          );
-        }
-      }
-    }
+    } else process.stdout.write(formatRoutingAdviceHuman(advisory));
     return;
   }
 

@@ -6,11 +6,15 @@ import {
   resolveDoctorResult,
   renderDoctorHuman,
   renderDoctorJson,
+  projectExecutionClaudeOk,
   projectExecutionProviderReadiness,
+  projectExecutionRuntimeDisplay,
+  resolveExecutionRuntimeFacts,
   type DaemonHealthEvidence,
   type DoctorInput,
   type DoctorResult,
   type LocalProviderFact,
+  type LocalRuntimeFact,
 } from "../src/setup/doctor.js";
 import type { SetupPrerequisite } from "../src/setup/types.js";
 import type { ProviderName, ProviderReadiness } from "../src/core/providers.js";
@@ -302,4 +306,284 @@ test("JSON output includes prerequisites with optional fix fields", () => {
   const nodeCheck = prereqs.find((p) => p.id === "node")!;
   assert.equal(nodeCheck.ready, false);
   assert.equal(typeof nodeCheck.fix, "string");
+});
+
+// ── Execution runtime authority ─────────────────────────────────────
+
+function runtimeHealthResult(readyList: string[]): Record<string, unknown> {
+  return {
+    ok: true,
+    runtimes: {
+      "claude-code": {
+        ok: readyList.includes("claude-code"),
+        displayName: "Claude Code",
+        executable: "claude",
+        issues: readyList.includes("claude-code") ? [] : ["claude executable not found"],
+        capabilities: {},
+      },
+      "grok-build": {
+        ok: readyList.includes("grok-build"),
+        displayName: "Grok Build",
+        executable: "grok",
+        issues: readyList.includes("grok-build") ? [] : ["grok not found"],
+        capabilities: {},
+      },
+    },
+  };
+}
+
+function runtimeEvidence(
+  result: Record<string, unknown>,
+  overrides: { ok?: boolean; serverIdentity?: unknown } = {},
+): DaemonHealthEvidence {
+  return {
+    ok: overrides.ok ?? true,
+    serverIdentity: overrides.serverIdentity ?? buildIdentity(),
+    result: { ok: overrides.ok ?? true, ...result },
+  };
+}
+
+function localRuntimeFacts(readyList: string[]): LocalRuntimeFact[] {
+  return (["claude-code", "grok-build"] as const).map((name) => ({
+    name,
+    ok: readyList.includes(name),
+  }));
+}
+
+test("exact-build Daemon runtime facts override contradictory local PATH without mixing", () => {
+  const facts = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence(runtimeHealthResult(["claude-code", "grok-build"])),
+    // Caller shell PATH reports both runtimes unavailable.
+    localRuntimes: localRuntimeFacts([]),
+  });
+  assert.equal(facts.source, "daemon");
+  assert.equal(facts.sourceDetail, "build-matched daemon");
+  assert.equal(facts.runtimes["claude-code"]?.ok, true);
+  assert.equal(facts.runtimes["grok-build"]?.ok, true);
+});
+
+test("exact-build Daemon runtime unavailability wins over a local ready doctor", () => {
+  const facts = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence(runtimeHealthResult(["claude-code"])),
+    localRuntimes: localRuntimeFacts(["claude-code", "grok-build"]),
+  });
+  assert.equal(facts.source, "daemon");
+  assert.equal(facts.runtimes["claude-code"]?.ok, true);
+  assert.equal(facts.runtimes["grok-build"]?.ok, false);
+});
+
+test("absent Daemon falls back to the complete local runtime snapshot", () => {
+  const facts = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    localRuntimes: localRuntimeFacts(["claude-code"]),
+  });
+  assert.equal(facts.source, "local-fallback");
+  assert.equal(facts.sourceDetail, "daemon unavailable");
+  assert.equal(facts.runtimes["claude-code"]?.ok, true);
+  assert.equal(facts.runtimes["grok-build"]?.ok, false);
+});
+
+test("Daemon build or protocol mismatch falls back to local with bounded reason", () => {
+  const buildMismatch = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence(runtimeHealthResult(["claude-code", "grok-build"]), {
+      serverIdentity: buildIdentity({ buildId: "other" }),
+    }),
+    localRuntimes: localRuntimeFacts(["claude-code"]),
+  });
+  assert.equal(buildMismatch.source, "local-fallback");
+  assert.equal(buildMismatch.sourceDetail, "daemon build mismatch");
+
+  const protocolMismatch = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence(runtimeHealthResult([]), {
+      serverIdentity: buildIdentity({ protocolVersion: 999 }),
+    }),
+    localRuntimes: localRuntimeFacts([]),
+  });
+  assert.equal(protocolMismatch.sourceDetail, "daemon protocol mismatch");
+});
+
+test("unreadable Daemon identity or not-ok response falls back to local", () => {
+  const badId = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence(runtimeHealthResult([]), { serverIdentity: {} }),
+    localRuntimes: localRuntimeFacts(["grok-build"]),
+  });
+  assert.equal(badId.sourceDetail, "unreadable daemon identity");
+
+  const notOk = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence(runtimeHealthResult([]), { ok: false }),
+    localRuntimes: localRuntimeFacts(["grok-build"]),
+  });
+  assert.equal(notOk.sourceDetail, "daemon unavailable");
+});
+
+test("malformed Daemon runtime evidence falls back to the complete local snapshot, never mixing", () => {
+  // A supported runtime is missing entirely from the daemon runtimes payload.
+  const missing = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence({ runtimes: { "claude-code": { ok: true } } }),
+    localRuntimes: localRuntimeFacts([]),
+  });
+  assert.equal(missing.source, "local-fallback");
+  assert.equal(missing.sourceDetail, "malformed daemon evidence");
+  assert.equal(missing.runtimes["claude-code"]?.ok, false, "complete local snapshot wins, not partial daemon");
+  assert.equal(missing.runtimes["grok-build"]?.ok, false);
+
+  // A supported runtime carries a non-boolean ok flag.
+  const badType = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence({
+      runtimes: { "claude-code": { ok: "yes" }, "grok-build": { ok: true } },
+    }),
+    localRuntimes: localRuntimeFacts(["claude-code", "grok-build"]),
+  });
+  assert.equal(badType.sourceDetail, "malformed daemon evidence");
+  assert.equal(badType.runtimes["claude-code"]?.ok, true, "local snapshot wins as a whole");
+  assert.equal(badType.runtimes["grok-build"]?.ok, true);
+
+  // runtimes is not an object.
+  const notObject = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: {
+      ok: true,
+      serverIdentity: buildIdentity(),
+      result: { ok: true, runtimes: "garbage" },
+    },
+    localRuntimes: localRuntimeFacts(["claude-code"]),
+  });
+  assert.equal(notObject.sourceDetail, "malformed daemon evidence");
+});
+
+test("runtime display projects daemon ok while hiding caller-PATH diagnostics", () => {
+  const daemonFacts = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence(runtimeHealthResult(["claude-code", "grok-build"])),
+    localRuntimes: localRuntimeFacts([]),
+  });
+  const display = projectExecutionRuntimeDisplay(daemonFacts, {
+    "claude-code": { displayName: "Claude Code", executable: "claude", version: "1.0", issues: ["claude executable not found"] },
+    "grok-build": { displayName: "Grok Build", executable: "grok", issues: ["grok not found"] },
+  });
+  assert.equal(display["claude-code"]?.ok, true);
+  assert.equal(display["claude-code"]?.displayName, "Claude Code");
+  assert.equal(display["claude-code"]?.issues, undefined, "caller-PATH issues are not surfaced for daemon truth");
+  assert.equal(display["claude-code"]?.version, undefined);
+
+  const localFacts = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    localRuntimes: localRuntimeFacts(["claude-code"]),
+  });
+  const localDisplay = projectExecutionRuntimeDisplay(localFacts, {
+    "claude-code": { displayName: "Claude Code", executable: "claude", version: "1.0", issues: ["claude executable not found"] },
+    "grok-build": { displayName: "Grok Build", executable: "grok", issues: ["grok not found"] },
+  });
+  assert.equal(localDisplay["claude-code"]?.issues?.length, 1, "local fallback keeps caller diagnostics");
+  assert.equal(localDisplay["claude-code"]?.version, "1.0");
+  assert.equal(localDisplay["grok-build"]?.ok, false);
+});
+
+test("runtime resolver is pure and never mutates its input", () => {
+  const input = {
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: runtimeEvidence(runtimeHealthResult(["claude-code", "grok-build"])),
+    localRuntimes: localRuntimeFacts([]),
+  };
+  const frozen = structuredClone(input);
+  const first = resolveExecutionRuntimeFacts(input);
+  const second = resolveExecutionRuntimeFacts(input);
+  assert.deepEqual(second, first);
+  assert.deepEqual(input, frozen);
+});
+
+// ── CLI header ok/claudeCode projection ─────────────────────────────
+
+function claudeEvidence(claudeCode: string): DaemonHealthEvidence {
+  return {
+    ok: true,
+    serverIdentity: buildIdentity(),
+    result: {
+      ok: true,
+      claudeCode,
+      runtimes: runtimeHealthResult(["claude-code", "grok-build"]).runtimes,
+    },
+  };
+}
+
+test("CLI ok/claudeCode follow the exact-build Daemon when it is the runtime authority", () => {
+  const ev = claudeEvidence("1.0.0");
+  const facts = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: ev,
+    // Caller shell PATH cannot find claude at all.
+    localRuntimes: localRuntimeFacts([]),
+  });
+  assert.equal(facts.source, "daemon");
+  const header = projectExecutionClaudeOk(
+    facts,
+    ev,
+    true,
+    { ok: false, claudeCode: "unavailable" },
+  );
+  assert.deepEqual(header, { ok: true, claudeCode: "1.0.0" });
+});
+
+test("CLI ok/claudeCode report daemon-side unavailability when the Daemon cannot find claude", () => {
+  const ev = claudeEvidence("unavailable");
+  const facts = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: ev,
+    localRuntimes: localRuntimeFacts(["claude-code", "grok-build"]),
+  });
+  assert.equal(facts.source, "daemon");
+  const header = projectExecutionClaudeOk(
+    facts,
+    ev,
+    true,
+    { ok: true, claudeCode: "1.0.0" },
+  );
+  assert.deepEqual(header, { ok: false, claudeCode: "unavailable" });
+});
+
+test("CLI ok/claudeCode preserve the local caller snapshot on local fallback", () => {
+  const facts = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    localRuntimes: localRuntimeFacts(["claude-code"]),
+  });
+  assert.equal(facts.source, "local-fallback");
+  const header = projectExecutionClaudeOk(
+    facts,
+    { ok: true, serverIdentity: buildIdentity(), result: { ok: true, claudeCode: "2.0.0" } },
+    false,
+    { ok: true, claudeCode: "1.0.0" },
+  );
+  assert.deepEqual(header, { ok: true, claudeCode: "1.0.0" });
+});
+
+test("CLI ok/claudeCode stay bounded when Daemon claudeCode is absent or non-string", () => {
+  const ev: DaemonHealthEvidence = {
+    ok: true,
+    serverIdentity: buildIdentity(),
+    result: {
+      ok: true,
+      runtimes: runtimeHealthResult(["claude-code", "grok-build"]).runtimes,
+    },
+  };
+  const facts = resolveExecutionRuntimeFacts({
+    clientBuildIdentity: buildIdentity(),
+    daemonEvidence: ev,
+    localRuntimes: localRuntimeFacts([]),
+  });
+  assert.equal(facts.source, "daemon");
+  const header = projectExecutionClaudeOk(
+    facts,
+    ev,
+    true,
+    { ok: true, claudeCode: "caller-version" },
+  );
+  assert.deepEqual(header, { ok: false, claudeCode: "unavailable" });
 });

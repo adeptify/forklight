@@ -157,6 +157,38 @@ async function makeOpsHub(options: { guidedSample?: boolean } = {}) {
             integrationMaxLines: 1000,
             issues: [],
           },
+          classificationAdvice: {
+            taskClass: { state: "new", terminalCount: 0, completeSelectionCount: 0 },
+            taskFamily: { state: "missing", terminalCount: 0, completeSelectionCount: 0 },
+            familyChoices: [
+              { family: "refactor", terminalCount: 2, completeSelectionCount: 1, distinctClassCount: 2 },
+            ],
+            nextAction: "add-family",
+          },
+          routingExplanation: {
+            present: false,
+            selectedWorker: {
+              provider: "xai",
+              model: "grok-4.5",
+              runtime: "grok-build",
+              effort: "high",
+              workerProfileId: previewWorkerId,
+              workerProfileLabel: previewWorkerLabel,
+            },
+            shortlistSize: null,
+            basis: null,
+            evidence: null,
+            competition: null,
+            nextAction: "not-recorded",
+          },
+          workspaceBoundaryAdvice: {
+            status: "review",
+            ignoredDirectoryRootCount: 2,
+            coveredCount: 1,
+            visibleBusinessCount: 1,
+            reason: "checked",
+            nextAction: "review-workspace-boundaries",
+          },
           previewRevisionDigest: "0".repeat(64),
         } as T;
       }
@@ -171,6 +203,83 @@ async function makeOpsHub(options: { guidedSample?: boolean } = {}) {
           throw new Error("Task preview is out of date; preview again before submitting.");
         }
         return { id: "task-sub-1", name: "Test Task", status: "queued" } as T;
+      }
+      if (method === "reuse_task_class") {
+        if (params.confirm !== true) throw new Error("reuse_task_class requires confirm: true");
+        if (typeof params.taskFile !== "string" || !params.taskFile) {
+          throw new Error("taskFile is required");
+        }
+        const digest = typeof params.expectedPreviewRevisionDigest === "string"
+          ? params.expectedPreviewRevisionDigest
+          : "";
+        if (digest !== "0".repeat(64)) {
+          throw new Error("Task preview is out of date; preview again before applying.");
+        }
+        if (typeof params.taskClass !== "string" || !params.taskClass) {
+          throw new Error("taskClass is required");
+        }
+        return {
+          taskName: "Preview Task",
+          workerProfileId: "local-grok-builder",
+          workerProfileLabel: "Local Grok Builder",
+          provider: "xai",
+          model: "grok-4.5",
+          runtime: "grok-build",
+          effort: "high",
+          budget: { maxBudgetUsd: 1.25, unlimited: false },
+          effectivePolicy: {
+            profileId: "local-grok-builder",
+            values: { baseMaxAttempts: 6, maxExtraAttempts: 1, maxConcurrency: 1 },
+            provenance: { baseMaxAttempts: "worker" },
+            enforcementCapability: {
+              durationEnforcement: "preemptive",
+              tokenEnforcement: "post-observation",
+              progressWatchdog: "live",
+            },
+          },
+          quality: { passed: true, score: 80, checks: [], issues: [], warnings: [] },
+          integration: {
+            applicable: true,
+            integratable: true,
+            taskMaxFiles: 4,
+            taskMaxLines: 100,
+            integrationMaxFiles: 100,
+            integrationMaxLines: 1000,
+            issues: [],
+          },
+          classificationAdvice: {
+            taskClass: { state: "existing", terminalCount: 1, completeSelectionCount: 1 },
+            taskFamily: { state: "existing", terminalCount: 2, completeSelectionCount: 1 },
+            familyChoices: [],
+            classChoices: [],
+            nextAction: "reuse-classification",
+          },
+          routingExplanation: {
+            present: false,
+            selectedWorker: {
+              provider: "xai",
+              model: "grok-4.5",
+              runtime: "grok-build",
+              effort: "high",
+              workerProfileId: "local-grok-builder",
+              workerProfileLabel: "Local Grok Builder",
+            },
+            shortlistSize: null,
+            basis: null,
+            evidence: null,
+            competition: null,
+            nextAction: "not-recorded",
+          },
+          workspaceBoundaryAdvice: {
+            status: "clear",
+            ignoredDirectoryRootCount: 1,
+            coveredCount: 1,
+            visibleBusinessCount: 0,
+            reason: "checked",
+            nextAction: "continue",
+          },
+          previewRevisionDigest: "1".repeat(64),
+        } as T;
       }
       if (method === "resume") return { id: params.taskId, status: "queued" } as T;
       if (method === "revise") return { id: params.taskId, status: "queued" } as T;
@@ -1146,6 +1255,128 @@ test("model_routing bridge returns the canonical advisory when daemon succeeds",
   }
 });
 
+test("model_routing bridge forwards saved Worker Profile ids and preserves identity", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-mr-bridge-profile-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
+      calls.push({ method, params });
+      if (method === "model_routing") {
+        return {
+          taskClass: params.taskClass,
+          candidates: [
+            {
+              provider: "deepseek", model: "deepseek-v4-flash", runtime: "claude-code",
+              effort: "high", workerProfileId: "deepseek-primary", workerLabel: "DeepSeek Primary",
+              eligible: true,
+              evidence: { provider: "deepseek", model: "deepseek-v4-flash", relevantSampleCount: 10, acceptedDeliveryRate: 0.8 },
+              factors: [{ factor: "acceptedDelivery", weight: 1, available: true, normalizedScore: 0.8, weightedScore: 0.8 }],
+              totalScore: 0.8,
+              uncertainty: { insufficientSamples: false, insufficientGap: false, incompatibleCost: false, incompatibleCurrency: false, reasons: [] },
+            },
+            {
+              provider: "qwen", model: "qwen3.7-plus", runtime: "claude-code",
+              effort: "medium", workerProfileId: "qwen-secondary", workerLabel: "Qwen Secondary",
+              eligible: true,
+              evidence: { provider: "qwen", model: "qwen3.7-plus", relevantSampleCount: 10, acceptedDeliveryRate: 0.6 },
+              factors: [{ factor: "acceptedDelivery", weight: 1, available: true, normalizedScore: 0.6, weightedScore: 0.6 }],
+              totalScore: 0.6,
+              uncertainty: { insufficientSamples: false, insufficientGap: false, incompatibleCost: false, incompatibleCurrency: false, reasons: [] },
+            },
+          ],
+          recommendation: {
+            provider: "deepseek", model: "deepseek-v4-flash", confidence: 0.2,
+            reasoning: "clear-score-gap:0.2000",
+            workerProfileId: "deepseek-primary", workerLabel: "DeepSeek Primary",
+          },
+          shouldRunCompetition: false,
+          resolvedPolicy: { minRelevantSamples: 5, uncertaintyThreshold: 0.15, competitionOnUncertainty: true, weights: { acceptedDelivery: 1 } },
+        } as T;
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(`http://127.0.0.1:${port}/api/ops/model-routing`, "POST", server.getToken(), {
+      taskClass: "write-tests",
+      workerProfileIds: ["deepseek-primary", "qwen-secondary"],
+    });
+    assert.equal(res.status, 200);
+    const body = res.body as { ok: boolean; advisory: Record<string, unknown> };
+    const forwarded = calls.find((c) => c.method === "model_routing")!;
+    assert.deepEqual(forwarded.params.workerProfileIds, ["deepseek-primary", "qwen-secondary"]);
+    assert.equal(forwarded.params.candidates, undefined);
+    const cands = body.advisory.candidates as Array<Record<string, unknown>>;
+    assert.equal(cands.length, 2);
+    const deepseek = cands.find((c) => c.workerProfileId === "deepseek-primary")!;
+    assert.equal(deepseek.workerLabel, "DeepSeek Primary");
+    const rec = body.advisory.recommendation as Record<string, unknown>;
+    assert.equal(rec.workerProfileId, "deepseek-primary");
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("model_routing bridge rejects mixed inputs and duplicate profile ids before daemon call", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const before = ctx.calls.length;
+    // Mixed candidates + workerProfileIds
+    const mixed = await doHttp(`${ctx.base}/api/ops/model-routing`, "POST", ctx.token, {
+      taskClass: "t",
+      candidates: [{ provider: "deepseek", model: "v4" }, { provider: "qwen", model: "plus" }],
+      workerProfileIds: ["a", "b"],
+    });
+    assert.equal(mixed.status, 422);
+    assert.match(JSON.stringify(mixed.body), /exactly one of candidates or workerProfileIds/i);
+    // Neither candidates nor workerProfileIds
+    const neither = await doHttp(`${ctx.base}/api/ops/model-routing`, "POST", ctx.token, {
+      taskClass: "t",
+    });
+    assert.equal(neither.status, 422);
+    // Too few profile ids
+    const few = await doHttp(`${ctx.base}/api/ops/model-routing`, "POST", ctx.token, {
+      taskClass: "t",
+      workerProfileIds: ["a"],
+    });
+    assert.equal(few.status, 422);
+    // Duplicate profile ids
+    const dup = await doHttp(`${ctx.base}/api/ops/model-routing`, "POST", ctx.token, {
+      taskClass: "t",
+      workerProfileIds: ["a", "a"],
+    });
+    assert.equal(dup.status, 422);
+    assert.match(JSON.stringify(dup.body), /duplicate/i);
+    // Malformed profile id
+    const malformed = await doHttp(`${ctx.base}/api/ops/model-routing`, "POST", ctx.token, {
+      taskClass: "t",
+      workerProfileIds: ["a", 42 as unknown as string],
+    });
+    assert.equal(malformed.status, 422);
+    // No daemon call on any validation failure
+    assert.equal(ctx.calls.length, before, "no daemon call on profile validation failure");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test("resume and revise call daemon with correct methods", async () => {
   const ctx = await makeOpsHub();
   try {
@@ -1683,11 +1914,182 @@ test("task preview route is read-only: calls validate_file and never submit_file
     assert.equal(body.preview.provider, "xai");
     assert.equal(body.preview.model, "grok-4.5");
     assert.equal(body.preview.previewRevisionDigest, "0".repeat(64));
+    // Hub consumes the safe classification advisory projection unchanged.
+    const advice = body.preview.classificationAdvice as Record<string, unknown>;
+    assert.ok(advice, "classificationAdvice passes through the safe preview");
+    assert.equal((advice.taskClass as Record<string, unknown>).state, "new");
+    assert.equal(advice.nextAction, "add-family");
+    // Hub consumes the safe routing explanation projection unchanged.
+    const routing = body.preview.routingExplanation as Record<string, unknown>;
+    assert.ok(routing, "routingExplanation passes through the safe preview");
+    assert.equal(routing.present, false);
+    assert.equal(routing.nextAction, "not-recorded");
+    assert.equal(
+      (routing.selectedWorker as Record<string, unknown>).workerProfileId,
+      "local-grok-builder",
+    );
+    // Hub consumes the canonical workspace-boundary advice unchanged.
+    const boundary = body.preview.workspaceBoundaryAdvice as Record<string, unknown>;
+    assert.ok(boundary, "workspaceBoundaryAdvice passes through the safe preview");
+    assert.equal(boundary.status, "review");
+    assert.equal(boundary.ignoredDirectoryRootCount, 2);
+    assert.equal(boundary.coveredCount, 1);
+    assert.equal(boundary.visibleBusinessCount, 1);
+    assert.equal(boundary.reason, "checked");
+    assert.equal(boundary.nextAction, "review-workspace-boundaries");
     assert.ok(ctx.calls.some((c) => c.method === "validate_file"));
     // Preview never calls submit_file and never asks for confirm.
     assert.ok(!ctx.calls.slice(before).some((c) => c.method === "submit_file"));
   } finally {
     await ctx.cleanup();
+  }
+});
+
+// --- preview-bound draft classification reuse route ---
+
+test("reuse-class route applies one listed class and returns the fresh preview without submitting", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const res = await doHttp(
+      `${ctx.base}/api/ops/tasks/reuse-class`,
+      "POST",
+      ctx.token,
+      {
+        filePath: "/tmp/task.yaml",
+        previewRevisionDigest: "0".repeat(64),
+        taskClass: "migration",
+        confirm: true,
+      },
+    );
+    assert.equal(res.status, 200);
+    const body = res.body as { ok: boolean; action: string; preview: Record<string, unknown> };
+    assert.equal(body.ok, true);
+    assert.equal(body.action, "reuse_task_class");
+    assert.equal(body.preview.previewRevisionDigest, "1".repeat(64));
+    const advice = body.preview.classificationAdvice as Record<string, unknown>;
+    assert.equal((advice.taskClass as Record<string, unknown>).state, "existing");
+    // Only reuse_task_class was called; never submit_file and never a Worker.
+    const call = ctx.calls.find((c) => c.method === "reuse_task_class");
+    assert.ok(call, "reuse_task_class called");
+    assert.equal(call!.params.taskFile, "/tmp/task.yaml");
+    assert.equal(call!.params.expectedPreviewRevisionDigest, "0".repeat(64));
+    assert.equal(call!.params.taskClass, "migration");
+    assert.equal(call!.params.confirm, true);
+    assert.ok(!ctx.calls.some((c) => c.method === "submit_file"));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("reuse-class route requires confirm, path, digest, and class before any daemon call", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const before = ctx.calls.length;
+    const noConfirm = await doHttp(
+      `${ctx.base}/api/ops/tasks/reuse-class`,
+      "POST",
+      ctx.token,
+      { filePath: "/tmp/task.yaml", previewRevisionDigest: "0".repeat(64), taskClass: "migration" },
+    );
+    assert.equal(noConfirm.status, 422);
+
+    const relative = await doHttp(
+      `${ctx.base}/api/ops/tasks/reuse-class`,
+      "POST",
+      ctx.token,
+      { filePath: "relative/task.yaml", previewRevisionDigest: "0".repeat(64), taskClass: "migration", confirm: true },
+    );
+    assert.equal(relative.status, 422);
+
+    const noDigest = await doHttp(
+      `${ctx.base}/api/ops/tasks/reuse-class`,
+      "POST",
+      ctx.token,
+      { filePath: "/tmp/task.yaml", taskClass: "migration", confirm: true },
+    );
+    assert.equal(noDigest.status, 422);
+
+    const noClass = await doHttp(
+      `${ctx.base}/api/ops/tasks/reuse-class`,
+      "POST",
+      ctx.token,
+      { filePath: "/tmp/task.yaml", previewRevisionDigest: "0".repeat(64), confirm: true },
+    );
+    assert.equal(noClass.status, 422);
+    assert.equal(ctx.calls.length, before, "no daemon call on any validation failure");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("reuse-class route stale digest returns a preview-again instruction and never echoes daemon text", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const res = await doHttp(
+      `${ctx.base}/api/ops/tasks/reuse-class`,
+      "POST",
+      ctx.token,
+      {
+        filePath: "/tmp/task.yaml",
+        previewRevisionDigest: "1".repeat(64),
+        taskClass: "migration",
+        confirm: true,
+      },
+    );
+    assert.equal(res.status, 422);
+    const body = res.body as { error?: string };
+    assert.match(String(body.error), /out of date.*preview again/i);
+    const json = JSON.stringify(body);
+    assert.ok(!json.includes("/tmp/task.yaml"), "path not echoed");
+    assert.ok(!json.includes("Task preview is out of date; preview again before applying."), "raw daemon reason not echoed");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("reuse-class route daemon rejection returns a fixed bounded message without leaking diagnostics", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-reuse-err-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const setup = new SetupService(settings, new MemoryKeychain(), inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain: new MemoryKeychain(),
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, _params: Record<string, unknown> = {}) => {
+      if (method === "reuse_task_class") {
+        throw new Error("reuse_task_class requires an exact current classChoice - /tmp/bad.yaml - secretValue");
+      }
+      return {} as T;
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/reuse-class`,
+      "POST",
+      server.getToken(),
+      { filePath: "/tmp/bad.yaml", previewRevisionDigest: "0".repeat(64), taskClass: "migration", confirm: true },
+    );
+    assert.equal(res.status, 422);
+    const body = res.body as { error?: string };
+    assert.ok(typeof body.error === "string" && /preview again/i.test(body.error));
+    const json = JSON.stringify(body);
+    assert.ok(!json.includes("secretValue"), "no raw secret");
+    assert.ok(!json.includes("/tmp/bad.yaml"), "no raw path");
+    assert.ok(!json.includes("exact current classChoice"), "no raw daemon reason");
+  } finally {
+    await server.stop();
+    store.close();
   }
 });
 

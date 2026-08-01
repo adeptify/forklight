@@ -1,0 +1,198 @@
+version: 2
+name: Explain why an accepted Candidate cannot apply to current source
+project: ../..
+taskClass: m3-integration-preflight-applicability-explanation
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: volcengine-glm52-1m
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: volcengine
+    model: glm-5.2[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: volcengine-glm52-1m
+  selectedBecause:
+    code: main-judgment
+    note: This is a real bounded cross-layer explanation task. GLM is launchable and has already delivered ForkLight work, while this family lacks a second evidence-ready identity. Main selects GLM to produce user value and naturally diversify evidence, not because history proves it is superior.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Integration Preflight explains a real patch applicability rejection as what
+    happened, what it may mean, and what Main should do next, while retaining
+    raw diagnostics only as bounded technical evidence.
+  presentation:
+    summary: 补丁无法安全应用时，先讲清发生了什么和下一步，再把原始诊断放进技术详情。
+    language: zh-CN
+  context:
+    - The aligned source is docs/m3-integration-preflight-applicability-explanation-contract.md.
+    - Inspect src/core/integration.ts, Integration receipt types, CLI preflight formatting, and Hub preflight rendering before editing.
+    - Current Core appends raw git apply output to rejectionReasons and Hub renders that text as the primary reason.
+    - Existing path-classification and size-recovery guidance are canonical and must not be recomputed or disturbed.
+    - Preserve the current dirty worktree; change only files required by this contract.
+  inScope:
+    - Add one closed privacy-safe patch-not-applicable issue to the canonical Integration receipt.
+    - Emit it only from a non-zero real git apply dry-run and project the exact issue into the durable preflight event.
+    - Keep legacy rejectionReasons and JSON output compatible.
+    - Make CLI human output lead with a plain explanation and retain technical rejection evidence after it.
+    - Make Hub show what happened, uncertain meaning, and next safe action before collapsed technical details in Chinese and English.
+    - Add focused regression tests for the Core, event, CLI, Hub, privacy, and legacy behavior.
+  outOfScope:
+    - Do not parse stderr to infer a specific conflict, automatically retry, launch a Worker, change source, mutate the Task, alter policy, raise limits, apply Integration, or add a new action button.
+    - Do not change existing size guidance, path classification, delivery stages, patch formats, source-drift checks, or Integration authorization.
+    - Do not expose raw diagnostics, absolute paths, commands, diffs, prompts, credentials, or logs in the structured issue.
+    - Do not redesign Task Detail or add a second preflight endpoint.
+    - Do not touch other repositories, Elsewhere, Client-Core, client-app-adeptify, SDK release paths, commit, or push.
+  executionSteps:
+    - Freeze a failing dry-run fixture and other-rejection negative fixtures before changing production behavior.
+    - Add the closed issue to the canonical receipt and event without changing rejection authority.
+    - Update the existing CLI formatter and Hub renderer to consume the canonical issue.
+    - Keep raw rejection text in technical evidence and verify both languages independently.
+    - Run focused tests once, repair only Candidate-caused failures, then run full tests, build, Hub syntax, and diff hygiene once.
+  deliverables:
+    - Canonical privacy-safe applicability issue in receipt and event.
+    - Plain CLI explanation with compatible technical evidence.
+    - Bilingual Hub explanation-first rendering with legacy fallback.
+    - Focused regression coverage for semantics, privacy, and non-mutation.
+  modules:
+    - name: Integration applicability diagnosis
+      responsibility: Record the known failure stage without guessing the underlying git conflict.
+      consumes:
+        - Exit status from the existing real git apply dry-run.
+      produces:
+        - A closed patch-not-applicable issue plus unchanged audit rejectionReasons.
+      boundaries:
+        - No diagnostic parsing, source mutation, retry, or authorization change.
+    - name: CLI preflight explanation
+      responsibility: Explain the canonical issue before raw technical evidence.
+      consumes:
+        - Integration receipt issues and legacy rejectionReasons.
+      produces:
+        - Stable human-readable lines and unchanged JSON receipt output.
+      boundaries:
+        - No recomputation or action execution.
+    - name: Hub preflight explanation
+      responsibility: Present what happened, possible meaning, and next action in both languages.
+      consumes:
+        - The canonical issue and existing preflight receipt facts.
+      produces:
+        - Explanation-first UI and collapsed technical diagnostics.
+      boundaries:
+        - No raw diagnostic in primary copy and no new mutation control.
+  callChain:
+    - Main requests Integration Preflight for an accepted Candidate.
+    - Core runs the existing dry-run applicability check against current source.
+    - A non-zero exit rejects the receipt and records one closed applicability issue.
+    - Daemon, CLI JSON, and Hub receive the same persisted issue.
+    - CLI and Hub explain it; Main decides how to reconcile source and whether to run Preflight again.
+  scenarios:
+    - name: Current source no longer accepts patch
+      given: A real accepted Candidate and a patch that fails git apply check against current source.
+      when: Main runs Integration Preflight.
+      then: Source remains unchanged and the receipt carries a privacy-safe patch-not-applicable issue.
+    - name: Primary explanation is cautious
+      given: The issue exists with raw git diagnostics in rejectionReasons.
+      when: CLI or Hub renders the result.
+      then: The user sees what happened, possible source drift or conflict, and a safe next action before collapsed diagnostics.
+    - name: Unrelated rejection
+      given: Preflight rejects before a failing applicability check for another reason.
+      when: The receipt is rendered.
+      then: No applicability issue or invented cause appears.
+    - name: Legacy receipt
+      given: A stored receipt without structured issues.
+      when: CLI or Hub renders it.
+      then: Existing readable fallback remains available without throwing.
+  risks:
+    - Parsing git text would turn a heuristic into false certainty; the issue must name only the known stage.
+    - Showing raw stderr first would keep the existing comprehension problem; technical evidence must remain secondary.
+    - A new recovery button could mutate or retry unexpectedly; this slice provides explanation only.
+    - Replacing rejectionReasons would break durable audit and older clients; keep them compatible.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 1000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 8
+  fileLimitMode: warn
+  changedLineLimit: 1000
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/integration.ts
+    - src/cli.ts
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/integration.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - A real non-zero git apply dry-run produces exactly one canonical privacy-safe patch-not-applicable issue without mutating source.
+    - The structured issue contains no raw diagnostic, path, command, diff, prompt, credential, or log and is copied unchanged into the durable event.
+    - CLI and Hub show what happened, uncertain meaning, and next action before technical evidence; Chinese and English are independently readable.
+    - Other rejection types and legacy receipts do not fabricate the issue and keep working.
+    - Existing Integration authorization, path classification, size guidance, delivery plan, and rejectionReasons remain compatible.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts tests/daemon-cli.test.ts tests/hub-ui-assets.test.ts
+    - npm test
+    - npm run build
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

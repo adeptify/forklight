@@ -2504,6 +2504,133 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   .preview-table td:nth-child(2) { display: none; }
 }
 
+/* ── Task submit preview information hierarchy ──
+ * Presentation-only grouping of the existing safe admission preview. Scoped
+ * to .submit-preview-facts so unrelated preview panels keep their look.
+ * One reading path: what will run → why this Worker → execution boundaries →
+ * classification and next step; the technical digest stays collapsed. */
+.submit-preview-facts {
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+.submit-preview-facts .submit-group {
+  min-width: 0;
+  max-width: 100%;
+  border-top: var(--border);
+  padding-top: var(--gap-sm);
+}
+.submit-preview-facts .submit-group:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.submit-preview-facts .submit-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0 0 var(--gap-sm);
+}
+.submit-preview-facts .submit-fact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 3px;
+}
+.submit-preview-facts .fact-label {
+  flex: 0 0 auto;
+  font-weight: 650;
+  color: var(--ink);
+}
+.submit-preview-facts .fact-val {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: var(--ink);
+}
+.submit-preview-facts .submit-fact-task .fact-label,
+.submit-preview-facts .submit-fact-task .fact-val {
+  font-size: 14px;
+}
+.submit-preview-facts .submit-fact-task .fact-val {
+  font-weight: 700;
+}
+/* Boundaries read as a compact two-column grid on wide screens and stack in
+ * DOM order on narrow ones. */
+.submit-group-boundaries {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px var(--gap);
+}
+.submit-group-boundaries .submit-group-title {
+  grid-column: 1 / -1;
+  margin-bottom: 2px;
+}
+.submit-group-boundaries .submit-fact {
+  margin-top: 0;
+}
+.submit-preview-facts .submit-next-label {
+  display: block;
+  margin-top: var(--gap-sm);
+  font-weight: 700;
+  color: var(--ink);
+}
+.submit-preview-facts .submit-next-action {
+  margin-top: 2px;
+  color: var(--hi2);
+  font-weight: 650;
+}
+/* Family candidate disclosure stays native, keyboard-focusable and scoped to
+ * the classification group; it inherits the audit-details focus treatment. */
+.submit-group-classify .audit-details {
+  margin-top: var(--gap-sm);
+}
+.submit-family-list {
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 2px;
+}
+/* Per-choice draft-only class reuse rows stay compact, wrap on narrow screens
+ * and never overflow horizontally. The action button is a normal .btn.sm so
+ * it inherits the Hub's focus and disabled treatment. */
+.reuse-class-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding-top: 2px;
+}
+.reuse-class-name {
+  min-width: 0;
+  flex: 1 1 220px;
+}
+.reuse-class-btn {
+  flex: 0 0 auto;
+}
+.submit-preview-facts > .audit-details {
+  margin-top: var(--gap-sm);
+}
+@media (max-width: 768px) {
+  .submit-group-boundaries {
+    grid-template-columns: 1fr;
+  }
+  .submit-group-boundaries .submit-group-title {
+    grid-column: 1;
+  }
+}
+
 /* ── Adaptation panel (Hub Task detail) ──
  * Root cause of one-glyph-per-line: .form-card input { width:100% } stretched
  * checkboxes inside a 2-column grid, leaving ~0px for label text.
@@ -2789,6 +2916,14 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   font-weight: 700;
   color: var(--ink);
   margin-bottom: 4px;
+}
+.mr-subset-warning {
+  border-left: 1px solid var(--yellow);
+  padding-left: 8px;
+}
+.mr-excluded-badge {
+  display: inline-block;
+  margin-left: 8px;
 }
 .mr-conclusion-provider {
   font-family: var(--mono);

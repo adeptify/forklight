@@ -1,0 +1,185 @@
+version: 2
+name: Keep excluded verifier output out of raw Candidate diff
+project: ../..
+taskClass: m3-snapshot-exclude-diff-bounding
+taskFamily: workspace-isolation
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: workspace-isolation
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: main-judgment
+    note: A real Nexus Task is currently blocked by a multi-gigabyte excluded Rust target entering raw diff; Grok is the available independent runtime and will run only after the existing shared queue releases.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+
+contract:
+  outcome: >-
+    Snapshot-excluded directories are atomically removed from both comparison
+    trees before raw Git diff and restored afterward, so verifier build output
+    cannot inflate Candidate artifacts or hold the shared Daemon queue.
+  presentation:
+    summary: 验收生成的 target、node_modules 等排除目录不再被先做成巨型补丁，任务能正常收尾。
+    language: zh-CN
+  context:
+    - The authoritative contract is docs/m3-snapshot-exclude-diff-bounding-contract.md; implement its narrow pre-comparison boundary.
+    - Nexus Task f375d98d-3b1e-4a2a-99aa-d9f03d7f2a21 created about 2.9 GiB under nested src-tauri/target during Rust verification even though target was in workspace.exclude.
+    - Current patch.ts stashes only top-level runtime dependency mirrors, then streams the full no-index diff to raw and generated artifacts before PathPolicy classification can discard excluded content from Integration.
+    - Existing exact named-segment semantics live in PathPolicy; reuse them and do not invent substring or Git-ignore behavior.
+    - Main owns review and runtime activation. Do not restart or interrupt Daemon, touch Nexus/Adeptify/Flyleaf, delete retained workspaces, commit, or push.
+  inScope:
+    - Discover snapshot-excluded roots at any depth under baseline and workspace without following symlinks.
+    - Atomically stash each outermost excluded root under the owned Task root before spawning git diff.
+    - Restore every stashed root in finally on success and failure, preserving retained-workspace inspection.
+    - Keep included generatedPaths classification and existing business/Integration patch semantics unchanged.
+    - Change the old full-audit meaning so snapshot-excluded trees do not enter raw or generated patch payloads.
+    - Add nested target, multiple root, exact-segment, generatedPaths regression, symlink and injected-failure tests.
+  outOfScope:
+    - Do not redesign all generated evidence, add archive/compression, inspect real Nexus artifacts, or retain full excluded binary patches elsewhere.
+    - Do not change verification commands, build directories, Task policies, timeout, retry, Worker, Provider, Candidate review, Integration authorization, database or Hub.
+    - Do not modify any external project, Daemon/Hub process state, credential, commit, or push.
+  executionSteps:
+    - Freeze the nested-excluded-output failure as a small isolated fixture that proves current raw diff would see it.
+    - Generalize the existing dependency-stash lifecycle to outermost exact snapshot-excluded roots while preserving atomic rename and finally restoration.
+    - Keep included generatedPaths flowing through the existing classifier and update the obsolete full excluded-output audit assertion.
+    - Add success, injected-failure, exact-segment, nested/multiple-root and symlink regressions.
+    - Run focused tests once, repair only Candidate-caused failures, then run full acceptance once.
+  deliverables:
+    - Recursive exact snapshot-exclude stashing and restoration around raw diff.
+    - Bounded raw/generated patch artifacts for excluded verifier outputs.
+    - Non-destructive retained workspace behavior and failure recovery tests.
+    - Updated product/test semantics for excluded-output audit evidence.
+  modules:
+    - name: Excluded root stashing
+      responsibility: Find and atomically move outermost exact excluded roots out of comparison trees.
+      consumes:
+        - Task baseline/workspace roots and PathPolicy snapshotExcludes.
+      produces:
+        - Deterministic restoration records under the owned Task root.
+      boundaries:
+        - No symlink traversal, substring matching, file-body reads or external paths.
+    - name: Candidate patch stream
+      responsibility: Diff only included paths while preserving current classification for business and included generated paths.
+      consumes:
+        - Baseline/workspace with excluded roots temporarily absent.
+      produces:
+        - Raw, generated and Integration patch artifacts without excluded payloads.
+      boundaries:
+        - No change to Candidate authorization or included generatedPaths behavior.
+    - name: Restoration lifecycle
+      responsibility: Restore all stashed roots after success or failure.
+      consumes:
+        - Ordered stash records and exact original destinations.
+      produces:
+        - Retained workspace identical to its pre-diff excluded-output state.
+      boundaries:
+        - No source mutation, deletion policy, Daemon lifecycle or cross-project action.
+  callChain:
+    - Independent verification creates output inside the isolated workspace.
+    - Patch generation finds exact snapshot-excluded roots and atomically stashes them.
+    - Git diff streams only included paths into Candidate evidence.
+    - PathPolicy separates business and included generated evidence as before.
+    - Finally restoration returns excluded outputs for retained-workspace inspection.
+  scenarios:
+    - name: Nested Rust target
+      given: Verification creates a large nested target directory and target is in workspace.exclude.
+      when: Candidate patch generation begins.
+      then: Git diff never sees target, patch artifacts contain no target bytes, and target is restored unchanged.
+    - name: Multiple and nested excludes
+      given: Several exact excluded roots exist at different depths, including one below another excluded root.
+      when: Roots are stashed and restored.
+      then: Only outermost roots move once and every original location is recovered deterministically.
+    - name: Exact segment
+      given: target is excluded while targeted/file.ts is a business file.
+      when: Patch generation classifies changes.
+      then: targeted/file.ts remains in the Candidate and target content does not.
+    - name: Included generated path
+      given: An included dist file matches workspace.generatedPaths but dist is not snapshot-excluded.
+      when: Patch generation runs.
+      then: It remains generated evidence and is excluded only from Integration as before.
+    - name: Patch failure restoration
+      given: Diff generation fails after excluded roots are stashed.
+      when: The operation unwinds.
+      then: All excluded roots are restored and no partial result authorizes Integration.
+  risks:
+    - Parent-child double moves can break restoration; discover only outermost exact matches.
+    - Large directories must be renamed, never copied; keep stashes on the same Task filesystem.
+    - Old tests encode full excluded-output audit; update them explicitly to the new bounded contract.
+    - Process death between move and finally needs deterministic recovery evidence where supported without expanding this slice into a Daemon redesign.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 650
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 4
+  fileLimitMode: warn
+  changedLineLimit: 650
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 3
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workspace/patch.ts
+    - src/workspace/path-policy.ts
+    - tests/workspace.test.ts
+    - tests/integration.test.ts
+acceptance:
+  criteria:
+    - Exact snapshot-excluded roots at any depth never enter raw, generated or Integration patch payloads.
+    - Stashing uses atomic same-filesystem moves, never follows symlinks, and restores every excluded root after success or failure.
+    - Similar non-excluded names and included generatedPaths preserve their existing classification behavior.
+    - Patch artifacts remain bounded by included Candidate content rather than verifier build-output size.
+    - No external project, runtime process, credential, database, commit or push is changed.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/workspace.test.ts
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts
+    - npm test
+    - npm run build
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

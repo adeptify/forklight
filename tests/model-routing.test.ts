@@ -1542,3 +1542,799 @@ test("competition advisory fields are present and have correct types in every re
   assert.ok(typeof comp.suggestedCandidates === "number");
   assert.equal(result.shouldRunCompetition, comp.shouldRunCompetition);
 });
+
+// --- Profile identity preservation (M3 Worker Profile routing) -------------
+
+test("profile identity survives scoring and sorting on every candidate and recommendation", () => {
+  const result = provideRoutingAdvice({
+    taskClass: "coding:test",
+    candidates: [
+      {
+        provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high",
+        workerProfileId: "deepseek-primary", workerLabel: "DeepSeek Primary",
+      },
+      {
+        provider: "qwen", model: "plus", runtime: "claude-code", effort: "medium",
+        workerProfileId: "qwen-secondary", workerLabel: "Qwen Secondary",
+      },
+    ],
+    evidenceMap: new Map([
+      ["deepseek\0v4\0claude-code\0high", evidence("deepseek", "v4")],
+      ["qwen\0plus\0claude-code\0medium", evidence("qwen", "plus", {
+        modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+        correctionChurn: 8, correctionChurnRate: 0.8,
+        acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+        verifiedBehaviorCount: 2, verifiedBehaviorRate: 0.2,
+      })],
+    ]),
+    policy: DEFAULT_ROUTING_POLICY,
+  });
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.recommendation?.workerProfileId, "deepseek-primary");
+  assert.equal(result.recommendation?.workerLabel, "DeepSeek Primary");
+  const deepseek = result.candidates.find((c) => c.workerProfileId === "deepseek-primary")!;
+  assert.equal(deepseek.workerLabel, "DeepSeek Primary");
+  assert.equal(deepseek.provider, "deepseek");
+  assert.equal(deepseek.runtime, "claude-code");
+  assert.equal(deepseek.effort, "high");
+  const qwen = result.candidates.find((c) => c.workerProfileId === "qwen-secondary")!;
+  assert.equal(qwen.workerLabel, "Qwen Secondary");
+  assert.equal(qwen.workerProfileId, "qwen-secondary");
+  // The sorted top candidate carries the same Profile binding.
+  assert.equal(result.candidates[0]!.workerProfileId, "deepseek-primary");
+  assert.equal(result.candidates[0]!.workerLabel, "DeepSeek Primary");
+});
+
+test("two Profiles sharing provider/model stay two distinct candidates even with identical full identity", () => {
+  const result = provideRoutingAdvice({
+    taskClass: "coding:test",
+    candidates: [
+      {
+        provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high",
+        workerProfileId: "grok-fast", workerLabel: "Grok Fast",
+      },
+      {
+        provider: "xai", model: "grok-4.5", runtime: "grok-build", effort: "high",
+        workerProfileId: "grok-thorough", workerLabel: "Grok Thorough",
+      },
+    ],
+    evidenceMap: new Map(),
+    policy: DEFAULT_ROUTING_POLICY,
+  });
+  assert.equal(result.candidates.length, 2);
+  const ids = result.candidates.map((c) => c.workerProfileId).sort();
+  assert.deepEqual(ids, ["grok-fast", "grok-thorough"]);
+  const fast = result.candidates.find((c) => c.workerProfileId === "grok-fast")!;
+  const thorough = result.candidates.find((c) => c.workerProfileId === "grok-thorough")!;
+  assert.equal(fast.provider, "xai");
+  assert.equal(thorough.provider, "xai");
+  assert.equal(fast.model, thorough.model);
+  assert.equal(fast.runtime, thorough.runtime);
+  assert.equal(fast.effort, thorough.effort);
+  assert.equal(fast.workerLabel, "Grok Fast");
+  assert.equal(thorough.workerLabel, "Grok Thorough");
+  // No result-to-Profile binding is lost after sorting.
+  assert.ok(result.candidates.some((c) => c.workerProfileId === "grok-fast"));
+  assert.ok(result.candidates.some((c) => c.workerProfileId === "grok-thorough"));
+});
+
+test("legacy provider/model candidates never carry fabricated profile fields", () => {
+  const result = advice(evidence("deepseek", "v4"), evidence("qwen", "plus"));
+  assert.equal(result.candidates[0]!.workerProfileId, undefined);
+  assert.equal(result.candidates[0]!.workerLabel, undefined);
+  assert.equal(result.candidates[1]!.workerProfileId, undefined);
+  assert.equal(result.recommendation?.workerProfileId, undefined);
+  assert.equal(result.recommendation?.workerLabel, undefined);
+  // Recommendation-less responses also omit profile fields.
+  const unknown = advice(
+    evidence("deepseek", "v4", { relevantSampleCount: 0, terminalTaskCount: 0 }),
+    evidence("qwen", "plus", { relevantSampleCount: 0, terminalTaskCount: 0 }),
+  );
+  assert.equal(unknown.recommendation, undefined);
+  assert.equal(unknown.candidates[0]!.workerProfileId, undefined);
+});
+
+test("profile identity serializes privacy-safe with no endpoint or credential leak", () => {
+  const result = provideRoutingAdvice({
+    taskClass: "coding:test",
+    candidates: [
+      {
+        provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high",
+        workerProfileId: "deepseek-primary", workerLabel: "DeepSeek Primary",
+      },
+      {
+        provider: "qwen", model: "plus", runtime: "claude-code", effort: "medium",
+        workerProfileId: "qwen-secondary", workerLabel: "Qwen Secondary",
+      },
+    ],
+    evidenceMap: new Map(),
+    policy: DEFAULT_ROUTING_POLICY,
+  });
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /taskId|attemptId|rawLog|apiKey|endpoint|sourcePath|diagnostic/i);
+  assert.match(serialized, /"workerProfileId":"deepseek-primary"/);
+  assert.match(serialized, /"workerLabel":"DeepSeek Primary"/);
+  assert.match(serialized, /"workerProfileId":"qwen-secondary"/);
+});
+
+// --- Evidence-ready subset cohort (M3 V2) ------------------------------------
+
+/** Multi-candidate advice helper that accepts arbitrary candidates. */
+function multiAdvice(
+  candidates: Array<{
+    provider: string; model: string;
+    runtime?: string; effort?: string;
+    workerProfileId?: string; workerLabel?: string;
+  }>,
+  evidenceMap: Map<string, RoutingEvidence>,
+  policy: RoutingPolicySettings = DEFAULT_ROUTING_POLICY,
+  opts?: {
+    taskFamily?: string;
+    familyEvidenceMap?: Map<string, RoutingEvidence>;
+    competitionIntent?: CompetitionIntent;
+    competitionTriggers?: CompetitionTrigger[];
+  },
+) {
+  return provideRoutingAdvice({
+    taskClass: "coding:test",
+    candidates,
+    evidenceMap,
+    policy,
+    ...(opts?.taskFamily !== undefined ? { taskFamily: opts.taskFamily } : {}),
+    ...(opts?.familyEvidenceMap !== undefined
+      ? { familyEvidenceMap: opts.familyEvidenceMap } : {}),
+    ...(opts?.competitionIntent !== undefined
+      ? { competitionIntent: opts.competitionIntent } : {}),
+    ...(opts?.competitionTriggers !== undefined
+      ? { competitionTriggers: opts.competitionTriggers } : {}),
+  });
+}
+
+test("evidence-ready cohort: two ready + two unknown forms exact cohort and keeps excluded eligible", () => {
+  const readyA = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+  const readyB = evidence("qwen", "plus", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+    modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+    verifiedBehaviorCount: 2, verifiedBehaviorRate: 0.2,
+  });
+  const unknownC = evidence("minimax", "m2", {
+    terminalTaskCount: 0, relevantSampleCount: 0,
+  });
+  const unknownD = evidence("xai", "grok-4.5", {
+    terminalTaskCount: 0, relevantSampleCount: 0,
+  });
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+      { provider: "minimax", model: "m2" },
+      { provider: "xai", model: "grok-4.5" },
+    ],
+    new Map([
+      ["deepseek\0v4", readyA],
+      ["qwen\0plus", readyB],
+      ["minimax\0m2", unknownC],
+      ["xai\0grok-4.5", unknownD],
+    ]),
+  );
+  assert.equal(result.evidenceScope, "exact-class");
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.recommendation?.provider, "deepseek");
+  assert.equal(result.allCandidatesCompared, false);
+  assert.equal(result.cohortCandidateCount, 2);
+  assert.equal(result.totalCandidateCount, 4);
+
+  // Cohort members get compared and have real scores.
+  const deepseek = result.candidates.find((c) => c.provider === "deepseek")!;
+  const qwen = result.candidates.find((c) => c.provider === "qwen")!;
+  assert.equal(deepseek.cohortParticipation, "compared");
+  assert.equal(qwen.cohortParticipation, "compared");
+  assert.ok(deepseek.totalScore > qwen.totalScore);
+
+  // Excluded candidates stay eligible with zero score and insufficient evidence.
+  const minimax = result.candidates.find((c) => c.provider === "minimax")!;
+  const grok = result.candidates.find((c) => c.provider === "xai")!;
+  assert.equal(minimax.cohortParticipation, "insufficient-evidence");
+  assert.equal(grok.cohortParticipation, "insufficient-evidence");
+  assert.equal(minimax.totalScore, 0);
+  assert.equal(grok.totalScore, 0);
+  assert.equal(minimax.eligible, true);
+  assert.equal(grok.eligible, true);
+  assert.ok(minimax.uncertainty.insufficientSamples);
+  assert.ok(grok.uncertainty.insufficientSamples);
+  for (const f of minimax.factors) {
+    assert.equal(f.available, false);
+    assert.equal(f.unavailableReason, "candidate-excluded-from-comparison");
+    assert.equal(f.weightedScore, 0);
+  }
+  for (const f of grok.factors) {
+    assert.equal(f.available, false);
+    assert.equal(f.unavailableReason, "candidate-excluded-from-comparison");
+    assert.equal(f.weightedScore, 0);
+  }
+
+  // Serialization is privacy-safe.
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /taskId|attemptId|rawLog|apiKey|endpoint|sourcePath|diagnostic/i);
+  assert.match(serialized, /"cohortParticipation":"compared"/);
+  assert.match(serialized, /"cohortParticipation":"insufficient-evidence"/);
+  assert.match(serialized, /"allCandidatesCompared":false/);
+  assert.match(serialized, /"cohortCandidateCount":2/);
+  assert.match(serialized, /"totalCandidateCount":4/);
+});
+
+test("evidence-ready cohort: family fallback when exact is insufficient but family has three ready identities", () => {
+  // Exact is sparse for all four candidates.
+  const sparseA = evidence("deepseek", "v4", { terminalTaskCount: 2, relevantSampleCount: 2 });
+  const sparseB = evidence("qwen", "plus", { terminalTaskCount: 2, relevantSampleCount: 2 });
+  const sparseC = evidence("minimax", "m2", { terminalTaskCount: 2, relevantSampleCount: 2 });
+  const sparseD = evidence("xai", "grok-4.5", { terminalTaskCount: 0, relevantSampleCount: 0 });
+
+  // Family evidence: three have sufficient records, one is zero.
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 20, relevantSampleCount: 15, acceptedDeliveryCount: 15,
+    })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 20, relevantSampleCount: 10, acceptedDeliveryCount: 5,
+      acceptedDeliveryRate: 0.5, modelQualityFailureCount: 5, modelQualityFailureRate: 0.5,
+    })] as const,
+    ["minimax\0m2", evidence("minimax", "m2", {
+      terminalTaskCount: 15, relevantSampleCount: 8, acceptedDeliveryCount: 6,
+      acceptedDeliveryRate: 0.75,
+    })] as const,
+    ["xai\0grok-4.5", evidence("xai", "grok-4.5", {
+      terminalTaskCount: 0, relevantSampleCount: 0,
+    })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+      { provider: "minimax", model: "m2" },
+      { provider: "xai", model: "grok-4.5" },
+    ],
+    new Map([
+      ["deepseek\0v4", sparseA],
+      ["qwen\0plus", sparseB],
+      ["minimax\0m2", sparseC],
+      ["xai\0grok-4.5", sparseD],
+    ]),
+    DEFAULT_ROUTING_POLICY,
+    { taskFamily: "coding", familyEvidenceMap: familyMap },
+  );
+  assert.equal(result.evidenceScope, "task-family");
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.recommendation?.provider, "deepseek");
+  assert.equal(result.allCandidatesCompared, false);
+  assert.equal(result.cohortCandidateCount, 3);
+  assert.equal(result.totalCandidateCount, 4);
+
+  const grok = result.candidates.find((c) => c.provider === "xai")!;
+  assert.equal(grok.cohortParticipation, "insufficient-evidence");
+  assert.equal(grok.totalScore, 0);
+  assert.equal(grok.eligible, true);
+
+  // Cohort candidates get scored.
+  const deepseek = result.candidates.find((c) => c.provider === "deepseek")!;
+  assert.equal(deepseek.cohortParticipation, "compared");
+  assert.ok(deepseek.totalScore > 0);
+});
+
+test("evidence-ready cohort: only one ready identity means no cohort and no recommendation", () => {
+  const onlyReady = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+  const unknown1 = evidence("qwen", "plus", { terminalTaskCount: 0, relevantSampleCount: 0 });
+  const unknown2 = evidence("minimax", "m2", { terminalTaskCount: 0, relevantSampleCount: 0 });
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+      { provider: "minimax", model: "m2" },
+    ],
+    new Map([
+      ["deepseek\0v4", onlyReady],
+      ["qwen\0plus", unknown1],
+      ["minimax\0m2", unknown2],
+    ]),
+  );
+  assert.equal(result.evidenceScope, "none");
+  assert.equal(result.knowledge, "unknown");
+  assert.equal(result.recommendation, undefined);
+  assert.equal(result.allCandidatesCompared, false);
+  assert.equal(result.cohortCandidateCount, 0);
+  assert.equal(result.totalCandidateCount, 3);
+
+  // All candidates have insufficient samples; the ready one is not scored alone.
+  for (const c of result.candidates) {
+    assert.ok(c.uncertainty.insufficientSamples);
+    assert.ok(c.uncertainty.reasons.includes("insufficient-relevant-samples"));
+    assert.equal(c.totalScore, 0);
+  }
+});
+
+test("evidence-ready cohort: duplicate routing identities do not count as independent comparison points", () => {
+  // Two profiles with the same provider+model+runtime+effort count as one identity.
+  // Both meet the threshold but don't form a cohort because only 1 distinct identity.
+  const sameA = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+
+  const result = provideRoutingAdvice({
+    taskClass: "coding:test",
+    candidates: [
+      { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high", workerProfileId: "ds-1" },
+      { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high", workerProfileId: "ds-2" },
+    ],
+    evidenceMap: new Map([
+      ["deepseek\0v4\0claude-code\0high", sameA],
+    ]),
+    policy: DEFAULT_ROUTING_POLICY,
+  });
+  // Both share the same routing identity → only 1 distinct → no cohort.
+  assert.equal(result.evidenceScope, "none");
+  assert.equal(result.knowledge, "unknown");
+  assert.equal(result.recommendation, undefined);
+  assert.equal(result.candidates.length, 2);
+  // Both profiles are still present and eligible.
+  assert.deepEqual(result.candidates.map((c) => c.workerProfileId).sort(), ["ds-1", "ds-2"]);
+});
+
+test("evidence-ready cohort: duplicate identities plus a second distinct identity still forms a cohort", () => {
+  // Two Profiles share the same full identity, a third has a different identity.
+  // The two distinct identities (deepseek + qwen) form a cohort; both duplicate
+  // deepseek profiles participate in the cohort.
+  const dsA = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+  const qw = evidence("qwen", "plus", {
+    relevantSampleCount: 10, modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+    acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+  });
+
+  const result = provideRoutingAdvice({
+    taskClass: "coding:test",
+    candidates: [
+      { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high", workerProfileId: "ds-1" },
+      { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high", workerProfileId: "ds-2" },
+      { provider: "qwen", model: "plus", runtime: "claude-code", effort: "medium", workerProfileId: "qw-1" },
+    ],
+    evidenceMap: new Map([
+      ["deepseek\0v4\0claude-code\0high", dsA],
+      ["qwen\0plus\0claude-code\0medium", qw],
+    ]),
+    policy: DEFAULT_ROUTING_POLICY,
+  });
+  // Cohort forms: 2 distinct identities (deepseek + qwen), 3 candidates.
+  assert.equal(result.evidenceScope, "exact-class");
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.distinctIdentityCount, 2);
+  assert.equal(result.cohortCandidateCount, 3);
+  assert.equal(result.allCandidatesCompared, true);
+  // recommendationCoverage is "all-candidates" since all 3 are compared.
+  assert.equal(result.recommendationCoverage, "all-candidates");
+  assert.equal(result.recommendation?.coverage, "all-candidates");
+  assert.equal(result.recommendation?.provider, "deepseek");
+  assert.equal(result.recommendation?.model, "v4");
+  assert.equal(result.recommendation?.workerProfileId, undefined,
+    "shared evidence cannot arbitrarily choose one equivalent Profile");
+  assert.match(result.recommendation?.reasoning ?? "", /equivalent-profiles:2/);
+  // Both deepseek profiles are in the cohort.
+  assert.equal(
+    result.candidates.filter((c) => c.cohortParticipation === "compared").length,
+    3,
+  );
+});
+
+test("evidence-ready cohort: exact-class precedence over larger family cohort", () => {
+  // Exact: deepseek and qwen meet threshold (2 identities).
+  // Family: minimax also meets family threshold (3 identities).
+  // Exact should win even though family has more members.
+  const exactReadyA = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+  const exactReadyB = evidence("qwen", "plus", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+    modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+    verifiedBehaviorCount: 2, verifiedBehaviorRate: 0.2,
+  });
+  const exactSparse = evidence("minimax", "m2", { terminalTaskCount: 2, relevantSampleCount: 2 });
+
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", { terminalTaskCount: 30, relevantSampleCount: 25 })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", { terminalTaskCount: 30, relevantSampleCount: 20 })] as const,
+    ["minimax\0m2", evidence("minimax", "m2", { terminalTaskCount: 15, relevantSampleCount: 10 })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+      { provider: "minimax", model: "m2" },
+    ],
+    new Map([
+      ["deepseek\0v4", exactReadyA],
+      ["qwen\0plus", exactReadyB],
+      ["minimax\0m2", exactSparse],
+    ]),
+    DEFAULT_ROUTING_POLICY,
+    { taskFamily: "coding", familyEvidenceMap: familyMap },
+  );
+  // Exact scope wins even though family would have 3 members.
+  assert.equal(result.evidenceScope, "exact-class");
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.cohortCandidateCount, 2);
+  // minimax excluded from exact cohort.
+  const minimax = result.candidates.find((c) => c.provider === "minimax")!;
+  assert.equal(minimax.cohortParticipation, "insufficient-evidence");
+  assert.equal(minimax.totalScore, 0);
+});
+
+test("evidence-ready cohort: family factor coverage uses familyMinRelevantSamples, not exact threshold", () => {
+  const customFamilyThreshold = 8;
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    familyMinRelevantSamples: customFamilyThreshold,
+    minRelevantSamples: 5,
+    weights: { ...DEFAULT_ROUTING_POLICY.weights, acceptedDelivery: 1 },
+  };
+
+  // Exact: sparse (2 each).
+  const sparseA = evidence("deepseek", "v4", { terminalTaskCount: 2, relevantSampleCount: 2 });
+  const sparseB = evidence("qwen", "plus", { terminalTaskCount: 2, relevantSampleCount: 2 });
+
+  // Family: both have 8 exactly (meeting the family threshold, not the default 5).
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 12, relevantSampleCount: 8,
+      acceptedDeliveryCount: 8, acceptedDeliverySampleCount: 8,
+      acceptedDeliveryRate: 1,
+    })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 10, relevantSampleCount: 8,
+      acceptedDeliveryCount: 4, acceptedDeliverySampleCount: 8,
+      acceptedDeliveryRate: 0.5,
+    })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+    ],
+    new Map([
+      ["deepseek\0v4", sparseA],
+      ["qwen\0plus", sparseB],
+    ]),
+    policy,
+    { taskFamily: "coding", familyEvidenceMap: familyMap },
+  );
+  assert.equal(result.evidenceScope, "task-family");
+  // acceptedDelivery factor should use family min (8), not exact min (5).
+  // With exactly 8 samples for acceptedDelivery on each, factor is available.
+  const deepseekFactor = result.candidates
+    .find((c) => c.provider === "deepseek")!
+    .factors.find((f) => f.factor === "acceptedDelivery")!;
+  assert.equal(deepseekFactor.available, true);
+});
+
+test("evidence-ready cohort: strict mode blocks cohort but excluded candidates are not the cause", () => {
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    missingEvidenceMode: "strict",
+    weights: { ...DEFAULT_ROUTING_POLICY.weights, acceptedDelivery: 1 },
+  };
+  // Cohort member deepseek has incomplete acceptedDelivery evidence.
+  const complete = evidence("qwen", "plus", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 10,
+    acceptedDeliverySampleCount: 10, acceptedDeliveryRate: 1,
+  });
+  const incomplete = evidence("deepseek", "v4", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 0,
+    acceptedDeliverySampleCount: 2, acceptedDeliveryRate: 0,
+    acceptedDeliveryUnavailableCount: 8,
+  });
+  const unknown = evidence("minimax", "m2", {
+    terminalTaskCount: 0, relevantSampleCount: 0,
+  });
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+      { provider: "minimax", model: "m2" },
+    ],
+    new Map([
+      ["deepseek\0v4", incomplete],
+      ["qwen\0plus", complete],
+      ["minimax\0m2", unknown],
+    ]),
+    policy,
+  );
+  // Strict mode blocks the cohort because a factor is unavailable within it.
+  assert.equal(result.knowledge, "unknown");
+  assert.equal(result.recommendation, undefined);
+
+  // Cohort members (deepseek, qwen) get positive-factor-unavailable.
+  const deepseek = result.candidates.find((c) => c.provider === "deepseek")!;
+  const qwen = result.candidates.find((c) => c.provider === "qwen")!;
+  assert.ok(deepseek.uncertainty.reasons.includes("positive-factor-unavailable"));
+  assert.ok(qwen.uncertainty.reasons.includes("positive-factor-unavailable"));
+
+  // Excluded candidate (minimax) does NOT get positive-factor-unavailable — it
+  // was never in the cohort to begin with. It gets insufficient-relevant-samples.
+  const minimax = result.candidates.find((c) => c.provider === "minimax")!;
+  assert.ok(minimax.uncertainty.reasons.includes("insufficient-relevant-samples"));
+  assert.equal(
+    minimax.uncertainty.reasons.includes("positive-factor-unavailable"),
+    false,
+    "excluded candidates must not get positive-factor-unavailable",
+  );
+});
+
+test("evidence-ready cohort: no auto-Competition from subset knowledge alone", () => {
+  const readyA = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+  const readyB = evidence("qwen", "plus", {
+    relevantSampleCount: 10, modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+    acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+    verifiedBehaviorCount: 2, verifiedBehaviorRate: 0.2,
+  });
+  const unknown = evidence("minimax", "m2", { terminalTaskCount: 0, relevantSampleCount: 0 });
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+      { provider: "minimax", model: "m2" },
+    ],
+    new Map([
+      ["deepseek\0v4", readyA],
+      ["qwen\0plus", readyB],
+      ["minimax\0m2", unknown],
+    ]),
+    DEFAULT_ROUTING_POLICY,
+    { competitionIntent: "none" },
+  );
+  // Evidence produces a recommendation, but Competition intent is none.
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.shouldRunCompetition, false);
+  assert.equal(result.competition.intent, "none");
+  assert.equal(result.competition.shouldRunCompetition, false);
+  assert.deepEqual(result.competition.matchingTriggers, []);
+});
+
+test("evidence-ready cohort: family threshold is independently configurable and used for all factor gates", () => {
+  const familyThreshold = 10;
+  const policy: RoutingPolicySettings = {
+    ...DEFAULT_ROUTING_POLICY,
+    minRelevantSamples: 5, // exact uses 5
+    familyMinRelevantSamples: familyThreshold, // family uses 10
+    weights: { ...DEFAULT_ROUTING_POLICY.weights, acceptedDelivery: 1, firstPassSuccess: 1 },
+  };
+
+  // Exact is sparse.
+  const sparseA = evidence("deepseek", "v4", { terminalTaskCount: 1, relevantSampleCount: 1 });
+  const sparseB = evidence("qwen", "plus", { terminalTaskCount: 1, relevantSampleCount: 1 });
+
+  // Family: each has exactly 10 relevant + accepted delivery + first-pass samples.
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 15, relevantSampleCount: 10,
+      acceptedDeliveryCount: 10, acceptedDeliverySampleCount: 10, acceptedDeliveryRate: 1,
+      firstPassVerifiedSampleCount: 10, firstPassVerifiedSuccessCount: 8,
+      firstPassVerifiedSuccessRate: 0.8,
+    })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 12, relevantSampleCount: 10,
+      acceptedDeliveryCount: 5, acceptedDeliverySampleCount: 10, acceptedDeliveryRate: 0.5,
+      firstPassVerifiedSampleCount: 10, firstPassVerifiedSuccessCount: 4,
+      firstPassVerifiedSuccessRate: 0.4,
+    })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+    ],
+    new Map([
+      ["deepseek\0v4", sparseA],
+      ["qwen\0plus", sparseB],
+    ]),
+    policy,
+    { taskFamily: "coding", familyEvidenceMap: familyMap },
+  );
+  assert.equal(result.evidenceScope, "task-family");
+  // Factor gates must use familyMinRelevantSamples (10), not minRelevantSamples (5).
+  // With 10 samples on each, factors are available.
+  const deepseek = result.candidates.find((c) => c.provider === "deepseek")!;
+  assert.equal(
+    deepseek.factors.find((f) => f.factor === "acceptedDelivery")?.available,
+    true,
+  );
+  assert.equal(
+    deepseek.factors.find((f) => f.factor === "firstPassSuccess")?.available,
+    true,
+  );
+  // Resolved policy carries both thresholds.
+  assert.equal(result.resolvedPolicy.familyMinRelevantSamples, familyThreshold);
+  assert.equal(result.resolvedPolicy.minRelevantSamples, 5);
+});
+
+test("evidence-ready cohort: allCandidatesCompared is true when every candidate is in the cohort", () => {
+  const readyA = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+  const readyB = evidence("qwen", "plus", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+    modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+    verifiedBehaviorCount: 2, verifiedBehaviorRate: 0.2,
+  });
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+    ],
+    new Map([
+      ["deepseek\0v4", readyA],
+      ["qwen\0plus", readyB],
+    ]),
+  );
+  // Both candidates meet exact threshold → all compared.
+  assert.equal(result.allCandidatesCompared, true);
+  assert.equal(result.cohortCandidateCount, 2);
+  assert.equal(result.totalCandidateCount, 2);
+  assert.equal(result.knowledge, "recommendation");
+});
+
+test("evidence-ready cohort: Core, CLI, and Hub share same canonical coverage facts in serialization", () => {
+  const readyA = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+  const readyB = evidence("qwen", "plus", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+    modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+  });
+  const unknownC = evidence("minimax", "m2", { terminalTaskCount: 0, relevantSampleCount: 0 });
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4", workerProfileId: "ds-1", workerLabel: "DS" },
+      { provider: "qwen", model: "plus", workerProfileId: "qw-1", workerLabel: "QW" },
+      { provider: "minimax", model: "m2", workerProfileId: "mm-1", workerLabel: "MM" },
+    ],
+    new Map([
+      ["deepseek\0v4", readyA],
+      ["qwen\0plus", readyB],
+      ["minimax\0m2", unknownC],
+    ]),
+  );
+  const serialized = JSON.stringify(result);
+  // Canonical coverage fields are all present.
+  assert.ok("allCandidatesCompared" in result);
+  assert.ok("cohortCandidateCount" in result);
+  assert.ok("distinctIdentityCount" in result);
+  assert.ok("totalCandidateCount" in result);
+  assert.ok("excludedCandidateCount" in result);
+  assert.ok("recommendationCoverage" in result);
+  assert.match(serialized, /"allCandidatesCompared":false/);
+  assert.match(serialized, /"cohortCandidateCount":2/);
+  assert.match(serialized, /"totalCandidateCount":3/);
+  assert.match(serialized, /"excludedCandidateCount":1/);
+  // Participation facts per candidate.
+  assert.match(serialized, /"cohortParticipation":"compared"/);
+  assert.match(serialized, /"cohortParticipation":"insufficient-evidence"/);
+  assert.match(serialized, /"candidate-excluded-from-comparison"/);
+  // Privacy-safe: no raw task or credential content.
+  assert.doesNotMatch(serialized, /taskId|attemptId|rawLog|apiKey|endpoint|sourcePath|diagnostic/i);
+  // Profile identities survive for both cohort and excluded candidates.
+  assert.match(serialized, /"workerProfileId":"ds-1"/);
+  assert.match(serialized, /"workerProfileId":"mm-1"/);
+  // Canonical recommendationCoverage marker.
+  assert.match(serialized, /"recommendationCoverage":"evidence-ready-subset"/);
+  assert.equal(result.recommendation?.coverage, "evidence-ready-subset");
+  assert.match(serialized, /"distinctIdentityCount":2/);
+  // comparisonEvidence is present for every candidate.
+  assert.match(serialized, /"comparisonEvidence"/);
+});
+
+test("evidence-ready cohort: comparisonEvidence reflects family evidence when scope is task-family", () => {
+  const sparseA = evidence("deepseek", "v4", { terminalTaskCount: 2, relevantSampleCount: 2 });
+  const sparseB = evidence("qwen", "plus", { terminalTaskCount: 2, relevantSampleCount: 2 });
+
+  // Family evidence has different counts than exact evidence.
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", {
+      terminalTaskCount: 20, relevantSampleCount: 15,
+      acceptedDeliveryCount: 15, acceptedDeliveryRate: 1,
+    })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", {
+      terminalTaskCount: 20, relevantSampleCount: 10, acceptedDeliveryCount: 5,
+      acceptedDeliveryRate: 0.5,
+    })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+    ],
+    new Map([
+      ["deepseek\0v4", sparseA],
+      ["qwen\0plus", sparseB],
+    ]),
+    DEFAULT_ROUTING_POLICY,
+    { taskFamily: "coding", familyEvidenceMap: familyMap },
+  );
+  assert.equal(result.evidenceScope, "task-family");
+  // comparisonEvidence must carry family evidence counts, not exact counts.
+  const deepseek = result.candidates.find((c) => c.provider === "deepseek")!;
+  assert.equal(deepseek.comparisonEvidence.relevantSampleCount, 15,
+    "comparisonEvidence must show family sample count, not exact");
+  assert.equal(deepseek.evidence.relevantSampleCount, 2,
+    "legacy exact evidence is preserved untouched");
+  const qwen = result.candidates.find((c) => c.provider === "qwen")!;
+  assert.equal(qwen.comparisonEvidence.relevantSampleCount, 10,
+    "comparisonEvidence must show family sample count");
+});
+
+test("evidence-ready cohort: excluded candidate with partial family evidence retains truthful sample coverage", () => {
+  const readyA = evidence("deepseek", "v4", { relevantSampleCount: 10, acceptedDeliveryCount: 10 });
+  const readyB = evidence("qwen", "plus", {
+    relevantSampleCount: 10, acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+    modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+  });
+  const partial = evidence("minimax", "m2", { terminalTaskCount: 1, relevantSampleCount: 1 });
+
+  const familyMap = new Map([
+    ["deepseek\0v4", evidence("deepseek", "v4", { terminalTaskCount: 25, relevantSampleCount: 20 })] as const,
+    ["qwen\0plus", evidence("qwen", "plus", { terminalTaskCount: 20, relevantSampleCount: 15 })] as const,
+    ["minimax\0m2", evidence("minimax", "m2", { terminalTaskCount: 5, relevantSampleCount: 3 })] as const,
+  ] as Array<[string, RoutingEvidence]>);
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+      { provider: "minimax", model: "m2" },
+    ],
+    new Map([
+      ["deepseek\0v4", readyA],
+      ["qwen\0plus", readyB],
+      ["minimax\0m2", partial],
+    ]),
+    DEFAULT_ROUTING_POLICY,
+    { taskFamily: "coding", familyEvidenceMap: familyMap },
+  );
+  // Exact cohort forms (2 ready), minimax excluded.
+  assert.equal(result.evidenceScope, "exact-class");
+  const minimax = result.candidates.find((c) => c.provider === "minimax")!;
+  assert.equal(minimax.cohortParticipation, "insufficient-evidence");
+  // Family sample coverage is still reported truthfully.
+  assert.equal(minimax.sampleCoverage.familyRelevantCount, 3);
+  assert.equal(minimax.sampleCoverage.familyTerminalCount, 5);
+  assert.equal(minimax.sampleCoverage.familyMinRelevantSamples, 5);
+  // Excluded, not scored, but family evidence is visible for Main to consider.
+  assert.equal(minimax.totalScore, 0);
+  assert.equal(minimax.eligible, true);
+});
+
+test("evidence-ready cohort: zero-history candidates across the board produce scope none", () => {
+  const zeroA = evidence("deepseek", "v4", { terminalTaskCount: 0, relevantSampleCount: 0 });
+  const zeroB = evidence("qwen", "plus", { terminalTaskCount: 0, relevantSampleCount: 0 });
+  const zeroC = evidence("minimax", "m2", { terminalTaskCount: 0, relevantSampleCount: 0 });
+
+  const result = multiAdvice(
+    [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+      { provider: "minimax", model: "m2" },
+    ],
+    new Map([
+      ["deepseek\0v4", zeroA],
+      ["qwen\0plus", zeroB],
+      ["minimax\0m2", zeroC],
+    ]),
+  );
+  assert.equal(result.evidenceScope, "none");
+  assert.equal(result.knowledge, "unknown");
+  assert.equal(result.cohortCandidateCount, 0);
+  assert.equal(result.totalCandidateCount, 3);
+  assert.equal(result.allCandidatesCompared, false);
+  for (const c of result.candidates) {
+    assert.equal(c.totalScore, 0);
+    assert.ok(c.uncertainty.insufficientSamples);
+  }
+});
