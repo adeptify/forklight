@@ -8,11 +8,19 @@
  *    explicit per-run isolation container at the same relative path the
  *    destination project expects (sibling layout for ../sdk style deps).
  *
+ * Declared-package runtime links: when node_modules/<package> is a symlink to
+ * the exact real target of a validated root file:/link: declaration, the
+ * materializer rewrites that one link as a relative symlink to the isolated
+ * package mirror. Name and target must both match; every other escape keeps
+ * the hard rejection. materializeDependencySet applies this rule in one order
+ * for prepare, retained reverify, and disposable verification copies.
+ *
  * Never exposes an external symlink that points outside the isolation
  * container. Copy-on-write is requested via COPYFILE_FICLONE when the
  * platform supports it; ordinary file copy is the correctness fallback.
  * Symlinks are preserved only when their resolved target stays inside the
- * containment root, and are always rewritten as destination-relative links.
+ * containment root (or is an exact authorized declared rewrite), and are
+ * always rewritten as destination-relative links.
  *
  * Boundaries: no package install, no lockfile/package.json mutation, no
  * recursive dependency graph walk, no Candidate diff inclusion, no
@@ -130,6 +138,92 @@ function mapToDestination(
   return path.join(destinationProject, path.relative(sourceProjectReal, resolvedSource));
 }
 
+/**
+ * Narrow authorization for one exact declared-package node_modules symlink.
+ * Both the package-relative path and the resolved real target must match.
+ */
+export interface DeclaredRuntimeLinkAuthorization {
+  /** Path relative to node_modules (`@scope/name` or `name`). */
+  packageRelativePath: string;
+  /** Exact real source package root from the validated declared-local plan. */
+  sourceReal: string;
+  /**
+   * Isolated destination package root for materialization bookkeeping.
+   * May be lexical (caller path form); do not mix with realpath when emitting
+   * relative symlinks — recompute from destPath + relativeTarget instead.
+   */
+  destinationAbsolute: string;
+  /** Declared relative target text (POSIX `/` form) used to recompute the link. */
+  relativeTarget: string;
+}
+
+/**
+ * Derive the destination project root from an emitted node_modules package path
+ * and the package-relative path under node_modules. Stays in destPath's path
+ * namespace so relative symlink math never mixes lexical and realpath aliases.
+ */
+function destinationProjectFromPackageLink(
+  destPath: string,
+  packageRelativePath: string,
+): string {
+  let cursor = destPath;
+  const packageSegments = packageRelativePath.split("/").filter((segment) => segment.length > 0);
+  for (let i = 0; i < packageSegments.length; i++) {
+    cursor = path.dirname(cursor);
+  }
+  // cursor is .../node_modules
+  return path.dirname(cursor);
+}
+
+/**
+ * Map a package.json dependency name onto its exact node_modules-relative path.
+ * Rejects empty, traversal, and malformed scoped segments so a declaration
+ * cannot authorize an arbitrary link location.
+ */
+export function packageNameToNodeModulesRelative(packageName: string): string | null {
+  if (typeof packageName !== "string" || packageName.length === 0) return null;
+  if (packageName.includes("\0") || packageName.includes("\\")) return null;
+  // Normalize only for segment checks; output always uses `/` for map keys.
+  const normalized = packageName.split(/[/\\]+/).filter((segment) => segment.length > 0);
+  if (normalized.length === 0) return null;
+  if (normalized.some((segment) => segment === "." || segment === "..")) return null;
+  if (normalized.length === 1) {
+    const name = normalized[0]!;
+    // Incomplete scoped name (`@scope`) cannot map to a package path.
+    if (name.startsWith("@")) return null;
+    return name;
+  }
+  if (normalized.length === 2) {
+    const scope = normalized[0]!;
+    const name = normalized[1]!;
+    if (!scope.startsWith("@") || scope.length < 2) return null;
+    if (name.startsWith("@")) return null;
+    return `${scope}/${name}`;
+  }
+  return null;
+}
+
+/**
+ * Build exact package-path + real-target authorizations from validated plans.
+ * Malformed package names never authorize a runtime rewrite.
+ */
+export function buildDeclaredRuntimeLinkAuthorizations(
+  plans: readonly DeclaredLocalPackagePlan[],
+): Map<string, DeclaredRuntimeLinkAuthorization> {
+  const authorizations = new Map<string, DeclaredRuntimeLinkAuthorization>();
+  for (const plan of plans) {
+    const packageRelativePath = packageNameToNodeModulesRelative(plan.packageName);
+    if (packageRelativePath === null) continue;
+    authorizations.set(packageRelativePath, {
+      packageRelativePath,
+      sourceReal: plan.sourceAbsolute,
+      destinationAbsolute: plan.destinationAbsolute,
+      relativeTarget: plan.relativeTarget,
+    });
+  }
+  return authorizations;
+}
+
 async function materializeSymlink(
   sourcePath: string,
   destPath: string,
@@ -138,6 +232,7 @@ async function materializeSymlink(
   destRoot: string,
   sourceProjectReal: string,
   destinationProject: string,
+  declaredRuntimeLinks?: ReadonlyMap<string, DeclaredRuntimeLinkAuthorization>,
 ): Promise<void> {
   let resolvedTarget: string;
   try {
@@ -150,6 +245,36 @@ async function materializeSymlink(
   }
 
   if (!isPathInsideRoot(containmentRoot, resolvedTarget)) {
+    // Exact declared-package rewrite only: package-relative path AND real
+    // target must both match a validated plan. Name-only or target-only is
+    // insufficient; every other escape keeps the hard rejection.
+    const packageRelative = path.relative(sourceRoot, sourcePath).split(path.sep).join("/");
+    const authorization = declaredRuntimeLinks?.get(packageRelative);
+    if (authorization !== undefined) {
+      let targetReal: string;
+      try {
+        targetReal = await realpath(resolvedTarget);
+      } catch {
+        targetReal = path.normalize(resolvedTarget);
+      }
+      if (targetReal === authorization.sourceReal) {
+        // Emit the relative link entirely in destPath's path namespace.
+        // plan.destinationAbsolute may be realpath-canonical while destPath is
+        // still the caller-provided lexical form (e.g. /var vs /private/var);
+        // mixing those in path.relative produces a broken symlink.
+        const destinationProjectLexical = destinationProjectFromPackageLink(
+          destPath,
+          packageRelative,
+        );
+        const isolatedDestination = path.resolve(
+          destinationProjectLexical,
+          authorization.relativeTarget.split("/").join(path.sep),
+        );
+        const relativeTarget = path.relative(path.dirname(destPath), isolatedDestination);
+        await symlink(relativeTarget.length > 0 ? relativeTarget : ".", destPath);
+        return;
+      }
+    }
     throw new Error(ESCAPE_ERROR);
   }
 
@@ -177,6 +302,7 @@ async function materializeTree(
   destRoot: string,
   sourceProjectReal: string,
   destinationProject: string,
+  declaredRuntimeLinks?: ReadonlyMap<string, DeclaredRuntimeLinkAuthorization>,
 ): Promise<void> {
   await mkdir(destDir, { recursive: true, mode: 0o755 });
   const entries = await readdir(sourceDir, { withFileTypes: true });
@@ -197,6 +323,7 @@ async function materializeTree(
         destRoot,
         sourceProjectReal,
         destinationProject,
+        declaredRuntimeLinks,
       );
     } else if (entry.isDirectory()) {
       await materializeTree(
@@ -207,6 +334,7 @@ async function materializeTree(
         destRoot,
         sourceProjectReal,
         destinationProject,
+        declaredRuntimeLinks,
       );
     } else if (entry.isFile()) {
       await cloneOrCopyFile(sourcePath, destPath);
@@ -222,6 +350,12 @@ export interface MaterializeDependenciesOptions {
    * upgrades only remove legacy external symlinks before calling materialize.
    */
   replaceExisting?: boolean;
+  /**
+   * Exact declared-package runtime-link authorizations. Only a node_modules
+   * symlink whose package-relative path and resolved real target both match
+   * may be rewritten to the isolated package mirror.
+   */
+  declaredRuntimeLinks?: ReadonlyMap<string, DeclaredRuntimeLinkAuthorization>;
 }
 
 /**
@@ -293,6 +427,7 @@ export async function materializeProjectDependencies(
         destRoot,
         sourceProjectReal,
         destinationProject,
+        options?.declaredRuntimeLinks,
       );
     } catch (error) {
       // Clean up a partial mirror so the destination never looks command-ready
@@ -321,9 +456,13 @@ export interface DeclaredLocalPackagePlan {
   protocol: "file" | "link";
   /** Relative path text after the protocol (POSIX-style as declared). */
   relativeTarget: string;
-  /** Absolute source package root on the original filesystem. */
+  /** Absolute real source package root on the original filesystem. */
   sourceAbsolute: string;
-  /** Absolute destination package root inside the isolation container. */
+  /**
+   * Destination package root inside the isolation container, expressed in the
+   * caller-provided destination project path namespace (not necessarily
+   * realpath-canonical). Used for materialization and relative link emission.
+   */
   destinationAbsolute: string;
 }
 
@@ -463,7 +602,7 @@ export async function planDeclaredLocalPackages(
 
   const raw = await readRawLocalDeclarations(sourceProjectReal);
   const planned: DeclaredLocalPackagePlan[] = [];
-  // destinationAbsolute → sourceReal for conflict detection
+  // destinationCanonical → sourceReal for conflict detection
   const byDestination = new Map<string, string>();
   // packageName → sourceReal for same-name / different-source conflicts
   const byPackageName = new Map<string, string>();
@@ -485,16 +624,21 @@ export async function planDeclaredLocalPackages(
     }
 
     const sourceAbsolute = path.resolve(sourceProjectReal, relativeTarget);
-    const destinationAbsolute = path.resolve(destinationProjectReal, relativeTarget);
+    // Containment uses the realpath/canonical destination so /var vs /private/var
+    // aliases cannot bypass the isolation-container gate.
+    const destinationCanonical = path.resolve(destinationProjectReal, relativeTarget);
+    // Materialization and runtime-link emission use the caller-provided lexical
+    // destination project path so relative symlinks stay in one path namespace.
+    const destinationAbsolute = path.resolve(destinationProject, relativeTarget);
 
     // Destination must remain inside the owned isolation container.
-    if (!isPathInsideRoot(containerReal, destinationAbsolute)) {
+    if (!isPathInsideRoot(containerReal, destinationCanonical)) {
       throw new Error(LOCAL_ESCAPE_ERROR);
     }
     // Reject destinations that are the destination project itself or any
     // ancestor of it (including the container root via file:..). Sibling
     // mirrors and in-project package roots remain allowed.
-    if (isPathInsideRoot(destinationAbsolute, destinationProjectReal)) {
+    if (isPathInsideRoot(destinationCanonical, destinationProjectReal)) {
       throw new Error(LOCAL_ESCAPE_ERROR);
     }
 
@@ -529,7 +673,9 @@ export async function planDeclaredLocalPackages(
       throw new Error(LOCAL_CONFLICT_ERROR);
     }
 
-    const existingSource = byDestination.get(destinationAbsolute);
+    // Conflict keys use the canonical destination so lexical aliases of the
+    // same place still collide deterministically.
+    const existingSource = byDestination.get(destinationCanonical);
     if (existingSource !== undefined) {
       if (existingSource !== sourceReal) {
         throw new Error(LOCAL_CONFLICT_ERROR);
@@ -538,7 +684,7 @@ export async function planDeclaredLocalPackages(
       byPackageName.set(declaration.packageName, sourceReal);
       continue;
     }
-    byDestination.set(destinationAbsolute, sourceReal);
+    byDestination.set(destinationCanonical, sourceReal);
     byPackageName.set(declaration.packageName, sourceReal);
 
     planned.push({
@@ -648,6 +794,59 @@ export async function materializeDeclaredLocalPackages(
 }
 
 /**
+ * Canonical dependency-set materialization shared by Worker prepare, retained
+ * Candidate reverify, and disposable Integration/Main-remediation verification.
+ *
+ * Order is intentional and fail-closed:
+ * 1. Validate declared relative file:/link: packages against the owned container.
+ * 2. Copy each declared package into its isolated relative destination.
+ * 3. Mirror runtime dependency trees; rewrite only an exact declared-package
+ *    node_modules symlink (package path + real target) to the isolated mirror.
+ *
+ * Never installs packages, mutates manifests/lockfiles, or weakens the generic
+ * external-symlink escape gate for undeclared or wrong-target links.
+ */
+export async function materializeDependencySet(
+  sourceProject: string,
+  destinationProject: string,
+  isolationContainer: string,
+  dependencyNames: readonly string[] = RUNTIME_DEPENDENCY_DIRECTORIES,
+  options?: MaterializeDependenciesOptions,
+): Promise<{
+  runtime: string[];
+  local: MaterializedLocalPackage[];
+  linked: string[];
+}> {
+  const plans = await planDeclaredLocalPackages(
+    sourceProject,
+    destinationProject,
+    isolationContainer,
+  );
+  // Declared mirrors must exist before runtime links are rewritten to them.
+  const local = await materializeDeclaredLocalPackages(
+    sourceProject,
+    destinationProject,
+    isolationContainer,
+    options,
+  );
+  const declaredRuntimeLinks = buildDeclaredRuntimeLinkAuthorizations(plans);
+  const runtime = await materializeProjectDependencies(
+    sourceProject,
+    destinationProject,
+    dependencyNames,
+    {
+      ...options,
+      declaredRuntimeLinks,
+    },
+  );
+  return {
+    runtime,
+    local,
+    linked: [...runtime, ...local.map((entry) => entry.relativeTarget)],
+  };
+}
+
+/**
  * Ensure a retained workspace has local dependency mirrors before no-Worker
  * reverification. Replaces legacy external dependency symlinks without
  * touching business Candidate files. Missing mirrors are created from the
@@ -675,16 +874,12 @@ export async function ensureWorkspaceDependencyMirrors(
       // Absent — materialize will create when the source has the dependency.
     }
   }
-  const runtime = await materializeProjectDependencies(
-    sourceProject,
-    workspaceProject,
-    dependencyNames,
-  );
   const container = isolationContainer ?? path.dirname(workspaceProject);
-  const local = await materializeDeclaredLocalPackages(
+  const result = await materializeDependencySet(
     sourceProject,
     workspaceProject,
     container,
+    dependencyNames,
   );
-  return [...runtime, ...local.map((entry) => entry.relativeTarget)];
+  return result.linked;
 }

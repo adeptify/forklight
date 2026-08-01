@@ -1,0 +1,163 @@
+version: 2
+name: Release a Worker profile slot before local verification finishes
+project: ../..
+taskClass: m3-profile-worker-slot-release
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: local-grok-builder
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+  selectedWorker:
+    provider: xai
+    model: grok-4.5
+    runtime: grok-build
+    effort: high
+    workerProfileId: local-grok-builder
+  selectedBecause:
+    code: main-judgment
+    note: The issue is a bounded scheduler lifecycle change. Grok is the currently proven local runtime; recent Claude Code workers failed before their first model turn on the local NVM sandbox path, so Main avoids a known-zero-output retry.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      local-grok-builder: 0
+      deepseek-flash-1m: 0
+
+contract:
+  outcome: >-
+    A Worker profile slot is released as soon as that model process returns,
+    allowing another Task from the same profile to start while independent
+    verification continues when the unchanged global in-flight cap allows it.
+  presentation:
+    summary: Worker 做完后就释放该模型名额；本地检查继续，但不再无谓挡住同类 Worker。
+    language: zh-CN
+  context:
+    - Follow docs/m3-profile-worker-slot-release-contract.md as the authoritative aligned contract.
+    - The Daemon currently keeps a Task in one active map across preparation, Worker execution, verification, and Candidate capture; per-profile counting reads that full-lifecycle map.
+    - A real Grok Task therefore held its maxConcurrency=1 profile slot while a large local Rust verification and patch scan continued after the model had finished.
+    - The preceding excluded-output patch is already integrated; do not modify patch generation in this Task.
+  inScope:
+    - Track complete active Task lifecycle separately from current Worker profile occupancy.
+    - Release the profile occupancy exactly once after runtime run returns and before independent verification begins.
+    - Immediately reconsider queued jobs after release while retaining the global full-lifecycle cap.
+    - Add deterministic scheduler and runner regression tests for success and pre/worker failure paths.
+  outOfScope:
+    - No new setting, UI, public status field, verifier concurrency, acceptance-command parallelism, retry, adaptation, Competition, Provider probe, timeout, commit, or push.
+    - Do not touch patch generation, Hub assets, Elsewhere, Client-Core, Adeptify Shell, SDK/release paths, or related docs.
+  executionSteps:
+    - Introduce one private Profile Worker occupancy boundary in the Coordinator.
+    - Add an optional non-authoritative release hook at the Worker/verification boundary.
+    - Make scheduler profile counting consume Worker occupancy while global counting keeps complete active Tasks.
+    - Prove immediate repump, global-cap preservation, idempotent cleanup, and failure cleanup with deterministic tests.
+    - Run focused tests, then the full acceptance once.
+  deliverables:
+    - Separate private Profile Worker occupancy tracking.
+    - Safe Worker-return release hook that cannot redefine Task outcome.
+    - Deterministic concurrency and cleanup regressions.
+  modules:
+    - name: Daemon scheduler occupancy
+      responsibility: Distinguish full Task lifecycle from the period that occupies a Worker Profile slot.
+      consumes:
+        - Queue, active Tasks, immutable profile identity, Profile cap, and global cap.
+      produces:
+        - Eligible next job selection without bypassing the global in-flight limit.
+      boundaries:
+        - Private scheduler state only; health activeTaskIds retains its current full-lifecycle meaning.
+    - name: Attempt Worker release boundary
+      responsibility: Notify the scheduler after the runtime returns and before verification begins.
+      consumes:
+        - Existing runtime terminal return and cleanup lifecycle.
+      produces:
+        - One optional idempotent release notification.
+      boundaries:
+        - Notification failure cannot rewrite Worker or Task success; ordinary callers remain compatible.
+  callChain:
+    - Scheduler admits a queued Task under global and Profile limits and records its Worker occupancy.
+    - Runtime starts, runs, and returns its terminal result.
+    - Attempt runner clears runtime-only resources and notifies the Coordinator.
+    - Coordinator releases the Profile slot and pumps one newly eligible queued Task when the global cap allows.
+    - Original Task independently verifies and leaves the complete active set only at final lifecycle completion.
+  scenarios:
+    - name: Same Profile while verifying
+      given: Global cap is 2, Profile cap is 1, and Task A runtime has returned while its verifier is gated.
+      when: Task B from the same Profile is queued.
+      then: B starts while A remains an active verifying Task.
+    - name: Global cap remains authoritative
+      given: Global cap is 1 and Task A is still verifying after releasing its Profile slot.
+      when: Task B is queued.
+      then: B remains queued until A fully finishes.
+    - name: Failure cleanup
+      given: A runtime doctor, authentication, preparation, or Worker execution fails.
+      when: The job unwinds.
+      then: Its Profile occupancy is released exactly once and does not strand later work.
+  risks:
+    - Releasing the full active Task instead of only the Profile occupancy would break shutdown and recovery; keep both facts separate.
+    - Releasing before the runtime has actually returned could exceed Provider/model concurrency; use the post-run boundary.
+    - Removing the global cap would overrun local verifier resources and is forbidden in this slice.
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 700
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 4
+  fileLimitMode: warn
+  changedLineLimit: 700
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/daemon/coordinator.ts
+    - src/core/runner.ts
+    - tests/daemon.test.ts
+    - tests/worker-runtime.test.ts
+acceptance:
+  criteria:
+    - Same-profile queued work can start after the prior runtime returns when the unchanged global in-flight cap permits it.
+    - Verification remains part of the original active Task lifecycle and global cap.
+    - Worker and pre-Worker failures cannot leak a Profile slot or manufacture success/retry.
+    - Existing direct runner callers and health activeTaskIds semantics remain compatible.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/worker-runtime.test.ts
+    - npm test
+    - npm run build
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

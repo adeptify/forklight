@@ -1,5 +1,8 @@
 # M2 long-running execution acceptance
 
+> Supporting acceptance evidence, not current project status. The authoritative
+> Goal, milestone state, and action items live in [`PROJECT.md`](../PROJECT.md).
+
 Last updated: 2026-07-30
 
 ## What M2 gives the user

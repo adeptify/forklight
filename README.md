@@ -348,8 +348,8 @@ The MCP server (`src/mcp/server.ts`) exposes these tools over stdio:
 
 ## Documentation
 
-- [Project Status and Roadmap](PROJECT_STATUS.md) — current capabilities,
-  constraints, decisions, and next milestones.
+- [Project Source of Truth](PROJECT.md) — the only current product Goal,
+  milestone status, decisions, action items, and evidence index.
 - [Operations Guide](docs/operations.md) — complete workflow, module
   architecture, cost and mutation warnings, recovery.
 - [Configuration Guide](docs/configuration.md) — every configurable policy

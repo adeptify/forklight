@@ -109,6 +109,7 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_main_direct_list",
         "forklight_main_direct_start",
         "forklight_main_direct_status",
+        "forklight_main_failure_attribution",
         "forklight_main_review",
         "forklight_model_routing",
         "forklight_plan_board",
@@ -147,6 +148,111 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
       healthData.mcpBuildIdentity?.buildId,
       healthData.daemonBuildIdentity?.buildId,
     );
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP records one exact failure attribution without echoing the Main note", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-failure-attribution-"));
+  const taskId = randomUUID();
+  const attemptId = randomUUID();
+  const now = new Date().toISOString();
+  const store = new StateStore(home);
+  const task: TaskRecord = {
+    id: taskId,
+    name: "Failure attribution MCP fixture",
+    status: "failed",
+    sourcePath: "/tmp/source",
+    taskFile: "forklight://test/failure-attribution-mcp",
+    spec: {
+      version: 1,
+      name: "Failure attribution MCP fixture",
+      project: "/tmp/source",
+      goal: "Keep machine failure and responsibility separate",
+      constraints: [],
+      provider: { name: "deepseek", model: "v4", keychainService: "forklight.test" },
+      runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: null },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["false"] },
+    },
+    paths: taskPaths(home, taskId),
+    sessionId: randomUUID(),
+    currentAttemptId: attemptId,
+    createdAt: now,
+    updatedAt: now,
+    startedAt: now,
+    finishedAt: now,
+  };
+  const attempt: AttemptRecord = {
+    id: attemptId,
+    taskId,
+    ordinal: 1,
+    status: "failed",
+    sessionId: task.sessionId,
+    rawLogPath: path.join(home, "attempt.jsonl"),
+    startedAt: now,
+    finishedAt: now,
+    exitCode: 1,
+  };
+  store.createTask(task);
+  store.createAttempt(attempt);
+  const verification = store.addEvent(taskId, attemptId, "verification.completed", "failed", {
+    passed: false,
+    behaviorPassed: false,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [{ command: "false", exitCode: 1, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+    diffPath: task.paths.diff,
+    sourceUnchanged: true,
+  } satisfies VerificationResult);
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const missingConfirm = await client.callTool({
+      name: "forklight_main_failure_attribution",
+      arguments: {
+        taskId,
+        attemptId,
+        verificationEventSequence: verification.sequence,
+        cause: "verification-infrastructure",
+        note: "private-note-marker",
+      },
+    });
+    assert.equal(missingConfirm.isError, true);
+
+    const recorded = await client.callTool({
+      name: "forklight_main_failure_attribution",
+      arguments: {
+        taskId,
+        attemptId,
+        verificationEventSequence: verification.sequence,
+        cause: "verification-infrastructure",
+        note: "private-note-marker",
+        confirm: true,
+      },
+    });
+    assert.equal(recorded.isError, undefined);
+    assert.equal(JSON.stringify(recorded).includes("private-note-marker"), false);
+    const data = recorded.structuredContent as Record<string, unknown>;
+    assert.equal(data.impact, "non-model");
+    assert.equal(data.noteLength, "private-note-marker".length);
+    const recheck = new StateStore(home);
+    assert.equal(recheck.getTask(taskId).status, "failed");
+    assert.equal(
+      recheck.listEvents(taskId).filter((event) => event.type === "main.failure-attribution.recorded").length,
+      1,
+    );
+    recheck.close();
   } finally {
     await client.close();
     await server.close();

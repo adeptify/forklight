@@ -1,0 +1,237 @@
+version: 2
+name: "Replacement implementation: let Main attribute one exact verification failure without rewriting it"
+project: /Users/yijunwang/code/forklight
+taskClass: m3-main-failure-attribution
+taskFamily: capability-statistics
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: capability-statistics
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: volcengine
+      model: glm-5.2[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: volcengine-glm52-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: >-
+      No comparable cohort supports a best-model claim. This is the one bounded
+      replacement after Grok failed before producing a Candidate because its proxy
+      stream could not send. DeepSeek Flash is authenticated and has current real
+      Worker-response evidence.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      local-grok-builder: 0
+      deepseek-flash-1m: 0
+      volcengine-glm52-1m: 0
+    familySampleCounts:
+      local-grok-builder: 8
+      deepseek-flash-1m: 0
+      volcengine-glm52-1m: 0
+
+contract:
+  outcome: >-
+    Preserve every failed machine verification exactly as failed while letting
+    Main record one durable, exactly-bound responsibility attribution for that
+    verification. Valid attribution changes only routing/statistics consumption:
+    Candidate failures remain model-quality, verification infrastructure and
+    acceptance-contract failures are non-model, and insufficient evidence is
+    ambiguous. CLI, MCP, and Hub record the same evidence; Task Detail explains
+    in plain language that the Task still failed and whether this incident counts
+    toward Worker ability.
+  presentation:
+    summary: 任务仍然失败；Main 只补充说明这次失败是否能评价 Worker 能力，不能改写验收、接受或合入结果。
+    language: zh-CN
+  context:
+    - Follow docs/m3-main-failure-attribution-contract.md as the authoritative aligned contract.
+    - Existing statistics heuristically map most behavior verification failures to model-quality; that is wrong for the final local process-start timing failure on Task e6294b47-b652-4538-ae37-a3bef793f2ff.
+    - The same real Task also has an earlier Candidate-authored assertion failure that must remain first-pass model-quality evidence; a later infrastructure attribution must not erase it.
+    - Existing EventRecord storage, exact verification binding, Candidate Revision parsing, Main Review, statistics/routing aggregation, daemon/CLI/MCP mutation conventions, and Task Detail projections are the intended extension points.
+    - Current M0 is 1/3 because a PATH-missing Integration correctly rolled back before the latest successful activation. This slice must be eligible for normal self-upgrade only after Main review.
+  inScope:
+    - Add one event-backed failure-attribution authority with a closed cause-to-impact mapping, exact Attempt/verification/revision binding, bounded local Main note, and fail-closed parser.
+    - Allow exactly one attribution per Task+Attempt+verification; make byte-for-byte equivalent canonical requests idempotent without adding an event and reject any changed replay as a fixed conflict.
+    - Keep old or malformed bindings from influencing current-terminal, first-pass, final-delivery, routing, or statistics results.
+    - Consume a valid attribution only in routing/statistics impact classification while preserving Task/Attempt status, verification, failure category, Candidate, Main Review, retry, remediation, Integration, and delivery truth.
+    - Preserve first-pass attribution for the first Attempt and latest-terminal attribution for the latest verification independently.
+    - Expose one confirmation-gated daemon mutation, CLI command, MCP tool, and Hub Task Detail form backed by the same Core authority.
+    - Add a canonical privacy-safe Task Detail projection that says the Task remains failed and whether the incident counts toward Worker ability; show the bounded note locally but never in compact statistics.
+    - Add compact aggregate failure-responsibility counts and retain existing routing model-quality/non-model/ambiguous explanations without Task ids, reasons, revision data, commands, paths, logs, or diagnostics.
+    - Add deterministic unit and surface regressions including the real e629 binding shapes, idempotency, conflicts, corrupt imports, privacy, bilingual Hub copy, and explicit confirm gates.
+  outOfScope:
+    - Do not change any Task or Attempt status, verification command/result, Candidate Revision, Diff, Main Review eligibility, correction/reverify allowance, remediation, final-delivery authority, Integration preflight/apply, or activation semantics.
+    - Do not automatically infer attribution, run verification, launch a Worker, resume/correct/reverify, start Competition, change routing thresholds/weights, probe Providers, backfill old Tasks, or add a free-form impact value.
+    - Do not weaken tests, extend process-start timeouts, add retries, hide machine failures, turn non-model into success, or permanently blacklist any model.
+    - Do not modify the already-reviewed Profile slot release behavior except where a shared coordinator adapter must expose the new Core operation without changing scheduling.
+    - Do not touch Elsewhere, client-core, client-app-adeptify, SDK/release paths, consumer/Nexus docs, credentials, commit, or push.
+  executionSteps:
+    - Trace EventType/Store, verification and Candidate Revision binding, statistics terminal and first-pass classifiers, daemon protocol/coordinator/server, CLI/MCP receipts, Hub Task Detail projection and mutation route before editing.
+    - Implement a small Core authority and pure parser first; prove exact binding, closed cause mapping, idempotency, conflict, legacy/no-revision, and corrupt-event fail-closed behavior.
+    - Thread only validated attribution impact into terminal and first-pass statistics/routing classification and add aggregate-only compact counts.
+    - Add daemon, CLI, and MCP adapters with explicit confirm and privacy-safe exchange attribution; no Provider call or command execution.
+    - Add the Hub projection, bilingual plain-language display, and one-time form using trusted exact bindings from the Task Detail response.
+    - Run focused tests and syntax checks, then the full project check and diff hygiene once; report any remaining machine failure without retrying.
+  deliverables:
+    - Durable exactly-bound one-time Main failure attribution with an idempotent canonical receipt.
+    - Statistics and routing that exclude explicit external/contract failures, preserve model-quality failures, and keep ambiguous evidence visible.
+    - CLI, daemon, MCP, and Hub recording paths sharing one authority and one privacy boundary.
+    - Task Detail dual-truth explanation in English and Chinese, plus deterministic regression coverage.
+  modules:
+    - name: Core failure-attribution authority
+      responsibility: Validate, persist, and parse one exact Main attribution without mutating machine or delivery facts.
+      consumes:
+        - Task, Attempt, ordered events, failed verification sequence, exact Candidate Revision when present, closed cause, bounded note, and confirm true.
+      produces:
+        - One durable canonical attribution event/receipt or an idempotent existing result.
+      boundaries:
+        - No status mutation, no command execution, no free-form impact, no stale binding, and no second opinion for the same verification.
+    - name: Statistics and routing consumption
+      responsibility: Apply valid attribution only to the matching verification's model-quality impact and aggregate responsibility without private detail.
+      consumes:
+        - Existing diagnostic classification plus an optional exact validated attribution for terminal or first-pass verification.
+      produces:
+        - Model-quality, ignored non-model, and ambiguous counts with compact aggregate responsibility totals.
+      boundaries:
+        - Machine failure distribution and final delivery remain visible; old or corrupt attribution falls back to existing conservative classification.
+    - name: Daemon, CLI, and MCP control surfaces
+      responsibility: Carry the same exact confirmation-gated request to Core and return a bounded canonical receipt.
+      consumes:
+        - Exact ids/sequence/binding, closed cause, bounded note, and confirm true.
+      produces:
+        - Durable mutation result plus content-minimized exchange attribution.
+      boundaries:
+        - No Provider, Worker, verification, retry, Integration, note echo in receipts, or implicit confirmation.
+    - name: Hub Task Detail explanation
+      responsibility: Let a local Main record once and let an ordinary user understand the dual truth without internal mechanism vocabulary.
+      consumes:
+        - Trusted attribution eligibility/binding projection and existing Task journey facts.
+      produces:
+        - Bilingual still-failed, ability-impact, cause, bounded-note, and next-step presentation.
+      boundaries:
+        - Browser cannot forge authority; existing attribution closes editing until a new failed verification exists; compact Ops/statistics never receive the note.
+  callChain:
+    - Main inspects one failed verification and submits exact attribution through CLI, MCP, or Hub with confirm true.
+    - Daemon adapter validates shape and calls the Core authority; local CLI fallback calls the same Core authority.
+    - Core re-reads Store, validates the Attempt/verification/Candidate binding, handles idempotency, and appends one fixed-summary event.
+    - Task Decision/Detail projection reads only a unique valid attribution for the relevant verification and emits bounded user-facing semantics.
+    - StatisticsService reads the same parser for current-terminal and first-pass evidence, aggregates impact, and routing consumes those privacy-safe counts.
+    - Main Review, Candidate, correction/reverify, remediation, Integration, Task status, and machine verification continue unchanged.
+  scenarios:
+    - name: Candidate failure counts toward ability
+      given: A failed verification is exactly bound to its Attempt and Candidate Revision and the delivered behavior is wrong.
+      when: Main records cause candidate once.
+      then: The Task remains failed and the matching routing/statistics evidence is model-quality.
+    - name: Local verification infrastructure does not blame model
+      given: A failed verification is exactly bound but the only failure is an unchanged local process-start infrastructure fluctuation.
+      when: Main records cause verification-infrastructure once.
+      then: The Task remains failed, Integration stays blocked, and the matching model-quality denominator excludes the incident as non-model.
+    - name: Acceptance definition belongs to Main
+      given: Independent verification failed because the acceptance contract itself was wrong, without verified remediation or delivery.
+      when: Main records cause acceptance-contract.
+      then: The machine failure and delivery outcome remain unchanged while routing/statistics treat only this failure impact as non-model.
+    - name: Evidence is insufficient
+      given: Main cannot prove Candidate, infrastructure, or contract responsibility.
+      when: Main records cause insufficient-evidence.
+      then: The incident remains visible as ambiguous and is neither success nor model-quality blame.
+    - name: Idempotent replay and conflict
+      given: One valid attribution already exists for a verification.
+      when: The identical canonical request is replayed and then a changed request is attempted.
+      then: The identical replay returns existing without a new event; the changed replay fails with a fixed conflict and cannot rewrite statistics.
+    - name: Historical and latest verification remain separate
+      given: Attempt one has a Candidate assertion failure and a later same-Task reverification has a local infrastructure failure.
+      when: Both exact sequences are attributed and evidence is aggregated.
+      then: First-pass remains model-quality while current terminal evidence is non-model; neither binding leaks into the other.
+    - name: Corrupt or stale binding fails closed
+      given: Imported history has a wrong Attempt, sequence, revision id/digest, illegal cause/impact, or conflicting duplicate attribution.
+      when: Task Detail and statistics read the events.
+      then: The invalid attribution is ignored, no private fields enter compact output, and existing conservative classification remains.
+  risks:
+    - Applying the latest attribution to every historical verification would erase first-pass truth; always resolve by exact Attempt+sequence.
+    - Letting callers choose impact independently from cause would enable model-score manipulation; derive impact from a closed mapping in Core.
+    - Appending a new event for changed duplicate requests would allow repeated opinion changes and sample gaming; enforce one-time conflict and identical idempotency.
+    - Showing the Main note or exact ids in compact statistics would leak local evidence; keep note local to Task Detail/inspect and aggregates content-free.
+    - Hub-side recomputation could drift from daemon authority; expose a canonical projection and revalidate every mutation in Core.
+  changeBudget:
+    maxFiles: 18
+    maxDiffLines: 3200
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 18
+  fileLimitMode: warn
+  changedLineLimit: 3200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - target
+    - .forklight-boundary-capture
+    - .forklight-dev
+    - .forklight-daemon-test
+    - .forklight-receipt-retry
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-failure-attribution.ts
+    - src/core/types.ts
+    - src/core/statistics.ts
+    - src/daemon
+    - src/cli.ts
+    - src/mcp
+    - src/hub
+    - tests
+acceptance:
+  criteria:
+    - Exact failed-verification and Candidate bindings are durable, single-use, identically idempotent, conflict on change, and fail closed when malformed.
+    - Attribution never changes machine status, verification, Main Review, Candidate, retry/reverify, remediation, final delivery, or Integration authority.
+    - Terminal and first-pass routing/statistics consume only their own valid attribution; compact output is aggregate-only and privacy-safe.
+    - CLI, daemon, MCP, and Hub record the same confirmation-gated evidence without Provider or Worker execution.
+    - Hub plainly explains that the Task remains failed and whether this incident counts toward Worker ability in English and Chinese.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-failure-attribution.test.ts tests/statistics.test.ts tests/daemon.test.ts tests/mcp.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - node --check src/hub/public/app.js
+    - node --check src/hub/public/i18n.js
+    - npm run check
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

@@ -155,6 +155,7 @@ function evidence(
     ignoredNonModelFailures: {},
     ignoredNonModelTaskCount: 0,
     ambiguousFailureCount: 0,
+    failureAttributionCounts: { modelQuality: 0, nonModel: 0, ambiguous: 0 },
     correctionChurn: 0,
     correctionChurnRate: 0,
     acceptedDeliveryCount: 10,

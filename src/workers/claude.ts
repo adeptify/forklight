@@ -142,10 +142,23 @@ function childEnvironment(
   providerDefaults?: ProviderDefaultSettings,
 ): NodeJS.ProcessEnv {
   const provider = resolveProvider(task.spec.provider.name, task.spec.provider, providerDefaults);
+  const temporaryDirectory = runtimeTemporaryDirectory();
   return providerEnvironment(provider, apiKey, {
     ...process.env,
     CLAUDE_CONFIG_DIR: task.paths.claudeConfig,
+    // sandbox-exec resolves /tmp to /private/tmp when building the allowlist,
+    // while Node falls back to the literal /tmp when TMPDIR is absent. Keep
+    // Claude's temp-path choice on the exact canonical path the sandbox allows.
+    TMPDIR: temporaryDirectory,
+    TMP: temporaryDirectory,
+    TEMP: temporaryDirectory,
   });
+}
+
+export function runtimeTemporaryDirectory(
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  return realpathSync(environment.TMPDIR ?? "/tmp");
 }
 
 function sandboxLiteral(value: string): string {
@@ -209,7 +222,7 @@ export function workerLaunch(task: TaskRecord, claudeArgs: string[]): WorkerLaun
 
   const executable = executablePath(task.spec.runtime.executable);
   const runtimeDirectory = path.dirname(executable);
-  const temporaryDirectory = realpathSync(process.env.TMPDIR ?? "/tmp");
+  const temporaryDirectory = runtimeTemporaryDirectory();
   const checkpointReadPaths = checkpointRuntimeReadPaths(task);
   const checkpointReadRules = [
     ...checkpointReadPaths.map(

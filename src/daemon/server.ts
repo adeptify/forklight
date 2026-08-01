@@ -489,6 +489,31 @@ export class ForkLightDaemon {
           true,
         );
       }
+      case "main_failure_attribution": {
+        if (params.confirm !== true) {
+          throw new Error("main_failure_attribution requires explicit confirm: true");
+        }
+        return this.coordinator.mainFailureAttribution(
+          requiredString(params.taskId, "taskId"),
+          {
+            attemptId: requiredString(params.attemptId, "attemptId"),
+            verificationEventSequence: Number(params.verificationEventSequence),
+            cause: requiredString(params.cause, "cause") as never,
+            note: requiredString(params.note, "note"),
+            ...(params.candidateRevisionId === undefined
+              ? {}
+              : { candidateRevisionId: requiredString(params.candidateRevisionId, "candidateRevisionId") }),
+            ...(params.candidatePatchDigest === undefined
+              ? {}
+              : { candidatePatchDigest: requiredString(params.candidatePatchDigest, "candidatePatchDigest") }),
+            confirm: true,
+          },
+        );
+      }
+      case "main_failure_attribution_projection":
+        return this.coordinator.mainFailureAttributionProjection(
+          requiredString(params.taskId, "taskId"),
+        );
       case "revise": {
         // Non-string feedback is routed through the shared eligibility
         // boundary as an empty string so checkReviseEligibility produces

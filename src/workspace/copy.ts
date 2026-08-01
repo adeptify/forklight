@@ -12,8 +12,7 @@ import { lstatSync } from "node:fs";
 import path from "node:path";
 import type { TaskPaths, TaskSpec } from "../core/types.js";
 import {
-  materializeDeclaredLocalPackages,
-  materializeProjectDependencies,
+  materializeDependencySet,
   RUNTIME_DEPENDENCY_DIRECTORIES,
 } from "./dependency-materializer.js";
 import { matchesExcludedSegment } from "./path-policy.js";
@@ -134,9 +133,11 @@ export async function buildManifest(root: string, excludes: Set<string>): Promis
  * observe node_modules or sibling package mirrors. Dependencies always come
  * from the real project (spec.project), not from an optional snapshot copySource.
  *
- * Runtime dirs land under the workspace project. Declared local packages land
- * at the equivalent relative path from the workspace inside the Task root
- * (paths.root), so `file:../sibling/sdk` resolves for workspace commands.
+ * Uses the canonical dependency-set rule: declared local packages first, then
+ * runtime trees with exact declared-package link rewrite. Runtime dirs land
+ * under the workspace project. Declared local packages land at the equivalent
+ * relative path from the workspace inside the Task root (paths.root), so
+ * `file:../sibling/sdk` resolves for workspace commands.
  */
 async function materializeSharedDependencies(
   spec: TaskSpec,
@@ -145,15 +146,13 @@ async function materializeSharedDependencies(
   excludes: Set<string>,
 ): Promise<string[]> {
   const names = RUNTIME_DEPENDENCY_DIRECTORIES.filter((name) => excludes.has(name));
-  const runtime = names.length === 0
-    ? []
-    : await materializeProjectDependencies(spec.project, workspaceRoot, names);
-  const local = await materializeDeclaredLocalPackages(
+  const result = await materializeDependencySet(
     spec.project,
     workspaceRoot,
     isolationContainer,
+    names,
   );
-  return [...runtime, ...local.map((entry) => entry.relativeTarget)];
+  return result.linked;
 }
 
 async function writeWorkspaceContext(

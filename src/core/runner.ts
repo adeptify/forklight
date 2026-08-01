@@ -452,6 +452,14 @@ export async function executeAttempt(
   execution?: ExecutionSettings,
   providerDefaults?: ProviderDefaultsSettings,
   options?: AttemptExecutionOptions,
+  /**
+   * Optional non-authoritative scheduler notification: the Worker process is no
+   * longer occupying a Profile slot. Invoked at most once after the runtime
+   * returns (or doctor/run fails before/while launching) and before independent
+   * verification. Must never redefine Worker or Task success; ordinary direct
+   * callers may omit it.
+   */
+  onWorkerProfileSlotRelease?: () => void,
 ): Promise<RunResult> {
   if (resuming) {
     await assertWorkspaceExists(task.paths);
@@ -490,6 +498,21 @@ export async function executeAttempt(
     finishedAt: null,
     ...(task.startedAt === undefined ? { startedAt: attempt.startedAt } : {}),
   });
+
+  // Idempotent optional release: one notification per Attempt at the
+  // Worker-return / pre-verification boundary. Failures here never rewrite
+  // Worker, verification, or Task outcome.
+  let profileSlotReleaseNotified = false;
+  const notifyWorkerProfileSlotRelease = (): void => {
+    if (profileSlotReleaseNotified) return;
+    profileSlotReleaseNotified = true;
+    if (onWorkerProfileSlotRelease === undefined) return;
+    try {
+      onWorkerProfileSlotRelease();
+    } catch {
+      // Non-authoritative: scheduler notification must not change Task outcome.
+    }
+  };
 
   const forwarding = installInterruptForwarding();
   const duration = createDurationController(task, attempt);
@@ -542,6 +565,9 @@ export async function executeAttempt(
         error: message,
       });
       store.addEvent(task.id, attemptId, "worker.failed", message);
+      // Doctor / launch failure: model process is not running. Notify so a
+      // Profile slot is not held until the outer job Promise settles.
+      notifyWorkerProfileSlotRelease();
       return { task: store.getTask(task.id), attempt: store.getAttempt(attemptId) };
     }
   } finally {
@@ -554,6 +580,9 @@ export async function executeAttempt(
   // process while this attempt records terminal evidence or enters verification.
   // Failed/interrupted paths also clear workerPid; this closes the success-path race.
   store.updateTask(task.id, { workerPid: null });
+  // Profile Worker occupancy ends when the model process returns — before
+  // independent verification, Candidate capture, or final Task status.
+  notifyWorkerProfileSlotRelease();
 
   const workerFinishedAt = timestamp();
   const maxDurationMs = task.effectivePolicy?.values.maxDurationMs ?? null;
@@ -796,6 +825,7 @@ export async function resumeTask(
   execution?: ExecutionSettings,
   providerDefaults?: ProviderDefaultsSettings,
   options?: AttemptExecutionOptions,
+  onWorkerProfileSlotRelease?: () => void,
 ): Promise<RunResult> {
   const task = store.getTask(taskId);
   if (task.status !== "interrupted" && task.status !== "failed") {
@@ -817,6 +847,7 @@ export async function resumeTask(
     .join("\n\n");
   return executeAttempt(
     store, task, true, onProgress, combinedFeedback || undefined, exec, providerDefaults, options,
+    onWorkerProfileSlotRelease,
   );
 }
 
@@ -858,6 +889,7 @@ export async function correctTask(
   onProgress?: ProgressListener,
   execution?: ExecutionSettings,
   providerDefaults?: ProviderDefaultsSettings,
+  onWorkerProfileSlotRelease?: () => void,
 ): Promise<RunResult> {
   const exec = execution ?? cloneDefaults().execution;
   const task = store.getTask(taskId);
@@ -904,6 +936,7 @@ export async function correctTask(
     exec,
     providerDefaults,
     pending.executionOptions,
+    onWorkerProfileSlotRelease,
   );
 }
 

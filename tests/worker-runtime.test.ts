@@ -1178,3 +1178,180 @@ test("maximum wall duration preemptively terminates the spawned Worker", async (
     resetWorkerRegistryForTests();
   }
 });
+
+// --- Profile Worker slot release hook (Attempt boundary) ---
+
+test("executeAttempt notifies Profile slot release after Worker return and before verification", async () => {
+  registerPolicyTestClaude(async () => ({
+    status: "succeeded",
+    exitCode: 0,
+    resultText: "ok",
+  }));
+  const { store, task } = await policyRunnerFixture({
+    completionMode: "off",
+    changeBudgetMode: "off",
+  });
+  try {
+    let releaseCount = 0;
+    let verificationStartedAtRelease = false;
+    const result = await executeAttempt(
+      store,
+      task,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        releaseCount += 1;
+        verificationStartedAtRelease = store.listEvents(task.id).some(
+          (event) => event.type === "verification.started",
+        );
+      },
+    );
+    assert.equal(releaseCount, 1, "release hook fires exactly once on the success path");
+    assert.equal(
+      verificationStartedAtRelease,
+      false,
+      "release must precede independent verification",
+    );
+    assert.equal(result.task.status, "succeeded");
+    assert.ok(
+      store.listEvents(task.id).some((event) => event.type === "verification.started"),
+      "verification still runs after the optional release notification",
+    );
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+  }
+});
+
+test("executeAttempt release hook is optional, idempotent on failure paths, and cannot rewrite success", async () => {
+  // 1) Ordinary callers omit the hook and still succeed.
+  registerPolicyTestClaude(async () => ({
+    status: "succeeded",
+    exitCode: 0,
+    resultText: "ok",
+  }));
+  const omitted = await policyRunnerFixture({
+    completionMode: "off",
+    changeBudgetMode: "off",
+  });
+  try {
+    const result = await executeAttempt(omitted.store, omitted.task, false);
+    assert.equal(result.task.status, "succeeded");
+  } finally {
+    omitted.store.close();
+    resetWorkerRegistryForTests();
+  }
+
+  // 2) Doctor failure still notifies once so a Profile slot cannot leak.
+  resetWorkerRegistryForTests();
+  getWorkerAdapter("claude-code");
+  const capabilities = getWorkerAdapter("claude-code").capabilities();
+  registerWorkerAdapter({
+    name: "claude-code",
+    displayName: "Doctor-fail release test",
+    defaultExecutable: process.execPath,
+    capabilities: () => capabilities,
+    doctor: () => ({
+      runtime: "claude-code",
+      ok: false,
+      executable: process.execPath,
+      issues: ["simulated doctor failure for release hook"],
+      capabilities,
+    }),
+    validateSpec: () => {},
+    effortArgs: () => [],
+    toolProtocolAppendix: () => [],
+    checkpointProtocolAppendix: () => [],
+    run: async () => {
+      throw new Error("run must not be called when doctor fails");
+    },
+  });
+  const doctorCase = await policyRunnerFixture({});
+  try {
+    let releaseCount = 0;
+    const result = await executeAttempt(
+      doctorCase.store,
+      doctorCase.task,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        releaseCount += 1;
+      },
+    );
+    assert.equal(result.task.status, "failed");
+    assert.match(result.task.error ?? "", /doctor failed/);
+    assert.equal(releaseCount, 1);
+  } finally {
+    doctorCase.store.close();
+    resetWorkerRegistryForTests();
+  }
+
+  // 3) A throwing release hook must not manufacture failure after Worker success.
+  registerPolicyTestClaude(async () => ({
+    status: "succeeded",
+    exitCode: 0,
+    resultText: "ok",
+  }));
+  const throwCase = await policyRunnerFixture({
+    completionMode: "off",
+    changeBudgetMode: "off",
+  });
+  try {
+    const result = await executeAttempt(
+      throwCase.store,
+      throwCase.task,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        throw new Error("scheduler notification must not rewrite Task outcome");
+      },
+    );
+    assert.equal(result.task.status, "succeeded");
+    assert.equal(result.verification?.passed, true);
+  } finally {
+    throwCase.store.close();
+    resetWorkerRegistryForTests();
+  }
+
+  // 4) Worker failed status also releases exactly once (no verification).
+  registerPolicyTestClaude(async () => ({
+    status: "failed",
+    exitCode: 1,
+    error: "simulated worker failure for release",
+  }));
+  const failedCase = await policyRunnerFixture({});
+  try {
+    let releaseCount = 0;
+    const result = await executeAttempt(
+      failedCase.store,
+      failedCase.task,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        releaseCount += 1;
+      },
+    );
+    assert.equal(result.task.status, "failed");
+    assert.equal(result.verification, undefined);
+    assert.equal(releaseCount, 1);
+  } finally {
+    failedCase.store.close();
+    resetWorkerRegistryForTests();
+  }
+});

@@ -40,6 +40,13 @@ import {
   type MainCorrectionAuthorization,
 } from "../core/attempt-authorization.js";
 import { latestMainReview, recordMainReview } from "../core/main-review.js";
+import {
+  projectMainFailureAttribution,
+  recordMainFailureAttribution,
+  type FailureAttributionCause,
+  type MainFailureAttributionProjection,
+  type MainFailureAttributionReceipt,
+} from "../core/main-failure-attribution.js";
 import type { ProviderAuthInspector, ProviderName, ProviderReadiness } from "../core/providers.js";
 import { providerNames, realProviderAuthInspector, resolveProvider } from "../core/providers.js";
 import {
@@ -334,7 +341,14 @@ async function stopOrphanWorker(pid: number): Promise<void> {
 
 export class DaemonCoordinator {
   private readonly queue: QueuedJob[] = [];
+  /** Full Task lifecycle in-flight set: preparation, Worker, verification, Candidate capture. */
   private readonly active = new Map<string, Promise<void>>();
+  /**
+   * Private Profile Worker occupancy: Task ids that currently hold a Worker
+   * Profile slot (from scheduler admission through runtime return). Independent
+   * verification keeps the Task in `active` but must not keep the Profile slot.
+   */
+  private readonly profileWorkerOccupancy = new Set<string>();
   private readonly activeIntegrations = new Map<string, Promise<void>>();
   private readonly integrationOperations = new Map<string, IntegrationOperationContext>();
   private readonly authorizedHandoffShutdowns = new Set<string>();
@@ -1374,6 +1388,29 @@ export class DaemonCoordinator {
     this.reconcileGoalsForTask(taskId);
     this.reconcilePlans();
     return result;
+  }
+
+  mainFailureAttribution(
+    taskId: string,
+    input: {
+      attemptId: string;
+      verificationEventSequence: number;
+      cause: FailureAttributionCause;
+      note: string;
+      candidateRevisionId?: string;
+      candidatePatchDigest?: string;
+      confirm: true;
+    },
+  ): MainFailureAttributionReceipt {
+    return recordMainFailureAttribution(this.store, taskId, input);
+  }
+
+  mainFailureAttributionProjection(taskId: string): MainFailureAttributionProjection {
+    return projectMainFailureAttribution(
+      this.store.getTask(taskId),
+      this.store.listAttempts(taskId),
+      this.store.listEvents(taskId),
+    );
   }
 
   status(taskId: string): TaskRecord {
@@ -3109,11 +3146,23 @@ export class DaemonCoordinator {
     }
   }
 
+  /**
+   * Release one Task's Profile Worker occupancy exactly once and immediately
+   * reconsider the queue. Idempotent: a second call is a no-op. Does not remove
+   * the Task from the full-lifecycle `active` set (verification may continue).
+   */
+  private releaseProfileWorkerOccupancy(taskId: string): void {
+    if (!this.profileWorkerOccupancy.delete(taskId)) return;
+    this.pump();
+  }
+
   private pump(): void {
     this.pruneGoalBlockedQueuedJobs();
     const globalCap = this.maxConcurrencyOverride ?? this.settings.get().execution.maxConcurrency;
+    // Global in-flight cap still counts full Task lifecycle (active), including
+    // Tasks that have released their Profile Worker slot and are verifying.
     while (!this.closing && this.active.size < globalCap && this.queue.length > 0) {
-      // Find the next eligible job respecting per-profile concurrency caps
+      // Find the next eligible job respecting per-profile Worker occupancy caps
       let jobIndex = -1;
       for (let i = 0; i < this.queue.length; i += 1) {
         const candidate = this.queue[i]!;
@@ -3121,19 +3170,20 @@ export class DaemonCoordinator {
           const task = this.store.getTask(candidate.taskId);
           const profileConcurrency = task.effectivePolicy?.values.maxConcurrency ?? globalCap;
           const cap = Math.min(profileConcurrency, globalCap);
-          // Count active jobs from this profile
-          let profileActive = 0;
-          for (const [activeTaskId] of this.active) {
+          // Count only Tasks that still occupy a Worker Profile slot — not
+          // Tasks that are only verifying after the model process returned.
+          let profileOccupied = 0;
+          for (const occupiedTaskId of this.profileWorkerOccupancy) {
             try {
-              const activeTask = this.store.getTask(activeTaskId);
-              if (activeTask.effectivePolicy?.profileId === task.effectivePolicy?.profileId) {
-                profileActive += 1;
+              const occupiedTask = this.store.getTask(occupiedTaskId);
+              if (occupiedTask.effectivePolicy?.profileId === task.effectivePolicy?.profileId) {
+                profileOccupied += 1;
               }
             } catch {
-              // Active task may have been removed; skip
+              // Occupied task may have been removed; skip
             }
           }
-          if (profileActive < cap) {
+          if (profileOccupied < cap) {
             jobIndex = i;
             break;
           }
@@ -3149,6 +3199,9 @@ export class DaemonCoordinator {
         return;
       }
       const job = this.queue.splice(jobIndex, 1)[0]!;
+      // Record Profile occupancy at admission (covers preparation and pre-Worker
+      // gates). Released after runtime returns, or idempotently in job finally.
+      this.profileWorkerOccupancy.add(job.taskId);
       const settings = this.settings.get();
       const execution = this.execute(job, settings)
         .catch((error: unknown) => {
@@ -3169,6 +3222,9 @@ export class DaemonCoordinator {
         })
         .finally(() => {
           this.active.delete(job.taskId);
+          // Idempotent cleanup: covers auth/prep failures that never reached the
+          // Worker-return release hook, and double-releases after early notify.
+          this.profileWorkerOccupancy.delete(job.taskId);
           this.reconcileGoalsForTask(job.taskId);
           this.reconcilePlans();
           this.reconcileCompetitions(job.taskId);
@@ -3185,6 +3241,11 @@ export class DaemonCoordinator {
     // Read Attempt limits from immutable task snapshot, falling back to live settings for legacy tasks
     const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
     const maxExtraAttempts = task.effectivePolicy?.values.maxExtraAttempts ?? exec.maxExtraAttempts;
+    // Non-authoritative: notify scheduler that the model process no longer
+    // occupies this Profile slot. Safe to call more than once.
+    const onWorkerProfileSlotRelease = (): void => {
+      this.releaseProfileWorkerOccupancy(job.taskId);
+    };
 
     // Canonical launch admission. For a new Task this runs before any source
     // copy; for resume/correction it still runs before a new Attempt or Worker.
@@ -3201,6 +3262,7 @@ export class DaemonCoordinator {
         undefined,
         exec,
         settings.providerDefaults,
+        onWorkerProfileSlotRelease,
       );
       return;
     }
@@ -3218,6 +3280,7 @@ export class DaemonCoordinator {
       await executeAttempt(
         this.store, task, true, undefined,
         job.feedback, exec, settings.providerDefaults, effectiveOptions,
+        onWorkerProfileSlotRelease,
       );
     } else if (job.resuming) {
       const attemptCount = this.store.listAttempts(job.taskId).length;
@@ -3233,6 +3296,7 @@ export class DaemonCoordinator {
         exec,
         settings.providerDefaults,
         effectiveOptions,
+        onWorkerProfileSlotRelease,
       );
     } else {
       let currentTask = task;
@@ -3253,7 +3317,17 @@ export class DaemonCoordinator {
         }
         return;
       }
-      await executeAttempt(this.store, currentTask, false, undefined, undefined, exec, settings.providerDefaults);
+      await executeAttempt(
+        this.store,
+        currentTask,
+        false,
+        undefined,
+        undefined,
+        exec,
+        settings.providerDefaults,
+        undefined,
+        onWorkerProfileSlotRelease,
+      );
     }
   }
 

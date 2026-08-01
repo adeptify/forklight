@@ -2,8 +2,8 @@ import { cp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  materializeDeclaredLocalPackages,
-  materializeProjectDependencies,
+  materializeDependencySet,
+  RUNTIME_DEPENDENCY_DIRECTORIES,
 } from "../workspace/dependency-materializer.js";
 
 /**
@@ -31,8 +31,9 @@ export interface VerificationEnvironment {
  * Copy the current original project into an isolated temporary verification
  * container. Excluded directories (.git, node_modules, configured excludes)
  * are not copied. Runtime dependencies and root-manifest declared relative
- * file:/link: package roots are materialized via the canonical dependency
- * materializer so verifiers never see an external symlink outside the owned
+ * file:/link: package roots are materialized via the canonical dependency-set
+ * rule (declared packages first, then runtime trees with exact declared-package
+ * link rewrite) so verifiers never see an external symlink outside the owned
  * container.
  *
  * Extracted from integration.ts so that the Main remediation verification
@@ -60,8 +61,12 @@ export async function copyForVerification(
     };
 
     await cp(sourcePath, projectCwd, { recursive: true, filter });
-    await materializeProjectDependencies(sourcePath, projectCwd, ["node_modules"]);
-    await materializeDeclaredLocalPackages(sourcePath, projectCwd, cleanupRoot);
+    await materializeDependencySet(
+      sourcePath,
+      projectCwd,
+      cleanupRoot,
+      RUNTIME_DEPENDENCY_DIRECTORIES,
+    );
 
     return { projectCwd, cleanupRoot };
   } catch (error) {

@@ -1,5 +1,8 @@
 # M1 真实任务组合与历史候选池
 
+> Supporting evidence inventory, not current project status. The authoritative
+> Goal, milestone state, and action items live in [`PROJECT.md`](../PROJECT.md).
+
 更新时间：2026-07-30
 
 这份文档同时保存当前 M1.4 交付证据与早期候选池。以本页最前面的“当前权威结论”为准；

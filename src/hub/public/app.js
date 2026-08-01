@@ -10776,6 +10776,88 @@ function renderFourSectionOverview(task){
 }
 
 /* Primary Task workbench: sticky hero + tabbed sections so one screen is not a wall of cards. */
+function failureAttributionAssessmentText(value){
+  if(value === "counts") return t("failureAttributionCounts");
+  if(value === "excluded") return t("failureAttributionExcluded");
+  return t("failureAttributionUncertain");
+}
+
+function renderFailureAttributionCard(task){
+  var fa = task && task.failureAttribution;
+  if(!fa || typeof fa !== "object" || fa.machineOutcome !== "failed") return null;
+  var card = h("div", "task-report-card failure-attribution-card");
+  card.setAttribute("data-fl-role", "failure-attribution");
+  card.appendChild(h("div", "task-report-card-title", t("failureAttributionTitle")));
+  card.appendChild(h("div", "summary-line", t("failureAttributionMachineFailed")));
+  card.appendChild(h("div", "summary-line", failureAttributionAssessmentText(fa.abilityAssessment)));
+  if(fa.reason === "ready"){
+    card.appendChild(h("div", "summary-line dim", t("failureAttributionReady")));
+  } else if(fa.reason === "invalid-history"){
+    card.appendChild(h("div", "summary-line dim", t("failureAttributionInvalid")));
+  }
+  if(fa.attribution && fa.attribution.note){
+    card.appendChild(h("div", "task-report-label", t("failureAttributionNoteLabel")));
+    card.appendChild(h("div", "task-report-block", String(fa.attribution.note)));
+  }
+  return card;
+}
+
+function renderFailureAttributionControls(task){
+  var fa = task && task.failureAttribution;
+  if(!fa || !fa.eligible || !fa.binding) return null;
+  var card = h("div", "card form-card failure-attribution-controls");
+  card.setAttribute("data-fl-role", "failure-attribution-controls");
+  card.appendChild(h("div", "card-title mb-4", t("failureAttributionActionTitle")));
+  card.appendChild(h("div", "summary-line dim mb-8", t("failureAttributionActionHint")));
+  var causeLabel = h("label", "", t("failureAttributionCauseLabel"));
+  var cause = h("select", "");
+  [
+    ["candidate", "failureAttributionCauseCandidate"],
+    ["verification-infrastructure", "failureAttributionCauseInfrastructure"],
+    ["acceptance-contract", "failureAttributionCauseContract"],
+    ["insufficient-evidence", "failureAttributionCauseInsufficient"]
+  ].forEach(function(pair){
+    var option = document.createElement("option");
+    option.value = pair[0];
+    option.textContent = t(pair[1]);
+    cause.appendChild(option);
+  });
+  causeLabel.appendChild(cause);
+  card.appendChild(causeLabel);
+  var note = document.createElement("textarea");
+  note.maxLength = 500;
+  note.rows = 3;
+  note.placeholder = t("failureAttributionNotePlaceholder");
+  card.appendChild(note);
+  var button = h("button", "btn sm primary", t("failureAttributionRecord"));
+  button.type = "button";
+  button.addEventListener("click", function(){
+    var explanation = note.value.trim();
+    if(!explanation){ flashError(t("failureAttributionNoteRequired")); return; }
+    if(!window.confirm(t("failureAttributionConfirm"))) return;
+    var binding = fa.binding;
+    var body = {
+      attemptId: binding.attemptId,
+      verificationEventSequence: binding.verificationEventSequence,
+      cause: cause.value,
+      note: explanation,
+      confirm: true
+    };
+    if(binding.candidateRevisionId !== undefined){
+      body.candidateRevisionId = binding.candidateRevisionId;
+      body.candidatePatchDigest = binding.candidatePatchDigest;
+    }
+    taskAction(
+      "/api/ops/tasks/" + encodeURIComponent(task.id) + "/failure-attribution",
+      body,
+      button,
+      function(){ showTask(task.id); }
+    );
+  });
+  card.appendChild(hd("div", "actions", [button]));
+  return card;
+}
+
 function renderTaskWorkbench(task, extraTabs){
   var j = task.journey || {};
   var a = j.assignment || {};
@@ -11064,6 +11146,8 @@ function renderTaskWorkbench(task, extraTabs){
     checkNodes,
     "task-story-step-main-check"
   ));
+  var failureAttributionCard = renderFailureAttributionCard(task);
+  if(failureAttributionCard) checksBody.appendChild(failureAttributionCard);
   checksBody.appendChild(reportCard(
     t("taskReportFinalTitle"),
     t("taskReportFinalHint"),
@@ -11107,6 +11191,9 @@ function showTask(id){
     actionsBody.appendChild(h("div", "task-report-card-hint", t("taskTabActionsHint")));
     actionsBody.appendChild(h("div", "summary-line dim mb-8", t("taskManualActionsHint")));
     var manualActionsBody = actionsBody;
+
+    var failureAttributionControls = renderFailureAttributionControls(task);
+    if(failureAttributionControls) manualActionsBody.appendChild(failureAttributionControls);
 
     // Supervision panel
     var sup = h("div", "card form-card");

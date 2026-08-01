@@ -130,6 +130,12 @@ const ADAPTATION_PROPOSED_REASONS = new Set([
   "no-progress-timeout",
   "other-flexible-policy",
 ]);
+const FAILURE_ATTRIBUTION_CAUSES = new Set([
+  "candidate",
+  "verification-infrastructure",
+  "acceptance-contract",
+  "insufficient-evidence",
+]);
 const DIRECT_CODEX_REVIEW_DECISIONS = new Set(["accepted", "rejected"]);
 const DIRECT_CODEX_REJECTION_REASONS = new Set([
   "not-equivalent-task",
@@ -2905,6 +2911,7 @@ export class HubServer {
         let candidateReverificationEligibility: unknown = undefined;
         let correctionEligibility: unknown = undefined;
         let reviewGraph: unknown = undefined;
+        let failureAttribution: unknown = undefined;
         try {
           candidateReverificationEligibility = await this.daemonCall<unknown>(
             "candidate_reverify_eligibility",
@@ -2926,6 +2933,15 @@ export class HubServer {
           reviewGraph = await this.daemonCall<unknown>("review_graph_status", { taskId });
         } catch {
           // Review Graph is best-effort; absence must not break Task Detail.
+        }
+        try {
+          failureAttribution = await this.daemonCall<unknown>(
+            "main_failure_attribution_projection",
+            { taskId },
+          );
+        } catch {
+          // Best-effort local explanation; Task Detail still renders if an
+          // older daemon does not yet support this projection.
         }
         const inspect = await this.daemonCall<{
           events?: Array<{ timestamp: string; type: string; summary: string; payload?: unknown }>;
@@ -3037,6 +3053,7 @@ export class HubServer {
           ...(correctionEligibility === undefined
             ? {}
             : { correctionEligibility }),
+          ...(failureAttribution === undefined ? {} : { failureAttribution }),
           ...((reviewGraph ?? inspect.reviewGraph) === undefined
             || (reviewGraph ?? inspect.reviewGraph) === null
             ? {}
@@ -3193,6 +3210,59 @@ export class HubServer {
           confirm: true,
         });
         this.sendJson(req, res, 200, { ok: true, action: "candidate_reverify", taskId, result });
+        return;
+      }
+
+      // POST /api/ops/tasks/:id/main-review  { decision, reason, confirm: true }
+      const failureAttribution = opsRoute.match(/^\/tasks\/([^/]+)\/failure-attribution$/);
+      if (failureAttribution) {
+        const taskId = decodeURIComponent(failureAttribution[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "failure attribution requires confirm: true" });
+          return;
+        }
+        if (typeof body.attemptId !== "string" || body.attemptId.trim().length === 0) {
+          this.sendJson(req, res, 422, { error: "attemptId is required" });
+          return;
+        }
+        const sequence = Number(body.verificationEventSequence);
+        if (!Number.isSafeInteger(sequence) || sequence < 1) {
+          this.sendJson(req, res, 422, { error: "verificationEventSequence must be a positive integer" });
+          return;
+        }
+        if (typeof body.cause !== "string" || !FAILURE_ATTRIBUTION_CAUSES.has(body.cause)) {
+          this.sendJson(req, res, 422, { error: "Choose one supported responsibility reason" });
+          return;
+        }
+        const note = typeof body.note === "string" ? body.note.trim() : "";
+        if (!note || note.length > 500 || /[\u0000-\u001f\u007f]/u.test(note)) {
+          this.sendJson(req, res, 422, { error: "note must be 1-500 characters without control characters" });
+          return;
+        }
+        const hasRevisionId = body.candidateRevisionId !== undefined;
+        const hasDigest = body.candidatePatchDigest !== undefined;
+        if (hasRevisionId !== hasDigest) {
+          this.sendJson(req, res, 422, { error: "Candidate binding is incomplete" });
+          return;
+        }
+        const result = await this.daemonCall<unknown>("main_failure_attribution", {
+          taskId,
+          attemptId: body.attemptId.trim(),
+          verificationEventSequence: sequence,
+          cause: body.cause,
+          note,
+          ...(hasRevisionId ? {
+            candidateRevisionId: body.candidateRevisionId,
+            candidatePatchDigest: body.candidatePatchDigest,
+          } : {}),
+          confirm: true,
+        });
+        this.sendJson(req, res, 200, {
+          ok: true,
+          action: "main_failure_attribution",
+          taskId,
+          result,
+        });
         return;
       }
 

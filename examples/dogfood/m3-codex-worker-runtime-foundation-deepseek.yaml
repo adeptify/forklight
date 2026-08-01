@@ -1,0 +1,194 @@
+version: 2
+name: Add the Codex CLI Worker Runtime foundation
+project: ../..
+taskClass: m3-codex-worker-runtime-foundation
+taskFamily: worker-runtime
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: worker-runtime
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: No fair comparable cohort exists. DeepSeek Flash is selected for a bounded implementation slice after the Claude temp-root bootstrap was repaired and verified; Main will independently review every boundary.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek-flash-1m: 0
+      local-grok-builder: 0
+
+contract:
+  outcome: >-
+    ForkLight recognizes a saved OpenAI/Codex Worker identity, validates an exact
+    model and supported effort, launches a least-privilege non-interactive Codex
+    process in the isolated Task workspace, and normalizes JSONL progress,
+    terminal result, session identity, and Token usage into existing Worker
+    contracts without granting Main, Integration, commit, or push authority.
+  presentation:
+    summary: Codex 可以像其他 Worker 一样被选择、隔离执行并留下统一证据，模型和思考强度不会静默变化。
+    language: zh-CN
+  context:
+    - Follow docs/m3-codex-worker-runtime-foundation-contract.md exactly.
+    - Local Codex CLI 0.146.0 and one task-local-auth JSONL probe are already verified by Main.
+    - PROJECT.md remains the only project-management source; do not edit it.
+    - Existing Provider/runtime/Profile/Task/Runner/normalizer contracts are the extension points.
+  inScope:
+    - Add openai and codex-cli identity with exclusive fail-closed pairing.
+    - Add optional model-config supportedEfforts and reject unsupported Profile effort before Task creation.
+    - Add bounded local Codex catalog projection for visible model and effort metadata.
+    - Add task-local Codex auth/catalog seeding without content or path leakage.
+    - Add Codex JSONL normalizer and Worker adapter with exact least-privilege args and interruption hooks.
+    - Register the adapter and update policy/readiness/task executable seams required by the new runtime.
+    - Add deterministic focused regressions; preserve every existing runtime path.
+  outOfScope:
+    - No Hub redesign, resume, pricing, live Provider probe, Competition, Integration, commit, push, or non-ForkLight edits.
+    - Do not enable ultra, web, MCP, apps, plugins, nested agents, danger-full-access, extra writable roots, or user config.
+    - Do not modify PROJECT.md or existing failure-attribution behavior.
+  executionSteps:
+    - Trace runtime/provider/profile/task/runner/doctor and event-normalization seams before editing.
+    - Implement pure identity and supported-effort validation first.
+    - Implement strict Codex catalog and JSONL parsers with malformed-input tests.
+    - Implement task-local auth seeding and exact CLI argument builder.
+    - Register the adapter and add focused execution/readiness tests using fake processes or fixtures, not a second paid live probe.
+    - Run focused tests, build, full suite, and diff hygiene once.
+  deliverables:
+    - First-class openai/codex-cli Worker identity and validation.
+    - Strict local model/effort catalog projection.
+    - Registered Codex adapter plus JSONL normalizer and usage evidence.
+    - Deterministic compatibility, safety, privacy, and runtime tests.
+  modules:
+    - name: Identity and Profile validation
+      responsibility: Freeze and validate OpenAI/Codex model/effort identity before Task creation.
+      consumes:
+        - Saved model config, Worker Profile, provider/runtime pair, model, and effort.
+      produces:
+        - Exact immutable Task identity or bounded validation error.
+      boundaries:
+        - Existing profiles remain compatible; no silent fallback and no ultra.
+    - name: Codex local catalog
+      responsibility: Project only visible model slugs, labels, defaults, and supported non-ultra efforts.
+      consumes:
+        - Local models_cache.json with bounded size and strict shape.
+      produces:
+        - Privacy-safe detached catalog rows.
+      boundaries:
+        - No instructions, account, auth, paths, prompts, or raw cache object leave this module.
+    - name: Codex Worker adapter
+      responsibility: Launch least-privilege non-interactive Codex and normalize its lifecycle.
+      consumes:
+        - Task prompt, workspace, exact model/effort, local sign-in seed, and runner hooks.
+      produces:
+        - Worker events, result, session id, exact terminal usage, or fixed failure.
+      boundaries:
+        - No source write outside workspace; no Main review, verification, Integration, commit, or push.
+  callChain:
+    - Settings validate model supportedEfforts and Worker Profile effort.
+    - Task resolution freezes openai/codex-cli/model/effort and launch authentication checks local sign-in.
+    - Runner gets the registered Codex adapter and starts one Task-local runtime.
+    - Adapter seeds only auth/catalog, builds exact args, and launches Codex in the Task workspace.
+    - Normalizer converts JSONL into existing Worker events and terminal usage.
+    - Existing verifier and Main authority continue unchanged.
+  scenarios:
+    - name: Valid saved Worker
+      given: A visible Codex model lists high and a Profile selects codex-cli with that model and high.
+      when: Settings and Task preview resolve it.
+      then: Exact identity is accepted and frozen without fallback.
+    - name: Unsupported effort
+      given: A model does not list max or a Profile requests ultra.
+      when: The Profile or Task is validated.
+      then: No Task is created and a bounded error identifies the unsupported combination.
+    - name: Least-privilege editable launch
+      given: An editable isolated Task and readable local Codex sign-in.
+      when: The adapter builds and launches the run.
+      then: Only workspace-write is selected and all user config, web, apps, MCP, and multi-agent paths are disabled.
+    - name: Terminal usage
+      given: A valid turn.completed JSONL event.
+      when: It is normalized.
+      then: Input, cached input, cache-write input, output, and reasoning subset are represented once in existing usage fields.
+    - name: Malformed or failed run
+      given: Invalid JSONL, duplicate terminal events, missing usage, or turn.failed.
+      when: The adapter completes.
+      then: It fails closed or marks usage unavailable without inventing success, cost, or Token counts.
+  risks:
+    - Operator Codex config or AGENTS instructions could expand Worker authority; ignore user config/rules and set project_doc_max_bytes=0.
+    - Codex model catalogs change; parse a bounded safe projection and fail closed rather than hard-code guessed support.
+    - Task-local auth copies are sensitive; permissions must be 0600 and artifacts stay inside the private Task root.
+    - Codex WebSocket can time out before HTTPS fallback; treat stream errors as progress/transport evidence and let the runtime complete within configured policy.
+  changeBudget:
+    maxFiles: 16
+    maxDiffLines: 2600
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 16
+  fileLimitMode: warn
+  changedLineLimit: 2600
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/runtime-names.ts
+    - src/core/providers.ts
+    - src/core/model-catalog.ts
+    - src/core/worker-profiles.ts
+    - src/core/task.ts
+    - src/workers
+    - src/events
+    - src/setup
+acceptance:
+  criteria:
+    - openai/codex-cli model/effort identity is exact, fail-closed, and backward compatible.
+    - Codex args and task-local auth satisfy the documented isolation boundary and never enable ultra or broader tools.
+    - JSONL progress, terminal result, session id, and usage normalize into existing contracts without guesses.
+    - Existing Claude and Grok paths remain unchanged and all focused/full verification passes.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-runtime.test.ts tests/worker-profiles.test.ts tests/model-catalog.test.ts
+    - npm run build
+    - npm test
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import type { WriteStream } from "node:fs";
-import { lstat, rename, rm } from "node:fs/promises";
+import { lstat, readdir, rename, rm } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import path from "node:path";
 import type {
@@ -9,48 +10,162 @@ import type {
   TaskPaths,
   WorkspacePatchReport,
 } from "../core/types.js";
-import { RUNTIME_DEPENDENCY_DIRECTORIES } from "./dependency-materializer.js";
 import type { PathPolicy } from "./path-policy.js";
 import { workspacePatchPaths } from "./path-policy.js";
 
-interface StashedDependency {
+interface StashedRoot {
   original: string;
   stashed: string;
 }
 
-/**
- * Temporarily move runtime dependency mirrors out of baseline/workspace so
- * `git diff --no-index` never walks verifier-only node_modules. Candidate
- * patches stay free of dependency noise; mirrors are restored afterward.
- */
-async function stashRuntimeDependencyMirrors(paths: TaskPaths): Promise<StashedDependency[]> {
-  const stashed: StashedDependency[] = [];
-  for (const name of RUNTIME_DEPENDENCY_DIRECTORIES) {
-    for (const root of [paths.baseline, paths.workspace]) {
-      const original = path.join(root, name);
-      try {
-        await lstat(original);
-      } catch {
-        continue;
-      }
-      const stashedPath = path.join(
-        paths.root,
-        `.forklight-dep-stash-${root === paths.baseline ? "baseline" : "workspace"}-${name}`,
-      );
-      await rm(stashedPath, { recursive: true, force: true });
-      await rename(original, stashedPath);
-      stashed.push({ original, stashed: stashedPath });
-    }
-  }
-  return stashed;
+function isEnoent(error: unknown): boolean {
+  return (
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: unknown }).code === "ENOENT"
+  );
 }
 
-async function restoreRuntimeDependencyMirrors(
-  stashed: readonly StashedDependency[],
-): Promise<void> {
-  for (const entry of stashed) {
-    await rm(entry.original, { recursive: true, force: true }).catch(() => undefined);
-    await rename(entry.stashed, entry.original);
+/**
+ * Discover outermost exact snapshot-excluded roots under a comparison tree.
+ * Uses PathPolicy named-segment equality only: an entry whose name equals a
+ * configured exclude is collected and never descended into. Symlinks are not
+ * followed, so discovery cannot escape the owned Task root via a link.
+ */
+async function discoverOutermostExcludedRoots(
+  absoluteRoot: string,
+  excludes: ReadonlySet<string>,
+): Promise<string[]> {
+  if (excludes.size === 0) return [];
+  const found: string[] = [];
+
+  async function walk(directory: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      // Only a genuinely disappeared directory is ignorable (TOCTOU between
+      // parent listing and descent). Permission and other FS errors fail closed
+      // so excluded build output cannot stay hidden from discovery and leak
+      // into the raw Candidate diff.
+      if (isEnoent(error)) return;
+      throw error;
+    }
+    // Stable order keeps stash names and restore sequencing deterministic.
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      if (excludes.has(entry.name)) {
+        found.push(absolute);
+        continue;
+      }
+      // Dirent for a pure symlink reports isSymbolicLink and not isDirectory,
+      // so this never traverses linked trees.
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        await walk(absolute);
+      }
+    }
+  }
+
+  await walk(absoluteRoot);
+  return found;
+}
+
+/**
+ * Deterministic, collision-resistant stash destination under the Task root.
+ * Hash covers the exact role and relative path so `a/b` and `a+b` never share
+ * a destination (unlike separator substitution).
+ */
+export function excludedRootStashPath(
+  taskRoot: string,
+  role: "baseline" | "workspace",
+  relativePosix: string,
+): string {
+  const digest = createHash("sha256")
+    .update(role)
+    .update("\0")
+    .update(relativePosix)
+    .digest("hex");
+  return path.join(taskRoot, `.forklight-exclude-stash-${digest}`);
+}
+
+/**
+ * Atomically move every outermost snapshot-excluded root out of baseline and
+ * workspace before `git diff --no-index`. Stashes live on the same Task
+ * filesystem so rename never copies multi-gigabyte verifier trees.
+ */
+async function stashExcludedRoots(
+  paths: TaskPaths,
+  excludes: ReadonlySet<string>,
+): Promise<StashedRoot[]> {
+  const stashed: StashedRoot[] = [];
+  const roots: Array<{ role: "baseline" | "workspace"; absolute: string }> = [
+    { role: "baseline", absolute: paths.baseline },
+    { role: "workspace", absolute: paths.workspace },
+  ];
+  try {
+    for (const { role, absolute } of roots) {
+      const discovered = await discoverOutermostExcludedRoots(absolute, excludes);
+      for (const original of discovered) {
+        const relativePosix = path.relative(absolute, original).split(path.sep).join("/");
+        if (
+          !relativePosix
+          || relativePosix === ".."
+          || relativePosix.startsWith("../")
+          || path.isAbsolute(relativePosix)
+        ) {
+          // Never move the comparison root or anything outside it.
+          continue;
+        }
+        const stashedPath = excludedRootStashPath(paths.root, role, relativePosix);
+        // Never delete an unexpected pre-existing stash: collision or leftover
+        // state must fail closed so retained data cannot be overwritten.
+        try {
+          await lstat(stashedPath);
+          throw new Error(
+            "Excluded-root stash destination already exists; refusing to overwrite retained data",
+          );
+        } catch (error) {
+          if (!isEnoent(error)) throw error;
+        }
+        await rename(original, stashedPath);
+        stashed.push({ original, stashed: stashedPath });
+      }
+    }
+    return stashed;
+  } catch (error) {
+    // Roll back any roots already moved so a mid-stash failure cannot leave
+    // the retained workspace partially emptied.
+    try {
+      await restoreStashedRoots(stashed);
+    } catch {
+      // Every recorded root was already attempted; surface the stash failure.
+    }
+    throw error;
+  }
+}
+
+/**
+ * Restore every stashed root to its exact original path (reverse order).
+ * Continues after individual failures so one bad rename cannot leave later
+ * roots stranded in the stash, then surfaces a single bounded error.
+ */
+async function restoreStashedRoots(stashed: readonly StashedRoot[]): Promise<void> {
+  let failureCount = 0;
+  for (let index = stashed.length - 1; index >= 0; index -= 1) {
+    const entry = stashed[index]!;
+    try {
+      await rm(entry.original, { recursive: true, force: true }).catch(() => undefined);
+      await rename(entry.stashed, entry.original);
+    } catch {
+      failureCount += 1;
+    }
+  }
+  if (failureCount > 0) {
+    throw new Error(
+      `Failed to restore ${failureCount} snapshot-excluded root(s) after patch generation`,
+    );
   }
 }
 
@@ -141,18 +256,32 @@ function toEvidence(artifactPath: string, acc: SectionAccumulator): PatchEvidenc
   };
 }
 
+export interface WriteWorkspacePatchOptions {
+  /**
+   * Optional hook invoked after excluded roots are stashed and before the raw
+   * diff runs. Production callers omit this; tests use it to inject failures
+   * while proving finally-restoration.
+   */
+  afterExcludedRootStash?: () => void | Promise<void>;
+}
+
 export async function writeWorkspacePatchReport(
   paths: TaskPaths,
   policy: PathPolicy,
+  options?: WriteWorkspacePatchOptions,
 ): Promise<WorkspacePatchReport> {
-  // Verifier-only dependency mirrors must not enter Candidate patches. Stash
-  // them for the duration of the baseline↔workspace comparison, then restore
-  // so subsequent acceptance/debug inspection still sees local dependencies.
-  const stashedDependencies = await stashRuntimeDependencyMirrors(paths);
+  // Snapshot-excluded roots (nested target, dist, node_modules, …) must not
+  // enter raw/generated/Integration patch payloads. Stash outermost exact
+  // matches for the baseline↔workspace comparison, then always restore so
+  // retained-workspace inspection still sees verifier output.
+  const stashedRoots = await stashExcludedRoots(paths, policy.snapshotExcludes);
   try {
+    if (options?.afterExcludedRootStash !== undefined) {
+      await options.afterExcludedRootStash();
+    }
     return await writeWorkspacePatchReportCore(paths, policy);
   } finally {
-    await restoreRuntimeDependencyMirrors(stashedDependencies);
+    await restoreStashedRoots(stashedRoots);
   }
 }
 

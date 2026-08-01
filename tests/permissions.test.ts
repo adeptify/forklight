@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -6,6 +7,7 @@ import type { AttemptRecord, TaskRecord } from "../src/core/types.js";
 import {
   allowedToolArguments,
   interruptedExitCode,
+  runtimeTemporaryDirectory,
   workerLaunch,
 } from "../src/workers/claude.js";
 
@@ -34,6 +36,14 @@ test("P2 Worker never receives Bash or web tools", () => {
 test("an interrupted Worker never records a successful exit code", () => {
   assert.equal(interruptedExitCode(0), 130);
   assert.equal(interruptedExitCode(143), 143);
+});
+
+test("Claude Worker canonicalizes its runtime temp directory for the macOS sandbox", () => {
+  assert.equal(runtimeTemporaryDirectory({}), realpathSync("/tmp"));
+  assert.equal(
+    runtimeTemporaryDirectory({ TMPDIR: "/tmp" }),
+    realpathSync("/tmp"),
+  );
 });
 
 test("checkpoint MCP configuration contains identity but no credential or command text", async () => {

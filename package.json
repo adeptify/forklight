@@ -33,6 +33,7 @@
     "plugins/forklight/",
     ".agents/plugins/",
     "README.md",
+    "PROJECT.md",
     "AGENTS.md",
     "examples/",
     "fixtures/"

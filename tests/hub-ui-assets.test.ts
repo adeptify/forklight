@@ -4605,6 +4605,28 @@ test("Hub server journey projection is wired into task detail endpoint", async (
   assert.ok(!/\.secret/.test(journeyFnBlock), "journey projection does not expose secrets");
 });
 
+test("Hub failure attribution explains two separate facts and hides controls without a trusted binding", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.ok(src.includes('fa.machineOutcome !== "failed"'), "successful Tasks hide the failure card");
+  assert.ok(src.includes("!fa.eligible || !fa.binding"), "recording controls require trusted binding");
+  assert.ok(src.includes("failureAttributionMachineFailed"));
+  assert.ok(src.includes("failureAttributionAssessmentText"));
+  for (const key of [
+    "failureAttributionTitle",
+    "failureAttributionMachineFailed",
+    "failureAttributionCounts",
+    "failureAttributionExcluded",
+    "failureAttributionUncertain",
+  ]) {
+    assert.ok(enSection.includes(key), `English attribution copy contains ${key}`);
+    assert.ok(zhSection.includes(key), `Chinese attribution copy contains ${key}`);
+  }
+  assert.ok(!enSection.includes("Boundary Reduction (measured Worker Tokens"));
+  assert.ok(!zhSection.includes("Boundary Reduction (measured Worker Tokens"));
+});
+
 /* Secondary-workflow localization: split the i18n bundle into en and zh
  * sections so a key can be asserted in both languages without mistaking
  * string presence in one section for bilingual coverage. */

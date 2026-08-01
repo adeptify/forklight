@@ -25,7 +25,7 @@ export type TaskScopedCliOperation =
   | "forklight_integration_preflight" | "forklight_integration_apply"
   | "forklight_integration_status" | "forklight_integration_wait"
   | "forklight_integration_history" | "forklight_revise"
-  | "forklight_main_review" | "forklight_correct"
+  | "forklight_main_review" | "forklight_main_failure_attribution" | "forklight_correct"
   | "forklight_correction_eligibility"
   | "forklight_adaptation_preview" | "forklight_adaptation_apply"
   | "forklight_remediation_verify"

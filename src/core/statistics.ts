@@ -7,6 +7,7 @@ import {
 import { isTerminalTaskStatus } from "./task-progress.js";
 import { isReviewGraphReviewerTaskFile } from "./task.js";
 import { failureCategoryFromEvents } from "./worker-failure.js";
+import { resolveMainFailureAttribution } from "./main-failure-attribution.js";
 import type {
   AttemptRecord,
   AttemptStatus,
@@ -109,6 +110,12 @@ export interface CompactProviderModelSummary {
   totalTurns?: number;
   avgTurns?: number;
   failureDistribution: Partial<Record<FailureCategory, number>>;
+  /** Explicit Main responsibility decisions only; aggregate and content-free. */
+  failureAttributionCounts: {
+    modelQuality: number;
+    nonModel: number;
+    ambiguous: number;
+  };
   /**
    * Main/delivery-backed final delivery — parallel to machine success.
    * acceptedDeliveryCount is accepted outcomes only; the rate uses comparable
@@ -167,6 +174,7 @@ export function projectCompactProviderModelSummary(
     ...(summary.totalTurns === undefined ? {} : { totalTurns: summary.totalTurns }),
     ...(summary.avgTurns === undefined ? {} : { avgTurns: summary.avgTurns }),
     failureDistribution: { ...summary.failureDistribution },
+    failureAttributionCounts: { ...summary.failureAttributionCounts },
     acceptedDeliveryCount: summary.acceptedDeliveryCount,
     acceptedDeliverySampleCount: summary.acceptedDeliverySampleCount,
     acceptedDeliveryNotAcceptedCount: summary.acceptedDeliveryNotAcceptedCount,
@@ -459,6 +467,7 @@ export function resolveCurrentMainDecision(
 function classifyTerminalFailure(
   item: TaskEvidence,
   getDisposition?: (taskId: string) => RemediationDisposition | undefined,
+  applyFailureAttribution = true,
 ): FailureClassification | undefined {
   if (item.task.status === "succeeded") return undefined;
   const attempt = latestAttempt(item.attempts);
@@ -488,6 +497,17 @@ function classifyTerminalFailure(
       diagnostic: classification.diagnostic,
       impact: "non-model",
     };
+  }
+  const verificationEvent = applyFailureAttribution ? latestVerificationEvent(item.events) : undefined;
+  if (verificationEvent?.attemptId !== undefined) {
+    const attribution = resolveMainFailureAttribution(
+      item.events,
+      verificationEvent.attemptId,
+      verificationEvent.sequence,
+    );
+    if (attribution !== undefined) {
+      classification = { ...classification, impact: attribution.impact };
+    }
   }
   return classification;
 }
@@ -520,7 +540,7 @@ export function classifyFinalDeliveryOutcome(
   if (input.hasAppliedIntegration?.(taskId) === true) return "accepted";
 
   if (item.task.status !== "succeeded") {
-    const classification = classifyTerminalFailure(item, input.getDisposition);
+    const classification = classifyTerminalFailure(item, input.getDisposition, false);
     // Relevant model-quality machine failure without later accepted delivery is
     // a comparable non-acceptance. External/policy/ambiguous stay unavailable.
     if (classification?.impact === "model-quality") return "not-accepted";
@@ -623,6 +643,18 @@ function summaryFor(
   for (const failure of failures) {
     failureDistribution[failure.category] = (failureDistribution[failure.category] ?? 0) + 1;
   }
+  const failureAttributionCounts = { modelQuality: 0, nonModel: 0, ambiguous: 0 };
+  for (const item of evidence) {
+    if (item.task.status === "succeeded") continue;
+    const verificationEvent = latestVerificationEvent(item.events);
+    if (verificationEvent?.attemptId === undefined) continue;
+    const attribution = resolveMainFailureAttribution(
+      item.events, verificationEvent.attemptId, verificationEvent.sequence,
+    );
+    if (attribution?.impact === "model-quality") failureAttributionCounts.modelQuality += 1;
+    else if (attribution?.impact === "non-model") failureAttributionCounts.nonModel += 1;
+    else if (attribution?.impact === "ambiguous") failureAttributionCounts.ambiguous += 1;
+  }
 
   // Final delivery is Main/delivery-backed and task-unique. Machine success is
   // never a shortcut into the accepted set.
@@ -674,6 +706,7 @@ function summaryFor(
     turnsSampleSize: turns.length,
     ...(turns.length === 0 ? {} : { totalTurns, avgTurns: totalTurns / turns.length }),
     failureDistribution,
+    failureAttributionCounts,
     failures,
     acceptedDeliveryCount: deliveryCounts.acceptedDeliveryCount,
     acceptedDeliverySampleCount: deliveryCounts.acceptedDeliverySampleCount,
@@ -780,11 +813,11 @@ export function verificationFrom(events: EventRecord[]): VerificationResult | un
  * A later Main zero-Worker reverification on the same Attempt must not replace
  * the original Worker independent check.
  */
-function earliestVerificationFrom(events: EventRecord[]): VerificationResult | undefined {
+function earliestVerificationEventFrom(events: EventRecord[]): EventRecord | undefined {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence || a.id - b.id);
   for (const candidate of ordered) {
     const result = verificationResultFromEvent(candidate);
-    if (result !== undefined) return result;
+    if (result !== undefined) return candidate;
   }
   return undefined;
 }
@@ -849,6 +882,12 @@ export interface RoutingEvidence {
   ignoredNonModelFailures: Partial<Record<FailureCategory, number>>;
   ignoredNonModelTaskCount: number;
   ambiguousFailureCount: number;
+  /** Explicit Main responsibility decisions only; aggregate and content-free. */
+  failureAttributionCounts: {
+    modelQuality: number;
+    nonModel: number;
+    ambiguous: number;
+  };
   /** Explicit Main-requested Worker revisions plus Main repair deliveries. */
   correctionChurn: number;
   correctionChurnRate: number;
@@ -951,7 +990,10 @@ export function classifyFirstPassOutcome(
   // Use the earliest valid verification on Attempt one so a later Main
   // reverification of the same Candidate cannot rewrite Worker first-pass truth.
   const ownEvents = attemptEvents(item, first.id);
-  const verification = earliestVerificationFrom(ownEvents);
+  const verificationEvent = earliestVerificationEventFrom(ownEvents);
+  const verification = verificationEvent === undefined
+    ? undefined
+    : verificationResultFromEvent(verificationEvent);
 
   // Durable Provider/connectivity and budget evidence wins over a coincidental
   // passing behavior check. These runs are operationally inconclusive for
@@ -990,13 +1032,21 @@ export function classifyFirstPassOutcome(
   // First-pass failure requires own durable verification attributable to model
   // behavior. Missing verification and non-model external causes stay unavailable.
   if (verification !== undefined && verification.behaviorPassed === false) {
-    const classification = classifyFailure({
+    let classification = classifyFailure({
       taskStatus: "failed",
       attemptStatus: first.status,
       ...(first.exitCode === undefined ? {} : { attemptExitCode: first.exitCode }),
       verification,
       ...(first.error === undefined ? {} : { error: first.error }),
     });
+    if (verificationEvent !== undefined) {
+      const attribution = resolveMainFailureAttribution(
+        item.events, first.id, verificationEvent.sequence,
+      );
+      if (attribution !== undefined) {
+        classification = { ...classification, impact: attribution.impact };
+      }
+    }
     if (classification.impact === "model-quality") {
       return "failure";
     }
@@ -1104,6 +1154,7 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
       ignoredNonModelFailures: {},
       ignoredNonModelTaskCount: 0,
       ambiguousFailureCount: 0,
+      failureAttributionCounts: { modelQuality: 0, nonModel: 0, ambiguous: 0 },
       correctionChurn: 0,
       correctionChurnRate: 0,
       acceptedDeliveryCount: 0,
@@ -1159,6 +1210,16 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
       // after a verified amended-acceptance delivery. Machine failure stays
       // visible via terminal Task status and failure listings elsewhere.
       const amendedAcceptance = disposition?.acceptanceBasis === "amended-acceptance";
+
+      const terminalVerificationEvent = latestVerificationEvent(item.events);
+      if (terminalVerificationEvent?.attemptId !== undefined) {
+        const attribution = resolveMainFailureAttribution(
+          item.events, terminalVerificationEvent.attemptId, terminalVerificationEvent.sequence,
+        );
+        if (attribution?.impact === "model-quality") evidence.failureAttributionCounts.modelQuality += 1;
+        else if (attribution?.impact === "non-model") evidence.failureAttributionCounts.nonModel += 1;
+        else if (attribution?.impact === "ambiguous") evidence.failureAttributionCounts.ambiguous += 1;
+      }
 
       // First-pass verified success is independent of eventual delivery and of
       // the relevant-sample gate below. Every terminal Task contributes exactly

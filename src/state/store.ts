@@ -675,15 +675,20 @@ export class StateStore {
     }
   }
 
-  private transact(action: () => void): void {
+  atomic<T>(action: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      action();
+      const result = action();
       this.db.exec("COMMIT");
+      return result;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private transact(action: () => void): void {
+    this.atomic(action);
   }
 
   createPlanGraph(

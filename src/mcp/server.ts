@@ -940,6 +940,81 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
   );
 
   server.registerTool(
+    "forklight_main_failure_attribution",
+    {
+      title: "Explain who is responsible for one failed verification",
+      description:
+        "Record Main's one-time, exactly-bound explanation of whether one failed verification reflects Candidate quality, verification infrastructure, the acceptance contract, or insufficient evidence. The Task stays failed; this never reruns, accepts, integrates, or calls a Provider.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        attemptId: z.string().uuid(),
+        verificationEventSequence: z.number().int().positive(),
+        cause: z.enum([
+          "candidate",
+          "verification-infrastructure",
+          "acceptance-contract",
+          "insufficient-evidence",
+        ]),
+        note: z.string().trim().min(1).max(500).refine(
+          (value) => !/[\u0000-\u001f\u007f]/u.test(value),
+          { message: "note must not contain control characters" },
+        ),
+        candidateRevisionId: z.string().min(1).optional(),
+        candidatePatchDigest: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+        confirm: z.literal(true),
+      }).strict().refine(
+        (value) => (value.candidateRevisionId === undefined)
+          === (value.candidatePatchDigest === undefined),
+        { message: "candidateRevisionId and candidatePatchDigest must be provided together" },
+      ),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({
+      taskId,
+      attemptId,
+      verificationEventSequence,
+      cause,
+      note,
+      candidateRevisionId,
+      candidatePatchDigest,
+    }) => withMcpExchangeReceipt({
+      operation: "forklight_main_failure_attribution",
+      home,
+      args: {
+        taskId,
+        attemptId,
+        verificationEventSequence,
+        cause,
+        noteLength: note.length,
+        hasCandidateRevision: candidateRevisionId !== undefined,
+        confirm: true,
+      },
+      taskId,
+      invoke: async () => {
+        await ensureDaemon(home);
+        const result = await daemonRequest<Record<string, unknown>>(
+          "main_failure_attribution",
+          {
+            taskId,
+            attemptId,
+            verificationEventSequence,
+            cause,
+            note,
+            ...(candidateRevisionId === undefined ? {} : { candidateRevisionId }),
+            ...(candidatePatchDigest === undefined ? {} : { candidatePatchDigest }),
+            confirm: true,
+          },
+          home,
+        );
+        return textAndData(
+          result,
+          "Main responsibility explanation recorded. The Task is still failed and delivery remains blocked.",
+        );
+      },
+    }),
+  );
+
+  server.registerTool(
     "forklight_list",
     {
       title: "List ForkLight tasks",

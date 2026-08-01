@@ -17,6 +17,7 @@ import {
   copyForVerification,
 } from "../src/core/integration-verification-copy.js";
 import {
+  excludedRootStashPath,
   parseAffectedPathsFromWorkspaceDiff,
   writeWorkspacePatchReport,
 } from "../src/workspace/patch.js";
@@ -362,7 +363,7 @@ test("excluded snapshot segments share one nested-segment meaning across copy an
   assert.equal(withPatterns.classify("src/generated/client.ts"), "business");
 });
 
-test("recreated excluded dist tree stays out of business and integration evidence", async () => {
+test("recreated excluded dist tree stays out of raw generated and integration evidence", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "forklight-excluded-dist-"));
   const source = path.join(root, "source");
   await mkdir(path.join(source, "src"), { recursive: true });
@@ -387,25 +388,24 @@ test("recreated excluded dist tree stays out of business and integration evidenc
     );
   }
   await writeFile(path.join(paths.workspace, "dist", "nested", "report.json"), "{}\n");
+  const distSentinel = path.join(paths.workspace, "dist", "bundle-0.js");
+  const distBytes = await readFile(distSentinel, "utf8");
 
   const { workspacePatchPaths } = await import("../src/workspace/path-policy.js");
   const { writeWorkspacePatchReport } = await import("../src/workspace/patch.js");
   const report = await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
   const artifacts = workspacePatchPaths(paths);
 
-  // Raw evidence retains both the source change and the full dist tree.
+  // Snapshot-excluded trees never enter raw/generated/Integration payloads.
   const raw = await readFile(artifacts.rawDiff, "utf8");
   assert.match(raw, /src\/value\.ts/);
-  assert.match(raw, /dist\/bundle-0\.js/);
-  assert.match(raw, /dist\/bundle-199\.js/);
-  assert.match(raw, /dist\/nested\/report\.json/);
-  assert.ok(raw.length > 1_000);
+  assert.doesNotMatch(raw, /dist\//);
+  assert.doesNotMatch(raw, /bundle-0/);
+  assert.doesNotMatch(raw, /generated 199/);
+  assert.ok(raw.length < 50_000, "raw patch stays bounded by included content");
 
-  // Generated evidence retains dist but never the source change.
   const generated = await readFile(artifacts.generatedDiff, "utf8");
-  assert.match(generated, /dist\/bundle-0\.js/);
-  assert.match(generated, /dist\/bundle-199\.js/);
-  assert.match(generated, /dist\/nested\/report\.json/);
+  assert.doesNotMatch(generated, /dist\//);
   assert.doesNotMatch(generated, /src\/value\.ts/);
 
   // Integration evidence keeps only the source change.
@@ -415,16 +415,442 @@ test("recreated excluded dist tree stays out of business and integration evidenc
   assert.match(integration, /\+after/);
   assert.doesNotMatch(integration, /dist\//);
 
-  // Metrics: business/integration count only the source file; generated
-  // absorbs the recreated dist tree so it cannot inflate Integration.
+  // Metrics: business/integration count only the source file; excluded
+  // verifier output is absent from generated evidence too.
   assert.deepEqual(report.business.affectedPaths, ["src/value.ts"]);
   assert.deepEqual(report.integration.affectedPaths, ["src/value.ts"]);
   assert.equal(report.business.filesChanged, 1);
   assert.equal(report.business.changedLines, 2);
-  assert.equal(report.generated.filesChanged, 201);
-  assert.equal(report.generated.changedLines, 201);
-  assert.ok(report.generated.affectedPaths.every((p) => p.startsWith("dist/")));
-  assert.equal(report.generated.affectedPaths.length, 201);
+  assert.equal(report.generated.filesChanged, 0);
+  assert.equal(report.generated.changedLines, 0);
+  assert.deepEqual(report.generated.affectedPaths, []);
+
+  // Retained workspace still holds the excluded verifier tree unchanged.
+  assert.equal(await readFile(distSentinel, "utf8"), distBytes);
+  assert.equal(
+    await readFile(path.join(paths.workspace, "dist", "nested", "report.json"), "utf8"),
+    "{}\n",
+  );
+});
+
+test("nested excluded Rust target never enters raw patch and is restored", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-nested-target-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "apps", "shell", "src-tauri"), { recursive: true });
+  await writeFile(path.join(source, "apps", "shell", "src-tauri", "main.rs"), "fn main() {}\n");
+  const paths = taskPaths(path.join(root, "state"), "nested-target");
+  const taskSpec = spec(source);
+  taskSpec.workspace.exclude = [".git", "node_modules", "target"];
+  await prepareWorkspace(taskSpec, paths);
+
+  await writeFile(
+    path.join(paths.workspace, "apps", "shell", "src-tauri", "main.rs"),
+    "fn main() { /* edited */ }\n",
+  );
+  // Verifier-created nested target with a large sparse/binary sentinel.
+  const targetDir = path.join(
+    paths.workspace,
+    "apps",
+    "shell",
+    "src-tauri",
+    "target",
+    "release",
+  );
+  await mkdir(targetDir, { recursive: true });
+  const sentinel = "NESTED_TARGET_SENTINEL_" + "X".repeat(64 * 1024);
+  await writeFile(path.join(targetDir, "app.bin"), sentinel);
+
+  const { workspacePatchPaths } = await import("../src/workspace/path-policy.js");
+  const report = await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+  const artifacts = workspacePatchPaths(paths);
+
+  const raw = await readFile(artifacts.rawDiff, "utf8");
+  const generated = await readFile(artifacts.generatedDiff, "utf8");
+  const integration = await readFile(artifacts.integrationDiff, "utf8");
+  for (const body of [raw, generated, integration]) {
+    assert.doesNotMatch(body, /NESTED_TARGET_SENTINEL_/);
+    assert.doesNotMatch(body, /src-tauri\/target/);
+    assert.doesNotMatch(body, /app\.bin/);
+  }
+  assert.match(raw, /main\.rs/);
+  assert.match(integration, /main\.rs/);
+  assert.deepEqual(report.business.affectedPaths, ["apps/shell/src-tauri/main.rs"]);
+  assert.deepEqual(report.generated.affectedPaths, []);
+  assert.ok(raw.length < sentinel.length, "raw patch smaller than excluded sentinel alone");
+
+  // Restored for retained-workspace inspection.
+  assert.equal(await readFile(path.join(targetDir, "app.bin"), "utf8"), sentinel);
+});
+
+test("multiple outermost excluded roots stash once and restore deterministically", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-multi-exclude-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "app.ts"), "v1\n");
+  const paths = taskPaths(path.join(root, "state"), "multi-exclude");
+  const taskSpec = spec(source);
+  taskSpec.workspace.exclude = [".git", "node_modules", "dist", "target", "coverage"];
+  await prepareWorkspace(taskSpec, paths);
+
+  await writeFile(path.join(paths.workspace, "src", "app.ts"), "v2\n");
+  // Top-level and nested excluded roots, including a child exclude under a
+  // parent exclude (dist/node_modules) that must move only with the parent.
+  await mkdir(path.join(paths.workspace, "node_modules", "pkg"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "node_modules", "pkg", "index.js"), "TOP_NM\n");
+  await mkdir(path.join(paths.workspace, "dist", "node_modules", "inner"), { recursive: true });
+  await writeFile(
+    path.join(paths.workspace, "dist", "node_modules", "inner", "x.js"),
+    "NESTED_UNDER_DIST\n",
+  );
+  await writeFile(path.join(paths.workspace, "dist", "out.js"), "DIST_OUT\n");
+  await mkdir(
+    path.join(paths.workspace, "apps", "web", "target", "debug"),
+    { recursive: true },
+  );
+  await writeFile(
+    path.join(paths.workspace, "apps", "web", "target", "debug", "lib.rlib"),
+    "TARGET_LIB\n",
+  );
+  await mkdir(path.join(paths.workspace, "pkg", "coverage"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "pkg", "coverage", "report.json"), "COV\n");
+
+  const { workspacePatchPaths } = await import("../src/workspace/path-policy.js");
+  const report = await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+  const artifacts = workspacePatchPaths(paths);
+  const raw = await readFile(artifacts.rawDiff, "utf8");
+  for (const marker of ["TOP_NM", "NESTED_UNDER_DIST", "DIST_OUT", "TARGET_LIB", "COV"]) {
+    assert.doesNotMatch(raw, new RegExp(marker));
+  }
+  assert.doesNotMatch(raw, /node_modules/);
+  assert.doesNotMatch(raw, /dist\//);
+  assert.doesNotMatch(raw, /target\//);
+  assert.doesNotMatch(raw, /coverage/);
+  assert.match(raw, /app\.ts/);
+  assert.deepEqual(report.business.affectedPaths, ["src/app.ts"]);
+  assert.deepEqual(report.generated.affectedPaths, []);
+
+  // Every original location is recovered; child under dist stayed with parent.
+  assert.equal(
+    await readFile(path.join(paths.workspace, "node_modules", "pkg", "index.js"), "utf8"),
+    "TOP_NM\n",
+  );
+  assert.equal(
+    await readFile(path.join(paths.workspace, "dist", "node_modules", "inner", "x.js"), "utf8"),
+    "NESTED_UNDER_DIST\n",
+  );
+  assert.equal(await readFile(path.join(paths.workspace, "dist", "out.js"), "utf8"), "DIST_OUT\n");
+  assert.equal(
+    await readFile(
+      path.join(paths.workspace, "apps", "web", "target", "debug", "lib.rlib"),
+      "utf8",
+    ),
+    "TARGET_LIB\n",
+  );
+  assert.equal(
+    await readFile(path.join(paths.workspace, "pkg", "coverage", "report.json"), "utf8"),
+    "COV\n",
+  );
+});
+
+test("exact excluded segment leaves similar names like targeted in Candidate", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-exact-segment-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "targeted"), { recursive: true });
+  await writeFile(path.join(source, "targeted", "file.ts"), "before\n");
+  const paths = taskPaths(path.join(root, "state"), "exact-segment");
+  const taskSpec = spec(source);
+  taskSpec.workspace.exclude = [".git", "node_modules", "target"];
+  await prepareWorkspace(taskSpec, paths);
+
+  await writeFile(path.join(paths.workspace, "targeted", "file.ts"), "after\n");
+  await mkdir(path.join(paths.workspace, "pkg", "target", "debug"), { recursive: true });
+  await writeFile(
+    path.join(paths.workspace, "pkg", "target", "debug", "blob.bin"),
+    "EXCLUDED_TARGET_BYTES\n",
+  );
+
+  const { workspacePatchPaths } = await import("../src/workspace/path-policy.js");
+  const report = await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+  const artifacts = workspacePatchPaths(paths);
+  const raw = await readFile(artifacts.rawDiff, "utf8");
+  const integration = await readFile(artifacts.integrationDiff, "utf8");
+
+  assert.match(raw, /targeted\/file\.ts/);
+  assert.match(integration, /targeted\/file\.ts/);
+  assert.doesNotMatch(raw, /EXCLUDED_TARGET_BYTES/);
+  assert.doesNotMatch(raw, /blob\.bin/);
+  assert.doesNotMatch(integration, /EXCLUDED_TARGET_BYTES/);
+  assert.deepEqual(report.business.affectedPaths, ["targeted/file.ts"]);
+  assert.deepEqual(report.integration.affectedPaths, ["targeted/file.ts"]);
+  assert.deepEqual(report.generated.affectedPaths, []);
+  assert.equal(
+    await readFile(path.join(paths.workspace, "pkg", "target", "debug", "blob.bin"), "utf8"),
+    "EXCLUDED_TARGET_BYTES\n",
+  );
+});
+
+test("included generatedPaths stay generated evidence when not snapshot-excluded", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-included-gen-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "value.ts"), "before\n");
+  const paths = taskPaths(path.join(root, "state"), "included-gen");
+  const taskSpec = spec(source);
+  // dist is NOT snapshot-excluded; only classified via generatedPaths.
+  taskSpec.workspace.exclude = [".git", "node_modules"];
+  taskSpec.workspace.generatedPaths = ["dist/**"];
+  await prepareWorkspace(taskSpec, paths);
+
+  await writeFile(path.join(paths.workspace, "src", "value.ts"), "after\n");
+  await mkdir(path.join(paths.workspace, "dist"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "dist", "out.js"), "build-output\n");
+
+  const { workspacePatchPaths } = await import("../src/workspace/path-policy.js");
+  const report = await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+  const artifacts = workspacePatchPaths(paths);
+
+  assert.deepEqual(report.business.affectedPaths, ["src/value.ts"]);
+  assert.deepEqual(report.generated.affectedPaths, ["dist/out.js"]);
+  assert.deepEqual(report.integration.affectedPaths, ["src/value.ts"]);
+  assert.match(await readFile(artifacts.rawDiff, "utf8"), /dist\/out\.js/);
+  assert.match(await readFile(artifacts.generatedDiff, "utf8"), /dist\/out\.js/);
+  assert.doesNotMatch(await readFile(artifacts.integrationDiff, "utf8"), /dist\/out\.js/);
+});
+
+test("excluded roots restore after injected patch failure", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-exclude-fail-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "value.ts"), "before\n");
+  const paths = taskPaths(path.join(root, "state"), "exclude-fail");
+  const taskSpec = spec(source);
+  taskSpec.workspace.exclude = [".git", "node_modules", "target", "dist"];
+  await prepareWorkspace(taskSpec, paths);
+
+  await writeFile(path.join(paths.workspace, "src", "value.ts"), "after\n");
+  const nestedTarget = path.join(
+    paths.workspace,
+    "apps",
+    "shell",
+    "src-tauri",
+    "target",
+    "release",
+  );
+  await mkdir(nestedTarget, { recursive: true });
+  await writeFile(path.join(nestedTarget, "app.bin"), "FAIL_RESTORE_SENTINEL\n");
+  await mkdir(path.join(paths.workspace, "dist"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "dist", "out.js"), "DIST_FAIL\n");
+
+  await assert.rejects(
+    () => writeWorkspacePatchReport(paths, createPathPolicy(taskSpec), {
+      afterExcludedRootStash: async () => {
+        // Prove roots were moved out of the comparison tree before diff.
+        await assert.rejects(() => lstat(nestedTarget), /ENOENT/);
+        await assert.rejects(
+          () => lstat(path.join(paths.workspace, "dist")),
+          /ENOENT/,
+        );
+        throw new Error("injected patch failure after exclude stash");
+      },
+    }),
+    /injected patch failure after exclude stash/,
+  );
+
+  // Finally restoration returns every excluded root; no partial Integration.
+  assert.equal(
+    await readFile(path.join(nestedTarget, "app.bin"), "utf8"),
+    "FAIL_RESTORE_SENTINEL\n",
+  );
+  assert.equal(
+    await readFile(path.join(paths.workspace, "dist", "out.js"), "utf8"),
+    "DIST_FAIL\n",
+  );
+  await assert.rejects(() => lstat(paths.diff), /ENOENT/);
+});
+
+test("exclude discovery never follows symlinks outside comparison trees", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-exclude-symlink-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "value.ts"), "before\n");
+  const paths = taskPaths(path.join(root, "state"), "exclude-symlink");
+  const taskSpec = spec(source);
+  taskSpec.workspace.exclude = [".git", "node_modules", "target"];
+  await prepareWorkspace(taskSpec, paths);
+
+  await writeFile(path.join(paths.workspace, "src", "value.ts"), "after\n");
+  // External tree that must never be moved or read into the patch. Identical
+  // symlinks in both comparison trees keep the link itself out of the Candidate
+  // while proving discovery refuses to traverse it looking for `target`.
+  const outside = path.join(root, "outside");
+  await mkdir(path.join(outside, "target"), { recursive: true });
+  await writeFile(path.join(outside, "target", "escape.bin"), "OUTSIDE_TARGET_SENTINEL\n");
+  await symlink(outside, path.join(paths.baseline, "linked-out"));
+  await symlink(outside, path.join(paths.workspace, "linked-out"));
+
+  // Real in-tree excluded root still stashed/restored.
+  await mkdir(path.join(paths.workspace, "real", "target"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "real", "target", "in.bin"), "IN_TREE\n");
+
+  const { workspacePatchPaths } = await import("../src/workspace/path-policy.js");
+  const report = await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+  const artifacts = workspacePatchPaths(paths);
+  const raw = await readFile(artifacts.rawDiff, "utf8");
+
+  assert.doesNotMatch(raw, /OUTSIDE_TARGET_SENTINEL/);
+  assert.doesNotMatch(raw, /escape\.bin/);
+  assert.doesNotMatch(raw, /IN_TREE/);
+  assert.match(raw, /value\.ts/);
+  assert.deepEqual(report.business.affectedPaths, ["src/value.ts"]);
+
+  // Outside tree untouched; in-tree target restored.
+  assert.equal(
+    await readFile(path.join(outside, "target", "escape.bin"), "utf8"),
+    "OUTSIDE_TARGET_SENTINEL\n",
+  );
+  assert.equal(
+    await readFile(path.join(paths.workspace, "real", "target", "in.bin"), "utf8"),
+    "IN_TREE\n",
+  );
+  // Symlink itself remains in the workspace (not an excluded segment name).
+  assert.equal(await readlink(path.join(paths.workspace, "linked-out")), outside);
+});
+
+test("exclude discovery fails closed on unreadable directories", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-exclude-eacces-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "value.ts"), "before\n");
+  const paths = taskPaths(path.join(root, "state"), "exclude-eacces");
+  const taskSpec = spec(source);
+  taskSpec.workspace.exclude = [".git", "node_modules", "target"];
+  await prepareWorkspace(taskSpec, paths);
+
+  await writeFile(path.join(paths.workspace, "src", "value.ts"), "after\n");
+  // Nested excluded output under a directory the walker cannot read: discovery
+  // must not swallow EACCES and must not produce Candidate evidence.
+  const hidden = path.join(paths.workspace, "hidden");
+  await mkdir(path.join(hidden, "target", "release"), { recursive: true });
+  await writeFile(path.join(hidden, "target", "release", "app.bin"), "HIDDEN_TARGET\n");
+  await chmod(hidden, 0o000);
+  try {
+    await assert.rejects(
+      () => writeWorkspacePatchReport(paths, createPathPolicy(taskSpec)),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        const code = (error as NodeJS.ErrnoException).code;
+        assert.equal(code, "EACCES");
+        return true;
+      },
+    );
+    // No partial Integration authorization artifact.
+    await assert.rejects(() => lstat(paths.diff), /ENOENT/);
+  } finally {
+    await chmod(hidden, 0o755);
+  }
+});
+
+test("exclude stash refuses pre-existing destination and keeps both roots distinct", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-exclude-collision-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "value.ts"), "before\n");
+  const paths = taskPaths(path.join(root, "state"), "exclude-collision");
+  const taskSpec = spec(source);
+  // `x+y` is a legal single-segment exclude; with separator substitution it
+  // would collide with nested `x/y` when y is also excluded. Hash destinations
+  // must keep both distinct.
+  taskSpec.workspace.exclude = [".git", "node_modules", "y", "x+y", "dist"];
+  await prepareWorkspace(taskSpec, paths);
+
+  await writeFile(path.join(paths.workspace, "src", "value.ts"), "after\n");
+  await mkdir(path.join(paths.workspace, "x", "y"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "x", "y", "nested.bin"), "NESTED_XY\n");
+  await mkdir(path.join(paths.workspace, "x+y"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "x+y", "plus.bin"), "PLUS_XY\n");
+  await mkdir(path.join(paths.workspace, "dist"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "dist", "out.js"), "DIST_OK\n");
+
+  // Distinct collision-resistant destinations for paths that share a "+" encoding.
+  const nestedStash = excludedRootStashPath(paths.root, "workspace", "x/y");
+  const plusStash = excludedRootStashPath(paths.root, "workspace", "x+y");
+  assert.notEqual(nestedStash, plusStash);
+
+  // Pre-existing stash for dist must not be deleted or overwritten.
+  const distStash = excludedRootStashPath(paths.root, "workspace", "dist");
+  await writeFile(distStash, "PREEXISTING_STASH\n");
+
+  await assert.rejects(
+    () => writeWorkspacePatchReport(paths, createPathPolicy(taskSpec)),
+    /stash destination already exists/,
+  );
+
+  assert.equal(await readFile(distStash, "utf8"), "PREEXISTING_STASH\n");
+  // Earlier moves roll back; every excluded root remains at its original path.
+  assert.equal(
+    await readFile(path.join(paths.workspace, "x", "y", "nested.bin"), "utf8"),
+    "NESTED_XY\n",
+  );
+  assert.equal(
+    await readFile(path.join(paths.workspace, "x+y", "plus.bin"), "utf8"),
+    "PLUS_XY\n",
+  );
+  assert.equal(
+    await readFile(path.join(paths.workspace, "dist", "out.js"), "utf8"),
+    "DIST_OK\n",
+  );
+  await assert.rejects(() => lstat(paths.diff), /ENOENT/);
+});
+
+test("exclude restore attempts every root after a mid-restore failure", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-exclude-multirestore-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "value.ts"), "before\n");
+  const paths = taskPaths(path.join(root, "state"), "exclude-multirestore");
+  const taskSpec = spec(source);
+  taskSpec.workspace.exclude = [".git", "node_modules", "target", "dist"];
+  await prepareWorkspace(taskSpec, paths);
+
+  await writeFile(path.join(paths.workspace, "src", "value.ts"), "after\n");
+  const targetParent = path.join(paths.workspace, "apps", "shell", "src-tauri");
+  await mkdir(path.join(targetParent, "target", "release"), { recursive: true });
+  await writeFile(path.join(targetParent, "target", "release", "app.bin"), "TARGET_KEEP\n");
+  await mkdir(path.join(paths.workspace, "dist"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "dist", "out.js"), "DIST_KEEP\n");
+
+  const targetStash = excludedRootStashPath(
+    paths.root,
+    "workspace",
+    "apps/shell/src-tauri/target",
+  );
+
+  try {
+    await assert.rejects(
+      () => writeWorkspacePatchReport(paths, createPathPolicy(taskSpec), {
+        afterExcludedRootStash: async () => {
+          // Block restore of the nested target only; dist must still return.
+          await chmod(targetParent, 0o555);
+        },
+      }),
+      /Failed to restore \d+ snapshot-excluded root/,
+    );
+
+    // Recoverable root was restored despite the other failure.
+    assert.equal(
+      await readFile(path.join(paths.workspace, "dist", "out.js"), "utf8"),
+      "DIST_KEEP\n",
+    );
+    // Failed root remains preserved in its stash (content not deleted).
+    assert.equal(
+      await readFile(path.join(targetStash, "release", "app.bin"), "utf8"),
+      "TARGET_KEEP\n",
+    );
+  } finally {
+    await chmod(targetParent, 0o755).catch(() => undefined);
+    // Best-effort cleanup of the stranded stash for the temp tree.
+    await rm(targetStash, { recursive: true, force: true }).catch(() => undefined);
+  }
 });
 
 // --- Workspace preparation progress (FL-D preparation observability) ---
@@ -1113,6 +1539,334 @@ test("declared local package: duplicate declarations are stable and deterministi
   // Discovery walks fields in order then sorts names within field, so alpha first.
   assert.equal(plans[0]!.packageName, "alpha");
   assert.equal(plans[0]!.relativeTarget, "../sibling/sdk");
+});
+
+// --- Declared local-package runtime-link rewrite (Flyleaf-shaped) ---
+
+const FLYLEAF_SDK_RELATIVE = "../adeptify/adeptify-next/client-core/ts/sdk";
+
+/**
+ * Freeze the Flyleaf Task 5a37f666 failure shape without reading real sources:
+ * root package.json declares a scoped file: sibling SDK, and node_modules holds
+ * a package-manager symlink to that exact SDK path.
+ */
+async function writeFlyleafShapedRuntimeLinkFixture(root: string): Promise<{
+  app: string;
+  sdk: string;
+  sdkIndex: string;
+  originalSdkBytes: string;
+  nmLink: string;
+}> {
+  const app = path.join(root, "app");
+  const sdk = path.join(root, "adeptify", "adeptify-next", "client-core", "ts", "sdk");
+  await mkdir(app, { recursive: true });
+  await mkdir(sdk, { recursive: true });
+  const originalSdkBytes = "export const flyleafSdk = 1;\n";
+  await writeFile(
+    path.join(sdk, "package.json"),
+    JSON.stringify({ name: "@adeptify/client-core", version: "0.0.1" }),
+  );
+  await writeFile(path.join(sdk, "index.js"), originalSdkBytes);
+  await writeFile(
+    path.join(app, "package.json"),
+    `${JSON.stringify({
+      name: "flyleaf-shaped-app",
+      version: "1.0.0",
+      dependencies: {
+        "@adeptify/client-core": `file:${FLYLEAF_SDK_RELATIVE}`,
+      },
+    }, null, 2)}\n`,
+  );
+  await writeFile(path.join(app, "value.txt"), "business\n");
+  // Package-manager layout: scoped package symlink to the declared sibling.
+  await mkdir(path.join(app, "node_modules", "@adeptify"), { recursive: true });
+  const nmLink = path.join(app, "node_modules", "@adeptify", "client-core");
+  await symlink(sdk, nmLink);
+  return {
+    app,
+    sdk,
+    sdkIndex: path.join(sdk, "index.js"),
+    originalSdkBytes,
+    nmLink,
+  };
+}
+
+test("prepareWorkspace rewrites Flyleaf-shaped scoped node_modules link into the owned container", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-flyleaf-runtime-link-"));
+  const { app, sdk, sdkIndex, originalSdkBytes } = await writeFlyleafShapedRuntimeLinkFixture(root);
+  const paths = taskPaths(path.join(root, "state"), "flyleaf-runtime-link");
+  const taskSpec = spec(app);
+
+  const manifest = await prepareWorkspace(taskSpec, paths);
+
+  assert.ok(manifest.linkedDependencies.includes("node_modules"));
+  assert.ok(manifest.linkedDependencies.includes(FLYLEAF_SDK_RELATIVE));
+
+  const mirroredSdk = path.join(
+    paths.root,
+    "adeptify",
+    "adeptify-next",
+    "client-core",
+    "ts",
+    "sdk",
+  );
+  assert.equal((await lstat(mirroredSdk)).isDirectory(), true);
+  assert.equal(await readFile(path.join(mirroredSdk, "index.js"), "utf8"), originalSdkBytes);
+
+  const workspaceLink = path.join(
+    paths.workspace,
+    "node_modules",
+    "@adeptify",
+    "client-core",
+  );
+  const linkMeta = await lstat(workspaceLink);
+  assert.equal(linkMeta.isSymbolicLink(), true);
+  const linkText = await readlink(workspaceLink);
+  assert.equal(path.isAbsolute(linkText), false);
+  const resolved = await realpath(workspaceLink);
+  assert.equal(resolved, await realpath(mirroredSdk));
+  // Must not resolve to the original sibling outside the isolation container.
+  assert.notEqual(resolved, await realpath(sdk));
+  const containerReal = await realpath(paths.root);
+  assert.ok(resolved.startsWith(containerReal + path.sep) || resolved === containerReal);
+
+  // Source package and original package-manager link stay immutable.
+  assert.equal(await readFile(sdkIndex, "utf8"), originalSdkBytes);
+  assert.equal(await realpath(path.join(app, "node_modules", "@adeptify", "client-core")), await realpath(sdk));
+
+  // Business Candidate edit only; dependency mirrors never enter the patch.
+  await writeFile(path.join(paths.workspace, "value.txt"), "after\n");
+  await writeFile(path.join(mirroredSdk, "index.js"), "export const flyleafSdk = 999;\n");
+  const report = await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+  const diff = await readFile(paths.diff, "utf8");
+  assert.doesNotMatch(diff, /node_modules/);
+  assert.doesNotMatch(diff, /adeptify/);
+  assert.doesNotMatch(diff, /flyleafSdk/);
+  assert.doesNotMatch(diff, /client-core/);
+  assert.deepEqual(report.business.affectedPaths, ["value.txt"]);
+  assert.deepEqual(report.integration.affectedPaths, ["value.txt"]);
+  assert.equal(await readFile(sdkIndex, "utf8"), originalSdkBytes);
+});
+
+test("copyForVerification rewrites Flyleaf-shaped scoped runtime link inside cleanup root", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-flyleaf-verify-link-"));
+  const { app, sdk, sdkIndex, originalSdkBytes } = await writeFlyleafShapedRuntimeLinkFixture(root);
+
+  const verifyEnv = await copyForVerification(app, []);
+  try {
+    const mirroredSdk = path.join(
+      verifyEnv.cleanupRoot,
+      "adeptify",
+      "adeptify-next",
+      "client-core",
+      "ts",
+      "sdk",
+    );
+    const verifyLink = path.join(
+      verifyEnv.projectCwd,
+      "node_modules",
+      "@adeptify",
+      "client-core",
+    );
+    assert.equal((await lstat(verifyLink)).isSymbolicLink(), true);
+    assert.equal(path.isAbsolute(await readlink(verifyLink)), false);
+    assert.equal(await realpath(verifyLink), await realpath(mirroredSdk));
+    assert.notEqual(await realpath(verifyLink), await realpath(sdk));
+    assert.equal(await readFile(path.join(mirroredSdk, "index.js"), "utf8"), originalSdkBytes);
+    assert.equal(await readFile(sdkIndex, "utf8"), originalSdkBytes);
+  } finally {
+    await rm(verifyEnv.cleanupRoot, { recursive: true, force: true });
+  }
+});
+
+test("retained reverify rewrites declared scoped runtime link via ensureWorkspaceDependencyMirrors", async () => {
+  const {
+    ensureWorkspaceDependencyMirrors,
+  } = await import("../src/workspace/dependency-materializer.js");
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-flyleaf-reverify-link-"));
+  const { app, sdk } = await writeFlyleafShapedRuntimeLinkFixture(root);
+  const container = path.join(root, "container");
+  const workspace = path.join(container, "workspace");
+  // Retained Candidate layout: dependency-free business copy already present.
+  await mkdir(workspace, { recursive: true });
+  await writeFile(
+    path.join(workspace, "package.json"),
+    await readFile(path.join(app, "package.json"), "utf8"),
+  );
+  await writeFile(path.join(workspace, "value.txt"), "business\n");
+
+  const linked = await ensureWorkspaceDependencyMirrors(
+    app,
+    workspace,
+    ["node_modules"],
+    container,
+  );
+  assert.ok(linked.includes("node_modules"));
+  assert.ok(linked.includes(FLYLEAF_SDK_RELATIVE));
+
+  const mirroredSdk = path.join(
+    container,
+    "adeptify",
+    "adeptify-next",
+    "client-core",
+    "ts",
+    "sdk",
+  );
+  const workspaceLink = path.join(workspace, "node_modules", "@adeptify", "client-core");
+  assert.equal((await lstat(workspaceLink)).isSymbolicLink(), true);
+  assert.equal(path.isAbsolute(await readlink(workspaceLink)), false);
+  assert.equal(await realpath(workspaceLink), await realpath(mirroredSdk));
+  assert.notEqual(await realpath(workspaceLink), await realpath(sdk));
+});
+
+test("declared runtime link with wrong target fails closed and leaves no command-ready external link", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-runtime-wrong-target-"));
+  const { app, sdk } = await writeFlyleafShapedRuntimeLinkFixture(root);
+  const wrong = path.join(root, "wrong-sdk");
+  await mkdir(wrong, { recursive: true });
+  await writeFile(path.join(wrong, "package.json"), JSON.stringify({ name: "wrong" }));
+  await writeFile(path.join(wrong, "index.js"), "export const wrong = true;\n");
+  // Same declared package name, but node_modules points at a different directory.
+  const nmLink = path.join(app, "node_modules", "@adeptify", "client-core");
+  await rm(nmLink, { force: true });
+  await symlink(wrong, nmLink);
+  // Declared source remains the real sibling SDK.
+  assert.equal(await realpath(path.resolve(app, FLYLEAF_SDK_RELATIVE)), await realpath(sdk));
+
+  const paths = taskPaths(path.join(root, "state"), "wrong-target");
+  await assert.rejects(
+    () => prepareWorkspace(spec(app), paths),
+    /dependency materialization rejected: dependency link escapes the project/,
+  );
+  await assert.rejects(
+    () => lstat(path.join(paths.workspace, "node_modules")),
+    /ENOENT/,
+  );
+});
+
+test("undeclared escaping node_modules link still fails closed when a declared package exists", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-runtime-undeclared-escape-"));
+  const { app } = await writeFlyleafShapedRuntimeLinkFixture(root);
+  const outside = path.join(root, "outside-secret");
+  await writeFile(outside, "secret\n");
+  await symlink(outside, path.join(app, "node_modules", "escape-hatch"));
+
+  const paths = taskPaths(path.join(root, "state"), "undeclared-escape");
+  await assert.rejects(
+    () => prepareWorkspace(spec(app), paths),
+    /dependency materialization rejected: dependency link escapes the project/,
+  );
+  await assert.rejects(
+    () => lstat(path.join(paths.workspace, "node_modules")),
+    /ENOENT/,
+  );
+});
+
+test("escape inside declared package fails closed and does not copy external content", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-local-pkg-internal-escape-"));
+  const { app, sdk } = await writeFlyleafShapedRuntimeLinkFixture(root);
+  const outside = path.join(root, "secret-outside");
+  await writeFile(outside, "secret\n");
+  await symlink(outside, path.join(sdk, "leaked"));
+
+  const paths = taskPaths(path.join(root, "state"), "pkg-internal-escape");
+  await assert.rejects(
+    () => prepareWorkspace(spec(app), paths),
+    /dependency materialization rejected: dependency link escapes the project/,
+  );
+  // Declared package mirror must not remain command-ready with an external leak.
+  await assert.rejects(
+    () => lstat(path.join(
+      paths.root,
+      "adeptify",
+      "adeptify-next",
+      "client-core",
+      "ts",
+      "sdk",
+    )),
+    /ENOENT/,
+  );
+});
+
+test("packageNameToNodeModulesRelative maps scoped names and rejects traversal", async () => {
+  const {
+    packageNameToNodeModulesRelative,
+    buildDeclaredRuntimeLinkAuthorizations,
+  } = await import("../src/workspace/dependency-materializer.js");
+
+  assert.equal(packageNameToNodeModulesRelative("@adeptify/client-core"), "@adeptify/client-core");
+  assert.equal(packageNameToNodeModulesRelative("lodash"), "lodash");
+  assert.equal(packageNameToNodeModulesRelative("../evil"), null);
+  assert.equal(packageNameToNodeModulesRelative("@scope/../evil"), null);
+  assert.equal(packageNameToNodeModulesRelative("@scope"), null);
+  assert.equal(packageNameToNodeModulesRelative(""), null);
+  assert.equal(packageNameToNodeModulesRelative("a/b/c"), null);
+
+  // Target-only would be unsafe: authorization keys are package-relative paths.
+  const auths = buildDeclaredRuntimeLinkAuthorizations([
+    {
+      packageName: "@adeptify/client-core",
+      protocol: "file",
+      relativeTarget: "../sdk",
+      sourceAbsolute: "/tmp/source-sdk",
+      destinationAbsolute: "/tmp/container/sdk",
+    },
+  ]);
+  assert.equal(auths.has("@adeptify/client-core"), true);
+  assert.equal(auths.has("client-core"), false);
+  assert.equal(auths.get("@adeptify/client-core")?.sourceReal, "/tmp/source-sdk");
+  assert.equal(auths.get("@adeptify/client-core")?.relativeTarget, "../sdk");
+});
+
+test("runtime-link rewrite resolves through an aliased destination project path", async () => {
+  const {
+    materializeDependencySet,
+  } = await import("../src/workspace/dependency-materializer.js");
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-flyleaf-alias-dest-"));
+  const { app, sdk } = await writeFlyleafShapedRuntimeLinkFixture(root);
+
+  // Real isolation container, plus a sibling symlink alias into it. Callers may
+  // hold the alias form while realpath yields a different string (macOS /var).
+  const realContainer = path.join(root, "real-container");
+  const aliasContainer = path.join(root, "alias-container");
+  const realWorkspace = path.join(realContainer, "workspace");
+  await mkdir(realWorkspace, { recursive: true });
+  await writeFile(
+    path.join(realWorkspace, "package.json"),
+    await readFile(path.join(app, "package.json"), "utf8"),
+  );
+  await symlink(realContainer, aliasContainer);
+  const aliasWorkspace = path.join(aliasContainer, "workspace");
+
+  await materializeDependencySet(
+    app,
+    aliasWorkspace,
+    aliasContainer,
+    ["node_modules"],
+  );
+
+  const mirroredSdk = path.join(
+    aliasContainer,
+    "adeptify",
+    "adeptify-next",
+    "client-core",
+    "ts",
+    "sdk",
+  );
+  const workspaceLink = path.join(
+    aliasWorkspace,
+    "node_modules",
+    "@adeptify",
+    "client-core",
+  );
+  assert.equal((await lstat(workspaceLink)).isSymbolicLink(), true);
+  const linkText = await readlink(workspaceLink);
+  assert.equal(path.isAbsolute(linkText), false);
+  // Must resolve even when the destination project path is an alias.
+  assert.equal(await realpath(workspaceLink), await realpath(mirroredSdk));
+  assert.notEqual(await realpath(workspaceLink), await realpath(sdk));
+  // Alias and real container are the same isolation root.
+  assert.equal(await realpath(aliasContainer), await realpath(realContainer));
 });
 
 async function preparedSnapshot(prefix: string): Promise<ReturnType<typeof taskPaths>> {

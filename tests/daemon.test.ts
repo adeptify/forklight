@@ -5113,6 +5113,494 @@ test("per-profile concurrency: Task override takes precedence over worker profil
   assert.equal(snap.provenance.maxConcurrency, "task");
 });
 
+// --- Profile Worker slot release (Worker return vs full Task lifecycle) ---
+
+import {
+  getWorkerAdapter,
+  registerWorkerAdapter,
+  resetWorkerRegistryForTests,
+} from "../src/workers/registry.js";
+import { isTerminalTaskStatus } from "../src/core/task-progress.js";
+import type { EffectivePolicySnapshot } from "../src/core/types.js";
+import type { WorkerAdapter } from "../src/workers/types.js";
+
+function createDeferredGate(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+async function waitUntil(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (predicate()) return;
+    await sleep(10);
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+function profileSlotPolicy(profileId: string, maxConcurrency: number): EffectivePolicySnapshot {
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const values = {
+    ...defaultAdvancedPolicyFields(),
+    maxConcurrency,
+    completionMode: "off" as const,
+    changeBudgetMode: "off" as const,
+  };
+  const provenance = Object.fromEntries(
+    (Object.keys(values) as (keyof typeof values)[]).map((field) => [field, "worker" as const]),
+  ) as EffectivePolicySnapshot["provenance"];
+  return {
+    profileId,
+    values,
+    provenance,
+    enforcementCapability: caps,
+  };
+}
+
+function verificationGateCommand(gateScript: string, gatePath: string): string {
+  return [
+    JSON.stringify(process.execPath),
+    JSON.stringify(gateScript),
+    JSON.stringify(gatePath),
+  ].join(" ");
+}
+
+async function writeVerificationGateScript(home: string): Promise<string> {
+  const gateScript = path.join(home, "wait-verification-gate.mjs");
+  await writeFile(
+    gateScript,
+    `import { existsSync, watch } from "node:fs";
+import { dirname } from "node:path";
+const gate = process.argv[1];
+if (existsSync(gate)) process.exit(0);
+await new Promise((resolve, reject) => {
+  const watcher = watch(dirname(gate), () => {
+    if (existsSync(gate)) {
+      watcher.close();
+      resolve(undefined);
+    }
+  });
+  watcher.on("error", reject);
+});
+`,
+  );
+  return gateScript;
+}
+
+async function seedProfileSlotTask(params: {
+  store: StateStore;
+  home: string;
+  project: string;
+  name: string;
+  profileId: string;
+  profileMaxConcurrency: number;
+  gateScript: string;
+  gatePath: string;
+  /** When false, leave the Task unprepared so the Coordinator prep path runs. */
+  prepare?: boolean;
+}): Promise<TaskRecord> {
+  const task = registerTaskFromSpec(
+    params.store,
+    {
+      version: 1,
+      name: params.name,
+      project: params.project,
+      goal: "Profile Worker slot release regression",
+      constraints: [],
+      provider: {
+        name: "deepseek",
+        model: "deepseek-v4-flash",
+        keychainService: "forklight.test.api-key",
+      },
+      runtime: {
+        name: "claude-code",
+        executable: "claude",
+        effort: "low",
+        maxBudgetUsd: 0.1,
+      },
+      workspace: { exclude: [] },
+      worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: {
+        commands: [verificationGateCommand(params.gateScript, params.gatePath)],
+      },
+    },
+    `forklight://test/profile-slot/${params.name}`,
+    profileSlotPolicy(params.profileId, params.profileMaxConcurrency),
+  );
+  if (params.prepare !== false) {
+    await prepareTaskWorkspace(params.store, task);
+  }
+  return params.store.getTask(task.id);
+}
+
+/** Wrap a deferred gate with a synchronous started flag for admission proofs. */
+function trackableGate(): {
+  promise: Promise<void>;
+  resolve: () => void;
+  started: () => boolean;
+} {
+  const gate = createDeferredGate();
+  let started = false;
+  return {
+    promise: gate.promise,
+    resolve: () => {
+      started = true;
+      gate.resolve();
+    },
+    started: () => started,
+  };
+}
+
+function installControllableClaudeWorker(options: {
+  workerHold: Map<string, { promise: Promise<void>; resolve: () => void }>;
+  workerStarted: Map<string, { promise: Promise<void>; resolve: () => void }>;
+  /** When true, doctor fails only the first call so a queued successor can run. */
+  doctorFailOnce?: boolean;
+  /** Task ids whose run() should fail or throw; others succeed. */
+  runFailureByTaskId?: Map<string, "failed" | "throw">;
+}): void {
+  resetWorkerRegistryForTests();
+  getWorkerAdapter("claude-code");
+  const capabilities = getWorkerAdapter("claude-code").capabilities();
+  let doctorFailuresRemaining = options.doctorFailOnce === true ? 1 : 0;
+  const adapter: WorkerAdapter = {
+    name: "claude-code",
+    displayName: "Profile-slot test Claude",
+    defaultExecutable: process.execPath,
+    capabilities: () => capabilities,
+    doctor: () => {
+      const ok = doctorFailuresRemaining <= 0;
+      if (doctorFailuresRemaining > 0) doctorFailuresRemaining -= 1;
+      return {
+        runtime: "claude-code",
+        ok,
+        executable: process.execPath,
+        issues: ok ? [] : ["simulated doctor failure"],
+        capabilities,
+      };
+    },
+    validateSpec: () => {},
+    effortArgs: () => [],
+    toolProtocolAppendix: () => [],
+    checkpointProtocolAppendix: () => [],
+    run: async (ctx) => {
+      options.workerStarted.get(ctx.task.id)?.resolve();
+      const hold = options.workerHold.get(ctx.task.id);
+      if (hold !== undefined) await hold.promise;
+      const runFailure = options.runFailureByTaskId?.get(ctx.task.id);
+      if (runFailure === "throw") {
+        throw new Error("simulated worker launch failure");
+      }
+      if (runFailure === "failed") {
+        return { status: "failed", exitCode: 1, error: "simulated worker failure" };
+      }
+      // Tiny business edit so verification always has a real patch artifact.
+      try {
+        await writeFile(
+          path.join(ctx.task.paths.workspace, "src", "hello.ts"),
+          `export const n = ${Date.now()};\n`,
+        );
+      } catch {
+        // Workspace may be absent on some failure paths; success path prepares it.
+      }
+      return { status: "succeeded", exitCode: 0, resultText: "ok" };
+    },
+  };
+  registerWorkerAdapter(adapter);
+}
+
+test("same-profile queued Task starts after Worker returns while prior Task still verifies", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-profile-slot-same-"));
+  const project = path.join(home, "source");
+  await mkdir(path.join(project, "src"), { recursive: true });
+  await writeFile(path.join(project, "src", "hello.ts"), "export const n = 1;\n");
+  const gateScript = await writeVerificationGateScript(home);
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 2);
+  const workerHold = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  const workerStarted = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  installControllableClaudeWorker({ workerHold, workerStarted });
+  try {
+    const gateA = path.join(home, "gate-a");
+    const gateB = path.join(home, "gate-b");
+    const taskA = await seedProfileSlotTask({
+      store, home, project, name: "slot-a", profileId: "shared-profile",
+      profileMaxConcurrency: 1, gateScript, gatePath: gateA,
+    });
+    const taskB = await seedProfileSlotTask({
+      store, home, project, name: "slot-b", profileId: "shared-profile",
+      profileMaxConcurrency: 1, gateScript, gatePath: gateB,
+    });
+    const holdA = createDeferredGate();
+    const startedA = createDeferredGate();
+    const startedB = createDeferredGate();
+    workerHold.set(taskA.id, holdA);
+    workerStarted.set(taskA.id, startedA);
+    workerHold.set(taskB.id, createDeferredGate()); // resolve immediately path unused; auto-pass
+    workerHold.get(taskB.id)!.resolve();
+    workerStarted.set(taskB.id, startedB);
+
+    coordinator.queueTask(taskA.id);
+    await startedA.promise;
+    coordinator.queueTask(taskB.id);
+    assert.deepEqual(coordinator.health().queuedTaskIds, [taskB.id]);
+    assert.deepEqual(coordinator.health().activeTaskIds, [taskA.id]);
+
+    holdA.resolve();
+    await startedB.promise;
+    await waitUntil(
+      () => store.getTask(taskA.id).status === "verifying",
+      "Task A enters independent verification",
+    );
+    const health = coordinator.health();
+    assert.ok((health.activeTaskIds as string[]).includes(taskA.id));
+    assert.ok((health.activeTaskIds as string[]).includes(taskB.id));
+    assert.equal((health.queuedTaskIds as string[]).includes(taskB.id), false);
+    assert.equal(store.getTask(taskA.id).status, "verifying");
+
+    await writeFile(gateA, "release\n");
+    await writeFile(gateB, "release\n");
+    await waitUntil(
+      () => isTerminalTaskStatus(store.getTask(taskA.id).status)
+        && isTerminalTaskStatus(store.getTask(taskB.id).status),
+      "both Tasks finish after verification gates open",
+    );
+    assert.deepEqual(coordinator.health().activeTaskIds, []);
+    assert.deepEqual(coordinator.health().queuedTaskIds, []);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+    resetWorkerRegistryForTests();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("global in-flight cap still blocks while a Task verifies after releasing its Profile slot", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-profile-slot-global-"));
+  const project = path.join(home, "source");
+  await mkdir(path.join(project, "src"), { recursive: true });
+  await writeFile(path.join(project, "src", "hello.ts"), "export const n = 1;\n");
+  const gateScript = await writeVerificationGateScript(home);
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 1);
+  const workerHold = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  const workerStarted = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  installControllableClaudeWorker({ workerHold, workerStarted });
+  try {
+    const gateA = path.join(home, "gate-a");
+    const gateB = path.join(home, "gate-b");
+    const taskA = await seedProfileSlotTask({
+      store, home, project, name: "global-a", profileId: "shared-profile",
+      profileMaxConcurrency: 1, gateScript, gatePath: gateA,
+    });
+    // Pre-prepared successor retains status "preparing" until the scheduler
+    // admits it — assert scheduler health / Worker start, not fixture status.
+    const taskB = await seedProfileSlotTask({
+      store, home, project, name: "global-b", profileId: "shared-profile",
+      profileMaxConcurrency: 1, gateScript, gatePath: gateB,
+    });
+    const holdA = createDeferredGate();
+    const startedA = createDeferredGate();
+    const startedB = trackableGate();
+    workerHold.set(taskA.id, holdA);
+    workerStarted.set(taskA.id, startedA);
+    const holdB = createDeferredGate();
+    holdB.resolve();
+    workerHold.set(taskB.id, holdB);
+    workerStarted.set(taskB.id, startedB);
+
+    coordinator.queueTask(taskA.id);
+    await startedA.promise;
+    holdA.resolve();
+    await waitUntil(
+      () => store.getTask(taskA.id).status === "verifying",
+      "Task A verifying after Profile slot release",
+    );
+    coordinator.queueTask(taskB.id);
+    // pump() is synchronous on admission: with global cap 1 and A still active,
+    // B must remain queued and must not start a Worker.
+    assert.deepEqual(coordinator.health().activeTaskIds, [taskA.id]);
+    assert.deepEqual(coordinator.health().queuedTaskIds, [taskB.id]);
+    assert.equal(startedB.started(), false, "B must not start a Worker while A is still active");
+    assert.equal(
+      store.listAttempts(taskB.id).length,
+      0,
+      "B must not create an Attempt while blocked by the global in-flight cap",
+    );
+
+    await writeFile(gateA, "release\n");
+    await startedB.promise;
+    await writeFile(gateB, "release\n");
+    await waitUntil(
+      () => isTerminalTaskStatus(store.getTask(taskA.id).status)
+        && isTerminalTaskStatus(store.getTask(taskB.id).status),
+      "B runs only after A fully leaves the active set",
+    );
+    assert.deepEqual(coordinator.health().activeTaskIds, []);
+    assert.deepEqual(coordinator.health().queuedTaskIds, []);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+    resetWorkerRegistryForTests();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Worker and pre-Worker failures release Profile occupancy without stranding the queue", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-profile-slot-fail-"));
+  const project = path.join(home, "source");
+  await mkdir(path.join(project, "src"), { recursive: true });
+  await writeFile(path.join(project, "src", "hello.ts"), "export const n = 1;\n");
+  const gateScript = await writeVerificationGateScript(home);
+  const store = new StateStore(home);
+
+  /**
+   * Same-Coordinator proof: queue a failing Task and an already-queued
+   * same-profile successor under cap 1. After the failure unwinds, the
+   * successor must start (Profile occupancy released) without reconstructing
+   * the Coordinator. Optional mutable auth fails only the first inspection.
+   */
+  async function runQueuedSuccessorAfterFailure(params: {
+    label: string;
+    doctorFailOnce?: boolean;
+    runFailure?: "failed" | "throw";
+    /** Fail the first auth inspection only; later inspections succeed. */
+    failFirstAuthOnly?: boolean;
+    /** Skip workspace preparation so Coordinator prep path can fail. */
+    unpreparedFailingProject?: string;
+  }): Promise<void> {
+    const workerHold = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+    const workerStarted = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+    // Mutable auth seam: first launch preflight fails, subsequent succeed so the
+    // already-queued successor can run in the same Coordinator after cleanup.
+    let authFailuresRemaining = params.failFirstAuthOnly === true ? 1 : 0;
+    const inspector: ProviderAuthInspector = {
+      hasReadableKeychainValue: () => {
+        if (authFailuresRemaining > 0) {
+          authFailuresRemaining -= 1;
+          return false;
+        }
+        return true;
+      },
+      hasLocalGrokSignIn: () => true,
+    };
+    const coordinator = new DaemonCoordinator(
+      store,
+      new SettingsService(store),
+      1,
+      params.failFirstAuthOnly === true ? inspector : TEST_PROVIDER_AUTH_READY,
+    );
+
+    const failingGatePath = path.join(home, `gate-fail-${params.label}`);
+    const successGatePath = path.join(home, `gate-ok-${params.label}`);
+    const failingProject = params.unpreparedFailingProject ?? project;
+    const failing = await seedProfileSlotTask({
+      store,
+      home,
+      project: failingProject,
+      name: `fail-${params.label}`,
+      profileId: "fail-profile",
+      profileMaxConcurrency: 1,
+      gateScript,
+      gatePath: failingGatePath,
+      prepare: params.unpreparedFailingProject === undefined,
+    });
+    const successor = await seedProfileSlotTask({
+      store, home, project, name: `ok-${params.label}`, profileId: "fail-profile",
+      profileMaxConcurrency: 1, gateScript, gatePath: successGatePath,
+    });
+
+    const startedFailing = trackableGate();
+    const startedOk = trackableGate();
+    const holdFailing = createDeferredGate();
+    // Worker run failures resolve the hold immediately so run() fails promptly.
+    if (params.runFailure !== undefined) {
+      holdFailing.resolve();
+    }
+    const holdOk = createDeferredGate();
+    holdOk.resolve();
+    workerHold.set(failing.id, holdFailing);
+    workerHold.set(successor.id, holdOk);
+    workerStarted.set(failing.id, startedFailing);
+    workerStarted.set(successor.id, startedOk);
+
+    const runFailureByTaskId = new Map<string, "failed" | "throw">();
+    if (params.runFailure !== undefined) {
+      runFailureByTaskId.set(failing.id, params.runFailure);
+    }
+    // Install once for both Tasks: first doctor call / failing Task run may
+    // fail; the successor always uses the healthy path.
+    installControllableClaudeWorker({
+      workerHold,
+      workerStarted,
+      doctorFailOnce: params.doctorFailOnce === true,
+      runFailureByTaskId,
+    });
+
+    try {
+      // Admit the failing Task first; then queue the successor so it is already
+      // waiting when failure cleanup repumps.
+      coordinator.queueTask(failing.id);
+      if (params.runFailure !== undefined) {
+        await startedFailing.promise;
+      }
+      // Auth and doctor/prep can finish before we queue the successor; queue it
+      // while the failing job may still be active OR already cleaned up. If it
+      // already cleaned up, pump will start the successor immediately — that
+      // still proves occupancy was released in the same Coordinator.
+      coordinator.queueTask(successor.id);
+
+      await waitUntil(
+        () => store.getTask(failing.id).status === "failed"
+          && !(coordinator.health().activeTaskIds as string[]).includes(failing.id),
+        `${params.label} failure leaves the full active set`,
+      );
+      // No Worker success / retry manufactured for the failing Task.
+      assert.equal(store.getTask(failing.id).status, "failed");
+      assert.equal(
+        store.listEvents(failing.id).some((event) => event.type === "worker.completed"),
+        false,
+        `${params.label}: failure must not fabricate Worker success`,
+      );
+
+      await startedOk.promise;
+      assert.equal(
+        (coordinator.health().queuedTaskIds as string[]).includes(successor.id),
+        false,
+        `${params.label}: already-queued successor starts after occupancy release`,
+      );
+      await writeFile(successGatePath, "release\n");
+      await waitUntil(
+        () => isTerminalTaskStatus(store.getTask(successor.id).status),
+        `${params.label} successor finishes after slot release`,
+      );
+      assert.equal(store.getTask(successor.id).status, "succeeded");
+      assert.deepEqual(coordinator.health().activeTaskIds, []);
+      assert.deepEqual(coordinator.health().queuedTaskIds, []);
+    } finally {
+      await coordinator.shutdown();
+    }
+  }
+
+  try {
+    await runQueuedSuccessorAfterFailure({ label: "doctor", doctorFailOnce: true });
+    await runQueuedSuccessorAfterFailure({ label: "worker-throw", runFailure: "throw" });
+    await runQueuedSuccessorAfterFailure({ label: "worker-failed", runFailure: "failed" });
+    await runQueuedSuccessorAfterFailure({ label: "auth", failFirstAuthOnly: true });
+    // Missing project makes workspace preparation fail before any Worker run.
+    await runQueuedSuccessorAfterFailure({
+      label: "prep",
+      unpreparedFailingProject: path.join(home, "missing-source-for-prep-failure"),
+    });
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("snapshot stores truthful enforcement capability", () => {
   const claudeCaps = enforcementCapabilityForRuntime("claude-code");
   const snap = resolveEffectivePolicy(
@@ -5131,7 +5619,7 @@ test("snapshot stores truthful enforcement capability", () => {
 
 // --- Bounded policy adaptation transition chain ---
 
-import type { AdvancedPolicyFields, EffectivePolicySnapshot } from "../src/core/types.js";
+import type { AdvancedPolicyFields } from "../src/core/types.js";
 
 interface AdaptationTaskSeed {
   effectivePolicy: EffectivePolicySnapshot;

@@ -2685,6 +2685,106 @@ test("Hub task detail endpoint ships projected activity without mutating inspect
   }
 });
 
+test("Hub failure attribution reads trusted projection and forwards one exact confirmed binding", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-failure-attribution-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const binding = {
+    attemptId: "attempt-exact",
+    verificationEventSequence: 77,
+    candidateRevisionId: "revision-exact",
+    candidatePatchDigest: "a".repeat(64),
+  };
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-test-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 42 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 42 } }),
+    daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
+      calls.push({ method, params });
+      if (method === "status") return { id: "task-failed", status: "failed", spec: {} } as T;
+      if (method === "task_decision" || method === "task_economics") return {} as T;
+      if (method === "inspect") return { events: [], attempts: [], diff: "" } as T;
+      if (method === "main_failure_attribution_projection") {
+        return {
+          machineOutcome: "failed",
+          abilityAssessment: "uncertain",
+          eligible: true,
+          reason: "ready",
+          binding,
+        } as T;
+      }
+      if (method === "main_failure_attribution") {
+        return { impact: "non-model", noteLength: 23, existing: false } as T;
+      }
+      if (
+        method === "candidate_reverify_eligibility"
+        || method === "correction_eligibility"
+        || method === "review_graph_status"
+      ) throw new Error("optional");
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  const port = await server.start();
+  try {
+    const detail = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/task-failed`,
+      "GET",
+      server.getToken(),
+    );
+    assert.equal(detail.status, 200);
+    assert.deepEqual((detail.body as { failureAttribution?: unknown }).failureAttribution, {
+      machineOutcome: "failed",
+      abilityAssessment: "uncertain",
+      eligible: true,
+      reason: "ready",
+      binding,
+    });
+
+    const missingConfirm = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/task-failed/failure-attribution`,
+      "POST",
+      server.getToken(),
+      { ...binding, cause: "verification-infrastructure", note: "private-note-marker" },
+    );
+    assert.equal(missingConfirm.status, 422);
+    const recorded = await doHttp(
+      `http://127.0.0.1:${port}/api/ops/tasks/task-failed/failure-attribution`,
+      "POST",
+      server.getToken(),
+      {
+        ...binding,
+        cause: "verification-infrastructure",
+        note: " private-note-marker ",
+        confirm: true,
+      },
+    );
+    assert.equal(recorded.status, 200);
+    assert.equal(JSON.stringify(recorded.body).includes("private-note-marker"), false);
+    const mutation = calls.find((call) => call.method === "main_failure_attribution");
+    assert.deepEqual(mutation?.params, {
+      taskId: "task-failed",
+      ...binding,
+      cause: "verification-infrastructure",
+      note: "private-note-marker",
+      confirm: true,
+    });
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
 test("GET /api/ops/self-upgrade-evidence rejects without token and bounds daemon errors", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "fl-hub-sue-err-"));
   const store = new StateStore(home);

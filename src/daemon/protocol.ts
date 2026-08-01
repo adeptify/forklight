@@ -10,6 +10,8 @@ export type DaemonMethod =
   | "checkpoint_run"
   | "resume"
   | "main_review"
+  | "main_failure_attribution"
+  | "main_failure_attribution_projection"
   | "revise"
   | "list"
   | "list_summaries"
@@ -122,6 +124,7 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "economics_summary",
   "routing_evidence_coverage",
   "model_routing",
+  "main_failure_attribution_projection",
   "main_direct_status",
   "main_direct_list",
   "main_direct_aggregate",

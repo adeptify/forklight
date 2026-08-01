@@ -40,6 +40,7 @@ export type EventType =
   | "checkpoint.skipped"
   | "attempt.authorization.granted"
   | "main-review.completed"
+  | "main.failure-attribution.recorded"
   | "competition.main-decision.completed"
   | "competition.retained-partial.completed"
   | "candidate.handoff.authorized"

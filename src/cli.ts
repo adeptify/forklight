@@ -37,6 +37,10 @@ import {
 import { parseRemediationAmendmentInput } from "./core/main-remediation.js";
 import { recordMainReview } from "./core/main-review.js";
 import {
+  isFailureAttributionCause,
+  recordMainFailureAttribution,
+} from "./core/main-failure-attribution.js";
+import {
   describeCorrectionRejection,
   resolveCorrectionEligibility,
   resolveLatestRevision,
@@ -209,6 +213,7 @@ Usage:
   forklight revise <task-id> --feedback <text>
   forklight correct <task-id> --feedback <text> [--max-budget-usd <number|none>] [--candidate-revision <id> --reusable-paths <json-array> --remaining-gaps <json-array>] --confirm
   forklight main-review <task-id> --decision <accept|revise|reject> --reason <text> --confirm
+  forklight failure-attribution <task-id> --attempt <id> --verification-sequence <n> --cause <candidate|verification-infrastructure|acceptance-contract|insufficient-evidence> --note <text> [--candidate-revision <id> --candidate-digest <sha256>] --confirm [--json]
   forklight review-graph create <task-id> --reviewer-profile <id> [--reviewer-profile <id> ...] --reason <text> --confirm [--json]
       # or --reviewer-profiles <id1,id2,id3> for 1–3 independent read-only judges
   forklight review-graph status <task-id> [--json]
@@ -3168,6 +3173,56 @@ async function main(): Promise<void> {
           }
         },
         renderOutput: (review) => `${JSON.stringify(review, null, 2)}\n`,
+      });
+      process.stdout.write(output);
+      return;
+    }
+    if (command === "failure-attribution") {
+      const taskId = required(positional, "task id");
+      const attemptId = required(option(rest, "--attempt"), "--attempt");
+      const rawSequence = required(option(rest, "--verification-sequence"), "--verification-sequence");
+      const verificationEventSequence = Number(rawSequence);
+      if (!Number.isSafeInteger(verificationEventSequence) || verificationEventSequence < 1) {
+        throw new Error("--verification-sequence must be a positive integer");
+      }
+      const cause = required(option(rest, "--cause"), "--cause");
+      if (!isFailureAttributionCause(cause)) throw new Error("--cause is not supported");
+      const note = required(option(rest, "--note"), "--note");
+      const candidateRevisionId = option(rest, "--candidate-revision");
+      const candidatePatchDigest = option(rest, "--candidate-digest");
+      if (!rest.includes("--confirm")) throw new Error("failure-attribution requires --confirm");
+      const params = {
+        taskId,
+        attemptId,
+        verificationEventSequence,
+        cause,
+        note,
+        ...(candidateRevisionId === undefined ? {} : { candidateRevisionId }),
+        ...(candidatePatchDigest === undefined ? {} : { candidatePatchDigest }),
+        confirm: true as const,
+      };
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_main_failure_attribution",
+        home: forklightHome(),
+        args: {
+          taskId,
+          attemptId,
+          verificationEventSequence,
+          cause,
+          noteLength: note.trim().length,
+          hasCandidateRevision: candidateRevisionId !== undefined || candidatePatchDigest !== undefined,
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          try {
+            await ensureDaemon();
+            return daemonRequest<Record<string, unknown>>("main_failure_attribution", params);
+          } catch {
+            return recordMainFailureAttribution(store, taskId, params);
+          }
+        },
+        renderOutput: (value) => `${JSON.stringify(value, null, 2)}\n`,
       });
       process.stdout.write(output);
       return;

@@ -1,5 +1,8 @@
 # M1 daily-assistant acceptance
 
+> Supporting acceptance evidence, not current project status. The authoritative
+> Goal, milestone state, and action items live in [`PROJECT.md`](../PROJECT.md).
+
 Last updated: 2026-07-28
 
 This is the product gate for moving ForkLight from an engineering Alpha to a

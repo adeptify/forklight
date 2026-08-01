@@ -1255,22 +1255,30 @@ test("recreated excluded dist does not inflate the integration patch or block ap
     assert.equal(result.status, "applied");
     assert.match(await readFile(path.join(sourceDir, "readme.md"), "utf8"), /Changed text/);
 
-    // Raw and generated audit evidence retain the full recreated dist tree.
+    // Snapshot-excluded dist never enters raw/generated/Integration payloads.
+    // Bounded audit truth is "excluded verifier output was present and restored",
+    // not a multi-megabyte binary patch of build artifacts.
     const raw = await readFile(path.join(paths.root, "workspace.raw.patch"), "utf8");
-    assert.match(raw, /dist\/bundle-0\.js/);
-    assert.match(raw, /dist\/bundle-299\.js/);
     assert.match(raw, /readme\.md/);
+    assert.doesNotMatch(raw, /dist\//);
+    assert.doesNotMatch(raw, /bundle-0/);
+    assert.doesNotMatch(raw, /bundle-299/);
     const generated = await readFile(
       path.join(paths.root, "workspace.generated.patch"),
       "utf8",
     );
-    assert.match(generated, /dist\/bundle-0\.js/);
-    assert.match(generated, /dist\/bundle-299\.js/);
+    assert.doesNotMatch(generated, /dist\//);
+    assert.doesNotMatch(generated, /bundle-0/);
     assert.doesNotMatch(generated, /readme\.md/);
     // The reviewed Integration patch stayed source-only.
     const integration = await readFile(paths.diff, "utf8");
     assert.match(integration, /readme\.md/);
     assert.doesNotMatch(integration, /dist\//);
+    // Retained workspace still holds the excluded verifier tree.
+    assert.match(
+      await readFile(path.join(paths.workspace, "dist", "bundle-0.js"), "utf8"),
+      /generated 0/,
+    );
   } finally {
     store.close();
   }
