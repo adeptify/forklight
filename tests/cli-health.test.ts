@@ -540,6 +540,7 @@ test("exact-build Daemon runtime facts keep saved Workers launchable despite a c
     daemonEvidence: daemonRuntimeEvidence({
       "claude-code": { ok: true, displayName: "Claude Code", executable: "claude", issues: [], capabilities: {} },
       "grok-build": { ok: true, displayName: "Grok Build", executable: "grok", issues: [], capabilities: {} },
+      "codex-cli": { ok: true, displayName: "Codex CLI", executable: "codex", issues: [], capabilities: {} },
     }),
     // The caller shell PATH cannot find either runtime.
     localRuntimes: [
@@ -578,6 +579,7 @@ test("exact-build Daemon runtime unavailability blocks only the affected saved W
     daemonEvidence: daemonRuntimeEvidence({
       "claude-code": { ok: true },
       "grok-build": { ok: false },
+      "codex-cli": { ok: true },
     }),
     // Local PATH claims both are ready — the Daemon launches the work and wins.
     localRuntimes: [
@@ -658,6 +660,7 @@ test("CLI health header agrees with the effective runtime authority (Daemon trut
       runtimes: {
         "claude-code": { ok: true },
         "grok-build": { ok: true },
+        "codex-cli": { ok: true },
       },
     },
   };

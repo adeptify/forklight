@@ -177,7 +177,7 @@ const taskInputSchema = z.object({
    *  never auto-generated from workerProfileId. parseTaskSpec is the semantic authority. */
   routingDecision: routingDecisionSchema.optional()
     .describe("Main routing-decision snapshot frozen before any Worker starts: shortlist, selectedWorker, selectedBecause, competition intent/triggers, evidenceSnapshot"),
-  provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]).optional(),
+  provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"]).optional(),
   model: z.string().min(1).optional(),
   endpoint: z.string().url().optional(),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
@@ -663,7 +663,14 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
             daemonRequest<TaskDecisionView>("task_decision", { taskId }, home),
           ]);
           return textAndData({
-            ...buildTaskSummary(task, decision.progress, decision.failureCategory),
+            ...buildTaskSummary(
+              task,
+              decision.progress,
+              decision.failureCategory,
+              undefined,
+              undefined,
+              decision.attentionResolution,
+            ),
             decision,
           });
         },
@@ -897,6 +904,114 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
           return textAndData(
             buildTaskSummary(task),
             `ForkLight task ${taskId} was queued for Main correction. The Worker will reuse the existing workspace and session. Poll forklight_status.`,
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_task_resolve",
+    {
+      title: "Mark a failed or interrupted Task as handled",
+      description:
+        "Explicit Main closure of a failed/interrupted Task after the real-world problem has been handled. Requires confirm: true. The Task stays truthfully failed/interrupted, its original evidence remains readable, and no success, delivery, model-quality, or cost fact is invented. One closed reason, a bounded Main note, and an optional successor/evidence Task id are durable evidence. Exact replay is idempotent; a conflicting resolve fails until reopened. The Task moves to History with reason attention-resolved.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        reason: z.enum([
+          "environment-recovered",
+          "superseded",
+          "handled-elsewhere",
+          "no-longer-needed",
+        ]).describe("Why Main considers the failure handled"),
+        note: z.string().trim().max(500).optional()
+          .describe("Optional bounded Main-authored explanation of how it was handled"),
+        evidenceTaskId: z.string().uuid().optional()
+          .describe("Optional successor/evidence Task id that shows the problem was handled"),
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that Main considers the failure handled. Must be true.",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, reason, note, evidenceTaskId }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_resolve",
+        home,
+        args: {
+          taskId,
+          reason,
+          ...(note === undefined ? {} : { noteLength: note.trim().length }),
+          ...(evidenceTaskId === undefined ? {} : { evidenceTaskId }),
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const result = await daemonRequest<Record<string, unknown>>(
+            "task_resolve",
+            {
+              taskId,
+              reason,
+              ...(note === undefined || note.trim().length === 0
+                ? {}
+                : { note: note.trim() }),
+              ...(evidenceTaskId === undefined ? {} : { evidenceTaskId }),
+              confirm: true,
+            },
+            home,
+          );
+          return textAndData(
+            result,
+            `Task ${taskId} resolved as ${reason}; the Task stays failed/interrupted and moved to History (attention-resolved).`,
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_task_reopen",
+    {
+      title: "Reopen a handled failure for further action",
+      description:
+        "Explicit Main reopen of a handled failure, returning the unchanged failed/interrupted Task to Now. Requires confirm: true. Appends one durable reopen event; the machine status is never changed. Exact replay is idempotent; nothing to reopen fails closed before writing any event.",
+      inputSchema: z.object({
+        taskId: z.string().uuid(),
+        note: z.string().trim().max(500).optional()
+          .describe("Optional bounded Main-authored explanation of why the failure is actionable again"),
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that Main reopens the handled failure. Must be true.",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, note }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_reopen",
+        home,
+        args: {
+          taskId,
+          ...(note === undefined ? {} : { noteLength: note.trim().length }),
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const result = await daemonRequest<Record<string, unknown>>(
+            "task_reopen",
+            {
+              taskId,
+              ...(note === undefined || note.trim().length === 0
+                ? {}
+                : { note: note.trim() }),
+              confirm: true,
+            },
+            home,
+          );
+          return textAndData(
+            result,
+            `Task ${taskId} reopened; the failed/interrupted Task returned to Now.`,
           );
         },
       });
@@ -1379,7 +1494,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         candidates: z.array(z.object({
           workerProfileId: z.string().min(1).max(64).optional()
             .describe("Saved Worker Profile id. When set on every candidate, each candidate resolves its own frozen provider/model/runtime/effort identity (reasoned mixed-runtime admission)."),
-          providerName: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]).optional(),
+          providerName: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"]).optional(),
           modelName: z.string().min(1).optional(),
           maxBudgetUsd: z.number().positive().nullable().optional(),
         })).min(1),
@@ -1595,7 +1710,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       description:
         "Return cached provider verification status (verified, failed, stale, or unverified). This is a safe, read-only operation — it never triggers a probe, incurs no cost, and reveals no secrets.",
       inputSchema: z.object({
-        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]).optional().describe(
+        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"]).optional().describe(
           "Optional provider name. Omit to return status for all configured providers.",
         ),
       }),
@@ -1617,7 +1732,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       description:
         "Run an EXPLICIT live probe against one or all configured providers. This is a MUTATING, potentially billable operation: every request uses the current configured budget, timeout, cache lifetime, and concurrency limits, then persists only safe evidence.",
       inputSchema: z.object({
-        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]).optional().describe(
+        provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"]).optional().describe(
           "Optional provider name. Omit to probe all configured providers with bounded concurrency.",
         ),
       }),

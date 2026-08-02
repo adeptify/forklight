@@ -106,6 +106,11 @@ import { validateContractQualityOverride } from "../core/worker-profiles.js";
 import { previewQualityPolicy } from "../core/contract-quality.js";
 import { buildDeliveryPlanView } from "../core/delivery-profiles.js";
 import { isLegalBoardPlacement } from "../core/task-summary.js";
+import {
+  TASK_RESOLUTION_EVIDENCE_ID_MAX_LENGTH,
+  TASK_RESOLUTION_NOTE_MAX_LENGTH,
+  TASK_RESOLUTION_REASONS,
+} from "../core/task-resolution.js";
 import { HISTORY_INVALID_REQUEST_REASON } from "../core/task-history.js";
 import {
   candidateRevisionMatchesCurrentDiff,
@@ -354,6 +359,26 @@ export interface SafeTaskJourney {
   retainedCandidate: RetainedCandidateSection;
   /** Privacy-safe cross-Worker handoff story when this Task is source or successor. */
   candidateHandoff?: CandidateHandoffSection;
+  /**
+   * Explicit Main attention resolution when the failed/interrupted Task was
+   * handled. The machine status, original failure evidence, and delivery truth
+   * stay unchanged; this only explains the closed attention and names the one
+   * next action (Reopen).
+   */
+  resolution?: AttentionResolutionSection;
+}
+
+/** Privacy-safe closed resolution story for a handled failure. */
+export interface AttentionResolutionSection {
+  status: "resolved" | "reopened";
+  /** Closed reason code Main chose; the browser owns readable copy. */
+  reason?: string;
+  /** Optional bounded Main-authored explanation of how it was handled. */
+  note?: string;
+  /** Optional successor/evidence Task id (never a retry). */
+  evidenceTaskId?: string;
+  resolvedAt?: string;
+  reopenedAt?: string;
 }
 
 interface CandidateHandoffSection {
@@ -475,6 +500,10 @@ interface WorkerExecutionSection {
   provider: string;
   model: string;
   runtime: string;
+  /** Frozen requested execution preference. Absent on legacy Tasks (single-run). */
+  executionPreference?: string;
+  /** Frozen resolved execution mode (auto already resolved). */
+  executionMode?: string;
   /** Bounded Attempt summaries (max 5, latest first). */
   attempts: Array<{
     ordinal: number;
@@ -810,6 +839,12 @@ export function buildSafeTaskJourney(
     provider: truncate(String((spec.provider as Record<string, unknown>)?.name ?? ""), 40),
     model: truncate(String((spec.provider as Record<string, unknown>)?.model ?? ""), 80),
     runtime: truncate(String((spec.runtime as Record<string, unknown>)?.name ?? ""), 40),
+    ...(typeof spec.executionPreference === "string"
+      ? { executionPreference: spec.executionPreference }
+      : {}),
+    ...(typeof spec.executionMode === "string"
+      ? { executionMode: spec.executionMode }
+      : {}),
     attempts,
     ...(workerClaim === undefined ? {} : { workerClaim }),
     changedFilePaths,
@@ -1000,6 +1035,48 @@ export function buildSafeTaskJourney(
     ...(category === undefined ? {} : { failureCategory: category }),
   };
 
+  // --- Explicit Main attention resolution (how the failure was handled) ---
+  // The daemon Core owns the validated projection; the Hub only re-shapes the
+  // closed codes into a readable story. Never recomputes lifecycle semantics.
+  // Only failed/interrupted Tasks can carry a resolution story; forged evidence
+  // on other statuses fails open to no resolution.
+  const rawResolution = (taskStatus === "failed" || taskStatus === "interrupted")
+    ? inspect.attentionResolution
+    : undefined;
+  let resolution: AttentionResolutionSection | undefined;
+  if (
+    rawResolution !== null
+    && typeof rawResolution === "object"
+    && !Array.isArray(rawResolution)
+  ) {
+    const r = rawResolution as Record<string, unknown>;
+    const resolutionStatus = r.status === "resolved" || r.status === "reopened"
+      ? r.status
+      : undefined;
+    const resolutionNote = typeof r.note === "string" && r.note.length > 0
+      ? truncate(r.note, 500)
+      : undefined;
+    if (resolutionStatus !== undefined) {
+      resolution = {
+        status: resolutionStatus,
+        ...(resolutionNote === undefined ? {} : { note: resolutionNote }),
+        ...(typeof r.reason === "string"
+          && (TASK_RESOLUTION_REASONS as readonly string[]).includes(r.reason)
+          ? { reason: r.reason }
+          : {}),
+        ...(typeof r.evidenceTaskId === "string" && r.evidenceTaskId.length > 0
+          ? { evidenceTaskId: truncate(r.evidenceTaskId, 100) }
+          : {}),
+        ...(typeof r.resolvedAt === "string" && r.resolvedAt.length > 0
+          ? { resolvedAt: r.resolvedAt }
+          : {}),
+        ...(typeof r.reopenedAt === "string" && r.reopenedAt.length > 0
+          ? { reopenedAt: r.reopenedAt }
+          : {}),
+      };
+    }
+  }
+
   // --- Next Action ---
   const nextLabel = resolveNextAction(
     taskStatus,
@@ -1009,6 +1086,7 @@ export function buildSafeTaskJourney(
     mainReview,
     remediationDisposition,
     integration,
+    resolution,
   );
 
   const nextAction: NextActionSection = {
@@ -1105,6 +1183,7 @@ export function buildSafeTaskJourney(
     ...(candidateReuse === undefined ? {} : { candidateReuse }),
     ...(candidateReverification === undefined ? {} : { candidateReverification }),
     ...(candidateHandoff === undefined ? {} : { candidateHandoff }),
+    ...(resolution === undefined ? {} : { resolution }),
   };
 }
 
@@ -1534,9 +1613,15 @@ function resolveNextAction(
   mainReview: { decision: string } | undefined,
   remediationDisposition: { status: "verified-repaired-delivered" } | undefined,
   integration: { applied: boolean } | undefined,
+  resolution?: AttentionResolutionSection,
 ): string {
+  // Delivered outcomes win over an attention resolution: a Task that reached
+  // verified delivery is done, never "reopen". A plain handled failure has
+  // the one next action Reopen; the machine status stays failed/interrupted
+  // and is never called success.
   if (remediationDisposition?.status === "verified-repaired-delivered") return "done";
   if (integration?.applied) return "done";
+  if (resolution?.status === "resolved") return "reopen";
   if (mainReview?.decision === "accept") return "ready-to-integrate";
   if (mainReview?.decision === "revise") return "revise";
   if (mainReview?.decision === "reject") return "stopped";
@@ -2241,7 +2326,23 @@ export class HubServer {
         let next = current;
         let extraPatch: Record<string, unknown> = {};
         if (action === "upsert") {
-          const profile = validateWorkerProfile(body.profile ?? body, "workerProfile", catalog);
+          const rawProfile = (body.profile ?? body) as Record<string, unknown>;
+          // The Hub defaults newly created Workers to `auto` execution so a
+          // non-expert never learns protocol vocabulary to choose. Editing an
+          // existing legacy profile (no field) preserves its single-run
+          // behavior — the field is only added for genuinely new Workers.
+          const isNew = typeof rawProfile.id === "string"
+            && !current.profiles.some((profile) => profile.id === rawProfile.id);
+          const profile = validateWorkerProfile(
+            {
+              ...rawProfile,
+              ...(isNew && rawProfile.executionPreference === undefined
+                ? { executionPreference: "auto" }
+                : {}),
+            },
+            "workerProfile",
+            catalog,
+          );
           next = upsertWorkerProfile(current, profile, catalog);
         } else if (action === "remove") {
           if (typeof body.id !== "string") throw new Error("id is required");
@@ -2701,6 +2802,20 @@ export class HubServer {
       ...(typeof t.decisionStage === "string" ? { decisionStage: t.decisionStage } : {}),
       ...(t.failureCategory === undefined ? {} : { failureCategory: t.failureCategory }),
       ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+      // Forward the latest explicit Main attention resolution only when it is
+      // a valid resolved/reopened state; malformed evidence fails open to Now.
+      ...(() => {
+        const resolution = t.attentionResolution;
+        if (
+          resolution !== null
+          && typeof resolution === "object"
+          && !Array.isArray(resolution)
+          && (resolution as { status?: unknown }).status !== "none"
+        ) {
+          return { attentionResolution: resolution };
+        }
+        return {};
+      })(),
       // Forward the canonical Core board placement only when the codes
       // form a legal pair; absent or contradictory codes fail open to Now.
       ...(boardCodes === null ? {} : boardCodes),
@@ -2992,6 +3107,7 @@ export class HubServer {
           mainReview?: Record<string, unknown>;
           competitionContext?: Record<string, unknown>;
           reviewGraph?: Record<string, unknown>;
+          attentionResolution?: { status: string; reason?: string; note?: string; evidenceTaskId?: string; resolvedAt?: string; reopenedAt?: string; eventSequence?: number };
         }>("inspect", { taskId });
         const events = Array.isArray(inspect.events) ? inspect.events : [];
         // Filter narrative fragments before the transport bound so stream
@@ -3083,6 +3199,13 @@ export class HubServer {
           ...(inspect.competitionContext === undefined
             ? {}
             : { competitionContext: inspect.competitionContext }),
+          // Latest explicit Main attention resolution. The daemon Core owns the
+          // validated projection; the Hub only translates the closed codes.
+          ...(inspect.attentionResolution === undefined
+            || (inspect.attentionResolution.status !== "resolved"
+              && inspect.attentionResolution.status !== "reopened")
+            ? {}
+            : { attentionResolution: inspect.attentionResolution }),
           timeline,
           economics,
           deliveryPlan,
@@ -3305,6 +3428,95 @@ export class HubServer {
           taskId,
           result,
         });
+        return;
+      }
+
+      // POST /api/ops/tasks/:id/resolve  { reason, note, evidenceTaskId?, confirm: true }
+      // Explicit Main closure of a handled failure. The daemon Core validates
+      // eligibility, idempotency, and conflict semantics; the Hub only
+      // enforces the bounded inputs before forwarding.
+      const resolveRoute = opsRoute.match(/^\/tasks\/([^/]+)\/resolve$/);
+      if (resolveRoute) {
+        const taskId = decodeURIComponent(resolveRoute[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "resolve requires confirm: true" });
+          return;
+        }
+        const reason = typeof body.reason === "string" ? body.reason : "";
+        if (!(TASK_RESOLUTION_REASONS as readonly string[]).includes(reason)) {
+          this.sendJson(req, res, 422, { error: "Choose one supported handled reason" });
+          return;
+        }
+        let note: string | undefined;
+        if (body.note !== undefined) {
+          if (typeof body.note !== "string") {
+            this.sendJson(req, res, 422, { error: "note must be a string when provided" });
+            return;
+          }
+          note = body.note.trim();
+          if (note.length > TASK_RESOLUTION_NOTE_MAX_LENGTH) {
+            this.sendJson(req, res, 422, {
+              error: `note must be at most ${TASK_RESOLUTION_NOTE_MAX_LENGTH} characters`,
+            });
+            return;
+          }
+          if (note.length === 0) note = undefined;
+        }
+        const evidenceTaskId = body.evidenceTaskId === undefined
+          ? undefined
+          : typeof body.evidenceTaskId === "string"
+            ? body.evidenceTaskId.trim()
+            : "";
+        if (
+          evidenceTaskId !== undefined
+          && (!evidenceTaskId
+            || evidenceTaskId.length > TASK_RESOLUTION_EVIDENCE_ID_MAX_LENGTH)
+        ) {
+          this.sendJson(req, res, 422, {
+            error: `evidenceTaskId must be 1-${TASK_RESOLUTION_EVIDENCE_ID_MAX_LENGTH} characters`,
+          });
+          return;
+        }
+        const result = await this.daemonCall<unknown>("task_resolve", {
+          taskId,
+          reason,
+          ...(note === undefined || note.length === 0 ? {} : { note }),
+          ...(evidenceTaskId === undefined ? {} : { evidenceTaskId }),
+          confirm: true,
+        });
+        this.sendJson(req, res, 200, { ok: true, action: "resolve", taskId, result });
+        return;
+      }
+
+      // POST /api/ops/tasks/:id/reopen  { note, confirm: true }
+      const reopenRoute = opsRoute.match(/^\/tasks\/([^/]+)\/reopen$/);
+      if (reopenRoute) {
+        const taskId = decodeURIComponent(reopenRoute[1]!);
+        if (body.confirm !== true) {
+          this.sendJson(req, res, 422, { error: "reopen requires confirm: true" });
+          return;
+        }
+        let note: string | undefined;
+        if (body.note !== undefined) {
+          if (typeof body.note !== "string") {
+            this.sendJson(req, res, 422, { error: "note must be a string when provided" });
+            return;
+          }
+          note = body.note.trim();
+          if (note.length > TASK_RESOLUTION_NOTE_MAX_LENGTH) {
+            this.sendJson(req, res, 422, {
+              error: `note must be at most ${TASK_RESOLUTION_NOTE_MAX_LENGTH} characters`,
+            });
+            return;
+          }
+          if (note.length === 0) note = undefined;
+        }
+        const result = await this.daemonCall<unknown>("task_reopen", {
+          taskId,
+          ...(note === undefined ? {} : { note }),
+          confirm: true,
+        });
+        this.sendJson(req, res, 200, { ok: true, action: "reopen", taskId, result });
         return;
       }
 

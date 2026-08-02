@@ -112,17 +112,37 @@ function liveStageDetailText(live){
     next: liveStageNextText(live.next)
   });
 }
-/* Board-only presentation: map progress.activity (+ silence age) to a
+/* Board-only presentation: map progress dual clocks (+ silence age) to a
  * short badge. Does not invent a machine status or change taskLane.
- * Quiet = no new event within the backend quiet window. Long quiet is still
- * only "no new evidence" (never failure, retry, or cancellation). */
+ * Fresh Runtime signal means the Worker recently spoke. That is not proof of
+ * network health or failure, even when effective progress is old. Long quiet
+ * without a Runtime signal is still only "no new evidence" (never failure,
+ * retry, cancellation, or a network diagnosis). */
 function boardActivityKind(task){
+  var p = task && task.progress;
+  var dual = p && p.dualClock;
+  if(dual){
+    if(dual.runtimeSignalObservation === "terminal") return null;
+    // Fresh Runtime communication: Worker is responding. Stalled work without
+    // a substantive step is explained by dual-clock copy, not as disconnect.
+    if(dual.runtimeSignalObservation === "active") return "active";
+    if(dual.runtimeSignalObservation === "quiet"){
+      var progressTs = dual.latestEffectiveProgressAt || dual.latestRuntimeSignalAt;
+      if(progressTs){
+        var dualAge = Date.now() - Date.parse(progressTs);
+        if(Number.isFinite(dualAge) && dualAge >= 5 * 60 * 1000) return "stalled";
+      }
+      return "quiet";
+    }
+  }
   var live = taskLiveStage(task);
   if(live && live.observation === "terminal") return null;
   if(live && live.observation === "active") return "active";
   if(live && live.observation === "quiet"){
-    // Silence age follows lastEventAt (event age), not the older stage evidence time.
-    var quietTs = (task.progress && task.progress.lastEventAt) || live.observedAt;
+    // Silence age follows Runtime signal, then lastEventAt, never invents disconnect.
+    var quietTs = (p && p.latestRuntimeSignalAt)
+      || (p && p.lastEventAt)
+      || live.observedAt;
     if(quietTs){
       var age = Date.now() - Date.parse(quietTs);
       // 5 minutes: long-run board signal only; not a machine failure.
@@ -130,7 +150,6 @@ function boardActivityKind(task){
     }
     return "quiet";
   }
-  var p = task && task.progress;
   if(!p || !p.activity) return null;
   if(p.activity === "terminal") return null;
   if(p.activity === "active") return "active";
@@ -141,6 +160,63 @@ function boardActivityKind(task){
     if(Number.isFinite(age2) && age2 >= 5 * 60 * 1000) return "stalled";
   }
   return "quiet";
+}
+/* Plain-language dual-clock line for board cards and Task Detail.
+ * Describes recent Runtime communication vs last substantive step without
+ * field names, raw telemetry, or Provider/network health claims. */
+function dualClockPlainText(progress){
+  if(!progress) return null;
+  var runtimeAt = progress.latestRuntimeSignalAt
+    || (progress.dualClock && progress.dualClock.latestRuntimeSignalAt);
+  var progressAt = progress.latestEffectiveProgressAt
+    || (progress.dualClock && progress.dualClock.latestEffectiveProgressAt);
+  if(!runtimeAt && !progressAt) return null;
+  var dual = progress.dualClock;
+  var runtimeText = runtimeAt ? fmtSince(runtimeAt) : t("taskDualClockUnknown");
+  // Baseline / unknown are not substantive progress timestamps.
+  var progressText;
+  if(dual && dual.effectiveProgressObservation === "baseline"){
+    progressText = t("taskDualClockBaseline");
+  } else if(dual && dual.effectiveProgressKnown && progressAt){
+    progressText = fmtSince(progressAt);
+  } else if(dual && dual.effectiveProgressObservation === "unknown"){
+    progressText = t("taskDualClockUnknown");
+  } else if(progressAt && dual && dual.effectiveProgressObservation === "terminal" && dual.effectiveProgressKnown){
+    progressText = fmtSince(progressAt);
+  } else if(!dual && progressAt){
+    progressText = fmtSince(progressAt);
+  } else {
+    progressText = t("taskDualClockUnknown");
+  }
+  if(dual
+    && dual.runtimeSignalObservation === "active"
+    && (dual.effectiveProgressObservation === "quiet"
+      || dual.effectiveProgressObservation === "baseline"
+      || dual.effectiveProgressObservation === "unknown")){
+    if(dual.effectiveProgressObservation === "baseline"){
+      return t("taskDualClockStalledBaseline", { runtime: runtimeText });
+    }
+    return t("taskDualClockStalled", {
+      runtime: runtimeText,
+      progress: progressText
+    });
+  }
+  return t("taskDualClockBoard", {
+    runtime: runtimeText,
+    progress: progressText
+  });
+}
+function dualClockNextText(progress){
+  var dual = progress && progress.dualClock;
+  if(!dual || !dual.next) return null;
+  var map = {
+    "wait-for-runtime": "taskDualClockNextRuntime",
+    "wait-for-effective-progress": "taskDualClockNextProgress",
+    "wait-for-new-evidence": "taskDualClockNextEvidence",
+    "inspect-failure": "taskDualClockNextInspect",
+    "none": "taskDualClockNextNone"
+  };
+  return t(map[dual.next] || "taskDualClockNextNone");
 }
 function boardActivityBadge(task){
   var kind = boardActivityKind(task);
@@ -1312,6 +1388,11 @@ function taskProgressSummary(task){
     }
     return t("taskProgressRepairedDelivered");
   }
+  // A handled failure is closed attention: say handled, never successful.
+  // The machine status stays failed/interrupted and remains visible.
+  if(task && task.attentionResolution && task.attentionResolution.status === "resolved"){
+    return t("taskProgressHandled");
+  }
   var status = task && task.status;
   var stage = task && task.decisionStage;
   var machineFailed = status === "failed" || status === "interrupted" || status === "blocked";
@@ -1419,7 +1500,12 @@ function kanbanCard(task){
   meta.appendChild(document.createTextNode(fmtSince(task.createdAt)));
   cardEl.appendChild(meta);
   cardEl.appendChild(h("div", "meta mt-4 dim fs11", taskProgressSummary(task)));
-  if(p && p.lastEventAt){
+  var dualLine = dualClockPlainText(p);
+  if(dualLine){
+    cardEl.appendChild(h("div", "meta dim fs11", dualLine));
+    var dualNext = dualClockNextText(p);
+    if(dualNext) cardEl.appendChild(h("div", "meta dim fs11", dualNext));
+  } else if(p && p.lastEventAt){
     cardEl.appendChild(h("div", "meta dim fs11", t("taskLastUpdate", { time: fmtSince(p.lastEventAt) })));
   }
   var open = function(){ showTask(task.id); };
@@ -1463,6 +1549,7 @@ function taskHistoryGroup(task){
   var reason = task && task.boardReason;
   if(reason === "delivered" || reason === "activated" || reason === "repaired-delivered") return "delivered";
   if(reason === "main-rejected") return "stopped";
+  if(reason === "attention-resolved") return "handled";
   return null;
 }
 function historyGroup(tone, label, hint, items){
@@ -1489,12 +1576,15 @@ function renderHistoryBoard(tasks){
   wrap.appendChild(h("div", "summary-line dim board-scope-helper", t("boardHistoryHelper")));
   var delivered = [];
   var stopped = [];
+  var handled = [];
   tasks.forEach(function(task){
     var group = taskHistoryGroup(task);
     if(group === "stopped") stopped.push(task);
+    else if(group === "handled") handled.push(task);
     else delivered.push(task);
   });
   wrap.appendChild(historyGroup("delivered", t("boardHistoryDelivered"), t("boardHistoryDeliveredHint"), delivered));
+  wrap.appendChild(historyGroup("handled", t("boardHistoryHandled"), t("boardHistoryHandledHint"), handled));
   wrap.appendChild(historyGroup("stopped", t("boardHistoryStopped"), t("boardHistoryStoppedHint"), stopped));
   return wrap;
 }
@@ -1745,9 +1835,14 @@ function rOverview(){
   liveStrip.appendChild(liveInfo);
   viewEl.appendChild(liveStrip);
 
-  // Needs attention: actionable items first
+  // Needs attention: genuinely open failed/interrupted work only. The
+  // canonical Core board placement decides Now vs History; a handled failure
+  // (attention-resolved) is History and must not surface here as work the
+  // user still needs to do. Older daemons without boardScope fail open to Now.
   var attention = tasks.filter(function(task){
-    return (task.status === "failed" || task.status === "interrupted") && !hasVerifiedFinalDelivery(task);
+    return (task.status === "failed" || task.status === "interrupted")
+      && !hasVerifiedFinalDelivery(task)
+      && taskBoardScope(task) === "now";
   }).slice(0, 3);
   if(attention.length > 0){
     viewEl.appendChild(sec(t("needsAttention")));
@@ -3247,7 +3342,7 @@ function rTasks(){
   var legend = h("div", "kanban-legend");
   var legendRows;
   if(boardScope === "history"){
-    var groups = { delivered: 0, stopped: 0 };
+    var groups = { delivered: 0, handled: 0, stopped: 0 };
     scoped.forEach(function(task){
       var g = taskHistoryGroup(task);
       if(g) groups[g] += 1;
@@ -3255,6 +3350,7 @@ function rTasks(){
     legendRows = [
       ["all", t("taskBoardFilterAll"), scoped.length],
       ["delivered", t("boardHistoryDelivered"), groups.delivered],
+      ["handled", t("boardHistoryHandled"), groups.handled],
       ["stopped", t("boardHistoryStopped"), groups.stopped]
     ];
   } else {
@@ -4490,7 +4586,7 @@ function formActions(primaryLabel, onSubmit, secondary){
 var ADV_FIELD_LABELS = {
   maxDurationMs: "workersAdvMaxDuration",
   observedTokenCeiling: "workersAdvObservedTokenCeiling",
-  noProgressTimeoutMs: "workersAdvNoProgressTimeout",
+  noProgressTimeoutMs: "workersAdvNoEffectiveProgress",
   workerStopGraceMs: "workersAdvStopGrace",
   fileLimit: "workersAdvFileLimit",
   fileLimitMode: "workersAdvFileLimitMode",
@@ -4637,6 +4733,14 @@ function buildAdvancedFields(){
       row.appendChild(lab);
     });
     container.appendChild(row);
+    // Help text for the no-effective-progress stop: blank/null disables only
+    // this stop and does not imply a total duration cap.
+    if(group.fields.indexOf("noProgressTimeoutMs") >= 0){
+      container.appendChild(h("div", "summary-line dim fs11 mb-8", t("workersAdvNoEffectiveProgressHelp")));
+    }
+    if(group.fields.indexOf("maxDurationMs") >= 0){
+      container.appendChild(h("div", "summary-line dim fs11 mb-8", t("workersAdvMaxDurationHelp")));
+    }
   });
   return container;
 }
@@ -6060,7 +6164,8 @@ function workerReadinessPresentation(result){
     "authentication-missing": "workersReadinessReasonAuthenticationMissing",
     "runtime-unavailable": "workersReadinessReasonRuntimeUnavailable",
     "pairing-invalid": "workersReadinessReasonPairingInvalid",
-    "model-invalid": "workersReadinessReasonModelInvalid"
+    "model-invalid": "workersReadinessReasonModelInvalid",
+    "native-goal-unsupported": "workersReadinessReasonNativeGoalUnsupported"
   };
   var nextMap = {
     none: "workersReadinessNextNone",
@@ -6069,7 +6174,8 @@ function workerReadinessPresentation(result){
     "configure-authentication": "workersReadinessNextAuth",
     "fix-runtime": "workersReadinessNextRuntime",
     "change-pairing": "workersReadinessNextPairing",
-    "choose-model": "workersReadinessNextModel"
+    "choose-model": "workersReadinessNextModel",
+    "choose-execution-mode": "workersReadinessNextExecutionMode"
   };
   var state = stateMap[result && result.state] || stateMap.blocked;
   return {
@@ -6078,6 +6184,29 @@ function workerReadinessPresentation(result){
     reason: t(reasonMap[result && result.reason] || "workersReadinessReasonModelInvalid"),
     next: t(nextMap[result && result.nextAction] || "workersReadinessNextModel")
   };
+}
+
+function executionPreferenceLabel(pref){
+  var map = {
+    auto: "workersExecutionAuto",
+    "single-run": "workersExecutionSingleRun",
+    "native-goal": "workersExecutionNativeGoal"
+  };
+  return t(map[pref] || "workersExecutionInherited");
+}
+
+function resolvedExecutionModeText(result){
+  if(result && result.resolvedExecutionMode === "native-goal"){
+    return t("workersExecutionResolvedNativeGoal");
+  }
+  if(result && result.resolvedExecutionMode === "single-run"){
+    return t("workersExecutionResolvedSingleRun");
+  }
+  return "";
+}
+
+function executionPreferenceUnsupported(result){
+  return Boolean(result && result.reason === "native-goal-unsupported");
 }
 
 function rWorker(){
@@ -6134,6 +6263,12 @@ function rWorker(){
       story.appendChild(h("div", "profile-story-line dim fs11",
         t("workersReadinessNextLabel", { action: readinessView.next })));
     }
+    var execPrefText = prof.executionPreference === undefined
+      ? t("workersExecutionSingleRun")
+      : executionPreferenceLabel(prof.executionPreference);
+    var execModeText = resolvedExecutionModeText(readiness);
+    story.appendChild(h("div", "profile-story-line",
+      execModeText ? (execPrefText + " · " + execModeText) : execPrefText));
     story.appendChild(h("div", "profile-story-line", t("workersCardRunsWith", {
       model: modelLine, runtime: runtimeDisplayName(prof.runtime)
     })));
@@ -6145,10 +6280,10 @@ function rWorker(){
     var progressValue = advanced.noProgressTimeoutMs !== undefined
       ? advanced.noProgressTimeoutMs : prof.noProgressTimeoutMs;
     var progressText = progressValue === null
-      ? t("workersCardNoProgressUnlimited")
+      ? t("workersCardNoEffectiveProgressUnlimited")
       : (progressValue === undefined
-        ? t("workersCardNoProgressInherited")
-        : t("workersCardNoProgressLimited", { duration: readableDuration(progressValue) }));
+        ? t("workersCardNoEffectiveProgressInherited")
+        : t("workersCardNoEffectiveProgressLimited", { duration: readableDuration(progressValue) }));
     story.appendChild(h("div", "profile-story-line", budgetText + " "
       + t("workersCardEffort", { effort: effortLabel(prof.effort) }) + " " + progressText));
     var baseAttempts = advanced.baseMaxAttempts;
@@ -6358,6 +6493,43 @@ function rWorker(){
   }
   syncModelEfforts(isEdit ? (editingProfile.effort || "") : "medium");
   labEf.appendChild(selEf); form.appendChild(labEf);
+  var labEx = h("label", "", t("workersExecutionLabel"));
+  var selEx = h("select", "");
+  selEx.id = "fl-wp-execution";
+  labEx.htmlFor = selEx.id;
+  [
+    ["auto", t("workersExecutionAuto")],
+    ["single-run", t("workersExecutionSingleRun")],
+    ["native-goal", t("workersExecutionNativeGoal")]
+  ].forEach(function(pair){
+    var o = document.createElement("option"); o.value = pair[0]; o.textContent = pair[1]; selEx.appendChild(o);
+  });
+  if(isEdit && editingProfile.executionPreference){
+    selEx.value = editingProfile.executionPreference;
+  } else if(isEdit){
+    // Editing a legacy profile: keep it unchanged (single-run) unless the user
+    // chooses explicitly. The empty option means "preserve the saved value".
+    var inheritOption = document.createElement("option");
+    inheritOption.value = ""; inheritOption.textContent = t("workersExecutionInherited");
+    selEx.insertBefore(inheritOption, selEx.firstChild);
+    selEx.value = "";
+  } else {
+    // New Workers default to auto.
+    selEx.value = "auto";
+  }
+  labEx.appendChild(selEx); form.appendChild(labEx);
+  var execHint = h("div", "hint-inline dim fs11", t("workersExecutionAutoHint"));
+  form.appendChild(execHint);
+  function syncExecutionHint(){
+    if(selEx.value === "native-goal" && selR.value !== "codex-cli"){
+      execHint.textContent = t("workersExecutionUnsupportedNativeGoal");
+    } else {
+      execHint.textContent = t("workersExecutionAutoHint");
+    }
+  }
+  selEx.addEventListener("change", syncExecutionHint);
+  selR.addEventListener("change", syncExecutionHint);
+  syncExecutionHint();
   var advDetails = h("details", "advanced-disclosure");
   var advSummary = h("summary", "", t("workersAdvancedToggle"));
   advDetails.appendChild(advSummary);
@@ -6423,6 +6595,7 @@ function rWorker(){
       modelConfigId: selM.value
     };
     if(selEf.value) profile.effort = selEf.value;
+    if(selEx.value) profile.executionPreference = selEx.value;
     if(budgetMode.value === "unlimited"){
       profile.maxBudgetUsd = null;
     } else if(budgetMode.value === "limited"){
@@ -6552,7 +6725,7 @@ function rLimits(){
   var b = numField("fl-budget", "Default max budget (USD)", hs.defaultMaxBudgetUsd, "0.01", "0.01");
   var mb = numField("fl-max-budget", "Hard maximum budget (USD)", hs.maximumBudgetUsd, "0.01", "0.01");
   var c = numField("fl-concurrency", "Max concurrency", hs.maxConcurrency || 1, "1", "1");
-  var timeoutIn = numField("fl-timeout", "No-progress timeout (ms)", hs.noProgressTimeoutMs || 600000, "1000", "1000");
+  var timeoutIn = numField("fl-timeout", t("workersAdvNoEffectiveProgress"), hs.noProgressTimeoutMs || 600000, "1000", "1000");
   form.appendChild(formActions(t("systemSave"), null, {
     label: t("systemBack"),
     onClick: function(){ switchTab("worker"); }
@@ -9380,6 +9553,57 @@ function renderRetainedCandidate(task){
   return card;
 }
 
+/* Attention-resolution story: how a handled failure was closed, why Main
+ * considered it handled, and the optional successor/evidence Task. The
+ * original failure explanation is preserved in the Cause section below. */
+function renderAttentionResolutionSection(task, j){
+  if(!j || !j.resolution) return null;
+  var resolution = j.resolution;
+  var section = h("div", "journey-section attention-resolution-section");
+  section.setAttribute("data-fl-role", "journey-resolution");
+  section.appendChild(h("div", "journey-section-title", t("journeyResolution")));
+  var body = h("div", "journey-section-body");
+  var whatRow = h("div", "task-story-row");
+  whatRow.setAttribute("data-fl-role", "resolution-what");
+  whatRow.appendChild(h("div", "task-story-label", t("journeyWhatLabel")));
+  whatRow.appendChild(h("div", "task-story-value",
+    resolution.status === "resolved"
+      ? t("attentionResolvedWhat", {
+          reason: attentionResolutionReasonLabel(resolution.reason || "handled-elsewhere")
+        })
+      : t("attentionReopenedWhat")));
+  body.appendChild(whatRow);
+  if(resolution.note){
+    var whyRow = h("div", "task-story-row");
+    whyRow.setAttribute("data-fl-role", "resolution-note");
+    whyRow.appendChild(h("div", "task-story-label", t("journeyWhyLabel")));
+    whyRow.appendChild(h("div", "task-story-value", resolution.note));
+    body.appendChild(whyRow);
+  }
+  if(resolution.evidenceTaskId){
+    var evRow = h("div", "task-story-row");
+    evRow.setAttribute("data-fl-role", "resolution-evidence");
+    evRow.appendChild(h("div", "task-story-label", t("attentionResolvedEvidenceLabel")));
+    var evBtn = h("button", "btn sm", t("attentionResolvedEvidenceOpen"));
+    evBtn.type = "button";
+    evBtn.addEventListener("click", function(){ showTask(resolution.evidenceTaskId); });
+    evRow.appendChild(evBtn);
+    body.appendChild(evRow);
+  }
+  if(resolution.status === "resolved" && resolution.resolvedAt){
+    body.appendChild(h("div", "dim fs11", t("attentionResolvedAt", {
+      time: fmtTm(resolution.resolvedAt)
+    })));
+  }
+  if(resolution.status === "reopened" && resolution.reopenedAt){
+    body.appendChild(h("div", "dim fs11", t("attentionReopenedAt", {
+      time: fmtTm(resolution.reopenedAt)
+    })));
+  }
+  section.appendChild(body);
+  return section;
+}
+
 /* Collaboration journey renderer: presents the Task as a readable
  * Main-to-Worker process in evidence order. Each section is backed by
  * the safe journey projection from the server - never raw prompts,
@@ -9399,7 +9623,12 @@ function renderTaskJourney(task){
   current.appendChild(h("div", "journey-section-body journey-field",
     detailLive ? liveStageDetailText(detailLive) : taskProgressSummary(task)));
   var currentProgress = task.progress || (task.decision && task.decision.progress);
-  if(currentProgress && currentProgress.lastEventAt){
+  var detailDual = dualClockPlainText(currentProgress);
+  if(detailDual){
+    current.appendChild(h("div", "dim fs11", detailDual));
+    var detailDualNext = dualClockNextText(currentProgress);
+    if(detailDualNext) current.appendChild(h("div", "dim fs11", detailDualNext));
+  } else if(currentProgress && currentProgress.lastEventAt){
     current.appendChild(h("div", "dim fs11", t("taskLastUpdate", {
       time: fmtSince(currentProgress.lastEventAt)
     })));
@@ -9636,7 +9865,12 @@ function renderTaskJourney(task){
   delivery.appendChild(dBody);
   panel.appendChild(delivery);
 
-  // 5. Cause (what happened + why, always separate)
+  // 5. Attention resolution (how the handled failure was closed). The
+  // original failure explanation stays in the Cause section below it.
+  var resolutionSection = renderAttentionResolutionSection(task, j);
+  if(resolutionSection) panel.appendChild(resolutionSection);
+
+  // 6. Cause (what happened + why, always separate)
   var cause = h("div", "journey-section");
   cause.setAttribute("data-fl-role", "journey-cause");
   cause.appendChild(h("div", "journey-section-title", t("journeyCause")));
@@ -9695,6 +9929,9 @@ function renderTaskJourney(task){
   next.appendChild(h("div", "journey-section-title", t("journeyNext")));
   if(hasVerifiedFinalDelivery(task)){
     next.appendChild(h("div", "journey-section-body", t("journeyNextDone")));
+  } else if(j && j.resolution && j.resolution.status === "resolved"){
+    // A handled failure is closed attention: the one next action is Reopen.
+    next.appendChild(h("div", "journey-section-body", t("journeyNextReopen")));
   } else if(j && j.cause && j.cause.failureCategory === "verification"){
     next.appendChild(h("div", "journey-section-body", t("journeyNextVerification")));
   } else if(j && j.nextAction){
@@ -9821,8 +10058,20 @@ function nextActionLabel(label){
     "done": "journeyNextDone", "credentials": "journeyNextCredentials", "budget": "journeyNextBudget",
     "runtime": "journeyNextRuntime", "connectivity": "journeyNextConnectivity",
     "investigate": "journeyNextInvestigate",
-    "revise-contract": "journeyNextReviseContract" };
+    "revise-contract": "journeyNextReviseContract",
+    "reopen": "journeyNextReopen" };
   return t(map[label] || label);
+}
+/* Translate closed attention-resolution reason codes into readable copy.
+ * The browser only translates the codes; the Core owns the vocabulary. */
+function attentionResolutionReasonLabel(reason){
+  var map = {
+    "environment-recovered": "attentionResolvedReasonEnvironment",
+    "superseded": "attentionResolvedReasonSuperseded",
+    "handled-elsewhere": "attentionResolvedReasonHandledElsewhere",
+    "no-longer-needed": "attentionResolvedReasonNoLongerNeeded"
+  };
+  return t(map[reason] || "attentionResolvedReasonHandledElsewhere");
 }
 
 /* --- Direct Main Token savings setup (calibration journey) ---
@@ -10782,12 +11031,20 @@ function renderFourSectionOverview(task){
   var repaired = !!(fd.remediationDisposition && fd.remediationDisposition.status === "verified-repaired-delivered");
   var integrated = !!(fd.integration && fd.integration.status === "completed");
   var mainAccepted = !!(fd.mainReview && fd.mainReview.decision === "accept");
+  var resolutionStory = j.resolution && j.resolution.status === "resolved" ? j.resolution : null;
+  // Delivery and activation always outrank a handled resolution: a real
+  // delivered outcome is presented as delivered, with resolution only as
+  // secondary history.
   if(repaired){
     s4.appendChild(h("div", "four-section-conclusion ok", t("taskOvDelivered")));
   } else if(integrated){
     s4.appendChild(h("div", "four-section-conclusion ok", t("taskOvIntegrated")));
   } else if(mainAccepted){
     s4.appendChild(h("div", "four-section-conclusion ok", t("taskOvReadyIntegrate")));
+  } else if(resolutionStory){
+    s4.appendChild(h("div", "four-section-conclusion handled", t("taskOvHandled", {
+      reason: attentionResolutionReasonLabel(resolutionStory.reason || "handled-elsewhere")
+    })));
   } else {
     var statusText = task.status || "waiting";
     if(statusText === "succeeded" || statusText === "completed"){
@@ -10932,6 +11189,27 @@ function renderTaskWorkbench(task, extraTabs){
           cause.failureCategory,
           fd.mainReview && fd.mainReview.decision
         );
+    // A handled failure leads with the resolution banner unless a real
+    // delivered outcome exists, which outranks handled copy. The original
+    // failure explanation is preserved in the what-box below it.
+    var heroResolution = !hasVerifiedFinalDelivery(task)
+      && j.resolution && j.resolution.status === "resolved"
+      ? j.resolution
+      : null;
+    if(heroResolution){
+      var handledBox = h("div", "task-report-hero-box attention-handled-box");
+      handledBox.appendChild(h("div", "task-report-hero-box-label", t("attentionResolvedHeroLabel")));
+      handledBox.appendChild(h("div", "task-report-hero-box-body", t("attentionResolvedHeroBody", {
+        reason: attentionResolutionReasonLabel(heroResolution.reason || "handled-elsewhere")
+      })));
+      if(heroResolution.evidenceTaskId){
+        var heroEvBtn = h("button", "btn sm mt-8", t("attentionResolvedEvidenceOpen"));
+        heroEvBtn.type = "button";
+        heroEvBtn.addEventListener("click", function(){ showTask(heroResolution.evidenceTaskId); });
+        handledBox.appendChild(heroEvBtn);
+      }
+      hero.appendChild(handledBox);
+    }
     if(whyText){
       var whatBox = h("div", "task-report-hero-box");
       whatBox.appendChild(h("div", "task-report-hero-box-label", t("taskHeroWhatHappened")));
@@ -11204,6 +11482,101 @@ function renderTaskWorkbench(task, extraTabs){
   return shell;
 }
 
+/* Attention-resolution controls for the Actions tab. A resolved failure
+ * shows the handled explanation plus the one Reopen action; an unresolved
+ * failed/interrupted Task gets a confirmation-gated Resolve flow with one
+ * closed reason, a bounded note, and an optional evidence Task id. The
+ * machine status and original failure evidence are never changed here. */
+function renderAttentionResolutionControls(task){
+  var failed = task.status === "failed" || task.status === "interrupted";
+  if(!failed) return null;
+  var resolution = task.attentionResolution;
+  var resolved = resolution && resolution.status === "resolved";
+  var card = h("div", "card form-card attention-resolution-controls");
+  if(resolved){
+    card.setAttribute("data-fl-role", "attention-resolved-controls");
+    card.appendChild(h("div", "card-title mb-4", t("attentionResolvedTitle")));
+    card.appendChild(h("div", "summary-line dim mb-8", t("attentionResolvedHint")));
+    card.appendChild(h("div", "summary-line", t("attentionResolvedReasonLabel", {
+      reason: attentionResolutionReasonLabel(resolution.reason || "handled-elsewhere")
+    })));
+    if(resolution.note){
+      card.appendChild(h("div", "summary-line dim mt-4", resolution.note));
+    }
+    if(resolution.evidenceTaskId){
+      var evidenceBtn = h("button", "btn sm mt-8", t("attentionResolvedEvidenceOpen"));
+      evidenceBtn.type = "button";
+      evidenceBtn.addEventListener("click", function(){ showTask(resolution.evidenceTaskId); });
+      card.appendChild(evidenceBtn);
+    }
+    card.appendChild(h("div", "summary-line dim mt-8", t("attentionResolvedOriginalKept")));
+    var reopenLab = h("label", "", t("attentionReopenNote"));
+    var reopenIn = h("input", "");
+    reopenIn.type = "text";
+    reopenIn.placeholder = t("attentionReopenNotePh");
+    reopenLab.appendChild(reopenIn);
+    card.appendChild(reopenLab);
+    var reopenBtn = h("button", "btn sm", t("attentionReopenBtn"));
+    reopenBtn.type = "button";
+    reopenBtn.addEventListener("click", function(){
+      if(!window.confirm(t("attentionReopenConfirm"))) return;
+      var reopenNote = reopenIn.value.trim();
+      var body = { confirm: true };
+      if(reopenNote) body.note = reopenNote;
+      taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/reopen", body, reopenBtn, function(){
+        showTask(task.id);
+      });
+    });
+    card.appendChild(hd("div", "actions", [reopenBtn]));
+    return card;
+  }
+  card.setAttribute("data-fl-role", "attention-resolve-controls");
+  card.appendChild(h("div", "card-title mb-4", t("attentionResolveTitle")));
+  card.appendChild(h("div", "summary-line dim mb-8", t("attentionResolveHint")));
+  var reasonLab = h("label", "", t("attentionResolveReasonLabel"));
+  var reasonSel = h("select", "");
+  [
+    ["environment-recovered", t("attentionResolvedReasonEnvironment")],
+    ["superseded", t("attentionResolvedReasonSuperseded")],
+    ["handled-elsewhere", t("attentionResolvedReasonHandledElsewhere")],
+    ["no-longer-needed", t("attentionResolvedReasonNoLongerNeeded")]
+  ].forEach(function(pair){
+    var o = document.createElement("option");
+    o.value = pair[0];
+    o.textContent = pair[1];
+    reasonSel.appendChild(o);
+  });
+  reasonLab.appendChild(reasonSel);
+  card.appendChild(reasonLab);
+  var noteLab = h("label", "", t("attentionResolveNote"));
+  var noteIn = h("input", "");
+  noteIn.type = "text";
+  noteIn.placeholder = t("attentionResolveNotePh");
+  noteLab.appendChild(noteIn);
+  card.appendChild(noteLab);
+  var evidenceLab = h("label", "", t("attentionResolveEvidence"));
+  var evidenceIn = h("input", "");
+  evidenceIn.type = "text";
+  evidenceIn.placeholder = t("attentionResolveEvidencePh");
+  evidenceLab.appendChild(evidenceIn);
+  card.appendChild(evidenceLab);
+  var resolveBtn = h("button", "btn sm", t("attentionResolveBtn"));
+  resolveBtn.type = "button";
+  resolveBtn.addEventListener("click", function(){
+    if(!window.confirm(t("attentionResolveConfirm"))) return;
+    var resolveNote = noteIn.value.trim();
+    var body = { reason: reasonSel.value, confirm: true };
+    if(resolveNote) body.note = resolveNote;
+    var evidence = evidenceIn.value.trim();
+    if(evidence) body.evidenceTaskId = evidence;
+    taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/resolve", body, resolveBtn, function(){
+      showTask(task.id);
+    });
+  });
+  card.appendChild(hd("div", "actions", [resolveBtn]));
+  return card;
+}
+
 function showTask(id){
   loadingDetail(t("taskDetailLoading"));
   fetchJSON("/api/ops/tasks/" + encodeURIComponent(id)).then(function(task){
@@ -11224,6 +11597,11 @@ function showTask(id){
 
     var failureAttributionControls = renderFailureAttributionControls(task);
     if(failureAttributionControls) manualActionsBody.appendChild(failureAttributionControls);
+
+    // Attention resolution: close a handled failure or reopen it. The machine
+    // status and original failure evidence stay unchanged.
+    var attentionResolutionControls = renderAttentionResolutionControls(task);
+    if(attentionResolutionControls) manualActionsBody.appendChild(attentionResolutionControls);
 
     // Supervision panel
     var sup = h("div", "card form-card");

@@ -4,6 +4,11 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
 import { isProviderName, providerDefinition, providerNames } from "./providers.js";
+import {
+  isExecutionPreference,
+  nativeGoalSupportForRuntime,
+  resolveExecutionMode,
+} from "./execution-mode.js";
 import { normalizeDirectCodexProfileId } from "./direct-codex-calibration.js";
 import {
   assertProviderRuntimePair,
@@ -34,8 +39,10 @@ import type {
   ContractTaskSpec,
   DeliveryResolution,
   DeliverySpec,
+  ExecutionPreference,
   FrozenWorkerIdentity,
   QualityReport,
+  ResolvedExecutionMode,
   RoutingDecisionSnapshot,
   TaskAdvancedPolicyOverride,
   TaskContract,
@@ -426,6 +433,7 @@ export function parseTaskSpec(
     effort?: string;
     maxBudgetUsd?: number | null;
     pricingRoute?: string;
+    executionPreference?: string;
   } = {};
   let selectedProfileId: string | undefined;
   const profileIdRaw = root.workerProfileId;
@@ -452,6 +460,9 @@ export function parseTaskSpec(
       effort: resolved.effort,
       maxBudgetUsd: resolved.maxBudgetUsd,
       ...(resolved.pricingRoute === undefined ? {} : { pricingRoute: resolved.pricingRoute }),
+      ...(resolved.executionPreference === undefined
+        ? {}
+        : { executionPreference: resolved.executionPreference }),
     };
   } else if (
     workerProfiles !== undefined
@@ -478,6 +489,9 @@ export function parseTaskSpec(
       effort: resolved.effort,
       maxBudgetUsd: resolved.maxBudgetUsd,
       ...(resolved.pricingRoute === undefined ? {} : { pricingRoute: resolved.pricingRoute }),
+      ...(resolved.executionPreference === undefined
+        ? {}
+        : { executionPreference: resolved.executionPreference }),
     };
   }
   const providerName = stringValue(
@@ -665,6 +679,28 @@ export function parseTaskSpec(
     ? profileDefaults.pricingRoute
     : undefined;
 
+  // --- Execution mode resolution ---
+  // A saved per-Worker preference is turned into one immutable per-Task mode
+  // before admission. Explicit Task override wins over the selected Worker
+  // Profile; legacy Tasks with no preference freeze single-run. `auto` may fall
+  // back; forced `native-goal` fails closed when the Runtime cannot prove it.
+  const taskExecutionPreference = (() => {
+    const raw = root.executionPreference;
+    if (raw === undefined) return undefined;
+    if (typeof raw !== "string" || !isExecutionPreference(raw)) {
+      throw new Error("task.executionPreference must be auto, single-run, or native-goal");
+    }
+    return raw as ExecutionPreference;
+  })();
+  const effectiveExecutionPreference: ExecutionPreference | undefined =
+    taskExecutionPreference ?? profileDefaults.executionPreference as ExecutionPreference | undefined;
+  const executionResolution = resolveExecutionMode(
+    effectiveExecutionPreference,
+    nativeGoalSupportForRuntime(runtimeName),
+  );
+  const frozenExecutionPreference: ExecutionPreference = executionResolution.preference;
+  const frozenExecutionMode: ResolvedExecutionMode = executionResolution.mode;
+
   const common = {
     name: stringValue(root.name, "task.name"),
     project,
@@ -725,6 +761,8 @@ export function parseTaskSpec(
       noChangeMode: completionPolicyMode,
       changeBudgetMode,
     },
+    executionPreference: frozenExecutionPreference,
+    executionMode: frozenExecutionMode,
   };
 
   // Post-resolve validation: routingDecision must bind to the resolved Task identity.

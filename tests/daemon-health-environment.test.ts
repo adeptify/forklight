@@ -42,7 +42,7 @@ import {
 import { StateStore } from "../src/state/store.js";
 
 const PROVIDER_NAMES: ProviderName[] = [
-  "deepseek", "qwen", "minimax", "glm", "volcengine", "xai",
+  "deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai",
 ];
 
 function fakeProviders(
@@ -54,7 +54,9 @@ function fakeProviders(
     const d = defaults[name];
     const readiness: ProviderReadiness = {
       ready,
-      authMode: ready ? (name === "xai" ? "local-sign-in" : "api-key") : "none",
+      authMode: ready
+        ? (name === "xai" || name === "openai" ? "local-sign-in" : "api-key")
+        : "none",
       endpoint: d.defaultEndpoint,
       defaultModel: `${d.defaultModel}-g${generation}`,
       keychainService: d.defaultKeychainService,
@@ -101,6 +103,13 @@ function fakeRuntimes(
       "grok",
       ok ? `grok-g${generation}` : undefined,
       `grok unavailable generation ${generation}`,
+    ),
+    "codex-cli": runtimeFact(
+      ok,
+      "Codex CLI",
+      "codex",
+      ok ? `codex-g${generation}` : undefined,
+      `codex unavailable generation ${generation}`,
     ),
   };
 }

@@ -7,10 +7,15 @@
  */
 
 import type { ModelCatalogSettings } from "./model-catalog.js";
+import { nativeGoalSupportForRuntime } from "./execution-mode.js";
 import type { ProviderName, ProviderReadiness } from "./providers.js";
 import { assertProviderRuntimePair, type RuntimeName } from "./runtime-names.js";
 import type { ProviderDefaultsSettings } from "./settings.js";
-import type { ProviderHealthStatus } from "./types.js";
+import type {
+  ExecutionPreference,
+  ProviderHealthStatus,
+  ResolvedExecutionMode,
+} from "./types.js";
 import {
   materializeWorkerModel,
   type WorkerProfile,
@@ -31,7 +36,8 @@ export type WorkerReadinessReason =
   | "authentication-missing"
   | "runtime-unavailable"
   | "pairing-invalid"
-  | "model-invalid";
+  | "model-invalid"
+  | "native-goal-unsupported";
 
 export type WorkerReadinessNextAction =
   | "none"
@@ -40,7 +46,8 @@ export type WorkerReadinessNextAction =
   | "configure-authentication"
   | "fix-runtime"
   | "change-pairing"
-  | "choose-model";
+  | "choose-model"
+  | "choose-execution-mode";
 
 export interface WorkerReadinessChecks {
   model: "ready" | "invalid";
@@ -48,6 +55,8 @@ export interface WorkerReadinessChecks {
   authentication: ProviderReadiness["authMode"] | "unknown";
   runtime: "ready" | "unavailable" | "unknown";
   connection: ProviderHealthStatus;
+  /** Whether the selected Runtime proves a native Goal contract. */
+  nativeGoal: "ready" | "unsupported" | "unknown";
 }
 
 export interface WorkerReadinessResult {
@@ -60,6 +69,10 @@ export interface WorkerReadinessResult {
   runtime: RuntimeName;
   provider?: ProviderName;
   model?: string;
+  /** Frozen requested execution preference (legacy → single-run). */
+  executionPreference: ExecutionPreference;
+  /** Frozen resolved execution mode (auto already resolved). */
+  resolvedExecutionMode: ResolvedExecutionMode;
   checks: WorkerReadinessChecks;
 }
 
@@ -89,20 +102,38 @@ function checks(
     authentication: "unknown",
     runtime: "unknown",
     connection: "unverified",
+    nativeGoal: "unknown",
     ...patch,
   };
+}
+
+function readinessExecutionMode(
+  profile: WorkerProfile,
+): { preference: ExecutionPreference; resolved: ResolvedExecutionMode } {
+  const nativeGoalSupported = nativeGoalSupportForRuntime(profile.runtime);
+  const preference: ExecutionPreference = profile.executionPreference ?? "single-run";
+  if (preference === "auto") {
+    return { preference, resolved: nativeGoalSupported ? "native-goal" : "single-run" };
+  }
+  if (preference === "native-goal") {
+    // Forced native-goal never falls back: when unsupported the Worker is
+    // blocked, and the projected mode still names what was requested.
+    return { preference, resolved: "native-goal" };
+  }
+  return { preference, resolved: "single-run" };
 }
 
 function blocked(
   profile: WorkerProfile,
   reason: Extract<WorkerReadinessReason,
-    "authentication-missing" | "runtime-unavailable" | "pairing-invalid" | "model-invalid">,
+    "authentication-missing" | "runtime-unavailable" | "pairing-invalid" | "model-invalid" | "native-goal-unsupported">,
   nextAction: Extract<WorkerReadinessNextAction,
-    "configure-authentication" | "fix-runtime" | "change-pairing" | "choose-model">,
+    "configure-authentication" | "fix-runtime" | "change-pairing" | "choose-model" | "choose-execution-mode">,
   componentChecks: WorkerReadinessChecks,
   provider?: ProviderName,
   model?: string,
 ): WorkerReadinessResult {
+  const { preference, resolved } = readinessExecutionMode(profile);
   return {
     workerId: profile.id,
     workerLabel: profile.label,
@@ -113,6 +144,8 @@ function blocked(
     runtime: profile.runtime,
     ...(provider === undefined ? {} : { provider }),
     ...(model === undefined ? {} : { model }),
+    executionPreference: preference,
+    resolvedExecutionMode: resolved,
     checks: componentChecks,
   };
 }
@@ -187,12 +220,35 @@ function resolveOne(
   }
 
   const connection = input.providerVerification?.[provider]?.status ?? "unverified";
+  // Forced native-goal must fail closed when the selected Runtime cannot prove
+  // the native Goal contract. `auto` silently falls back to single-run.
+  const nativeGoalSupported = nativeGoalSupportForRuntime(profile.runtime);
+  const { preference: executionPreference, resolved: resolvedExecutionMode } =
+    readinessExecutionMode(profile);
+  if (executionPreference === "native-goal" && !nativeGoalSupported) {
+    return blocked(
+      profile,
+      "native-goal-unsupported",
+      "choose-execution-mode",
+      checks({
+        model: "ready",
+        pairing: "allowed",
+        authentication: auth.authMode,
+        runtime: "ready",
+        nativeGoal: "unsupported",
+      }),
+      provider,
+      model,
+    );
+  }
+
   const componentChecks = checks({
     model: "ready",
     pairing: "allowed",
     authentication: auth.authMode,
     runtime: "ready",
     connection,
+    nativeGoal: nativeGoalSupported ? "ready" : "unsupported",
   });
   if (connection === "verified") {
     return {
@@ -205,6 +261,8 @@ function resolveOne(
       runtime: profile.runtime,
       provider,
       model,
+      executionPreference,
+      resolvedExecutionMode,
       checks: componentChecks,
     };
   }
@@ -219,6 +277,8 @@ function resolveOne(
       runtime: profile.runtime,
       provider,
       model,
+      executionPreference,
+      resolvedExecutionMode,
       checks: componentChecks,
     };
   }
@@ -232,6 +292,8 @@ function resolveOne(
     runtime: profile.runtime,
     provider,
     model,
+    executionPreference,
+    resolvedExecutionMode,
     checks: componentChecks,
   };
 }

@@ -1072,6 +1072,45 @@ test("Hub board filter is presentation-only and bilingual", async () => {
   assert.ok(css.includes(".board-lane-filter"), "lane chip styles ship");
 });
 
+test("Hub explains handled failures bilingually and never calls them successful", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  // Overview attention consumes canonical board placement, not raw status.
+  assert.ok(src.includes('taskBoardScope(task) === "now"'),
+    "Overview attention must use canonical board placement");
+  // History groups handled failures separately from delivered/stopped.
+  assert.ok(src.includes('"attention-resolved"') || src.includes("attention-resolved"),
+    "History group recognizes attention-resolved");
+  assert.ok(src.includes("boardHistoryHandled"), "history handled group label key");
+  // Actions tab wires confirmation-gated resolve and reopen routes.
+  assert.ok(src.includes('"/resolve"'), "resolve route is wired");
+  assert.ok(src.includes('"/reopen"'), "reopen route is wired");
+  assert.ok(src.includes("attentionResolveConfirm"), "resolve confirmation i18n key");
+  assert.ok(src.includes("attentionReopenConfirm"), "reopen confirmation i18n key");
+  // Bilingual copy ships for the closed resolution vocabulary.
+  for (const key of [
+    "attentionResolveTitle", "attentionResolveBtn", "attentionReopenBtn",
+    "attentionResolvedReasonEnvironment", "attentionResolvedReasonSuperseded",
+    "attentionResolvedReasonHandledElsewhere", "attentionResolvedReasonNoLongerNeeded",
+    "journeyNextReopen", "boardHistoryHandled",
+  ]) {
+    assert.ok(i18n.includes(key + ":"), `i18n has ${key}`);
+  }
+  assert.ok(i18n.includes("Mark as handled"), "en resolve title");
+  assert.ok(i18n.includes("标记为已处理"), "zh resolve title");
+  assert.ok(i18n.includes("Reopen"), "en reopen button");
+  assert.ok(i18n.includes("重新打开"), "zh reopen button");
+  // Primary copy explains how the problem was handled without jargon-leading
+  // internal terms, and never claims delivery or success.
+  assert.ok(i18n.includes("How this was handled"), "en leads with how handled");
+  assert.ok(i18n.includes("这个问题后来怎么处理"), "zh leads with how handled");
+  assert.ok(i18n.includes("Related Task"), "en related-Task label");
+  assert.ok(i18n.includes("相关任务（可选）"), "zh related-Task label");
+  assert.ok(!src.includes("attentionResolvedDelivered"), "no delivered claim");
+  assert.ok(i18n.includes("attentionResolvedWhat") && i18n.includes("该问题已被处理"),
+    "zh explains the problem was handled, not succeeded");
+});
+
 test("Hub board wires task-submit controls", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   assert.ok(src.includes("/api/ops/tasks/submit"), "submit API route");
@@ -3170,6 +3209,46 @@ test("Hub board activity maps quiet silence age without inventing machine status
   );
 });
 
+test("Hub dual-clock copy explains Runtime signal vs substantive progress in EN and ZH", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  for (const name of ["dualClockPlainText", "dualClockNextText", "boardActivityKind"]) {
+    assert.ok(src.includes(`function ${name}(`), `${name} must exist`);
+  }
+  assert.ok(src.includes("dualClockPlainText(p)"), "board cards render dual-clock line");
+  assert.ok(src.includes("dualClockPlainText(currentProgress)"), "Task Detail renders dual-clock line");
+  // Fresh Runtime signal is never diagnosed as a dead connection.
+  assert.ok(src.includes('dual.runtimeSignalObservation === "active") return "active"'));
+  assert.ok(!/—/.test(src), "app.js must not introduce em dashes");
+  for (const key of [
+    "taskDualClockBoard", "taskDualClockStalled", "taskDualClockStalledBaseline",
+    "taskDualClockBaseline", "taskDualClockUnknown",
+    "taskDualClockNextProgress", "workersAdvNoEffectiveProgress",
+    "workersAdvNoEffectiveProgressHelp", "workersCardNoEffectiveProgressLimited",
+    "workersCardNoEffectiveProgressUnlimited", "workersAdvMaxDurationHelp",
+  ]) {
+    assert.ok(i18n.includes(key + ":"), `i18n has ${key}`);
+  }
+  assert.ok(i18n.includes("Heard from Worker"), "en Runtime-signal wording");
+  assert.ok(i18n.includes("Last substantive step"), "en effective-progress wording");
+  assert.ok(i18n.includes("no substantive step has been observed yet")
+    || i18n.includes("no substantive step observed yet"), "en baseline is not progress");
+  assert.ok(i18n.includes("Worker 最近回应于"), "zh Runtime-signal wording");
+  assert.ok(i18n.includes("上次实质进展于"), "zh effective-progress wording");
+  assert.ok(i18n.includes("尚未观察到实质进展"), "zh baseline is not progress");
+  assert.ok(i18n.includes("Processing heartbeats alone do not count as progress"), "en policy help");
+  assert.ok(i18n.includes("仅有处理中心跳不算实质进展"), "zh policy help");
+  assert.ok(i18n.includes("does not set a total execution-time limit"), "null policy does not claim duration cap");
+  assert.ok(i18n.includes("不表示存在总执行时长上限"), "zh null policy does not claim duration cap");
+  assert.ok(i18n.includes("proves neither network health nor network failure"), "en avoids false network diagnosis");
+  assert.ok(i18n.includes("既不能证明网络健康，也不能证明网络故障"), "zh avoids false network diagnosis");
+  // Primary copy must not expose raw field names as user-facing labels.
+  assert.ok(!src.includes("latestRuntimeSignalAt:"), "raw field names are not primary UI labels");
+  assert.ok(src.includes("workersAdvNoEffectiveProgress"), "advanced setting uses no-effective-progress label");
+  assert.ok(src.includes("workersAdvNoEffectiveProgressHelp"), "advanced setting explains the stop");
+  assert.ok(src.includes("taskDualClockStalledBaseline"), "baseline uses distinct plain-language path");
+});
+
 test("Hub live-stage helpers translate closed codes without recomputing lifecycle", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
@@ -4408,7 +4487,7 @@ test("Hub primary Worker, Main, and verification summaries explain meaning befor
   const workerBlock = src.slice(workerStart, workerEnd);
   assert.ok(workerBlock.includes("workersCardDefaultPurpose"), "Worker card explains when it is used");
   assert.ok(workerBlock.includes("workersCardRunsWith"), "Worker card explains model and runtime as a sentence");
-  assert.ok(workerBlock.includes("workersCardNoProgressLimited"), "Worker card explains stop behavior");
+  assert.ok(workerBlock.includes("workersCardNoEffectiveProgressLimited"), "Worker card explains no-effective-progress stop");
   assert.ok(workerBlock.includes("workersCardAttempts"), "Worker card explains correction attempts");
   assert.ok(workerBlock.includes("workersCardAttemptsNoExtra"), "zero correction attempts are phrased as behavior, not 0 jargon");
   assert.ok(workerBlock.includes("workersCardAdaptationOff"), "Worker card explains automatic follow-up behavior");
@@ -7364,4 +7443,30 @@ test("Hub retains prior evidence when one slice fails", async () => {
   assert.ok(!rf.includes("S.tasks = []"), "refresh does not clear tasks on failure");
   assert.ok(!rf.includes("S.boards = []"), "refresh does not clear boards on failure");
   assert.ok(!rf.includes("S.goals = []"), "refresh does not clear goals on failure");
+});
+
+// --- Execution preference UI (FL-104) ---
+
+test("Hub explains execution preference bilingually without forcing protocol vocabulary", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  assert.ok(src.includes("function executionPreferenceLabel("), "Worker cards label the preference");
+  assert.ok(src.includes("function resolvedExecutionModeText("), "resolved mode is projected in plain words");
+  assert.ok(src.includes("executionPreferenceUnsupported"), "forced unsupported native Goal has a clear signal");
+  assert.ok(src.includes("workersReadinessReasonNativeGoalUnsupported"), "readiness reason key is consumed");
+  assert.ok(src.includes("workersReadinessNextExecutionMode"), "readiness next action key is consumed");
+  assert.ok(src.includes("fl-wp-execution"), "the Worker editor has an execution preference control");
+  for (const phrase of [
+    "Auto — prefer a real Goal",
+    "One normal run",
+    "Native Goal (requires support)",
+    "自动 —— 优先使用真实 Goal",
+    "单次执行",
+    "原生 Goal（需要 Runtime 支持）",
+  ]) {
+    assert.ok(i18n.includes(phrase), phrase);
+  }
+  // Plain language first: technical ids live under disclosure, never the
+  // primary explanation.
+  assert.ok(!i18n.includes("app-server"), "beginner copy avoids the app-server transport name");
 });

@@ -20,6 +20,8 @@ import {
 } from "../src/core/task.js";
 import { attemptRuntimeBudget, budgetArguments } from "../src/workers/claude.js";
 import { cloneDefaults, type ContractQualitySettings, type TaskPolicy } from "../src/core/settings.js";
+import { upsertModelConfig } from "../src/core/model-catalog.js";
+import { upsertWorkerProfile } from "../src/core/worker-profiles.js";
 import { validateDeliveryProfilesSettings } from "../src/core/delivery-profiles.js";
 import type {
   AttemptRecord,
@@ -2536,4 +2538,84 @@ test("non-hard change-budget modes still keep independent acceptance commands vi
     assert.match(prompt, /Independent acceptance commands:/);
     assert.match(prompt, /Behavioral acceptance criteria:/);
   }
+});
+
+// --- Execution mode resolution (FL-104) ---
+
+function codexPolicy(): TaskPolicy {
+  const d = cloneDefaults();
+  const catalog = upsertModelConfig(d.modelCatalog, {
+    id: "codex-luna",
+    label: "Codex Luna",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    endpoint: "https://api.openai.com/v1",
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+  });
+  const workerProfiles = upsertWorkerProfile(d.workerProfiles, {
+    id: "codex-worker",
+    label: "Codex Worker",
+    runtime: "codex-cli",
+    modelConfigId: "codex-luna",
+    effort: "max",
+    executionPreference: "auto",
+  }, catalog);
+  return {
+    contractQuality: d.contractQuality,
+    execution: d.execution,
+    providerDefaults: d.providerDefaults,
+    completionPolicy: d.completionPolicy,
+    workerProfiles,
+    modelCatalog: catalog,
+  };
+}
+
+test("auto Codex Task freezes native-goal and records the preference", () => {
+  const spec = parseTaskSpec(
+    { ...contractSpec(), workerProfileId: "codex-worker" },
+    process.cwd(),
+    codexPolicy(),
+  );
+  assert.equal(spec.executionPreference, "auto");
+  assert.equal(spec.executionMode, "native-goal");
+});
+
+test("auto Claude Task freezes single-run because Claude has no proven native Goal", () => {
+  const spec = parseTaskSpec(contractSpec(), process.cwd());
+  assert.equal(spec.executionPreference, "single-run");
+  assert.equal(spec.executionMode, "single-run");
+});
+
+test("forced native-goal on Claude fails admission before cost", () => {
+  assert.throws(
+    () => parseTaskSpec({ ...contractSpec(), executionPreference: "native-goal" }, process.cwd()),
+    /native-goal/,
+  );
+});
+
+test("forced native-goal on Codex freezes native-goal", () => {
+  const policy = codexPolicy();
+  const spec = parseTaskSpec(
+    { ...contractSpec(), workerProfileId: "codex-worker", executionPreference: "native-goal" },
+    process.cwd(),
+    policy,
+  );
+  assert.equal(spec.executionPreference, "native-goal");
+  assert.equal(spec.executionMode, "native-goal");
+});
+
+test("legacy Task without a preference freezes single-run", () => {
+  const spec = parseTaskSpec(contractSpec(), process.cwd());
+  assert.equal(spec.executionMode, "single-run");
+});
+
+test("explicit Task preference override wins over the Worker profile", () => {
+  const policy = codexPolicy();
+  const spec = parseTaskSpec(
+    { ...contractSpec(), workerProfileId: "codex-worker", executionPreference: "single-run" },
+    process.cwd(),
+    policy,
+  );
+  assert.equal(spec.executionPreference, "single-run");
+  assert.equal(spec.executionMode, "single-run");
 });

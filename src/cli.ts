@@ -21,8 +21,8 @@ import type {
   ProviderModelSummary,
 } from "./core/statistics.js";
 import type {
-  AttemptAuthorization, AttemptExecutionOptions, AttemptRecord, EventRecord,
-  NormalizedWorkerEvent, TaskDecisionView, TaskRecord,
+  AttemptAuthorization, AttemptExecutionOptions, AttemptRecord, DecisionStage, EventRecord,
+  NormalizedWorkerEvent, RemediationDisposition, TaskDecisionView, TaskRecord,
 } from "./core/types.js";
 import { loadWorkPlan } from "./core/plan.js";
 import {
@@ -134,6 +134,7 @@ import {
   projectTaskSurface,
   type SafeTaskSummary,
 } from "./core/task-summary.js";
+import type { TaskResolutionState } from "./core/task-resolution.js";
 import { buildTaskDecisionView } from "./core/task-decision-view.js";
 import {
   failureCategoryForTask,
@@ -212,6 +213,9 @@ Usage:
   forklight resume <task-id> [--feedback <text>] [--authorize-extra --max-budget-usd <number|none> --reason <text> --confirm]
   forklight revise <task-id> --feedback <text>
   forklight correct <task-id> --feedback <text> [--max-budget-usd <number|none>] [--candidate-revision <id> --reusable-paths <json-array> --remaining-gaps <json-array>] --confirm
+  forklight resolve <task-id> --reason <code> [--note <text>] [--evidence <task-id>] --confirm [--json]
+      # code: environment-recovered | superseded | handled-elsewhere | no-longer-needed
+  forklight reopen <task-id> [--note <text>] --confirm [--json]
   forklight main-review <task-id> --decision <accept|revise|reject> --reason <text> --confirm
   forklight failure-attribution <task-id> --attempt <id> --verification-sequence <n> --cause <candidate|verification-infrastructure|acceptance-contract|insufficient-evidence> --note <text> [--candidate-revision <id> --candidate-digest <sha256>] --confirm [--json]
   forklight review-graph create <task-id> --reviewer-profile <id> [--reviewer-profile <id> ...] --reason <text> --confirm [--json]
@@ -302,8 +306,18 @@ function humanStatusLines(
   task: TaskRecord,
   progress?: TaskDecisionView["progress"],
   failureCategory?: WorkerFailureCategory,
+  decisionStage?: DecisionStage,
+  remediationDisposition?: RemediationDisposition,
+  attentionResolution?: TaskResolutionState,
 ): string {
-  const summary = buildTaskSummary(task, progress, failureCategory);
+  const summary = buildTaskSummary(
+    task,
+    progress,
+    failureCategory,
+    remediationDisposition,
+    decisionStage,
+    attentionResolution,
+  );
   const lines: string[] = [];
   for (const [key, value] of Object.entries(summary)) {
     if (value === undefined) continue;
@@ -323,6 +337,19 @@ function humanStatusLines(
       }
       continue;
     }
+    if (key === "attentionResolution" && typeof value === "object" && value !== null) {
+      const ar = value as { status?: string; reason?: string; evidenceTaskId?: string };
+      if (ar.status === "resolved") {
+        lines.push(`attentionResolution: resolved (${ar.reason ?? "handled-elsewhere"})`);
+      } else if (ar.status === "reopened") {
+        lines.push("attentionResolution: reopened");
+      }
+      if (typeof ar.evidenceTaskId === "string") lines.push(`evidenceTaskId: ${ar.evidenceTaskId}`);
+      continue;
+    }
+    // Nested objects (e.g. remediationDisposition) stay out of the compact
+    // human block; the full journey and JSON surface carry that evidence.
+    if (typeof value === "object" && value !== null) continue;
     lines.push(`${key}: ${String(value)}`);
   }
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
@@ -432,6 +459,40 @@ function humanIntegrationHistoryLines(history: {
     lines.push(`  ${r.status} — ${r.receiptId}${r.error ? ` (${r.error})` : ""}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+/** Human-readable attention-resolution result (resolve/reopen). */
+function humanTaskResolutionLines(record: Record<string, unknown>): string {
+  const state = record.state !== null && typeof record.state === "object"
+    && !Array.isArray(record.state)
+    ? record.state as Record<string, unknown>
+    : undefined;
+  const status = state?.status === "resolved" || state?.status === "reopened"
+    ? state.status
+    : "none";
+  const lines = [
+    `taskId: ${String(record.taskId ?? "")}`,
+    `existing: ${record.existing === true ? "true" : "false"}`,
+    `state: ${status}`,
+  ];
+  if (status === "resolved" && state !== undefined) {
+    lines.push(`reason: ${String(state.reason ?? "")}`);
+    if (typeof state.note === "string" && state.note.length > 0) {
+      lines.push(`note: ${state.note}`);
+    }
+    if (typeof state.evidenceTaskId === "string") {
+      lines.push(`evidenceTaskId: ${state.evidenceTaskId}`);
+    }
+    if (typeof state.resolvedAt === "string") lines.push(`resolvedAt: ${state.resolvedAt}`);
+  } else if (status === "reopened" && state !== undefined) {
+    if (typeof state.note === "string" && state.note.length > 0) {
+      lines.push(`note: ${state.note}`);
+    }
+    if (typeof state.reopenedAt === "string") lines.push(`reopenedAt: ${state.reopenedAt}`);
+  }
+  lines.push(`boardScope: ${String(record.boardScope ?? "now")}`);
+  lines.push(`boardReason: ${String(record.boardReason ?? "unresolved-failure")}`);
+  return lines.join("\n") + "\n";
 }
 
 /** Human-readable one Main-direct decision line. */
@@ -3140,6 +3201,74 @@ async function main(): Promise<void> {
       process.stdout.write(output);
       return;
     }
+    if (command === "resolve") {
+      const taskId = required(positional, "task id");
+      const reason = required(option(rest, "--reason"), "resolve reason code (--reason)");
+      const note = option(rest, "--note");
+      if (!rest.includes("--confirm")) {
+        throw new Error("resolve requires explicit --confirm");
+      }
+      const evidenceTaskId = option(rest, "--evidence");
+      const normalizedNote = note === undefined ? undefined : note.trim();
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_resolve",
+        home: forklightHome(),
+        args: {
+          taskId,
+          reason,
+          ...(normalizedNote === undefined ? {} : { noteLength: normalizedNote.length }),
+          ...(evidenceTaskId === undefined ? {} : { evidenceTaskId }),
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon();
+          return daemonRequest<Record<string, unknown>>("task_resolve", {
+            taskId,
+            reason,
+            ...(normalizedNote === undefined ? {} : { note: normalizedNote }),
+            ...(evidenceTaskId === undefined ? {} : { evidenceTaskId }),
+            confirm: true,
+          });
+        },
+        renderOutput: (result) => json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : humanTaskResolutionLines(result),
+      });
+      process.stdout.write(output);
+      return;
+    }
+    if (command === "reopen") {
+      const taskId = required(positional, "task id");
+      const note = option(rest, "--note");
+      if (!rest.includes("--confirm")) {
+        throw new Error("reopen requires explicit --confirm");
+      }
+      const normalizedNote = note === undefined ? undefined : note.trim();
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_reopen",
+        home: forklightHome(),
+        args: {
+          taskId,
+          ...(normalizedNote === undefined ? {} : { noteLength: normalizedNote.length }),
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon();
+          return daemonRequest<Record<string, unknown>>("task_reopen", {
+            taskId,
+            ...(normalizedNote === undefined ? {} : { note: normalizedNote }),
+            confirm: true,
+          });
+        },
+        renderOutput: (result) => json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : humanTaskResolutionLines(result),
+      });
+      process.stdout.write(output);
+      return;
+    }
     if (command === "main-review") {
       const taskId = required(positional, "task id");
       const decision = required(option(rest, "--decision"), "review decision");
@@ -3481,7 +3610,14 @@ async function main(): Promise<void> {
         },
         renderOutput: ({ task, summary }) => json
           ? `${JSON.stringify(summary, null, 2)}\n`
-          : humanStatusLines(task, summary.progress, summary.failureCategory),
+          : humanStatusLines(
+              task,
+              summary.progress,
+              summary.failureCategory,
+              summary.decisionStage,
+              summary.remediationDisposition,
+              summary.attentionResolution,
+            ),
       });
       process.stdout.write(output);
       return;

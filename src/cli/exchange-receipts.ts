@@ -30,7 +30,9 @@ export type TaskScopedCliOperation =
   | "forklight_adaptation_preview" | "forklight_adaptation_apply"
   | "forklight_remediation_verify"
   | "forklight_candidate_reverify"
-  | "forklight_direct_codex_capture";
+  | "forklight_direct_codex_capture"
+  | "forklight_resolve"
+  | "forklight_reopen";
 
 export type { TaskIdSource };
 

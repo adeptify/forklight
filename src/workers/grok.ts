@@ -18,6 +18,7 @@ import {
 import { readProviderKey } from "../core/secrets.js";
 import { cloneDefaults } from "../core/settings.js";
 import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
+import { isEffectiveProgressEvent } from "../core/runtime-activity.js";
 import type { NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
 import {
   appendGrokTextDelta,
@@ -44,8 +45,9 @@ const GROK_CAPABILITIES: WorkerCapabilityMatrix = {
   effortMapping: "partial",
   costUsageFidelity: "partial",
   sessionResume: "partial",
+  nativeGoal: "unsupported",
   streamingEvents: "partial",
-  progressHeartbeat: "any-nonterminal-stream-event",
+  progressHeartbeat: "effective-progress",
 };
 
 function sandboxLiteral(value: string): string {
@@ -587,11 +589,9 @@ export class GrokBuildAdapter implements WorkerAdapter {
         watchdogTerminal = true;
         clearWatchdog();
         terminal = event.terminal;
-      } else if (
-        GROK_CAPABILITIES.progressHeartbeat === "any-nonterminal-stream-event"
-        || event.type === "worker.tool.started"
-        || event.type === "worker.tool.completed"
-      ) {
+      } else if (isEffectiveProgressEvent(event.type, event.payload)) {
+        // Genuine thought/text deltas and tools reset the stop; keepalive-only
+        // records refresh Runtime liveness in durable history without resetting.
         scheduleWatchdog();
       }
       store.addEvent(task.id, attempt.id, event.type, event.summary, event.payload);
@@ -685,14 +685,14 @@ export class GrokBuildAdapter implements WorkerAdapter {
         exitCode: interruptedExitCode(exitCode),
         ...terminalFields(terminal),
         error:
-          "No effective implementation progress detected within the configured interval; worker was terminated by the progress watchdog",
+          "No effective progress detected within the configured interval; worker was terminated by the no-effective-progress stop",
         policyLimit: {
           category: "no-progress",
           enforcementPhase: "preemptive",
           configured: noProgressTimeoutMs,
           observed: noProgressTimeoutMs ?? 0,
           effect: "hard-fail",
-          detail: "Worker reached the configured no-progress interval and was terminated",
+          detail: "Worker reached the configured no-effective-progress interval and was terminated",
         },
       };
     }

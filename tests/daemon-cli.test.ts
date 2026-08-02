@@ -916,6 +916,83 @@ test("CLI status/list preserve canonical Main, remediation, and Integration plac
   }
 });
 
+test("CLI resolve closes a handled failure; reopen restores Now without changing status", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-resolve-"));
+  const store = new StateStore(home);
+  const taskId = "cli-resolve-task";
+  const taskRecord: TaskRecord = {
+    id: taskId,
+    name: "cli-resolve-task",
+    status: "failed",
+    sourcePath: "/source",
+    taskFile: `/task-${taskId}.yaml`,
+    spec: {
+      provider: { name: "deepseek", model: "deepseek-v4-pro[1M]" },
+      runtime: { name: "claude-code" },
+    } as TaskRecord["spec"],
+    paths: {
+      root: "/state/task",
+      baseline: "/state/task/baseline",
+      workspace: "/state/task/workspace",
+      logs: "/state/task/logs",
+      claudeConfig: "/state/task/claude",
+      diff: "/state/task/diff.patch",
+    },
+    sessionId: `session-${taskId}`,
+    createdAt: "2026-07-31T03:30:00.000Z",
+    updatedAt: "2026-07-31T03:30:00.000Z",
+  };
+  store.createTask(taskRecord);
+  store.addEvent(taskId, undefined, "worker.failed", "Worker failed: connectivity", {
+    failureCategory: "connectivity",
+  });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const resolved = await runCli(home, [
+      "resolve", taskId, "--reason", "environment-recovered", "--note", "env fixed by recovery", "--confirm", "--json",
+    ]);
+    assert.equal(resolved.code, 0, resolved.stderr);
+    const resolvedBody = JSON.parse(resolved.stdout) as Record<string, unknown>;
+    assert.equal(resolvedBody.existing, false);
+    assert.equal((resolvedBody.state as Record<string, unknown>).status, "resolved");
+    assert.equal(resolvedBody.boardScope, "history");
+    assert.equal(resolvedBody.boardReason, "attention-resolved");
+
+    // Exact replay is idempotent.
+    const replay = await runCli(home, [
+      "resolve", taskId, "--reason", "environment-recovered", "--note", "env fixed by recovery", "--confirm", "--json",
+    ]);
+    assert.equal(replay.code, 0, replay.stderr);
+    assert.equal((JSON.parse(replay.stdout) as Record<string, unknown>).existing, true);
+
+    // Conflicting resolve fails closed.
+    const conflict = await runCli(home, [
+      "resolve", taskId, "--reason", "superseded", "--note", "different", "--confirm", "--json",
+    ]);
+    assert.notEqual(conflict.code, 0);
+
+    const reopened = await runCli(home, [
+      "reopen", taskId, "--note", "actionable again", "--confirm", "--json",
+    ]);
+    assert.equal(reopened.code, 0, reopened.stderr);
+    const reopenedBody = JSON.parse(reopened.stdout) as Record<string, unknown>;
+    assert.equal(reopenedBody.existing, false);
+    assert.equal((reopenedBody.state as Record<string, unknown>).status, "reopened");
+    assert.equal(reopenedBody.boardScope, "now");
+
+    // Machine status is unchanged by resolve/reopen.
+    const status = await runCli(home, ["status", taskId, "--json"]);
+    assert.equal(status.code, 0, status.stderr);
+    assert.equal((JSON.parse(status.stdout) as Record<string, unknown>).status, "failed");
+  } finally {
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
 test("Integration status/history/wait succeed against an existing daemon without lifecycle mutation", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-int-observer-active-"));
   const seeded = seedCompletedIntegration(home);

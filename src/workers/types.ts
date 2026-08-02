@@ -19,9 +19,20 @@ export interface WorkerCapabilityMatrix {
   effortMapping: CapabilitySupport;
   costUsageFidelity: CapabilitySupport;
   sessionResume: CapabilitySupport;
+  /**
+   * True native Goal execution: the Runtime exposes a machine-observable,
+   * durable Goal with progress, completion/blocked state, cumulative usage, and
+   * interruption all bound to one Task lineage. Distinct from sessionResume —
+   * resuming a chat session is not a Goal contract.
+   */
+  nativeGoal: CapabilitySupport;
   streamingEvents: CapabilitySupport;
-  /** What resets the no-progress watchdog. */
-  progressHeartbeat: "tool-lifecycle" | "any-nonterminal-stream-event";
+  /**
+   * What resets the no-effective-progress watchdog.
+   * All supported Runtimes use closed effective-progress evidence only;
+   * liveness-only heartbeats never reset the timer.
+   */
+  progressHeartbeat: "effective-progress";
 }
 
 export interface WorkerDoctorResult {

@@ -1,5 +1,6 @@
 import { buildDeliveryLineage } from "./delivery-lineage.js";
 import { latestMainReview } from "./main-review.js";
+import { latestTaskResolutionState } from "./task-resolution.js";
 import {
   buildStatusProgress,
   DEFAULT_QUIET_AFTER_MS,
@@ -368,6 +369,9 @@ export function buildTaskDecisionView(input: {
   // Same gate as CLI list / listTaskSurfaces: do not leak historical categories
   // onto succeeded, running, or queued tasks after revise/resume.
   const failureCategory = failureCategoryForTask(input.task.status, orderedEvents);
+  // Latest explicit Main attention resolution from durable events. The Core
+  // owns this state; detailed surfaces only translate it.
+  const attentionResolution = latestTaskResolutionState(orderedEvents);
   return {
     taskId: input.task.id,
     ...decision,
@@ -382,5 +386,11 @@ export function buildTaskDecisionView(input: {
     ...(input.remediationDisposition === undefined
       ? {}
       : { remediationDisposition: input.remediationDisposition }),
+    // Only failed/interrupted Tasks project attention resolution; forged
+    // resolution evidence on other statuses fails open to Now.
+    ...(attentionResolution.status === "none"
+      || (input.task.status !== "failed" && input.task.status !== "interrupted")
+      ? {}
+      : { attentionResolution }),
   };
 }

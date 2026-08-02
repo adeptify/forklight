@@ -16,6 +16,16 @@ export type TaskStatus =
 export type AttemptStatus = "running" | "succeeded" | "failed" | "interrupted";
 export type RuntimeBudgetEnforcement = "supported" | "partial" | "unsupported";
 
+/** Saved per-Worker execution preference.
+ *  `auto` prefers a Runtime-native Goal when the Runtime proves one; otherwise
+ *  it resolves to a single run. `native-goal` never silently falls back.
+ *  Legacy profiles with no field remain single-run. */
+export type ExecutionPreference = "auto" | "single-run" | "native-goal";
+
+/** Immutable per-Task execution mode frozen before admission.
+ *  `auto` has already been resolved against the selected Runtime's capability. */
+export type ResolvedExecutionMode = "single-run" | "native-goal";
+
 export type EventType =
   | "task.created"
   | "task.launch-preflight.failed"
@@ -70,7 +80,9 @@ export type EventType =
   | "candidate.reverification.completed"
   | "review.assignment.created"
   | "review.assignment.completed"
-  | "review.assignment.failed";
+  | "review.assignment.failed"
+  | "task.resolution.completed"
+  | "task.resolution.reopened";
 
 export interface ProviderSpec {
   name: "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai" | "openai";
@@ -249,6 +261,13 @@ interface SharedTaskSpec {
   /** Creation-time snapshot of the Task Contract Quality layer.
    *  Absent only on legacy Task records created before per-Worker Quality policy. */
   qualityPolicy?: EffectiveQualityPolicySnapshot;
+  /** Effective execution preference frozen at Task admission.
+   *  Absent only on legacy stored Tasks predating execution-mode support;
+   *  runtime code falls back to single-run. */
+  executionPreference?: ExecutionPreference;
+  /** Frozen effective execution mode for this Task (auto already resolved).
+   *  Absent only on legacy stored Tasks; runtime code falls back to single-run. */
+  executionMode?: ResolvedExecutionMode;
 }
 
 export interface LegacyTaskSpec extends SharedTaskSpec {
@@ -591,6 +610,9 @@ export interface WorkspacePatchReport {
   generated: PatchEvidence;
   integration: PatchEvidence;
 }
+
+/** Re-export the single closed activity evidence type from the shared helper. */
+export type { RuntimeActivityEvidence } from "./runtime-activity.js";
 
 export interface NormalizedWorkerEvent {
   type: EventType;
@@ -1448,6 +1470,47 @@ export interface LiveStageProjection {
   evidenceSequence?: number;
 }
 
+/**
+ * Replayable dual-clock projection: Runtime communication vs effective Task
+ * progress. Rebuildable from ordered durable events after daemon restart.
+ * Never invents Provider health, ETA, percent complete, or hidden model text.
+ */
+export interface DualClockProjection {
+  /** Latest timestamp proving the Runtime still communicated. */
+  latestRuntimeSignalAt?: string;
+  /**
+   * Latest timestamp of effective progress. Worker start is the baseline until
+   * the first effective step; absent when no Worker-start or progress evidence
+   * exists at all.
+   */
+  latestEffectiveProgressAt?: string;
+  /** Closed age observation for the Runtime-signal clock. */
+  runtimeSignalObservation: "active" | "quiet" | "terminal" | "unknown";
+  /**
+   * Closed age observation for the effective-progress clock.
+   * `baseline` means only Worker start is known; `unknown` means legacy
+   * history without closed classification and without a Worker-start baseline.
+   */
+  effectiveProgressObservation:
+    | "active"
+    | "quiet"
+    | "terminal"
+    | "unknown"
+    | "baseline";
+  /**
+   * True when at least one closed effective-progress event was observed.
+   * False when only baseline/legacy/liveness evidence exists.
+   */
+  effectiveProgressKnown: boolean;
+  /** Closed next-step code for bilingual UI (no free text). */
+  next:
+    | "wait-for-runtime"
+    | "wait-for-effective-progress"
+    | "wait-for-new-evidence"
+    | "inspect-failure"
+    | "none";
+}
+
 export interface TaskDecisionView {
   taskId: string;
   stage: DecisionStage;
@@ -1482,12 +1545,26 @@ export interface TaskDecisionView {
      * UI translates closed codes only; it must not recompute lifecycle semantics.
      */
     liveStage?: LiveStageProjection;
+    /** Latest Runtime communication signal (any structured non-terminal Worker record). */
+    latestRuntimeSignalAt?: string;
+    /** Latest effective Task progress; Worker start until the first effective step. */
+    latestEffectiveProgressAt?: string;
+    /**
+     * Bounded dual-clock projection shared by CLI, daemon, MCP, board, and
+     * Task Detail. Preserves lastEventAt / liveStage for compatibility.
+     */
+    dualClock?: DualClockProjection;
   };
   /** Latest terminal failure class when task is failed|interrupted.
    *  Includes Worker classes and contract-infeasible (verification/Main). */
   failureCategory?: "authentication" | "budget" | "runtime" | "connectivity" | "contract-infeasible";
   /** Independent final-delivery outcome after Main repaired a machine-failed Task. */
   remediationDisposition?: RemediationDisposition;
+  /** Latest explicit Main attention-resolution state (resolved/reopened/none).
+   *  `resolved` closes a handled failure to History without changing machine
+   *  status; `reopened` returns it to Now. Privacy-safe: reason code + bounded
+   *  Main note + optional evidence Task id + timestamps only. */
+  attentionResolution?: import("./task-resolution.js").TaskResolutionState;
 }
 
 export interface ActivationHandoff {

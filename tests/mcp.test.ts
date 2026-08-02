@@ -127,6 +127,8 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_statistics",
         "forklight_status",
         "forklight_submit",
+        "forklight_task_reopen",
+        "forklight_task_resolve",
         "forklight_validate",
         "forklight_wait",
       ],
@@ -2372,6 +2374,77 @@ test("MCP forklight_correct tool schema validates feedback, budget, and confirm"
     assert.ok(inputSchema.properties?.candidateRevisionId);
     assert.ok(inputSchema.properties?.reusablePaths);
     assert.ok(inputSchema.properties?.remainingGaps);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("MCP resolve/reopen tools require confirm and bounded closed inputs", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-resolve-"));
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const resolveTool = (await client.listTools()).tools
+      .find((candidate) => candidate.name === "forklight_task_resolve");
+    assert.ok(resolveTool, "forklight_task_resolve tool must be registered");
+    assert.equal(resolveTool?.annotations?.readOnlyHint, false);
+    const reopenTool = (await client.listTools()).tools
+      .find((candidate) => candidate.name === "forklight_task_reopen");
+    assert.ok(reopenTool, "forklight_task_reopen tool must be registered");
+    assert.equal(reopenTool?.annotations?.readOnlyHint, false);
+
+    // Confirm required on resolve.
+    const noConfirm = await client.callTool({
+      name: "forklight_task_resolve",
+      arguments: {
+        taskId: "00000000-0000-4000-8000-000000000001",
+        reason: "environment-recovered",
+        note: "env fixed",
+      },
+    });
+    assert.ok(noConfirm.isError);
+
+    // Unknown reason rejected.
+    const badReason = await client.callTool({
+      name: "forklight_task_resolve",
+      arguments: {
+        taskId: "00000000-0000-4000-8000-000000000001",
+        reason: "auto-fixed",
+        note: "x",
+        confirm: true,
+      },
+    });
+    assert.ok(badReason.isError);
+
+    // Overlong note rejected before daemon contact.
+    const overlongNote = await client.callTool({
+      name: "forklight_task_resolve",
+      arguments: {
+        taskId: "00000000-0000-4000-8000-000000000001",
+        reason: "superseded",
+        note: "x".repeat(501),
+        confirm: true,
+      },
+    });
+    assert.ok(overlongNote.isError);
+
+    // Confirm required on reopen.
+    const reopenNoConfirm = await client.callTool({
+      name: "forklight_task_reopen",
+      arguments: { taskId: "00000000-0000-4000-8000-000000000001", note: "again" },
+    });
+    assert.ok(reopenNoConfirm.isError);
+
+    const inputSchema = resolveTool?.inputSchema as {
+      properties?: Record<string, unknown>;
+      required?: string[];
+    };
+    assert.ok(inputSchema.properties?.reason);
+    assert.ok(inputSchema.properties?.evidenceTaskId);
+    assert.ok((inputSchema.required ?? []).includes("confirm"), "confirm is required");
   } finally {
     await client.close();
     await server.close();

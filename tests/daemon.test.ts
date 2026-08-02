@@ -37,7 +37,7 @@ import {
 import { requiresMatchingBuildIdentity } from "../src/daemon/protocol.js";
 import { daemonSocketPath } from "../src/core/config.js";
 import { DetachedDaemonFixture } from "./helpers/detached-daemon.js";
-import { DaemonCoordinator, probeProvidersBounded } from "../src/daemon/coordinator.js";
+import { DaemonCoordinator, isManagedWorkerCommand, probeProvidersBounded } from "../src/daemon/coordinator.js";
 import { assertWorkPlan } from "../src/core/plan.js";
 import { buildTaskRecord, checkReviseEligibility, executeAttempt, prepareTaskWorkspace, registerTaskFromSpec } from "../src/core/runner.js";
 import { parseTaskSpec, REVIEW_GRAPH_TASK_FILE_PREFIX } from "../src/core/task.js";
@@ -104,6 +104,48 @@ test("resolveDaemonStartupTimeoutMs accepts the bounded range and rejects garbag
   assert.throws(() => resolveDaemonStartupTimeoutMs(600_001), /Daemon startup timeout must be an integer/);
   assert.throws(() => resolveDaemonStartupTimeoutMs(1.5), /Daemon startup timeout must be an integer/);
   assert.throws(() => resolveDaemonStartupTimeoutMs("30000"), /Daemon startup timeout must be an integer/);
+});
+
+// --- managed Worker command classification (FL-104 Codex app-server cleanup) ---
+
+test("managed Worker command classification includes Codex app-server and preserves existing runtimes", () => {
+  // ForkLight-owned Codex app-server launch shapes: PATH name, absolute native
+  // binary path, and the JS-shim shape executed through node/env.
+  for (const command of [
+    "codex app-server",
+    "/opt/homebrew/bin/codex app-server",
+    "/usr/local/bin/codex app-server --config /tmp/config.toml",
+    "node /usr/local/lib/node_modules/@openai/codex/bin/codex.js app-server",
+    "/usr/bin/env node /usr/local/lib/node_modules/@openai/codex/bin/codex.js app-server",
+  ]) {
+    assert.equal(isManagedWorkerCommand(command), true, `must manage Codex app-server: ${command}`);
+  }
+  // Existing runtimes keep the pre-existing substring behavior.
+  for (const command of [
+    "claude --print do-it",
+    "/usr/local/bin/claude -p do-it",
+    "grok --json run",
+    "sandbox-exec -p (allow (default)) /usr/local/bin/claude -p do-it",
+  ]) {
+    assert.equal(isManagedWorkerCommand(command), true, `must preserve existing Worker: ${command}`);
+  }
+});
+
+test("managed Worker command classification rejects unrelated commands", () => {
+  for (const command of [
+    "codex exec --ephemeral",
+    "codex --version",
+    "node /path/to/app-server.js",
+    "grep -r codex app-server .",
+    "ssh codex@example.com app-server",
+    "bash -c codex app-server",
+    "tsc --build app-server",
+    "node /opt/forklight/src/daemon/server.js",
+    "npm run dev",
+    "ps -p 1 -o command=",
+  ]) {
+    assert.equal(isManagedWorkerCommand(command), false, `must reject non-Worker: ${command}`);
+  }
 });
 
 function fakeChild(overrides: Partial<DaemonChildHandle> = {}): DaemonChildHandle {

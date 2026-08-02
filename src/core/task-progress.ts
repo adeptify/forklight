@@ -1,4 +1,12 @@
+import {
+  classifyRuntimeActivity,
+  isEffectiveProgressEvent,
+  isRuntimeSignalEvent,
+  isWorkerStartBaseline,
+  RUNTIME_ACTIVITY_EFFECTIVE,
+} from "./runtime-activity.js";
 import type {
+  DualClockProjection,
   EventType,
   LiveStageEvidence,
   LiveStageMeaning,
@@ -610,12 +618,149 @@ export function projectLiveStageFromLatest(
 }
 
 /**
+ * Replay ordered durable events into the latest Runtime-signal and
+ * effective-progress clocks. Each worker.started / worker.resumed opens a new
+ * Attempt-scoped baseline and clears prior effective-progress evidence so an
+ * earlier Attempt cannot look like current progress. Pure: no Provider call,
+ * mutable timer, or summary-prose inference. Legacy messages without
+ * activityEvidence advance only the Runtime clock.
+ */
+export function projectDualClocks(
+  task: TaskRecord,
+  events: readonly LiveStageEventEvidence[],
+  nowMs: number,
+  quietAfterMs: number = DEFAULT_QUIET_AFTER_MS,
+): DualClockProjection {
+  const ordered = [...events].sort((left, right) => left.sequence - right.sequence);
+  let latestRuntimeSignalAt: string | undefined;
+  let latestEffectiveProgressAt: string | undefined;
+  let sawWorkerStart = false;
+  let sawExplicitEffective = false;
+
+  for (const event of ordered) {
+    const type = String(event.type);
+    const classif = classifyRuntimeActivity(type, event.payload);
+    if (classif === undefined) continue;
+
+    // Every structured Runtime record refreshes the liveness clock.
+    if (isRuntimeSignalEvent(type) || isWorkerStartBaseline(type)) {
+      latestRuntimeSignalAt = event.timestamp;
+    }
+
+    if (isWorkerStartBaseline(type)) {
+      // New Attempt: reset the effective-progress clock to this start baseline.
+      // Prior Attempt progress must not survive into the new attempt scope.
+      sawWorkerStart = true;
+      sawExplicitEffective = false;
+      latestEffectiveProgressAt = event.timestamp;
+      continue;
+    }
+
+    if (classif === RUNTIME_ACTIVITY_EFFECTIVE || isEffectiveProgressEvent(type, event.payload)) {
+      sawExplicitEffective = true;
+      latestEffectiveProgressAt = event.timestamp;
+      continue;
+    }
+    // Liveness-only (including legacy worker.message without classification)
+    // already refreshed the Runtime-signal clock above.
+  }
+
+  if (isTerminalTaskStatus(task.status)) {
+    const terminalNext: DualClockProjection["next"] =
+      task.status === "failed" || task.status === "interrupted"
+        ? "inspect-failure"
+        : "none";
+    return {
+      ...(latestRuntimeSignalAt === undefined ? {} : { latestRuntimeSignalAt }),
+      ...(latestEffectiveProgressAt === undefined ? {} : { latestEffectiveProgressAt }),
+      runtimeSignalObservation: "terminal",
+      effectiveProgressObservation: "terminal",
+      effectiveProgressKnown: sawExplicitEffective,
+      next: terminalNext,
+    };
+  }
+
+  const observe = (at: string | undefined): "active" | "quiet" | "unknown" => {
+    if (at === undefined) return "unknown";
+    const ms = Date.parse(at);
+    if (!Number.isFinite(ms)) return "unknown";
+    return nowMs - ms <= quietAfterMs ? "active" : "quiet";
+  };
+
+  const runtimeSignalObservation = observe(latestRuntimeSignalAt);
+  let effectiveProgressObservation: DualClockProjection["effectiveProgressObservation"];
+  if (sawExplicitEffective) {
+    effectiveProgressObservation = observe(latestEffectiveProgressAt);
+  } else if (sawWorkerStart) {
+    // Truthful baseline: start time is known, but launch alone is never a
+    // substantive step. Keep the closed "baseline" label so UI does not claim
+    // progress at Worker start.
+    effectiveProgressObservation = "baseline";
+  } else {
+    // Legacy history without Worker start or closed effective classification.
+    effectiveProgressObservation = "unknown";
+  }
+
+  // Progress is "stalled relative to Runtime" when Runtime is still speaking
+  // but the progress clock is only a baseline/unknown or has gone quiet.
+  const progressBehindRuntime =
+    runtimeSignalObservation === "active"
+    && (
+      effectiveProgressObservation === "quiet"
+      || effectiveProgressObservation === "baseline"
+      || effectiveProgressObservation === "unknown"
+    );
+
+  let next: DualClockProjection["next"] = "none";
+  if (runtimeSignalObservation === "unknown" && effectiveProgressObservation === "unknown") {
+    next = "wait-for-runtime";
+  } else if (progressBehindRuntime) {
+    next = "wait-for-effective-progress";
+  } else {
+    next = "wait-for-new-evidence";
+  }
+
+  return {
+    ...(latestRuntimeSignalAt === undefined ? {} : { latestRuntimeSignalAt }),
+    ...(latestEffectiveProgressAt === undefined ? {} : { latestEffectiveProgressAt }),
+    runtimeSignalObservation,
+    effectiveProgressObservation,
+    effectiveProgressKnown: sawExplicitEffective,
+    next,
+  };
+}
+
+/**
+ * Coarse dual-clock projection when only the latest-event cursor is available.
+ * Conservative: never invents effective progress from a bare message type.
+ */
+export function projectDualClocksFromLatest(
+  task: TaskRecord,
+  latestEvent: LatestEventMeta | undefined,
+  nowMs: number,
+  quietAfterMs: number = DEFAULT_QUIET_AFTER_MS,
+): DualClockProjection {
+  if (latestEvent === undefined) {
+    return projectDualClocks(task, [], nowMs, quietAfterMs);
+  }
+  const synthetic: LiveStageEventEvidence = {
+    sequence: latestEvent.sequence,
+    timestamp: latestEvent.timestamp,
+    type: latestEvent.type,
+  };
+  // Bare latest cursor has no payload classification: Runtime signal only.
+  return projectDualClocks(task, [synthetic], nowMs, quietAfterMs);
+}
+
+/**
  * Canonical TaskDecisionView.progress for status surfaces (CLI status, MCP
  * status via Decision View, list JSON). Driven by latest-event metadata rather
  * than frozen tasks.updatedAt. When the caller supplies a structured
  * preparationStage, list/status consumers can explain the current operation.
  * When ordered events are supplied, progress.liveStage is the replayable
- * canonical Worker explanation shared by every consumer.
+ * canonical Worker explanation shared by every consumer. Dual clocks are
+ * always present so board and Task Detail can separate Runtime liveness from
+ * effective progress without recomputing from prose.
  */
 export function buildStatusProgress(
   task: TaskRecord,
@@ -629,9 +774,30 @@ export function buildStatusProgress(
   const liveStage = events !== undefined
     ? projectLiveStage(task, events, nowMs, quietAfterMs, preparationStage)
     : projectLiveStageFromLatest(task, latestEvent, nowMs, quietAfterMs, preparationStage);
+  const dualClock = events !== undefined
+    ? projectDualClocks(task, events, nowMs, quietAfterMs)
+    : projectDualClocksFromLatest(task, latestEvent, nowMs, quietAfterMs);
   // When follow-up work is open on a terminal Task, activity follows the
   // canonical live-stage observation, not the raw terminal status.
-  const activity = isOpenFollowUpStage(liveStage.stage) ? liveStage.observation : rawActivity;
+  // Prefer Runtime-signal freshness for the coarse activity field so a
+  // liveness heartbeat never looks like a dead connection.
+  let activity = isOpenFollowUpStage(liveStage.stage) ? liveStage.observation : rawActivity;
+  if (
+    !isTerminalTaskStatus(task.status)
+    && !isOpenFollowUpStage(liveStage.stage)
+    && dualClock.runtimeSignalObservation === "active"
+  ) {
+    activity = "active";
+  } else if (
+    !isTerminalTaskStatus(task.status)
+    && !isOpenFollowUpStage(liveStage.stage)
+    && dualClock.runtimeSignalObservation === "quiet"
+    && activity === "active"
+  ) {
+    // Keep quiet when the Runtime clock is stale even if lastEventAt is newer
+    // for a non-Runtime event type.
+    activity = "quiet";
+  }
   return {
     activity,
     latestEventSequence: latestEvent?.sequence ?? 0,
@@ -640,6 +806,13 @@ export function buildStatusProgress(
     ...(latestEvent === undefined ? {} : { lastEventType: String(latestEvent.type) }),
     ...(preparationStage === undefined ? {} : { preparationStage }),
     liveStage,
+    ...(dualClock.latestRuntimeSignalAt === undefined
+      ? {}
+      : { latestRuntimeSignalAt: dualClock.latestRuntimeSignalAt }),
+    ...(dualClock.latestEffectiveProgressAt === undefined
+      ? {}
+      : { latestEffectiveProgressAt: dualClock.latestEffectiveProgressAt }),
+    dualClock,
   };
 }
 

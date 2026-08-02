@@ -1,3 +1,8 @@
+import {
+  RUNTIME_ACTIVITY_EFFECTIVE,
+  RUNTIME_ACTIVITY_LIVENESS,
+  withActivityEvidence,
+} from "../core/runtime-activity.js";
 import type {
   AttemptTokenUsage,
   ModelTokenUsage,
@@ -9,8 +14,8 @@ type JsonObject = Record<string, unknown>;
 
 /** Throttle interval for high-frequency Claude processing markers (ms).
  *  The first marker emits immediately; subsequent markers inside this window
- *  are dropped before Store writes. This is internal backpressure — it never
- *  stops the Worker or resets the no-progress watchdog. */
+ *  are dropped before Store writes. This is internal backpressure — it proves
+ *  Runtime liveness only and never resets the no-effective-progress watchdog. */
 export const CLAUDE_PROCESSING_THROTTLE_MS = 15_000;
 
 function asObject(value: unknown): JsonObject | undefined {
@@ -128,10 +133,13 @@ export class ClaudeEventNormalizer {
         {
           type: "worker.message",
           summary: `Claude Code initialized${typeof root.model === "string" ? ` with ${root.model}` : ""}`,
-          payload: {
-            model: root.model,
-            tools: root.tools,
-          },
+          payload: withActivityEvidence(
+            {
+              model: root.model,
+              tools: root.tools,
+            },
+            RUNTIME_ACTIVITY_LIVENESS,
+          ),
           ...(sessionId === undefined ? {} : { sessionId }),
         },
       ];
@@ -248,14 +256,21 @@ export class ClaudeEventNormalizer {
         events.push({
           type: "worker.tool.started",
           summary: `${block.name}${target ? `: ${target}` : ""}`,
-          payload: { toolUseId: id, tool: block.name, target },
+          payload: withActivityEvidence(
+            { toolUseId: id, tool: block.name, target },
+            RUNTIME_ACTIVITY_EFFECTIVE,
+          ),
         });
       } else if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
         events.push({
           type: "worker.message",
           summary: truncate(block.text.trim(), 500),
           // Closed activity marker only; stage classification must not need prose.
-          payload: { activityKind: "model-response" },
+          // Visible model response is effective progress, not a liveness heartbeat.
+          payload: withActivityEvidence(
+            { activityKind: "model-response" },
+            RUNTIME_ACTIVITY_EFFECTIVE,
+          ),
         });
       }
     }
@@ -277,12 +292,15 @@ export class ClaudeEventNormalizer {
       events.push({
         type: "worker.tool.completed",
         summary: `${tool} ${failed ? "failed" : "completed"}`,
-        payload: {
-          toolUseId: block.tool_use_id,
-          tool,
-          failed,
-          output: truncate(block.content, 500),
-        },
+        payload: withActivityEvidence(
+          {
+            toolUseId: block.tool_use_id,
+            tool,
+            failed,
+            output: truncate(block.content, 500),
+          },
+          RUNTIME_ACTIVITY_EFFECTIVE,
+        ),
       });
     }
     return events;
@@ -292,7 +310,8 @@ export class ClaudeEventNormalizer {
    * Emit a closed model-processing marker for Claude system thinking_tokens.
    * Rate-limited: the first marker emits immediately; subsequent markers inside
    * the throttle interval are dropped before Store writes. Token estimates and
-   * raw payload fields are never stored.
+   * raw payload fields are never stored. This is Runtime liveness only — it
+   * must never reset the no-effective-progress watchdog.
    */
   private parseProcessing(_root: JsonObject): NormalizedWorkerEvent[] {
     const now = this.clock();
@@ -307,7 +326,10 @@ export class ClaudeEventNormalizer {
       {
         type: "worker.message",
         summary: "Model is actively processing",
-        payload: { activityKind: "model-processing" },
+        payload: withActivityEvidence(
+          { activityKind: "model-processing" },
+          RUNTIME_ACTIVITY_LIVENESS,
+        ),
       },
     ];
   }

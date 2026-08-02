@@ -308,6 +308,7 @@ test("Hub status uses exact-build Daemon runtime truth and never false-blocks sa
       runtimes: {
         "claude-code": { ok: true, displayName: "Claude Code", executable: "claude", issues: [], capabilities: {} },
         "grok-build": { ok: true, displayName: "Grok Build", executable: "grok", issues: [], capabilities: {} },
+        "codex-cli": { ok: true, displayName: "Codex CLI", executable: "codex", issues: [], capabilities: {} },
       },
     });
     const status = await doHttp(`http://127.0.0.1:${ctx.port}/api/status`, "GET", ctx.token);
@@ -355,6 +356,7 @@ test("Hub status honors exact-build Daemon runtime unavailability over any local
       runtimes: {
         "claude-code": { ok: false, displayName: "Claude Code", executable: "claude", issues: [], capabilities: {} },
         "grok-build": { ok: true, displayName: "Grok Build", executable: "grok", issues: [], capabilities: {} },
+        "codex-cli": { ok: true, displayName: "Codex CLI", executable: "codex", issues: [], capabilities: {} },
       },
     });
     const status = await doHttp(`http://127.0.0.1:${ctx.port}/api/status`, "GET", ctx.token);
@@ -3211,5 +3213,70 @@ test("Hub /api/ops/tasks/history bounds daemon errors with privacy-safe language
   } finally {
     await server.stop();
     store.close();
+  }
+});
+
+// --- Execution preference defaulting (FL-104) ---
+
+test("Hub defaults newly created Workers to auto and preserves legacy profiles", async () => {
+  const ctx = await makeHub();
+  try {
+    const base = `http://127.0.0.1:${ctx.port}`;
+    // Seed a genuinely legacy profile without the preference field.
+    ctx.settings.update({
+      workerProfiles: {
+        defaultProfileId: "legacy-worker",
+        profiles: [{
+          id: "legacy-worker",
+          label: "Legacy Worker",
+          runtime: "claude-code",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          effort: "high",
+        }],
+      },
+    });
+    assert.equal(
+      ctx.settings.get().workerProfiles.profiles.find((p) => p.id === "legacy-worker")?.executionPreference,
+      undefined,
+      "legacy profile starts without the preference field",
+    );
+
+    // Creating a brand new profile defaults to auto.
+    const create = await doHttp(`${base}/api/worker-profiles`, "POST", ctx.token, {
+      action: "upsert",
+      profile: {
+        id: "new-auto-worker",
+        label: "New Auto Worker",
+        runtime: "claude-code",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        effort: "high",
+      },
+    });
+    assert.equal(create.status, 200);
+    const created = (create.body as { workerProfiles: { profiles: Array<{ id: string; executionPreference?: string }> } })
+      .workerProfiles;
+    const newProfile = created.profiles.find((p) => p.id === "new-auto-worker");
+    assert.equal(newProfile?.executionPreference, "auto");
+
+    // Editing an existing legacy profile (no field) keeps single-run behavior:
+    // the field is not invented for edits.
+    const legacySave = await doHttp(`${base}/api/worker-profiles`, "POST", ctx.token, {
+      action: "upsert",
+      profile: {
+        id: "legacy-worker",
+        label: "Legacy Worker v2",
+        runtime: "claude-code",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        effort: "high",
+      },
+    });
+    assert.equal(legacySave.status, 200);
+    const legacy = ctx.settings.get().workerProfiles.profiles.find((p) => p.id === "legacy-worker");
+    assert.equal(legacy?.executionPreference, undefined, "editing a legacy profile must not add the field");
+  } finally {
+    await ctx.cleanup();
   }
 });

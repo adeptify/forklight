@@ -5,6 +5,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
+import { executionModeFromTaskSpec } from "../core/execution-mode.js";
+import { isEffectiveProgressEvent } from "../core/runtime-activity.js";
 import { buildWorkerPrompt, workerPromptAppendicesForTask } from "../core/task.js";
 import type { NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
 import {
@@ -12,6 +14,7 @@ import {
   CodexEventNormalizer,
 } from "../events/codex-normalize.js";
 import { cloneDefaults } from "../core/settings.js";
+import { runCodexNativeGoal } from "./codex-goal.js";
 import type {
   RuntimeSpecView,
   WorkerAdapter,
@@ -32,8 +35,11 @@ const CODEX_CAPABILITIES: WorkerCapabilityMatrix = {
   effortMapping: "supported",
   costUsageFidelity: "partial",
   sessionResume: "unsupported",
+  // Codex proves a native Goal contract through its app-server persisted
+  // Thread Goals (FL-104). This is distinct from session resume.
+  nativeGoal: "supported",
   streamingEvents: "supported",
-  progressHeartbeat: "any-nonterminal-stream-event",
+  progressHeartbeat: "effective-progress",
 };
 
 function configValue(key: string, value: string | number | boolean): string {
@@ -155,10 +161,43 @@ function codexCheckpointLines(): string[] {
   ];
 }
 
+/** Task-local Codex environment: same credential allowlist and environment
+ *  stripping for both execution paths. Never forwards operator OpenAI/Codex
+ *  keys, endpoint redirects, or Anthropic/xAI keys that could leak the seeded
+ *  auth or redirect model traffic away from the exact frozen identity. */
+export function buildCodexWorkerEnv(
+  codexHome: string,
+  temporaryDirectory: string,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CODEX_HOME: codexHome,
+    TMPDIR: temporaryDirectory,
+    TMP: temporaryDirectory,
+    TEMP: temporaryDirectory,
+  };
+  delete env.OPENAI_API_KEY;
+  delete env.OPENAI_BASE_URL;
+  delete env.OPENAI_ORG_ID;
+  delete env.OPENAI_PROJECT;
+  delete env.CODEX_API_KEY;
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  delete env.ANTHROPIC_BASE_URL;
+  delete env.XAI_API_KEY;
+  return env;
+}
+
 export async function runCodexWorker(
   ctx: WorkerRunContext,
   operatorCodexHome?: string,
 ): Promise<WorkerExecutionResult> {
+  // The frozen per-Task execution mode decides the path. Native Goal drives one
+  // isolated Codex app-server Thread Goal (and resumes the exact Thread);
+  // single-run keeps the original non-interactive codex exec path unchanged.
+  if (executionModeFromTaskSpec(ctx.task.spec) === "native-goal") {
+    return runCodexNativeGoal(ctx, operatorCodexHome);
+  }
   const { store, task, attempt, resuming, hooks = {} } = ctx;
   if (resuming) {
     throw new Error("Codex Runtime resume is not supported by this foundation");
@@ -195,6 +234,9 @@ export async function runCodexWorker(
   let terminal: NormalizedWorkerEvent["terminal"];
   let runtimeSessionId: string | undefined;
   let lastAgentText: string | undefined;
+  // One Attempt must map to exactly one Codex session. A drifted identity is a
+  // terminal failure that a later success terminal must never overwrite.
+  let sessionIdentityFailed = false;
 
   const execution = ctx.execution ?? cloneDefaults().execution;
   const noProgressTimeoutMs = noProgressFromSnapshot(
@@ -240,22 +282,11 @@ export async function runCodexWorker(
     isolation: "codex-sandbox",
     authMode: "local-sign-in",
     authSeeded: seed.seeded,
+    executionMode: "single-run",
     correctionFeedbackIncluded: Boolean(hooks.feedback),
   });
 
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    CODEX_HOME: codexHome,
-    TMPDIR: temporaryDirectory,
-    TMP: temporaryDirectory,
-    TEMP: temporaryDirectory,
-  };
-  delete env.OPENAI_API_KEY;
-  delete env.CODEX_API_KEY;
-  delete env.ANTHROPIC_API_KEY;
-  delete env.ANTHROPIC_AUTH_TOKEN;
-  delete env.ANTHROPIC_BASE_URL;
-  delete env.XAI_API_KEY;
+  const env = buildCodexWorkerEnv(codexHome, temporaryDirectory);
 
   child = spawn(task.spec.runtime.executable || "codex", args, {
     cwd: task.paths.workspace,
@@ -270,17 +301,44 @@ export async function runCodexWorker(
   scheduleWatchdog();
 
   const emit = (event: NormalizedWorkerEvent): void => {
+    // Fail closed after the first session-identity drift: the drift failure is
+    // the final public runtime evidence for this Attempt. Guard before session
+    // processing so a second conflicting identity cannot emit a duplicate.
+    if (sessionIdentityFailed) {
+      return;
+    }
     if (event.sessionId !== undefined) {
       if (runtimeSessionId !== undefined && runtimeSessionId !== event.sessionId) {
-        terminal = { isError: true, failureReason: "Codex changed session identity during one Attempt" };
-      } else {
-        runtimeSessionId = event.sessionId;
+        // One Attempt maps to exactly one Codex session. Drift is terminal and
+        // a later success terminal must never overwrite or persist as this
+        // Attempt's terminal evidence.
+        sessionIdentityFailed = true;
+        const failureReason = "Codex changed session identity during one Attempt";
+        const failure: NormalizedWorkerEvent["terminal"] = {
+          isError: true,
+          failureReason,
+        };
+        terminal = failure;
+        clearWatchdog();
+        store.addEvent(task.id, attempt.id, "worker.failed", failureReason, {
+          failureCategory: "runtime",
+          reasonCode: "codex-session-drift",
+        });
+        hooks.onEvent?.({
+          type: "worker.failed",
+          summary: failureReason,
+          payload: { failureCategory: "runtime", reasonCode: "codex-session-drift" },
+          terminal: failure,
+        });
+        return;
       }
+      runtimeSessionId = event.sessionId;
     }
     if (event.terminal !== undefined) {
       terminal = event.terminal;
       clearWatchdog();
-    } else {
+    } else if (isEffectiveProgressEvent(event.type, event.payload)) {
+      // Session/setup and turn-start liveness never reset the stop.
       scheduleWatchdog();
     }
     const payload = event.sessionId === undefined
@@ -328,14 +386,14 @@ export async function runCodexWorker(
       status: "failed",
       exitCode: interruptedExitCode(outcome.code),
       ...terminalFields(terminal, lastAgentText),
-      error: "No effective implementation progress detected within the configured interval; Codex Worker was terminated",
+      error: "No effective progress detected within the configured interval; Codex Worker was terminated",
       policyLimit: {
         category: "no-progress",
         enforcementPhase: "preemptive",
         configured: noProgressTimeoutMs,
         observed: noProgressTimeoutMs ?? 0,
         effect: "hard-fail",
-        detail: "Codex Worker reached the configured no-progress interval and was terminated",
+        detail: "Codex Worker reached the configured no-effective-progress interval and was terminated",
       },
     };
   }
@@ -353,6 +411,15 @@ export async function runCodexWorker(
   }
   if (outcome.error !== undefined) {
     return { status: "failed", exitCode: outcome.code, error: "Unable to start Codex Worker" };
+  }
+  if (sessionIdentityFailed) {
+    return {
+      status: "failed",
+      exitCode: outcome.code,
+      ...terminalFields(terminal, lastAgentText),
+      error: "Codex changed session identity during one Attempt",
+      failureCategory: "runtime",
+    };
   }
   if (runtimeSessionId === undefined) {
     return {

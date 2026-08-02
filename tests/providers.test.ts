@@ -12,8 +12,8 @@ import {
 import { cloneDefaults, type ProviderDefaultSettings } from "../src/core/settings.js";
 import { parseTaskSpec } from "../src/core/task.js";
 
-test("provider registry exposes Claude Code-compatible defaults plus xai", () => {
-  assert.deepEqual(providerNames(), ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]);
+test("provider registry exposes Claude Code-compatible defaults plus xai and openai", () => {
+  assert.deepEqual(providerNames(), ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"]);
   assert.deepEqual(
     providerNames().map((name) => {
       const definition = providerDefinition(name);
@@ -26,6 +26,7 @@ test("provider registry exposes Claude Code-compatible defaults plus xai", () =>
       ["glm", "glm-5.2", "https://dashscope.aliyuncs.com/apps/anthropic"],
       ["volcengine", "glm-5.2[1M]", "https://ark.cn-beijing.volces.com/api/coding"],
       ["xai", "grok-4.5", "https://api.x.ai/v1"],
+      ["openai", "gpt-5.6-luna", "https://api.openai.com/v1"],
     ],
   );
 });
@@ -55,10 +56,13 @@ test("DeepSeek providerVariants lists Flash and Pro families, not only the defau
 
 test("task parsing stores provider metadata but never credential values", () => {
   for (const name of providerNames()) {
-    // xai pairs only with grok-build; Anthropic-compat providers use claude-code.
+    // xai pairs only with grok-build; openai only with codex-cli;
+    // the remaining Anthropic-compat providers use claude-code.
     const runtime = name === "xai"
       ? { name: "grok-build", executable: "grok", effort: "high", maxBudgetUsd: 0.1 }
-      : { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: 0.1 };
+      : name === "openai"
+        ? { name: "codex-cli", executable: "codex", effort: "high", maxBudgetUsd: 0.1 }
+        : { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: 0.1 };
     const spec = parseTaskSpec(
       {
         version: 1,
@@ -279,7 +283,8 @@ test("providerReadiness prefers a readable Keychain API key and can be tested wi
     hasLocalGrokSignIn: () => true,
   });
   assert.equal(readiness.providers.xai.authMode, "api-key");
-  assert.equal(seen.length, providerNames().length);
+  // openai is runtime-owned (Codex local sign-in) and never consults the Keychain.
+  assert.equal(seen.length, providerNames().length - 1);
   const serialized = JSON.stringify(readiness);
   assert.equal(serialized.includes("auth.json"), false);
   assert.equal(serialized.includes("/Users/"), false);

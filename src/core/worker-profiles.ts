@@ -20,8 +20,13 @@ import {
 import type {
   AdvancedPolicyFields,
   ContractQualityOverrides,
+  ExecutionPreference,
   PolicyMode,
 } from "./types.js";
+import {
+  isExecutionPreference,
+  nativeGoalSupportForRuntime,
+} from "./execution-mode.js";
 import {
   validateAdvancedPolicyPatch as validateAdvancedPolicyRaw,
 } from "./advanced-policy.js";
@@ -68,6 +73,11 @@ export interface WorkerProfile {
   /** Optional billing-route identifier for official pricing resolution.
    *  Bounded non-empty identifier; never a credential. Explicit Task/MCP override wins. */
   pricingRoute?: string;
+  /** Optional per-Worker execution preference.
+   *  Legacy profiles with no field remain single-run; the Hub defaults newly
+   *  created Workers to `auto`. Forced `native-goal` fails validation when the
+   *  selected Runtime cannot prove a native Goal contract. */
+  executionPreference?: ExecutionPreference;
 }
 
 export interface WorkerProfilesSettings {
@@ -90,6 +100,10 @@ export interface ResolvedWorkerSelection {
   /** Resolved billing route. Explicit Task/MCP override wins;
    *  otherwise inherited from the selected Worker profile. */
   pricingRoute?: string;
+  /** Resolved execution preference. Explicit Task/MCP override wins;
+   *  otherwise inherited from the selected Worker profile.
+   *  Absent for legacy selections without a preference (single-run). */
+  executionPreference?: ExecutionPreference;
 }
 
 export function isWorkerProfileId(value: string): boolean {
@@ -130,6 +144,9 @@ export function defaultWorkerProfiles(
               ...(preferred.endpoint === undefined ? {} : { endpoint: preferred.endpoint }),
             }),
         effort: execution.defaultEffort,
+        // New Workers default to `auto` execution: the Runtime's proven native
+        // Goal mode wins when available, otherwise one ordinary single run.
+        executionPreference: "auto",
         // maxBudgetUsd / noProgressTimeoutMs omitted → inherit execution defaults
       },
     ],
@@ -307,6 +324,19 @@ export function validateWorkerProfile(
     pricingRoute = o.pricingRoute;
   }
 
+  let executionPreference: ExecutionPreference | undefined;
+  if (o.executionPreference !== undefined) {
+    if (!isExecutionPreference(o.executionPreference)) {
+      throw new Error(`${label}.executionPreference must be auto, single-run, or native-goal`);
+    }
+    executionPreference = o.executionPreference;
+    if (executionPreference === "native-goal" && !nativeGoalSupportForRuntime(o.runtime)) {
+      throw new Error(
+        `${label}.executionPreference=native-goal requires a Runtime with a proven native Goal contract; runtime ${o.runtime} is not supported`,
+      );
+    }
+  }
+
   return {
     id: o.id,
     label: o.label.trim(),
@@ -321,6 +351,7 @@ export function validateWorkerProfile(
     ...(advancedPolicy === undefined ? {} : { advancedPolicy }),
     ...(contractQuality === undefined ? {} : { contractQuality }),
     ...(pricingRoute === undefined ? {} : { pricingRoute }),
+    ...(executionPreference === undefined ? {} : { executionPreference }),
   };
 }
 
@@ -418,6 +449,7 @@ export function resolveWorkerSelection(
     effort?: string;
     maxBudgetUsd?: number | null;
     pricingRoute?: string;
+    executionPreference?: string;
   },
   settings: {
     execution: ForkLightSettings["execution"];
@@ -524,6 +556,21 @@ export function resolveWorkerSelection(
   const pricingRoute = input.pricingRoute
     ?? (baseIdentityStillApplies ? base?.pricingRoute : undefined);
 
+  let executionPreference: ExecutionPreference | undefined;
+  if (input.executionPreference !== undefined) {
+    if (!isExecutionPreference(input.executionPreference)) {
+      throw new Error("executionPreference must be auto, single-run, or native-goal");
+    }
+    executionPreference = input.executionPreference;
+  } else if (base?.executionPreference !== undefined) {
+    executionPreference = base.executionPreference;
+  }
+  if (executionPreference === "native-goal" && !nativeGoalSupportForRuntime(runtimeName)) {
+    throw new Error(
+      `executionPreference=native-goal requires a Runtime with a proven native Goal contract; runtime ${runtimeName} is not supported`,
+    );
+  }
+
   return {
     profileId,
     modelConfigId: baseModel?.modelConfigId,
@@ -536,6 +583,7 @@ export function resolveWorkerSelection(
     maxBudgetUsd,
     noProgressTimeoutMs,
     ...(pricingRoute === undefined ? {} : { pricingRoute }),
+    ...(executionPreference === undefined ? {} : { executionPreference }),
   };
 }
 

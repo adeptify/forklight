@@ -4,6 +4,10 @@ import {
   type LatestEventMeta,
   type LiveStageEventEvidence,
 } from "./task-progress.js";
+import {
+  latestTaskResolutionState,
+  type TaskResolutionState,
+} from "./task-resolution.js";
 import type {
   DecisionStage,
   TaskDecisionView,
@@ -35,7 +39,8 @@ export type BoardReason =
   | "delivered"
   | "activated"
   | "repaired-delivered"
-  | "main-rejected";
+  | "main-rejected"
+  | "attention-resolved";
 
 /** Closed vocabulary of board scope codes, shared with the Hub adapter. */
 export const BOARD_SCOPE_VALUES: readonly BoardScope[] = ["now", "history"];
@@ -58,6 +63,7 @@ export const BOARD_REASON_BY_SCOPE: Readonly<Record<BoardScope, readonly BoardRe
     "activated",
     "repaired-delivered",
     "main-rejected",
+    "attention-resolved",
   ],
 };
 
@@ -84,14 +90,16 @@ export interface BoardPlacement {
 }
 
 /**
- * Pure, deterministic projection of Task status, Decision Stage, and verified
- * repaired-delivery disposition into a closed Now/History placement.
+ * Pure, deterministic projection of Task status, Decision Stage, verified
+ * repaired-delivery disposition, and explicit attention resolution into a
+ * closed Now/History placement.
  *
  * History requires durable evidence: a delivered or activated Integration, an
- * explicit Main rejection, or a Main-verified repaired delivery. Machine
+ * explicit Main rejection, a Main-verified repaired delivery, or an explicit
+ * Main resolution that the real-world failure was handled. Machine
  * `succeeded` alone is never enough for History; machine `failed` alone is
- * never a final outcome. Unknown, contradictory, or omitted Decision evidence
- * fails open to `now` so unfinished work is never hidden.
+ * never a final outcome. Unknown, contradictory, malformed, or omitted
+ * evidence fails open to `now` so unfinished work is never hidden.
  *
  * Contains no review reason, prompt, path, command, error body, event payload,
  * or free text. The Decision Stage already encodes the status-derived workflow
@@ -103,6 +111,7 @@ export function projectBoardPlacement(input: {
   status: TaskRecord["status"];
   decisionStage?: DecisionStage;
   remediationDisposition?: RemediationDisposition;
+  attentionResolution?: TaskResolutionState;
 }): BoardPlacement {
   // Delivered/activated Integration is the strongest current evidence and
   // stays authoritative over any earlier Main rejection or Main-repaired
@@ -124,6 +133,17 @@ export function projectBoardPlacement(input: {
     && input.remediationDisposition.status === "verified-repaired-delivered"
   ) {
     return { boardScope: "history", boardReason: "repaired-delivered" };
+  }
+  // Explicit Main resolution of a handled failure is a durable closed outcome
+  // ONLY for a failed/interrupted Task: it moves to History while its machine
+  // status is preserved. Forged resolution evidence on queued/running/
+  // preparing/verifying/succeeded targets must never hide the work in History;
+  // reopened or malformed evidence also falls through to the normal placement.
+  if (
+    input.attentionResolution?.status === "resolved"
+    && (input.status === "failed" || input.status === "interrupted")
+  ) {
+    return { boardScope: "history", boardReason: "attention-resolved" };
   }
   switch (input.decisionStage) {
     case "main-rejected":
@@ -186,6 +206,11 @@ export interface SafeTaskSummary {
   /** Present when Main has verified the repaired source as delivered.
    *  Contains only status, checkId, and createdAt — no raw command output, reason, or source. */
   remediationDisposition?: RemediationDisposition;
+  /** Latest explicit Main attention-resolution state (resolved/reopened/none).
+   *  `resolved` closes a handled failure to History without changing machine
+   *  status; `reopened` returns it to Now. Privacy-safe: reason code + bounded
+   *  Main note + optional evidence Task id + timestamps only. */
+  attentionResolution?: TaskResolutionState;
   /** Canonical Now/History placement. Always set by buildTaskSummary; absent
    *  only on hand-built legacy summaries. `history` means a durably closed
    *  end-to-end outcome; `now` means work or a decision still needs attention. */
@@ -208,6 +233,7 @@ export function buildTaskSummary(
   failureCategory?: WorkerFailureCategory,
   remediationDisposition?: RemediationDisposition,
   decisionStage?: DecisionStage,
+  attentionResolution?: TaskResolutionState,
 ): SafeTaskSummary {
   return {
     taskId: task.id,
@@ -228,12 +254,20 @@ export function buildTaskSummary(
     ...(decisionStage === undefined ? {} : { decisionStage }),
     ...(failureCategory === undefined ? {} : { failureCategory }),
     ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+    // Only failed/interrupted Tasks can project attention resolution. Forged
+    // resolution evidence on other statuses never surfaces on the summary.
+    ...(attentionResolution === undefined
+      || attentionResolution.status === "none"
+      || (task.status !== "failed" && task.status !== "interrupted")
+      ? {}
+      : { attentionResolution }),
     // Canonical Now/History placement is always provided so every board/list
     // surface can default to Now without recomputing lifecycle semantics.
     ...projectBoardPlacement({
       status: task.status,
       ...(decisionStage === undefined ? {} : { decisionStage }),
       ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+      ...(attentionResolution === undefined ? {} : { attentionResolution }),
     }),
   };
 }
@@ -274,11 +308,18 @@ export function projectTaskSurface(
     options.preparationStage,
     options.events,
   );
+  // Latest explicit Main attention resolution derived from the same ordered
+  // durable events the live-stage reducer uses. Absent events (legacy callers)
+  // leave resolution unset so placement fails open to Now.
+  const attentionResolution = options.events === undefined
+    ? undefined
+    : latestTaskResolutionState(options.events);
   return buildTaskSummary(
     task,
     progress,
     options.failureCategory,
     options.remediationDisposition,
     options.decisionStage,
+    attentionResolution,
   );
 }

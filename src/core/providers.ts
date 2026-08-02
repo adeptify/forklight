@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, lstatSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { localAccountName } from "./config.js";
@@ -279,13 +279,15 @@ export function hasLocalGrokSignIn(): boolean {
 }
 
 /** Check only the minimum local Codex credential file required for a
- * task-local auth seed. Contents and paths never leave this boundary. */
-export function hasLocalCodexSignIn(): boolean {
+ * task-local auth seed. Contents and paths never leave this boundary.
+ * A symlinked auth file fails closed because the launch-time seed copies only
+ * regular files; reporting ready here would contradict the launch boundary. */
+export function hasLocalCodexSignIn(codexHome = path.join(homedir(), ".codex")): boolean {
   try {
-    const authFile = path.join(homedir(), ".codex", "auth.json");
+    const authFile = path.join(codexHome, "auth.json");
     accessSync(authFile, constants.R_OK);
-    const metadata = statSync(authFile);
-    return metadata.isFile() && metadata.size > 0;
+    const metadata = lstatSync(authFile);
+    return metadata.isFile() && !metadata.isSymbolicLink() && metadata.size > 0;
   } catch {
     return false;
   }

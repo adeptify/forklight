@@ -44,6 +44,7 @@ function input(
           label: "Grok Worker",
           runtime: "grok-build",
           modelConfigId: "xai-model",
+          executionPreference: "auto",
         },
       ],
     },
@@ -90,12 +91,15 @@ test("Worker readiness keeps local launch and Provider verification separate", (
     runtime: "claude-code",
     provider: "deepseek",
     model: "deepseek-v4-pro[1M]",
+    executionPreference: "single-run",
+    resolvedExecutionMode: "single-run",
     checks: {
       model: "ready",
       pairing: "allowed",
       authentication: "api-key",
       runtime: "ready",
       connection: "verified",
+      nativeGoal: "unsupported",
     },
   });
   assert.equal(result[1]!.state, "launchable");
@@ -246,4 +250,146 @@ test("Worker with failed connection evidence stays needs-attention for non-xAI p
   assert.equal(result!.state, "needs-attention");
   assert.equal(result!.reason, "connection-failed");
   assert.equal(result!.canLaunch, true);
+});
+
+test("Codex Worker with openai local sign-in is launchable with exact identity", () => {
+  const defaults = cloneDefaults();
+  const providers = providerEvidence();
+  providers.openai = {
+    ready: true,
+    authMode: "local-sign-in",
+    endpoint: defaults.providerDefaults.openai.defaultEndpoint,
+    defaultModel: defaults.providerDefaults.openai.defaultModel,
+    keychainService: defaults.providerDefaults.openai.defaultKeychainService,
+  };
+  const result = resolveWorkerReadiness(input({
+    providers,
+    runtimes: {
+      "claude-code": { ok: true },
+      "grok-build": { ok: true },
+      "codex-cli": { ok: true },
+    },
+    workerProfiles: {
+      defaultProfileId: "codex-worker",
+      profiles: [{
+        id: "codex-worker",
+        label: "Codex Worker",
+        runtime: "codex-cli",
+        modelConfigId: "codex-model",
+        effort: "max",
+      }],
+    },
+    modelCatalog: {
+      models: [{
+        id: "codex-model",
+        label: "Codex Luna",
+        provider: "openai",
+        model: "gpt-5.6-luna",
+        endpoint: "https://api.openai.com/v1",
+        supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+      }],
+    },
+  }))[0]!;
+  assert.equal(result.state, "launchable");
+  assert.equal(result.canLaunch, true);
+  assert.equal(result.reason, "connection-unverified");
+  assert.equal(result.nextAction, "run-smoke-check");
+  assert.equal(result.runtime, "codex-cli");
+  assert.equal(result.provider, "openai");
+  assert.equal(result.model, "gpt-5.6-luna");
+  assert.equal(result.checks.authentication, "local-sign-in");
+  assert.equal(result.checks.runtime, "ready");
+  assert.equal(JSON.stringify(result).includes("endpoint"), false, "readiness never exposes endpoints");
+  assert.equal(JSON.stringify(result).includes("keychainService"), false);
+});
+
+// --- Execution preference / resolved mode (FL-104) ---
+
+function codexReadyInput(): WorkerReadinessInput {
+  const defaults = cloneDefaults();
+  const providers = providerEvidence();
+  providers.openai = {
+    ready: true,
+    authMode: "local-sign-in",
+    endpoint: defaults.providerDefaults.openai.defaultEndpoint,
+    defaultModel: defaults.providerDefaults.openai.defaultModel,
+    keychainService: defaults.providerDefaults.openai.defaultKeychainService,
+  };
+  return {
+    workerProfiles: {
+      defaultProfileId: "codex-worker",
+      profiles: [{
+        id: "codex-worker",
+        label: "Codex Worker",
+        runtime: "codex-cli",
+        modelConfigId: "codex-model",
+        effort: "max",
+        executionPreference: "auto",
+      }],
+    },
+    modelCatalog: {
+      models: [{
+        id: "codex-model",
+        label: "Codex Luna",
+        provider: "openai",
+        model: "gpt-5.6-luna",
+        endpoint: "https://api.openai.com/v1",
+        supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+      }],
+    },
+    providerDefaults: defaults.providerDefaults,
+    providers,
+    runtimes: {
+      "claude-code": { ok: true },
+      "grok-build": { ok: true },
+      "codex-cli": { ok: true },
+    },
+    providerVerification: {
+      openai: { status: "verified" },
+    },
+  };
+}
+
+test("auto Codex Worker resolves native-goal and projects the resolved mode", () => {
+  const result = resolveWorkerReadiness(codexReadyInput())[0]!;
+  assert.equal(result.state, "ready");
+  assert.equal(result.executionPreference, "auto");
+  assert.equal(result.resolvedExecutionMode, "native-goal");
+  assert.equal(result.checks.nativeGoal, "ready");
+});
+
+test("auto unsupported Runtime resolves single-run and explains it", () => {
+  // A Grok Worker with auto preference has no proven native Goal contract.
+  const result = resolveWorkerReadiness(input())[1]!;
+  assert.equal(result.workerId, "grok-worker");
+  assert.equal(result.executionPreference, "auto");
+  assert.equal(result.resolvedExecutionMode, "single-run");
+  assert.equal(result.checks.nativeGoal, "unsupported");
+});
+
+test("forced native-goal on an unsupported Runtime fails closed", () => {
+  const forced = input();
+  forced.workerProfiles = {
+    defaultProfileId: "forced",
+    profiles: [{
+      id: "forced",
+      label: "Forced native Goal",
+      runtime: "grok-build",
+      modelConfigId: "xai-model",
+      executionPreference: "native-goal",
+    }],
+  };
+  const result = resolveWorkerReadiness(forced)[0]!;
+  assert.equal(result.state, "blocked");
+  assert.equal(result.canLaunch, false);
+  assert.equal(result.reason, "native-goal-unsupported");
+  assert.equal(result.nextAction, "choose-execution-mode");
+  assert.equal(result.resolvedExecutionMode, "native-goal");
+  assert.equal(result.checks.nativeGoal, "unsupported");
+});
+
+test("legacy profile without a preference stays single-run", () => {
+  const result = resolveWorkerReadiness(input())[0]!;
+  assert.equal(result.executionPreference, "single-run");
+  assert.equal(result.resolvedExecutionMode, "single-run");
 });

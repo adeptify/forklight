@@ -55,16 +55,30 @@ test("Grok thought/text normalize to distinct activityKind without requiring pro
   const thoughtPayload = thought[0]?.payload as Record<string, unknown>;
   assert.equal(thoughtPayload.activityKind, "model-processing");
   assert.equal(thoughtPayload.streamType, "thought");
+  // Genuine Grok stream deltas are effective progress (unlike Claude thinking_tokens).
+  assert.equal(thoughtPayload.activityEvidence, "effective-progress");
   assert.ok(!thought[0]?.summary.includes("SECRET_PATH"));
 
   // Grok thinking is also model-processing, not model-response.
   clock = 15_000;
   const thinking = n.parseLine(JSON.stringify({ type: "thinking", data: "plan..." }));
   assert.equal((thinking[0]?.payload as Record<string, unknown>).activityKind, "model-processing");
+  assert.equal(
+    (thinking[0]?.payload as Record<string, unknown>).activityEvidence,
+    "effective-progress",
+  );
 
   // Grok text is visible model response — distinct from thought/thinking.
   const text = n.parseLine(JSON.stringify({ type: "text", data: "visible" }));
   assert.equal((text[0]?.payload as Record<string, unknown>).activityKind, "model-response");
+  assert.equal(
+    (text[0]?.payload as Record<string, unknown>).activityEvidence,
+    "effective-progress",
+  );
+
+  // Launch/session/keepalive-style records are liveness only.
+  const keep = n.parseLine(JSON.stringify({ type: "session", message: "ready" }));
+  assert.equal((keep[0]?.payload as Record<string, unknown>).activityEvidence, "liveness");
 });
 
 test("Grok processing markers are throttled before durable persistence", () => {

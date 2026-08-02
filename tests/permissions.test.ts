@@ -8,6 +8,7 @@ import {
   allowedToolArguments,
   interruptedExitCode,
   runtimeTemporaryDirectory,
+  runtimeTemporaryDirectoryAliases,
   workerLaunch,
 } from "../src/workers/claude.js";
 
@@ -43,6 +44,15 @@ test("Claude Worker canonicalizes its runtime temp directory for the macOS sandb
   assert.equal(
     runtimeTemporaryDirectory({ TMPDIR: "/tmp" }),
     realpathSync("/tmp"),
+  );
+  assert.deepEqual(
+    runtimeTemporaryDirectoryAliases({ TMPDIR: "/tmp" }),
+    [
+      "/tmp",
+      realpathSync("/tmp"),
+      `/tmp/claude-${process.getuid?.() ?? 0}`,
+      `${realpathSync("/tmp")}/claude-${process.getuid?.() ?? 0}`,
+    ],
   );
 });
 
@@ -114,6 +124,8 @@ test("macOS Worker launch restricts writes to task-owned directories", { skip: p
   assert.match(profile, /\(deny file-read\*/);
   assert.match(profile, /forklight-task\/workspace/);
   assert.match(profile, /forklight-task\/claude-config/);
+  assert.match(profile, new RegExp(`\\(subpath "\\/tmp\\/claude-${process.getuid?.() ?? 0}"\\)`));
+  assert.match(profile, new RegExp(`\\(subpath "\\/private\\/tmp\\/claude-${process.getuid?.() ?? 0}"\\)`));
   assert.match(profile, /daemon\/protocol\.ts/);
   assert.match(profile, /core\/build-identity\.ts/);
   assert.match(profile, /forklight\.sock/);

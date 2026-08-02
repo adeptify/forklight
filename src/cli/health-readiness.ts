@@ -116,6 +116,10 @@ export interface WorkerReadinessJsonEntry {
   runtime: RuntimeName;
   provider?: ProviderName;
   model?: string;
+  /** Requested execution preference (single-run for legacy). */
+  executionPreference: WorkerReadinessResult["executionPreference"];
+  /** Resolved execution mode (auto already resolved). */
+  resolvedExecutionMode: WorkerReadinessResult["resolvedExecutionMode"];
 }
 
 export function projectWorkerReadinessJson(
@@ -131,6 +135,8 @@ export function projectWorkerReadinessJson(
     runtime: result.runtime,
     ...(result.provider === undefined ? {} : { provider: result.provider }),
     ...(result.model === undefined ? {} : { model: result.model }),
+    executionPreference: result.executionPreference,
+    resolvedExecutionMode: result.resolvedExecutionMode,
   }));
 }
 
@@ -148,6 +154,7 @@ export function humanWorkerReadinessLines(
     lines.push(`  - ${identity}: ${result.state} [canLaunch=${result.canLaunch}]`);
     const binding = describeEffectiveBinding(result);
     if (binding !== undefined) lines.push(`    binding: ${binding}`);
+    lines.push(`    execution: ${result.executionPreference} -> ${result.resolvedExecutionMode}`);
     lines.push(`    reason: ${describeReason(result.reason)}`);
     lines.push(`    next: ${describeNextAction(result.nextAction)}`);
   }
@@ -184,6 +191,8 @@ export function describeReason(reason: WorkerReadinessResult["reason"]): string 
       return "Provider is not compatible with the runtime";
     case "model-invalid":
       return "saved model is missing or invalid";
+    case "native-goal-unsupported":
+      return "the Runtime cannot prove a native Goal for the forced mode";
   }
 }
 
@@ -203,5 +212,7 @@ export function describeNextAction(action: WorkerReadinessResult["nextAction"]):
       return "change the Worker to a compatible Provider/runtime pair";
     case "choose-model":
       return "choose a valid model for this Worker";
+    case "choose-execution-mode":
+      return "choose auto, one normal run, or a Runtime-native Goal";
   }
 }

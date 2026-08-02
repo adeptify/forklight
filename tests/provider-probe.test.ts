@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp } from "node:fs/promises";
+import { access, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -16,7 +16,11 @@ import {
   type KeychainReader,
   type Clock,
 } from "../src/core/provider-probe.js";
-import { resolveProvider, type ProviderName } from "../src/core/providers.js";
+import {
+  hasLocalCodexSignIn,
+  resolveProvider,
+  type ProviderName,
+} from "../src/core/providers.js";
 
 // --- Test helpers ---
 
@@ -667,4 +671,30 @@ test("worker-run evidence supersedes older explicit-probe evidence for the same 
   assert.equal(status.status, "verified");
   assert.equal(status.evidence?.source, "worker-run");
   assert.equal(status.evidence?.status, "verified");
+});
+
+// --- Codex local sign-in readiness (symlink fail-closed) ---
+
+test("hasLocalCodexSignIn fails closed on a symlinked auth file", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-codex-signin-"));
+  const target = path.join(root, "real-auth.json");
+  await writeFile(target, '{"private":"credential"}', { mode: 0o600 });
+
+  const goodHome = path.join(root, "good");
+  await mkdir(goodHome);
+  await writeFile(path.join(goodHome, "auth.json"), '{"private":"credential"}', { mode: 0o600 });
+  assert.equal(hasLocalCodexSignIn(goodHome), true, "regular non-empty auth file is ready");
+
+  const linkedHome = path.join(root, "linked");
+  await mkdir(linkedHome);
+  await symlink(target, path.join(linkedHome, "auth.json"));
+  assert.equal(
+    hasLocalCodexSignIn(linkedHome),
+    false,
+    "a symlinked auth file must not count as local sign-in because the task-local seed copies only regular files",
+  );
+
+  const emptyHome = path.join(root, "empty");
+  await mkdir(emptyHome);
+  assert.equal(hasLocalCodexSignIn(emptyHome), false, "missing auth file is not ready");
 });

@@ -66,6 +66,8 @@ export type DaemonMethod =
   | "goal_stop"
   | "goal_task_handoff"
   | "model_routing"
+  | "task_resolve"
+  | "task_reopen"
   | "main_direct_start"
   | "main_direct_complete"
   | "main_direct_status"

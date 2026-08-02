@@ -115,8 +115,7 @@ export function deriveEnforcementCapability(
       ? "unsupported"
       : "post-observation",
     progressWatchdog:
-      capabilities.progressHeartbeat === "any-nonterminal-stream-event"
-        || capabilities.progressHeartbeat === "tool-lifecycle"
+      capabilities.progressHeartbeat === "effective-progress"
         ? "live"
         : "terminal",
   };

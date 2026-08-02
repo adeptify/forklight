@@ -12,6 +12,11 @@ import {
   type StatisticsFilter,
 } from "../core/statistics.js";
 import type { AttemptAuthorization, TaskStatus } from "../core/types.js";
+import {
+  isTaskResolutionReason,
+  TASK_RESOLUTION_EVIDENCE_ID_MAX_LENGTH,
+  TASK_RESOLUTION_NOTE_MAX_LENGTH,
+} from "../core/task-resolution.js";
 import { StateStore } from "../state/store.js";
 import { DaemonCoordinator } from "./coordinator.js";
 import type { TaskHistoryPageRequest } from "../core/task-history.js";
@@ -514,6 +519,58 @@ export class ForkLightDaemon {
         return this.coordinator.mainFailureAttributionProjection(
           requiredString(params.taskId, "taskId"),
         );
+      case "task_resolve": {
+        if (params.confirm !== true) throw new Error("task_resolve requires explicit confirm: true");
+        const reason = requiredString(params.reason, "reason");
+        if (!isTaskResolutionReason(reason)) {
+          throw new Error("reason must be a bounded resolution reason");
+        }
+        const note = (() => {
+          if (params.note === undefined) return undefined;
+          if (typeof params.note !== "string") throw new Error("note must be a string when provided");
+          const trimmed = params.note.trim();
+          if (trimmed.length > TASK_RESOLUTION_NOTE_MAX_LENGTH) {
+            throw new Error(`note must be at most ${TASK_RESOLUTION_NOTE_MAX_LENGTH} characters`);
+          }
+          return trimmed.length > 0 ? trimmed : undefined;
+        })();
+        const evidenceTaskId = params.evidenceTaskId === undefined
+          ? undefined
+          : requiredString(params.evidenceTaskId, "evidenceTaskId").trim();
+        if (
+          evidenceTaskId !== undefined
+          && (evidenceTaskId.length < 1
+            || evidenceTaskId.length > TASK_RESOLUTION_EVIDENCE_ID_MAX_LENGTH)
+        ) {
+          throw new Error(
+            `evidenceTaskId must be 1-${TASK_RESOLUTION_EVIDENCE_ID_MAX_LENGTH} characters`,
+          );
+        }
+        return this.coordinator.resolveTask(
+          requiredString(params.taskId, "taskId"),
+          reason,
+          note,
+          evidenceTaskId,
+          true,
+        );
+      }
+      case "task_reopen": {
+        if (params.confirm !== true) throw new Error("task_reopen requires explicit confirm: true");
+        const note = (() => {
+          if (params.note === undefined) return undefined;
+          if (typeof params.note !== "string") throw new Error("note must be a string when provided");
+          const trimmed = params.note.trim();
+          if (trimmed.length > TASK_RESOLUTION_NOTE_MAX_LENGTH) {
+            throw new Error(`note must be at most ${TASK_RESOLUTION_NOTE_MAX_LENGTH} characters`);
+          }
+          return trimmed.length > 0 ? trimmed : undefined;
+        })();
+        return this.coordinator.reopenTask(
+          requiredString(params.taskId, "taskId"),
+          note,
+          true,
+        );
+      }
       case "revise": {
         // Non-string feedback is routed through the shared eligibility
         // boundary as an empty string so checkReviseEligibility produces

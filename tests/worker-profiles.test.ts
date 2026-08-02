@@ -8,6 +8,7 @@ import test from "node:test";
 import { parseTaskSpec } from "../src/core/task.js";
 import { cloneDefaults, SettingsService } from "../src/core/settings.js";
 import {
+  defaultWorkerProfiles,
   resolveWorkerSelection,
   setDefaultWorkerProfile,
   upsertWorkerProfile,
@@ -774,4 +775,110 @@ test("SettingsService persists model catalog and worker profiles", async () => {
   } finally {
     store.close();
   }
+});
+
+// --- Execution preference (FL-104) ---
+
+test("worker profile validates executionPreference and threads it into resolution", () => {
+  const settings = cloneDefaults();
+  const catalog = upsertMC(settings.modelCatalog, {
+    id: "codex-luna",
+    label: "Codex Luna",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    endpoint: "https://api.openai.com/v1",
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+  });
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "codex-auto",
+    label: "Codex Auto",
+    runtime: "codex-cli",
+    modelConfigId: "codex-luna",
+    effort: "high",
+    executionPreference: "auto",
+  }, catalog);
+  const resolved = resolveWorkerSelection({ workerProfileId: "codex-auto" }, {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles: profiles,
+    modelCatalog: catalog,
+  });
+  assert.equal(resolved.executionPreference, "auto");
+});
+
+test("legacy worker profile without executionPreference preserves single-run", () => {
+  const settings = cloneDefaults();
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "legacy-ex",
+    label: "Legacy",
+    runtime: "claude-code",
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+  }, settings.modelCatalog);
+  const resolved = resolveWorkerSelection({ workerProfileId: "legacy-ex" }, {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles: profiles,
+    modelCatalog: settings.modelCatalog,
+  });
+  assert.equal(resolved.executionPreference, undefined);
+});
+
+test("forced native-goal profile on an unsupported Runtime fails validation", () => {
+  assert.throws(
+    () => validateWorkerProfile({
+      id: "bad-native",
+      label: "Bad native",
+      runtime: "grok-build",
+      provider: "xai",
+      model: "grok-4.5",
+      executionPreference: "native-goal",
+    } as unknown as WorkerProfile, "workerProfile", cloneDefaults().modelCatalog),
+    /native-goal.*proven native Goal contract/,
+  );
+  assert.throws(
+    () => validateWorkerProfile({
+      id: "bad-value",
+      label: "Bad value",
+      runtime: "claude-code",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      executionPreference: "goal-magic",
+    } as unknown as WorkerProfile, "workerProfile", cloneDefaults().modelCatalog),
+    /executionPreference must be auto, single-run, or native-goal/,
+  );
+});
+
+test("forced native-goal profile on Codex is accepted", () => {
+  const settings = cloneDefaults();
+  const catalog = upsertMC(settings.modelCatalog, {
+    id: "codex-luna",
+    label: "Codex Luna",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    endpoint: "https://api.openai.com/v1",
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+  });
+  const validated = validateWorkerProfile({
+    id: "codex-native",
+    label: "Codex Native",
+    runtime: "codex-cli",
+    modelConfigId: "codex-luna",
+    effort: "high",
+    executionPreference: "native-goal",
+  }, "workerProfile", catalog);
+  assert.equal(validated.executionPreference, "native-goal");
+});
+
+test("default Worker Profile defaults to auto execution", () => {
+  const settings = cloneDefaults();
+  const profiles = defaultWorkerProfiles(
+    settings.execution,
+    settings.providerDefaults,
+    settings.modelCatalog,
+  );
+  assert.equal(
+    profiles.profiles.find((profile) => profile.id === "default")?.executionPreference,
+    "auto",
+  );
 });

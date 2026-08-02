@@ -17,6 +17,7 @@ import {
 import { checkpointLaunch } from "../core/checkpoint.js";
 import { providerEnvironment, resolveProvider } from "../core/providers.js";
 import { readProviderKey } from "../core/secrets.js";
+import { isEffectiveProgressEvent } from "../core/runtime-activity.js";
 import { ClaudeEventNormalizer } from "../events/normalize.js";
 import { cloneDefaults, type ExecutionSettings, type ProviderDefaultSettings } from "../core/settings.js";
 import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
@@ -161,6 +162,19 @@ export function runtimeTemporaryDirectory(
   return realpathSync(environment.TMPDIR ?? "/tmp");
 }
 
+export function runtimeTemporaryDirectoryAliases(
+  environment: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const configured = environment.TMPDIR ?? "/tmp";
+  const claudeTemporaryName = `claude-${process.getuid?.() ?? 0}`;
+  return [...new Set([
+    configured,
+    realpathSync(configured),
+    path.join("/tmp", claudeTemporaryName),
+    path.join(realpathSync("/tmp"), claudeTemporaryName),
+  ])];
+}
+
 function sandboxLiteral(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
@@ -222,7 +236,7 @@ export function workerLaunch(task: TaskRecord, claudeArgs: string[]): WorkerLaun
 
   const executable = executablePath(task.spec.runtime.executable);
   const runtimeDirectory = path.dirname(executable);
-  const temporaryDirectory = runtimeTemporaryDirectory();
+  const temporaryDirectories = runtimeTemporaryDirectoryAliases();
   const checkpointReadPaths = checkpointRuntimeReadPaths(task);
   const checkpointReadRules = [
     ...checkpointReadPaths.map(
@@ -238,7 +252,11 @@ export function workerLaunch(task: TaskRecord, claudeArgs: string[]): WorkerLaun
     .join("\n");
   const home = path.dirname(path.dirname(task.paths.root));
   const socketPath = daemonSocketPath(home);
-  const writablePaths = [task.paths.workspace, task.paths.claudeConfig, temporaryDirectory];
+  // Some Claude Code internals still create `/tmp/claude-<uid>` even when
+  // TMPDIR points elsewhere. sandbox-exec evaluates that not-yet-created
+  // literal path before resolving the symlink, so allow only that UID-scoped
+  // runtime directory under both `/tmp` spellings, alongside configured TMPDIR.
+  const writablePaths = [task.paths.workspace, task.paths.claudeConfig, ...temporaryDirectories];
   const writeRules = writablePaths
     .map((writablePath) => `  (subpath "${sandboxLiteral(writablePath)}")`)
     .concat(`  (literal "${sandboxLiteral(socketPath)}")`)
@@ -440,8 +458,9 @@ export async function runClaudeWorker(
           watchdogTimer = undefined;
         }
       }
-      // Only normalized tool lifecycle resets the watchdog, never narration.
-      if (event.type === "worker.tool.started" || event.type === "worker.tool.completed") {
+      // Reset only on closed effective progress (visible response, tool
+      // lifecycle). Liveness-only thinking_tokens never defeat the stop.
+      if (isEffectiveProgressEvent(event.type, event.payload)) {
         scheduleWatchdog();
       }
       if (event.terminal && hooks.wasInterrupted?.() === true) continue;
@@ -472,14 +491,14 @@ export async function runClaudeWorker(
       status: "failed",
       exitCode: interruptedExitCode(outcome.code),
       ...terminalFields(terminal),
-      error: "No effective implementation progress detected within the configured interval; worker was terminated by the progress watchdog",
+      error: "No effective progress detected within the configured interval; worker was terminated by the no-effective-progress stop",
       policyLimit: {
         category: "no-progress",
         enforcementPhase: "preemptive",
         configured: noProgressTimeoutMs,
         observed: noProgressTimeoutMs ?? 0,
         effect: "hard-fail",
-        detail: "Worker reached the configured no-progress interval and was terminated",
+        detail: "Worker reached the configured no-effective-progress interval and was terminated",
       },
     };
   }
@@ -530,8 +549,9 @@ const CLAUDE_CAPABILITIES: WorkerCapabilityMatrix = {
   effortMapping: "supported",
   costUsageFidelity: "partial",
   sessionResume: "supported",
+  nativeGoal: "unsupported",
   streamingEvents: "supported",
-  progressHeartbeat: "tool-lifecycle",
+  progressHeartbeat: "effective-progress",
 };
 
 /** Claude Code WorkerAdapter — thin wrap around runClaudeWorker. */

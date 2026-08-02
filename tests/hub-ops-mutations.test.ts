@@ -101,7 +101,7 @@ async function makeOpsHub(options: { guidedSample?: boolean } = {}) {
             const defaults = settings.get().providerDefaults;
             const providers = Object.fromEntries(providerNames().map((name) => [name, {
               ready: true,
-              authMode: name === "xai" ? "local-sign-in" : "api-key",
+              authMode: name === "xai" || name === "openai" ? "local-sign-in" : "api-key",
               endpoint: defaults[name].defaultEndpoint,
               defaultModel: defaults[name].defaultModel,
               keychainService: defaults[name].defaultKeychainService,
@@ -285,6 +285,38 @@ async function makeOpsHub(options: { guidedSample?: boolean } = {}) {
       if (method === "revise") return { id: params.taskId, status: "queued" } as T;
       if (method === "correct") return { id: params.taskId, status: "queued" } as T;
       if (method === "main_review") return { ok: true, decision: params.decision } as T;
+      if (method === "task_resolve") {
+        if (params.confirm !== true) throw new Error("task_resolve requires explicit confirm: true");
+        return {
+          taskId: params.taskId,
+          existing: false,
+          state: {
+            status: "resolved",
+            reason: params.reason,
+            ...(params.note === undefined ? {} : { note: params.note }),
+            ...(params.evidenceTaskId === undefined ? {} : { evidenceTaskId: params.evidenceTaskId }),
+            resolvedAt: "2026-07-31T00:00:00.000Z",
+            eventSequence: 9,
+          },
+          boardScope: "history",
+          boardReason: "attention-resolved",
+        } as T;
+      }
+      if (method === "task_reopen") {
+        if (params.confirm !== true) throw new Error("task_reopen requires explicit confirm: true");
+        return {
+          taskId: params.taskId,
+          existing: false,
+          state: {
+            status: "reopened",
+            ...(params.note === undefined ? {} : { note: params.note }),
+            reopenedAt: "2026-07-31T00:00:00.000Z",
+            eventSequence: 10,
+          },
+          boardScope: "now",
+          boardReason: "unresolved-failure",
+        } as T;
+      }
       if (method === "review_graph_create") {
         if (params.confirm !== true) throw new Error("review_graph_create requires confirm: true");
         return {
@@ -1566,6 +1598,77 @@ test("main_review requires confirm and valid decision", async () => {
     assert.ok(call);
     assert.equal(call!.params.confirm, true);
     assert.equal(call!.params.decision, "accept");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("resolve and reopen routes require confirm and forward bounded inputs", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const noConfirm = await doHttp(`${ctx.base}/api/ops/tasks/t1/resolve`, "POST", ctx.token, {
+      reason: "environment-recovered",
+      note: "env fixed",
+    });
+    assert.equal(noConfirm.status, 422);
+
+    const badReason = await doHttp(`${ctx.base}/api/ops/tasks/t1/resolve`, "POST", ctx.token, {
+      reason: "auto-fixed",
+      note: "x",
+      confirm: true,
+    });
+    assert.equal(badReason.status, 422);
+
+    // Empty/whitespace note is allowed and forwarded without a note field.
+    const emptyNote = await doHttp(`${ctx.base}/api/ops/tasks/t1/resolve`, "POST", ctx.token, {
+      reason: "environment-recovered",
+      note: "   ",
+      confirm: true,
+    });
+    assert.equal(emptyNote.status, 200);
+    const emptyNoteCall = ctx.calls.find((c) => c.method === "task_resolve");
+    assert.ok(emptyNoteCall);
+    assert.equal(emptyNoteCall!.params.note, undefined, "empty note is omitted");
+
+    // Overlong note fails before any daemon call.
+    const overlongNote = await doHttp(`${ctx.base}/api/ops/tasks/t1/resolve`, "POST", ctx.token, {
+      reason: "environment-recovered",
+      note: "x".repeat(501),
+      confirm: true,
+    });
+    assert.equal(overlongNote.status, 422);
+    const callsBeforeOk = ctx.calls.filter((c) => c.method === "task_resolve").length;
+
+    const ok = await doHttp(`${ctx.base}/api/ops/tasks/t1/resolve`, "POST", ctx.token, {
+      reason: "environment-recovered",
+      note: "env fixed by recovery",
+      evidenceTaskId: "22222222-2222-4222-8222-222222222222",
+      confirm: true,
+    });
+    assert.equal(ok.status, 200);
+    const call = ctx.calls.filter((c) => c.method === "task_resolve").at(-1);
+    assert.ok(call);
+    assert.equal(call!.params.confirm, true);
+    assert.equal(call!.params.reason, "environment-recovered");
+    assert.equal(call!.params.note, "env fixed by recovery");
+    assert.equal(call!.params.evidenceTaskId, "22222222-2222-4222-8222-222222222222");
+    assert.equal(ctx.calls.filter((c) => c.method === "task_resolve").length, callsBeforeOk + 1,
+      "overlong note made no daemon call");
+
+    const reopenNoConfirm = await doHttp(`${ctx.base}/api/ops/tasks/t1/reopen`, "POST", ctx.token, {
+      note: "again",
+    });
+    assert.equal(reopenNoConfirm.status, 422);
+
+    const reopenOk = await doHttp(`${ctx.base}/api/ops/tasks/t1/reopen`, "POST", ctx.token, {
+      note: "actionable again",
+      confirm: true,
+    });
+    assert.equal(reopenOk.status, 200);
+    const reopenCall = ctx.calls.find((c) => c.method === "task_reopen");
+    assert.ok(reopenCall);
+    assert.equal(reopenCall!.params.confirm, true);
+    assert.equal(reopenCall!.params.note, "actionable again");
   } finally {
     await ctx.cleanup();
   }

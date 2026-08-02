@@ -1,0 +1,185 @@
+version: 2
+name: "Dogfood hardening: review and complete the Codex Worker Runtime foundation with DeepSeek"
+project: ../..
+taskClass: m3-codex-runtime-hardening
+taskFamily: worker-runtime
+directCodexProfileId: codex-cli-gpt-5.6-sol-xhigh
+workerProfileId: deepseek-flash-1m
+routingDecision:
+  taskFamily: worker-runtime
+  shortlist:
+    - provider: xai
+      model: grok-4.5
+      runtime: grok-build
+      effort: high
+      workerProfileId: local-grok-builder
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: availability-fallback
+    note: Main fixed the proven UID-scoped Claude Code temp-directory launch denial after DeepSeek failed before Candidate creation. DeepSeek Flash now retries the same implementation contract; Grok remains unavailable due Provider proxy connectivity.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      local-grok-builder: 0
+      deepseek-flash-1m: 0
+
+contract:
+  outcome: >-
+    Review the already-present Codex CLI Worker Runtime foundation as an independent
+    implementer, fix concrete correctness, isolation, readiness, event-normalization,
+    and UI/profile defects, and add missing deterministic coverage so Main can judge
+    one coherent Candidate instead of directly implementing the remaining work.
+  presentation:
+    summary: 独立检查并补完 Codex Worker，让它可配置、可启动、可观察、失败时讲得清楚，同时不扩大 Worker 权限。
+    language: zh-CN
+  context:
+    - The source snapshot already contains an uncommitted Main bootstrap implementation; treat it as input, not as proof of correctness.
+    - Follow docs/m3-codex-worker-runtime-foundation-contract.md exactly.
+    - PROJECT.md is the sole project-management source and must not be edited by this Worker.
+    - Do not spend Codex runtime quota and do not run a live Codex model call; all runtime tests must use deterministic fixtures or fake processes.
+  inScope:
+    - Audit and correct the OpenAI/Codex runtime/provider/profile compatibility boundary.
+    - Audit task-local auth/catalog seeding, process arguments, environment removal, interruption, and cleanup.
+    - Audit strict JSONL normalization, terminal state, session identity, progress, result, and exact Token accounting.
+    - Complete model/effort import and saved-profile behavior in the Hub without exposing local account, auth, prompts, paths, or raw cache.
+    - Add deterministic adapter/readiness/Hub regressions for defects or missing behavior found during the audit.
+    - Run the focused tests, build, full suite, and diff hygiene once after implementation.
+  outOfScope:
+    - No live Codex request, native Goal mode, resume, pricing, Competition redesign, Integration execution, commit, push, or non-ForkLight edits.
+    - Do not edit PROJECT.md, AGENTS.md, package lockfiles, generated dist files, or existing Provider credentials.
+    - Do not enable ultra, web, apps, MCP, plugins, nested agents, danger-full-access, user config, or extra writable roots.
+  executionSteps:
+    - Read the contract and trace current bootstrap code from Profile resolution through Runner and event persistence.
+    - Write down concrete defects or uncovered requirements before changing code.
+    - Fix only evidenced gaps and add focused deterministic tests beside each fix.
+    - Verify no secrets, raw cache, account metadata, prompt content, or private task paths reach public Hub/events.
+    - Run focused tests, build, full suite, and git diff --check; report remaining limitations honestly.
+  deliverables:
+    - One focused Candidate containing only necessary Codex Runtime hardening changes.
+    - Deterministic regression evidence for launch arguments, isolation, normalization, readiness, model effort, and Hub profile setup.
+    - A concise final result listing defects fixed, verification run, and any intentionally deferred gaps.
+  modules:
+    - name: Codex identity and readiness
+      responsibility: Validate exact runtime/provider/model/effort identity and prove local sign-in without accepting an API-key fallback.
+      consumes:
+        - Saved model config, Worker Profile, local Codex sign-in metadata, and runtime doctor result.
+      produces:
+        - A launchable immutable identity or a bounded actionable readiness error.
+      boundaries:
+        - No silent model/effort fallback and no exposure of local auth content or account identity.
+    - name: Codex isolated execution
+      responsibility: Seed the minimum private runtime state and launch one non-interactive Codex process inside the isolated Task workspace.
+      consumes:
+        - Frozen Task identity, prompt, workspace path, task-private root, and runner interruption hooks.
+      produces:
+        - Streamed private runtime output plus normalized public lifecycle evidence.
+      boundaries:
+        - No user config/rules, web, apps, MCP, nested agents, extra roots, commit, push, Main review, or Integration authority.
+    - name: Codex evidence and Hub setup
+      responsibility: Normalize lifecycle/usage and let a user import safe model metadata and save a compatible Worker Profile.
+      consumes:
+        - Codex JSONL fixtures and a bounded local model-cache projection.
+      produces:
+        - Human-readable Task evidence and a valid Codex Worker Profile with supported effort choices.
+      boundaries:
+        - Missing usage stays unavailable; malformed/duplicate terminal data fails closed; private fields never enter settings or public responses.
+  callChain:
+    - Hub imports a safe Codex catalog projection and saves a compatible Codex Worker Profile.
+    - Task creation freezes provider, runtime, exact model, supported effort, and local-sign-in readiness.
+    - Runner resolves the registered Codex adapter and creates a task-private runtime home.
+    - Adapter launches Codex with least privilege and streams JSONL into the normalizer.
+    - Normalizer emits existing Worker events/result/usage for verifier and Main review without changing authority.
+  scenarios:
+    - name: Valid max-effort profile
+      given: A visible local Codex model explicitly supports max and local sign-in is readable.
+      when: The user imports the catalog, saves the Profile, and creates a Task.
+      then: The exact model and max effort are frozen and the runtime is launch-ready without an OpenAI API key.
+    - name: Unsupported or private configuration
+      given: Ultra, an unsupported effort, malformed cache data, a symlinked auth file, or an incompatible runtime/provider pair.
+      when: Import, Profile validation, readiness, or launch occurs.
+      then: The operation fails closed with a bounded explanation and no Task starts with substituted settings.
+    - name: Successful isolated stream
+      given: A deterministic JSONL stream with session, tool progress, message, terminal result, and usage.
+      when: The fake Codex process completes.
+      then: Public events are readable, exact usage is counted once, and no secret/path/raw cache data is exposed.
+    - name: Failed or interrupted stream
+      given: Malformed JSONL, duplicate terminal records, turn.failed, no progress, or Main interruption.
+      when: The adapter supervises the fake process.
+      then: It exits once with a truthful failure/interruption state, cleans private state, and never invents success or Tokens.
+  risks:
+    - A superficially valid CLI launch can still inherit operator authority; inspect the exact args, env, runtime home, and write boundary.
+    - Usage fields can be double-counted or guessed; preserve source semantics and explicitly represent unavailable data.
+    - Model cache formats can change; parse only bounded allowlisted fields and fail closed on ambiguous shape.
+  changeBudget:
+    maxFiles: 14
+    maxDiffLines: 2200
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 14
+  fileLimitMode: warn
+  changedLineLimit: 2200
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - target
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/workers
+    - src/events
+    - src/setup
+    - src/hub/server.ts
+    - src/hub/public
+    - src/cli
+    - tests
+acceptance:
+  criteria:
+    - Runtime/provider/model/effort identity is exact, fail-closed, and backward compatible.
+    - Codex launch and task-private seeding satisfy the documented least-privilege and privacy boundary.
+    - JSONL progress, terminal state, result, session id, and usage are normalized truthfully without guesses or double counting.
+    - Hub can import safe model metadata and save only compatible effort choices.
+    - Existing Claude and Grok behavior remains intact and all focused/full verification passes.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-runtime.test.ts tests/worker-profiles.test.ts tests/model-catalog.test.ts tests/provider-probe.test.ts tests/setup-doctor.test.ts
+    - npm run build
+    - npm test
+    - git diff --check
+deliveryProfileId: forklight-self-upgrade

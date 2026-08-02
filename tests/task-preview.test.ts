@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -1351,4 +1351,41 @@ test("human preview output renders the workspace boundary block without secrets"
   assert.match(human, /Next action: review-workspace-boundaries/);
   assert.ok(!human.includes("dist/"));
   assert.ok(!human.includes(project));
+});
+
+test("preview projects requested and resolved execution mode for auto Codex", async () => {
+  const base = cloneDefaults();
+  const catalog = upsertModelConfig(base.modelCatalog, {
+    id: "codex-preview-model",
+    label: "Codex Luna",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    endpoint: SECRET_ENDPOINT,
+  });
+  const profiles = upsertWorkerProfile(base.workerProfiles, {
+    id: "codex-preview",
+    label: "Codex Preview",
+    runtime: "codex-cli",
+    modelConfigId: "codex-preview-model",
+    effort: "max",
+    executionPreference: "auto",
+  }, catalog);
+  const settings = { ...base, modelCatalog: catalog, workerProfiles: profiles };
+  const { taskFile } = await writePreviewFixture({ workerProfileId: "codex-preview" });
+  const preview = await buildTaskAdmissionPreview(taskFile, settings);
+  assert.equal(preview.execution.preference, "auto");
+  assert.equal(preview.execution.mode, "native-goal");
+  assert.equal(preview.execution.nativeGoalSupported, true);
+  const human = formatTaskAdmissionPreviewHuman(preview);
+  assert.match(human, /Execution: requested=auto resolved=native-goal/);
+});
+
+test("forced native-goal preview fails closed on an unsupported Runtime", async () => {
+  const { taskFile } = await writePreviewFixture({ workerProfileId: "local-grok-builder" });
+  const yaml = await readFile(taskFile, "utf8") + "\nexecutionPreference: native-goal\n";
+  await writeFile(taskFile, yaml);
+  await assert.rejects(
+    () => buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder()),
+    /native-goal/,
+  );
 });

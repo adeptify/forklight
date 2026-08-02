@@ -26,6 +26,11 @@ import {
 } from "./contract-quality.js";
 import { assessIntegrationFeasibility, type IntegrationFeasibility } from "./integration-feasibility.js";
 import type { ForkLightSettings, TaskPolicy } from "./settings.js";
+import {
+  executionModeFromTaskSpec,
+  executionPreferenceFromTaskSpec,
+  nativeGoalSupportForRuntime,
+} from "./execution-mode.js";
 import { loadTaskSpec } from "./task.js";
 import {
   computeClassificationAdvice,
@@ -54,10 +59,12 @@ import type {
   AdvancedPolicyFields,
   EffectivePolicySnapshot,
   EnforcementCapability,
+  ExecutionPreference,
   PolicyMode,
   ProvenanceSource,
   QualityCheck,
   QualityReport,
+  ResolvedExecutionMode,
   TaskRecord,
   TaskSpec,
 } from "./types.js";
@@ -84,6 +91,14 @@ export interface SafeTaskAdmissionPreview {
   model: string;
   runtime: string;
   effort: string;
+  execution: {
+    /** Requested execution preference frozen at admission. */
+    preference: ExecutionPreference;
+    /** Effective execution mode (auto already resolved). */
+    mode: ResolvedExecutionMode;
+    /** Whether the selected Runtime proves a native Goal contract. */
+    nativeGoalSupported: boolean;
+  };
   budget: {
     maxBudgetUsd: number | null;
     unlimited: boolean;
@@ -319,6 +334,11 @@ export function projectSafeTaskAdmissionPreview(
     model: spec.provider.model,
     runtime: spec.runtime.name,
     effort: spec.runtime.effort,
+    execution: {
+      preference: executionPreferenceFromTaskSpec(spec),
+      mode: executionModeFromTaskSpec(spec),
+      nativeGoalSupported: nativeGoalSupportForRuntime(spec.runtime.name),
+    },
     budget: {
       maxBudgetUsd,
       unlimited: maxBudgetUsd === null,
@@ -379,6 +399,8 @@ function projectAdmissionRevisionFacts(input: {
       runtime: spec.runtime.name,
       effort: spec.runtime.effort,
       maxBudgetUsd: spec.runtime.maxBudgetUsd,
+      executionPreference: spec.executionPreference ?? "single-run",
+      executionMode: spec.executionMode ?? "single-run",
     },
     policy: {
       values,
@@ -511,6 +533,10 @@ export function formatTaskAdmissionPreviewHuman(preview: SafeTaskAdmissionPrevie
   lines.push(`Model: ${preview.model}`);
   lines.push(`Runtime: ${preview.runtime}`);
   lines.push(`Effort: ${preview.effort}`);
+  lines.push(
+    `Execution: requested=${preview.execution.preference} resolved=${preview.execution.mode}`
+    + ` (native Goal ${preview.execution.nativeGoalSupported ? "supported" : "unsupported"})`,
+  );
   lines.push(
     preview.budget.unlimited
       ? "Budget: unlimited"

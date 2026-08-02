@@ -662,6 +662,7 @@ button:focus-visible,
   background: var(--bg);
 }
 .history-group.tone-delivered .history-group-head { box-shadow: inset 0 -2px 0 var(--hi); }
+.history-group.tone-handled .history-group-head { box-shadow: inset 0 -2px 0 var(--hi2); }
 .history-group.tone-stopped .history-group-head { box-shadow: inset 0 -2px 0 var(--coral); }
 
 /* Deliberate History panel: explicit search form, Refresh, honest loaded/
@@ -975,6 +976,14 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   word-break: break-word;
 }
 .task-hero-failure-summary.dim { color: var(--muted); border-color: var(--line2); background: var(--bg2); }
+/* Attention resolution: handled banner and journey section accent. The
+ * original failure explanation stays below the handled banner. */
+.attention-handled-box {
+  background: var(--hi-soft);
+  border-color: color-mix(in srgb, var(--hi2) 30%, var(--line));
+}
+.attention-handled-box .task-report-hero-box-label { color: var(--hi2); }
+.attention-resolution-section .journey-section-title::before { background: var(--hi2); }
 /* Operations-first Overview */
 .ov-live-strip {
   display: flex;
@@ -1057,6 +1066,11 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   background: var(--red-soft);
   border: 1px solid color-mix(in srgb, var(--red) 28%, var(--line));
   color: var(--red);
+}
+.four-section-conclusion.handled {
+  background: var(--hi-soft);
+  border: 1px solid color-mix(in srgb, var(--hi2) 28%, var(--line));
+  color: var(--hi2);
 }
 .four-section-next {
   padding: 8px 12px;

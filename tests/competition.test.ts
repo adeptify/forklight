@@ -496,10 +496,21 @@ test("coordinator rejects all-or-nothing: duplicate candidates, blank model, cou
     await assert.rejects(
       () =>
         coordinator.create(baseSpec, "/test.yaml", [
-          { providerName: "openai", modelName: "gpt-4" },
+          { providerName: "not-a-provider", modelName: "gpt-4" },
           valid[0]!,
         ]),
       /Unsupported provider/,
+    );
+
+    // openai is a real provider but legacy candidates share the parent
+    // claude-code runtime, so the pairing must fail closed with a clear reason.
+    await assert.rejects(
+      () =>
+        coordinator.create(baseSpec, "/test.yaml", [
+          { providerName: "openai", modelName: "gpt-5.6-luna" },
+          valid[0]!,
+        ]),
+      /codex-cli/,
     );
 
     // Budget above maximum (default maximumBudgetUsd = 20)

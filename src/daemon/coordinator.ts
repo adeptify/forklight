@@ -193,7 +193,17 @@ import {
   type IntegrationOperationContext,
 } from "../core/integration-operation.js";
 import { buildTaskDecisionView } from "../core/task-decision-view.js";
-import { projectTaskSurface, type SafeTaskSummary } from "../core/task-summary.js";
+import {
+  projectTaskSurface,
+  type SafeTaskSummary,
+} from "../core/task-summary.js";
+import {
+  latestTaskResolutionState,
+  reopenTaskResolution,
+  resolveTaskResolution,
+  type TaskResolutionReason,
+  type TaskResolutionState,
+} from "../core/task-resolution.js";
 import { paginateTaskHistory, type TaskHistoryPage, type TaskHistoryPageRequest } from "../core/task-history.js";
 import { isTerminalTaskStatus, toLatestEventMeta } from "../core/task-progress.js";
 import { failureCategoryForTask } from "../core/worker-failure.js";
@@ -317,13 +327,55 @@ function processExists(pid: number): boolean {
   }
 }
 
+/** Strip one matching surrounding quote pair from a ps command token so paths
+ *  containing spaces stay path-agnostic and the executable name is comparable. */
+function unquoteCommandToken(token: string): string {
+  if (token.length < 2) return token;
+  const first = token[0]!;
+  const last = token[token.length - 1]!;
+  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
+/**
+ * Bounded managed-Worker command classification used by the exact-PID shutdown
+ * and crash-recovery stop path. Only ForkLight-owned Worker launch shapes are
+ * classified; never enumerates processes, never broadens to unrelated daemon
+ * processes, and never matches the word "codex" in arbitrary arguments.
+ *
+ * Existing runtimes keep the pre-existing substring behavior: the claude and
+ * grok CLI binaries appear as the executable, and sandbox-exec is the macOS
+ * sandbox wrapper that launches them.
+ *
+ * Codex app-server is recognized by its executable shape plus the exact
+ * "app-server" subcommand, so any install path is covered and a process that
+ * merely mentions codex is never classified. A node/env interpreter indirection
+ * is accepted so the JS-shim installation shape is also recognized.
+ */
+export function isManagedWorkerCommand(command: string): boolean {
+  if (/(?:claude|grok|sandbox-exec)/i.test(command)) return true;
+  const tokens = command.trim().split(/\s+/).map(unquoteCommandToken);
+  if (!tokens.includes("app-server")) return false;
+  const executable = tokens[0] ?? "";
+  const executableName = path.basename(executable).toLowerCase();
+  if (executableName === "codex" || executableName === "codex.js") return true;
+  if (executableName === "node" || executableName === "env") {
+    const script = tokens[executableName === "env" ? 2 : 1] ?? "";
+    const scriptName = path.basename(script).toLowerCase();
+    return scriptName === "codex" || scriptName === "codex.js";
+  }
+  return false;
+}
+
 function looksLikeWorker(pid: number): boolean {
   try {
     const command = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    return /(?:claude|grok|sandbox-exec)/i.test(command);
+    return isManagedWorkerCommand(command);
   } catch {
     return false;
   }
@@ -1413,6 +1465,96 @@ export class DaemonCoordinator {
     );
   }
 
+  /** Delivery truth for the resolution Core: delivered/activated Integration
+   *  or verified repaired delivery. Computed once from the canonical Decision
+   *  View so the Core never depends on that module (no import cycle). */
+  private taskHasDeliveredOutcome(taskId: string): boolean {
+    const task = this.store.getTask(taskId);
+    const disposition = this.store.getRemediationDisposition(taskId);
+    if (disposition?.status === "verified-repaired-delivered") return true;
+    const stage = buildTaskDecisionView({
+      task,
+      attempts: this.store.listAttempts(taskId),
+      events: this.store.listEvents(taskId),
+      integrationResults: this.store.listIntegrationResults(taskId),
+      ...(disposition === undefined ? {} : { remediationDisposition: disposition }),
+    }).stage;
+    return stage === "delivered" || stage === "activated";
+  }
+
+  /**
+   * Main resolves a failed/interrupted Task as handled after the real-world
+   * problem has been fixed. Delegates all authority, eligibility, idempotency,
+   * and conflict semantics to the Core service; returns the closed result with
+   * the canonical board placement. Never changes machine status, delivery
+   * truth, review truth, or statistics.
+   */
+  resolveTask(
+    taskId: string,
+    reason: TaskResolutionReason,
+    note: string | undefined,
+    evidenceTaskId: string | undefined,
+    confirm: true,
+  ): {
+    taskId: string;
+    existing: boolean;
+    state: TaskResolutionState;
+    boardScope: import("../core/task-summary.js").BoardScope;
+    boardReason: import("../core/task-summary.js").BoardReason;
+  } {
+    if (confirm !== true) throw new Error("resolve requires explicit confirm: true");
+    const result = resolveTaskResolution(this.store, taskId, {
+      reason,
+      ...(note === undefined ? {} : { note }),
+      ...(evidenceTaskId === undefined ? {} : { evidenceTaskId }),
+      confirm,
+      delivered: this.taskHasDeliveredOutcome(taskId),
+    });
+    const task = this.store.getTask(taskId);
+    const summary = this.projectOneTaskSurface(task, Date.now());
+    return {
+      taskId,
+      existing: result.existing,
+      state: result.state,
+      boardScope: summary.boardScope ?? "now",
+      boardReason: summary.boardReason ?? "unresolved-failure",
+    };
+  }
+
+  /**
+   * Main explicitly reopens a handled failure, returning the unchanged
+   * failed/interrupted Task to Now. Delegates all authority, idempotency, and
+   * conflict semantics to the Core service. Reopen is rejected when the Task
+   * later gained delivered/activated/repaired-delivery truth.
+   */
+  reopenTask(
+    taskId: string,
+    note: string | undefined,
+    confirm: true,
+  ): {
+    taskId: string;
+    existing: boolean;
+    state: TaskResolutionState;
+    boardScope: import("../core/task-summary.js").BoardScope;
+    boardReason: import("../core/task-summary.js").BoardReason;
+  } {
+    if (confirm !== true) throw new Error("reopen requires explicit confirm: true");
+    const result = reopenTaskResolution(this.store, taskId, {
+      ...(note === undefined ? {} : { note }),
+      confirm,
+      delivered: this.taskHasDeliveredOutcome(taskId),
+    });
+    const task = this.store.getTask(taskId);
+    const summary = this.projectOneTaskSurface(task, Date.now());
+    return {
+      taskId,
+      existing: result.existing,
+      state: result.state,
+      boardScope: summary.boardScope ?? "now",
+      boardReason: summary.boardReason ?? "unresolved-failure",
+    };
+  }
+
   status(taskId: string): TaskRecord {
     return this.store.getTask(taskId);
   }
@@ -1820,6 +1962,7 @@ export class DaemonCoordinator {
       };
     }
     const reviewGraph = getReviewGraphStatus(this.store, taskId);
+    const attentionResolution = latestTaskResolutionState(events);
     return {
       task,
       attempts,
@@ -1835,6 +1978,12 @@ export class DaemonCoordinator {
       diff,
       ...(competitionContext === undefined ? {} : { competitionContext }),
       ...(reviewGraph === undefined ? {} : { reviewGraph }),
+      // Latest explicit Main attention resolution from durable events. Only
+      // failed/interrupted Tasks project it; forged evidence fails open.
+      ...(attentionResolution.status === "none"
+        || (task.status !== "failed" && task.status !== "interrupted")
+        ? {}
+        : { attentionResolution }),
     };
   }
 

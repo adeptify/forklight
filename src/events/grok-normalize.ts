@@ -1,12 +1,20 @@
 /**
  * Best-effort normalizer for Grok Build headless streaming-json lines.
- * Heartbeat policy (MVP): any non-terminal stream object resets progress.
+ *
+ * Genuine thought/text stream deltas are effective model progress. Launch,
+ * session, and keepalive-only records are Runtime liveness only. Classification
+ * is closed and content-free — never derived from summary prose.
  *
  * Text deltas are accumulated by the Grok adapter (bounded). Normal EndTurn
  * alone is not treated as useful result content — only explicit result fields
  * or the assembled text deltas become terminal resultText.
  */
 
+import {
+  RUNTIME_ACTIVITY_EFFECTIVE,
+  RUNTIME_ACTIVITY_LIVENESS,
+  withActivityEvidence,
+} from "../core/runtime-activity.js";
 import type { NormalizedWorkerEvent } from "../core/types.js";
 
 /** Hard bound for ordered Grok text-delta assembly (bytes of UTF-16 code units). */
@@ -152,8 +160,8 @@ export class GrokEventNormalizer {
     const lower = type.toLowerCase();
 
     // Live CLI streaming-json: thought / text deltas + end (OAuth dogfood 2026-07-25).
-    // activityKind is the only field live-stage needs; summaries remain human-readable
-    // and are never used for stage classification.
+    // activityKind drives live-stage; activityEvidence separates Runtime liveness
+    // from effective progress. Summaries are never used for classification.
     if (lower === "thought" || lower === "thinking") {
       const now = this.clock();
       if (
@@ -164,9 +172,12 @@ export class GrokEventNormalizer {
       return [{
         type: "worker.message",
         summary: "Model is actively processing",
-        // Grok thought/thinking is closed model-processing evidence; stage
-        // classification uses activityKind only — never reads prose.
-        payload: { streamType: type, activityKind: "model-processing" },
+        // Grok thought/thinking is genuine stream content: effective progress
+        // for the watchdog, while live-stage still shows model-processing.
+        payload: withActivityEvidence(
+          { streamType: type, activityKind: "model-processing" },
+          RUNTIME_ACTIVITY_EFFECTIVE,
+        ),
       }];
     }
     if (lower === "text") {
@@ -175,8 +186,11 @@ export class GrokEventNormalizer {
         type: "worker.message",
         summary: data.slice(0, 240) || "text",
         // Full delta is not stored in events; adapter accumulates from raw lines.
-        // Grok text is visible model response — distinct from processing/thought.
-        payload: { streamType: type, activityKind: "model-response" },
+        // Grok text is visible model response and effective progress.
+        payload: withActivityEvidence(
+          { streamType: type, activityKind: "model-response" },
+          RUNTIME_ACTIVITY_EFFECTIVE,
+        ),
       }];
     }
 
@@ -234,7 +248,7 @@ export class GrokEventNormalizer {
       return [{
         type: "worker.tool.started",
         summary: `Tool started: ${name}`,
-        payload: { tool: name },
+        payload: withActivityEvidence({ tool: name }, RUNTIME_ACTIVITY_EFFECTIVE),
       }];
     }
     if (lower.includes("tool") && (lower.includes("end") || lower.includes("complete") || lower.includes("result"))) {
@@ -246,7 +260,7 @@ export class GrokEventNormalizer {
       return [{
         type: "worker.tool.completed",
         summary: `Tool completed: ${name}`,
-        payload: { tool: name },
+        payload: withActivityEvidence({ tool: name }, RUNTIME_ACTIVITY_EFFECTIVE),
       }];
     }
 
@@ -255,10 +269,14 @@ export class GrokEventNormalizer {
       : typeof obj.message === "string"
         ? obj.message
         : type || "Grok stream event";
+    // Launch / session / keepalive-style records: Runtime liveness only.
     return [{
       type: "worker.message",
       summary: String(summary).slice(0, 240),
-      payload: { streamType: type || "unknown" },
+      payload: withActivityEvidence(
+        { streamType: type || "unknown" },
+        RUNTIME_ACTIVITY_LIVENESS,
+      ),
     }];
   }
 }

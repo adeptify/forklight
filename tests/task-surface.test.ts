@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { projectTaskSurface, projectBoardPlacement, isLegalBoardPlacement, BOARD_SCOPE_VALUES, BOARD_REASON_VALUES, BOARD_REASON_BY_SCOPE, type SafeTaskSummary, type BoardReason } from "../src/core/task-summary.js";
+import { buildTaskSummary, projectTaskSurface, projectBoardPlacement, isLegalBoardPlacement, BOARD_SCOPE_VALUES, BOARD_REASON_VALUES, BOARD_REASON_BY_SCOPE, type SafeTaskSummary, type BoardReason } from "../src/core/task-summary.js";
+import {
+  latestTaskResolutionState,
+  resolveTaskResolution,
+  reopenTaskResolution,
+  isTaskResolutionReason,
+  TASK_RESOLUTION_REASONS,
+} from "../src/core/task-resolution.js";
 import {
   paginateTaskHistory,
   normalizeHistoryQuery,
@@ -19,7 +26,13 @@ import {
   failureCategoryFromEvents,
 } from "../src/core/worker-failure.js";
 import { buildTaskDecisionView } from "../src/core/task-decision-view.js";
-import { buildStatusProgress, detectOpenFollowUp, isOpenFollowUpStage } from "../src/core/task-progress.js";
+import {
+  buildStatusProgress,
+  detectOpenFollowUp,
+  isOpenFollowUpStage,
+  projectDualClocks,
+} from "../src/core/task-progress.js";
+import { isEffectiveProgressEvent } from "../src/core/runtime-activity.js";
 import { reconcileTask } from "../src/core/runner.js";
 import type { AttemptRecord, EventRecord, RemediationDisposition, TaskRecord, TaskStatus } from "../src/core/types.js";
 import { StateStore } from "../src/state/store.js";
@@ -848,7 +861,282 @@ test("listTaskSurfaces exposes the same liveStage as Decision View", async () =>
   });
   assert.equal(view.progress.liveStage?.stage, surface.progress?.liveStage?.stage);
   assert.equal(view.progress.liveStage?.evidence, surface.progress?.liveStage?.evidence);
+  // Dual clocks are shared across list and Decision View surfaces.
+  assert.ok(surface.progress?.dualClock);
+  assert.ok(view.progress.dualClock);
+  assert.equal(
+    view.progress.dualClock?.latestEffectiveProgressAt,
+    surface.progress?.dualClock?.latestEffectiveProgressAt,
+  );
+  assert.equal(view.progress.dualClock?.effectiveProgressKnown, true);
   store.close();
+});
+
+// --- Dual-clock: Runtime liveness vs effective progress ---
+
+test("dualClock: liveness-only heartbeats advance Runtime signal but not effective progress", () => {
+  const base = Date.parse(TS);
+  const startAt = new Date(base).toISOString();
+  const heartbeatAt = new Date(base + 9 * 60_000).toISOString();
+  const events = [
+    { sequence: 1, timestamp: startAt, type: "worker.started" as const },
+    {
+      sequence: 2,
+      timestamp: new Date(base + 15_000).toISOString(),
+      type: "worker.message" as const,
+      payload: { activityKind: "model-processing", activityEvidence: "liveness" },
+    },
+    {
+      sequence: 3,
+      timestamp: heartbeatAt,
+      type: "worker.message" as const,
+      payload: { activityKind: "model-processing", activityEvidence: "liveness" },
+    },
+  ];
+  const nowMs = base + 9 * 60_000 + 1_000;
+  const dual = projectDualClocks(makeTask("t-dual-live", "running"), events, nowMs, 30_000);
+  assert.equal(dual.latestRuntimeSignalAt, heartbeatAt);
+  assert.equal(dual.latestEffectiveProgressAt, startAt, "progress stays at Worker start baseline");
+  assert.equal(dual.runtimeSignalObservation, "active");
+  assert.equal(dual.effectiveProgressObservation, "baseline");
+  assert.equal(dual.effectiveProgressKnown, false);
+  assert.equal(dual.next, "wait-for-effective-progress");
+  assert.equal(
+    isEffectiveProgressEvent("worker.message", {
+      activityKind: "model-processing",
+      activityEvidence: "liveness",
+    }),
+    false,
+  );
+
+  const progress = buildStatusProgress(
+    makeTask("t-dual-live", "running"),
+    { sequence: 3, timestamp: heartbeatAt, type: "worker.message", summary: "Model is actively processing" },
+    nowMs,
+    30_000,
+    undefined,
+    events,
+  );
+  assert.equal(progress.activity, "active", "fresh Runtime signal is not a dead connection");
+  assert.equal(progress.latestRuntimeSignalAt, heartbeatAt);
+  assert.equal(progress.latestEffectiveProgressAt, startAt);
+  assert.equal(progress.dualClock?.runtimeSignalObservation, "active");
+  assert.equal(progress.lastEventAt, heartbeatAt, "legacy lastEventAt preserved");
+  assert.ok(progress.liveStage, "legacy liveStage preserved");
+  // Privacy: no private diagnostics in dual-clock projection.
+  const json = JSON.stringify(progress.dualClock);
+  assert.ok(!json.includes("Model is actively processing"));
+  assert.ok(!json.includes("activityEvidence"));
+});
+
+test("dualClock: visible model response and tools advance both clocks", () => {
+  const base = Date.parse(TS);
+  const startAt = new Date(base).toISOString();
+  const responseAt = new Date(base + 20_000).toISOString();
+  const toolAt = new Date(base + 40_000).toISOString();
+  const events = [
+    { sequence: 1, timestamp: startAt, type: "worker.started" as const },
+    {
+      sequence: 2,
+      timestamp: responseAt,
+      type: "worker.message" as const,
+      payload: { activityKind: "model-response", activityEvidence: "effective-progress" },
+    },
+    {
+      sequence: 3,
+      timestamp: toolAt,
+      type: "worker.tool.started" as const,
+      payload: { toolUseId: "t1", tool: "Read", activityEvidence: "effective-progress" },
+    },
+  ];
+  const dual = projectDualClocks(
+    makeTask("t-dual-eff", "running"),
+    events,
+    base + 41_000,
+    30_000,
+  );
+  assert.equal(dual.latestRuntimeSignalAt, toolAt);
+  assert.equal(dual.latestEffectiveProgressAt, toolAt);
+  assert.equal(dual.effectiveProgressKnown, true);
+  assert.equal(dual.effectiveProgressObservation, "active");
+  assert.equal(dual.runtimeSignalObservation, "active");
+});
+
+test("dualClock: restart replay rebuilds the same two timestamps without Provider state", () => {
+  const base = Date.parse(TS);
+  const startAt = new Date(base).toISOString();
+  const progressAt = new Date(base + 60_000).toISOString();
+  const heartbeatAt = new Date(base + 5 * 60_000).toISOString();
+  const events = [
+    { sequence: 1, timestamp: startAt, type: "worker.started" as const },
+    {
+      sequence: 2,
+      timestamp: progressAt,
+      type: "worker.message" as const,
+      payload: { activityKind: "model-response", activityEvidence: "effective-progress" },
+    },
+    {
+      sequence: 3,
+      timestamp: heartbeatAt,
+      type: "worker.message" as const,
+      payload: { activityKind: "model-processing", activityEvidence: "liveness" },
+    },
+  ];
+  const nowMs = base + 5 * 60_000 + 2_000;
+  const first = projectDualClocks(makeTask("t-dual-replay", "running"), events, nowMs, 30_000);
+  const second = projectDualClocks(makeTask("t-dual-replay", "running"), events, nowMs, 30_000);
+  assert.deepEqual(first, second);
+  assert.equal(first.latestRuntimeSignalAt, heartbeatAt);
+  assert.equal(first.latestEffectiveProgressAt, progressAt);
+  assert.equal(first.effectiveProgressKnown, true);
+  assert.equal(first.runtimeSignalObservation, "active");
+  assert.equal(first.effectiveProgressObservation, "quiet");
+});
+
+test("dualClock: legacy worker.message without classification never invents effective progress", () => {
+  const base = Date.parse(TS);
+  const startAt = new Date(base).toISOString();
+  const legacyAt = new Date(base + 30_000).toISOString();
+  const events = [
+    { sequence: 1, timestamp: startAt, type: "worker.started" as const },
+    {
+      sequence: 2,
+      timestamp: legacyAt,
+      type: "worker.message" as const,
+      // No activityEvidence and no activityKind — historical narration only.
+      payload: { note: "old prose must not be classified" },
+    },
+  ];
+  const dual = projectDualClocks(
+    makeTask("t-dual-legacy", "running"),
+    events,
+    base + 31_000,
+    30_000,
+  );
+  assert.equal(dual.latestRuntimeSignalAt, legacyAt);
+  assert.equal(dual.latestEffectiveProgressAt, startAt, "Worker-start baseline only");
+  assert.equal(dual.effectiveProgressKnown, false);
+  assert.equal(dual.effectiveProgressObservation, "baseline");
+  // Must not parse prose for progress.
+  assert.equal(
+    isEffectiveProgressEvent("worker.message", { note: "tool completed successfully" }),
+    false,
+  );
+});
+
+test("dualClock: Grok thought deltas count as effective; Claude thinking_tokens do not", () => {
+  const base = Date.parse(TS);
+  const startAt = new Date(base).toISOString();
+  const at = new Date(base + 10_000).toISOString();
+  const claudeOnly = projectDualClocks(
+    makeTask("t-dual-claude", "running"),
+    [
+      { sequence: 1, timestamp: startAt, type: "worker.started" },
+      {
+        sequence: 2,
+        timestamp: at,
+        type: "worker.message",
+        payload: { activityKind: "model-processing", activityEvidence: "liveness" },
+      },
+    ],
+    base + 11_000,
+    30_000,
+  );
+  assert.equal(claudeOnly.latestEffectiveProgressAt, startAt);
+  assert.equal(claudeOnly.effectiveProgressKnown, false);
+
+  const grokThought = projectDualClocks(
+    makeTask("t-dual-grok", "running"),
+    [
+      { sequence: 1, timestamp: startAt, type: "worker.started" },
+      {
+        sequence: 2,
+        timestamp: at,
+        type: "worker.message",
+        payload: {
+          activityKind: "model-processing",
+          activityEvidence: "effective-progress",
+          streamType: "thought",
+        },
+      },
+    ],
+    base + 11_000,
+    30_000,
+  );
+  assert.equal(grokThought.latestEffectiveProgressAt, at);
+  assert.equal(grokThought.effectiveProgressKnown, true);
+});
+
+test("dualClock: new Worker start resets effective-progress baseline for the new Attempt", () => {
+  const base = Date.parse(TS);
+  const firstStart = new Date(base).toISOString();
+  const firstProgress = new Date(base + 30_000).toISOString();
+  const secondStart = new Date(base + 120_000).toISOString();
+  const heartbeat = new Date(base + 150_000).toISOString();
+  const dual = projectDualClocks(
+    makeTask("t-dual-attempt", "running"),
+    [
+      { sequence: 1, timestamp: firstStart, type: "worker.started" },
+      {
+        sequence: 2,
+        timestamp: firstProgress,
+        type: "worker.message",
+        payload: { activityKind: "model-response", activityEvidence: "effective-progress" },
+      },
+      // New Attempt: prior effective progress must not survive.
+      { sequence: 3, timestamp: secondStart, type: "worker.started" },
+      {
+        sequence: 4,
+        timestamp: heartbeat,
+        type: "worker.message",
+        payload: { activityKind: "model-processing", activityEvidence: "liveness" },
+      },
+    ],
+    base + 151_000,
+    30_000,
+  );
+  assert.equal(dual.latestRuntimeSignalAt, heartbeat);
+  assert.equal(dual.latestEffectiveProgressAt, secondStart, "baseline is the latest Worker start");
+  assert.equal(dual.effectiveProgressKnown, false, "prior Attempt progress is cleared");
+  assert.equal(dual.effectiveProgressObservation, "baseline");
+  assert.notEqual(dual.latestEffectiveProgressAt, firstProgress);
+});
+
+test("dualClock: failed terminal next is inspect-failure", () => {
+  const base = Date.parse(TS);
+  const startAt = new Date(base).toISOString();
+  const failed = projectDualClocks(
+    makeTask("t-dual-fail", "failed"),
+    [
+      { sequence: 1, timestamp: startAt, type: "worker.started" },
+      {
+        sequence: 2,
+        timestamp: new Date(base + 10_000).toISOString(),
+        type: "worker.failed",
+      },
+    ],
+    base + 11_000,
+    30_000,
+  );
+  assert.equal(failed.runtimeSignalObservation, "terminal");
+  assert.equal(failed.effectiveProgressObservation, "terminal");
+  assert.equal(failed.next, "inspect-failure");
+
+  const interrupted = projectDualClocks(
+    makeTask("t-dual-int", "interrupted"),
+    [{ sequence: 1, timestamp: startAt, type: "worker.started" }],
+    base + 1_000,
+    30_000,
+  );
+  assert.equal(interrupted.next, "inspect-failure");
+
+  const succeeded = projectDualClocks(
+    makeTask("t-dual-ok", "succeeded"),
+    [{ sequence: 1, timestamp: startAt, type: "worker.started" }],
+    base + 1_000,
+    30_000,
+  );
+  assert.equal(succeeded.next, "none");
 });
 
 test("liveStage: worker.completed projects worker-finished before verification (full replay)", () => {
@@ -1694,4 +1982,521 @@ test("paginateTaskHistory: nextCursor is present only when more matching records
   // totalCount is the full match count, not the page size.
   assert.equal(first.totalCount, 30);
   assert.equal(second.totalCount, 30);
+});
+
+// --- Attention resolution (handled failures) ---
+
+const RESOLVED_STATE = {
+  status: "resolved" as const,
+  reason: "environment-recovered" as const,
+  note: "env fixed by recovery",
+  resolvedAt: TS,
+  eventSequence: 9,
+};
+const REOPENED_STATE = {
+  status: "reopened" as const,
+  note: "needs attention again",
+  reopenedAt: TS,
+  eventSequence: 10,
+};
+
+test("projectBoardPlacement: resolved failure closes to History attention-resolved", () => {
+  assert.deepEqual(
+    projectBoardPlacement({ status: "failed", decisionStage: "machine-failed", attentionResolution: RESOLVED_STATE }),
+    { boardScope: "history", boardReason: "attention-resolved" },
+  );
+  assert.deepEqual(
+    projectBoardPlacement({ status: "interrupted", decisionStage: "machine-failed", attentionResolution: RESOLVED_STATE }),
+    { boardScope: "history", boardReason: "attention-resolved" },
+  );
+  // Reopened returns the unchanged failed Task to Now / unresolved-failure.
+  assert.deepEqual(
+    projectBoardPlacement({ status: "failed", decisionStage: "machine-failed", attentionResolution: REOPENED_STATE }),
+    { boardScope: "now", boardReason: "unresolved-failure" },
+  );
+  // Unknown/malformed resolution evidence fails open to Now.
+  assert.deepEqual(
+    projectBoardPlacement({ status: "failed", decisionStage: "machine-failed", attentionResolution: { status: "none" } }),
+    { boardScope: "now", boardReason: "unresolved-failure" },
+  );
+  // Delivered/activated Integration stays authoritative over a resolution.
+  assert.deepEqual(
+    projectBoardPlacement({ status: "succeeded", decisionStage: "delivered", attentionResolution: RESOLVED_STATE }),
+    { boardScope: "history", boardReason: "delivered" },
+  );
+  // Repaired delivery stays authoritative over a resolution.
+  assert.deepEqual(
+    projectBoardPlacement({ status: "failed", decisionStage: "machine-failed", remediationDisposition: REPAIRED, attentionResolution: RESOLVED_STATE }),
+    { boardScope: "history", boardReason: "repaired-delivered" },
+  );
+});
+
+test("isLegalBoardPlacement accepts attention-resolved only as a history reason", () => {
+  assert.equal(isLegalBoardPlacement("history", "attention-resolved"), true);
+  assert.equal(isLegalBoardPlacement("now", "attention-resolved"), false);
+  assert.ok(BOARD_REASON_VALUES.includes("attention-resolved"));
+  assert.ok(BOARD_REASON_BY_SCOPE.history.includes("attention-resolved"));
+});
+
+test("latestTaskResolutionState reads the latest valid resolution over durable events", () => {
+  const resolveEvent = {
+    type: "task.resolution.completed",
+    sequence: 5,
+    payload: { kind: "resolve", reason: "superseded", note: "handled by successor", resolvedAt: TS },
+  };
+  assert.deepEqual(latestTaskResolutionState([resolveEvent]), {
+    status: "resolved",
+    reason: "superseded",
+    note: "handled by successor",
+    resolvedAt: TS,
+    eventSequence: 5,
+  });
+  // Malformed resolve payload is skipped -> fails open to none.
+  assert.deepEqual(
+    latestTaskResolutionState([{ type: "task.resolution.completed", sequence: 5, payload: { kind: "resolve" } }]),
+    { status: "none" },
+  );
+  // Unknown event type is ignored.
+  assert.deepEqual(
+    latestTaskResolutionState([{ type: "worker.failed", sequence: 1, payload: {} }]),
+    { status: "none" },
+  );
+  // Reopen after resolve -> reopened.
+  assert.deepEqual(latestTaskResolutionState([
+    resolveEvent,
+    { type: "task.resolution.reopened", sequence: 6, payload: { kind: "reopen", note: "needs work", reopenedAt: TS } },
+  ]), { status: "reopened", note: "needs work", reopenedAt: TS, eventSequence: 6 });
+  // Resolve after reopen -> resolved again.
+  assert.deepEqual(latestTaskResolutionState([
+    resolveEvent,
+    { type: "task.resolution.reopened", sequence: 6, payload: { kind: "reopen", note: "x", reopenedAt: TS } },
+    { type: "task.resolution.completed", sequence: 7, payload: { kind: "resolve", reason: "no-longer-needed", note: "obsolete", resolvedAt: TS } },
+  ]), { status: "resolved", reason: "no-longer-needed", note: "obsolete", resolvedAt: TS, eventSequence: 7 });
+});
+
+test("latestTaskResolutionState carries an optional evidence Task id", () => {
+  const state = latestTaskResolutionState([{
+    type: "task.resolution.completed",
+    sequence: 5,
+    payload: { kind: "resolve", reason: "superseded", note: "handled", evidenceTaskId: "11111111-1111-4111-8111-111111111111", resolvedAt: TS },
+  }]);
+  assert.equal(state.status, "resolved");
+  assert.equal((state as { evidenceTaskId?: string }).evidenceTaskId, "11111111-1111-4111-8111-111111111111");
+});
+
+test("resolveTaskResolution validates eligibility and appends one immutable event", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-core-"));
+  const store = new StateStore(home);
+  const taskId = "99999999-9999-4999-8999-999999999999";
+  const failedTask = makeTask(taskId, "failed");
+  delete failedTask.currentAttemptId;
+  store.createTask(failedTask);
+  store.addEvent(taskId, "attempt-1", "worker.failed", "failed", { failureCategory: "runtime" });
+
+  // Missing confirm fails before writing.
+  assert.throws(
+    () => resolveTaskResolution(
+      store,
+      taskId,
+      { reason: "environment-recovered", note: "x", confirm: false as unknown as true },
+    ),
+    /confirm/,
+  );
+
+  // Succeeded tasks are never eligible.
+  store.setTaskStatus(taskId, "succeeded", {});
+  assert.throws(
+    () => resolveTaskResolution(store, taskId, { reason: "environment-recovered", note: "x", confirm: true }),
+    /cannot be resolved from status/,
+  );
+  store.setTaskStatus(taskId, "failed", {});
+
+  // Invalid target: running Attempt fails before writing.
+  const runningAttempt: AttemptRecord = {
+    id: "attempt-running",
+    taskId,
+    ordinal: 1,
+    status: "running",
+    sessionId: "session",
+    rawLogPath: "/log",
+    startedAt: TS,
+  };
+  store.createAttempt(runningAttempt);
+  store.updateTask(taskId, { currentAttemptId: "attempt-running" });
+  assert.throws(
+    () => resolveTaskResolution(store, taskId, { reason: "environment-recovered", note: "x", confirm: true }),
+    /running Attempt/,
+  );
+  store.updateTask(taskId, { currentAttemptId: null });
+
+  const result = resolveTaskResolution(store, taskId, { reason: "environment-recovered", note: "env fixed", confirm: true });
+  assert.equal(result.existing, false);
+  assert.equal(result.state.status, "resolved");
+  assert.equal(store.getTask(taskId).status, "failed", "machine status preserved");
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
+    1,
+  );
+
+  // Exact replay is idempotent.
+  const replay = resolveTaskResolution(store, taskId, { reason: "environment-recovered", note: "env fixed", confirm: true });
+  assert.equal(replay.existing, true);
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
+    1,
+    "no duplicate event on exact replay",
+  );
+
+  // Conflicting resolve fails closed and preserves the first resolution.
+  assert.throws(
+    () => resolveTaskResolution(store, taskId, { reason: "superseded", note: "different", confirm: true }),
+    /already resolved/,
+  );
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
+    1,
+  );
+
+  // Reopen restores Now without changing machine status.
+  const reopened = reopenTaskResolution(store, taskId, { note: "needs attention again", confirm: true });
+  assert.equal(reopened.existing, false);
+  assert.equal(reopened.state.status, "reopened");
+  assert.equal(store.getTask(taskId).status, "failed");
+  assert.equal(store.listEvents(taskId).filter((e) => e.type === "task.resolution.reopened").length, 1);
+
+  // Reopen on a non-resolved Task fails closed.
+  assert.throws(
+    () => reopenTaskResolution(store, taskId, { note: "again", confirm: true }),
+    /already reopened/,
+  );
+  store.close();
+});
+
+test("reopenTaskResolution on a never-resolved Task fails before writing", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-reopen-none-"));
+  const store = new StateStore(home);
+  const taskId = "88888888-8888-4888-8888-888888888888";
+  store.createTask(makeTask(taskId, "failed"));
+  assert.throws(
+    () => reopenTaskResolution(store, taskId, { note: "again", confirm: true }),
+    /not resolved/,
+  );
+  assert.equal(store.listEvents(taskId).filter((e) => e.type === "task.resolution.reopened").length, 0);
+  store.close();
+});
+
+test("resolveTaskResolution validates the bounded reason vocabulary", () => {
+  assert.deepEqual(TASK_RESOLUTION_REASONS, [
+    "environment-recovered",
+    "superseded",
+    "handled-elsewhere",
+    "no-longer-needed",
+  ]);
+  assert.equal(isTaskResolutionReason("environment-recovered"), true);
+  assert.equal(isTaskResolutionReason("auto-fixed"), false);
+});
+
+test("coordinator.resolveTask closes a failed Task; reopen restores Now", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-coord-"));
+  const store = new StateStore(home);
+  const taskId = "77777777-7777-4777-8777-777777777777";
+  const failedTask = makeTask(taskId, "failed");
+  delete failedTask.currentAttemptId;
+  store.createTask(failedTask);
+  store.addEvent(taskId, "attempt-1", "worker.failed", "failed", { failureCategory: "runtime" });
+  store.addEvent(taskId, "attempt-1", "verification.completed", "failed", {
+    passed: false,
+    behaviorPassed: false,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: "/state/task/diff.patch",
+    sourceUnchanged: false,
+  });
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store));
+
+  const resolved = coordinator.resolveTask(taskId, "environment-recovered", "env fixed", undefined, true);
+  assert.equal(resolved.existing, false);
+  assert.equal(resolved.state.status, "resolved");
+  assert.equal(resolved.boardScope, "history");
+  assert.equal(resolved.boardReason, "attention-resolved");
+  assert.equal(store.getTask(taskId).status, "failed", "machine status preserved");
+
+  const replay = coordinator.resolveTask(taskId, "environment-recovered", "env fixed", undefined, true);
+  assert.equal(replay.existing, true);
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
+    1,
+  );
+
+  assert.throws(
+    () => coordinator.resolveTask(taskId, "superseded", "different", undefined, true),
+    /already resolved/,
+  );
+
+  const reopened = coordinator.reopenTask(taskId, "needs attention again", true);
+  assert.equal(reopened.existing, false);
+  assert.equal(reopened.state.status, "reopened");
+  assert.equal(reopened.boardScope, "now");
+  assert.equal(reopened.boardReason, "unresolved-failure");
+  assert.equal(store.getTask(taskId).status, "failed");
+
+  // After reopen, resolve again is allowed.
+  const resolvedAgain = coordinator.resolveTask(taskId, "no-longer-needed", "obsolete", undefined, true);
+  assert.equal(resolvedAgain.existing, false);
+  assert.equal(resolvedAgain.state.status, "resolved");
+  assert.equal(resolvedAgain.boardScope, "history");
+  assert.equal(resolvedAgain.boardReason, "attention-resolved");
+  store.close();
+});
+
+test("listTaskSurfaces carries attentionResolution and the closed placement", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-surface-"));
+  const store = new StateStore(home);
+  const taskId = "66666666-6666-4666-8666-666666666666";
+  const failedTask = makeTask(taskId, "failed");
+  delete failedTask.currentAttemptId;
+  store.createTask(failedTask);
+  store.addEvent(taskId, "attempt-1", "worker.failed", "failed", { failureCategory: "runtime" });
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store));
+  coordinator.resolveTask(taskId, "handled-elsewhere", "dealt with", undefined, true);
+
+  const surface = coordinator.listTaskSurfaces(["failed"], 10)[0]!;
+  assert.equal(surface.status, "failed");
+  assert.equal(surface.attentionResolution?.status, "resolved");
+  assert.equal(surface.boardScope, "history");
+  assert.equal(surface.boardReason, "attention-resolved");
+  store.close();
+});
+
+test("attention resolution never invents success, delivery, or cost facts", async () => {
+  const resolved = buildTaskSummary(makeTask("t-res-json", "failed"), undefined, undefined, undefined, "machine-failed", RESOLVED_STATE);
+  const json = JSON.stringify(resolved);
+  assert.equal(resolved.status, "failed", "machine status preserved");
+  assert.equal(resolved.boardScope, "history");
+  assert.equal(resolved.boardReason, "attention-resolved");
+  assert.ok(!json.includes('"delivered"'), "resolution is not presented as delivered");
+  assert.ok(!json.includes('"succeeded"'), "resolution is not presented as succeeded");
+  assert.ok(!json.includes("costUsd"), "no cost facts invented");
+});
+
+test("projectBoardPlacement: resolution cannot hide non-failed Tasks in History", () => {
+  const forged = RESOLVED_STATE;
+  const invalidStatuses = ["queued", "running", "preparing", "verifying", "succeeded", "blocked", "waiting"];
+  for (const status of invalidStatuses) {
+    const placement = projectBoardPlacement({
+      status: status as TaskRecord["status"],
+      decisionStage: "machine-failed",
+      attentionResolution: forged,
+    });
+    assert.notEqual(placement.boardScope, "history",
+      `${status} must not be hidden in History by resolution evidence`);
+  }
+  // Succeeded with delivered truth still wins as delivered, not attention-resolved.
+  assert.deepEqual(
+    projectBoardPlacement({ status: "succeeded", decisionStage: "delivered", attentionResolution: forged }),
+    { boardScope: "history", boardReason: "delivered" },
+  );
+});
+
+test("malformed latest resolution evidence fails open; a later valid event restores", () => {
+  const validResolve = {
+    type: "task.resolution.completed",
+    sequence: 5,
+    payload: { kind: "resolve", reason: "superseded", note: "handled", resolvedAt: TS },
+  };
+  const malformedReopen = {
+    type: "task.resolution.reopened",
+    sequence: 6,
+    payload: { kind: "reopen", reopenedAt: "not-a-date" },
+  };
+  // The malformed LATEST resolution event must not leave the older resolved
+  // event active: the Task fails open to Now.
+  assert.deepEqual(latestTaskResolutionState([validResolve, malformedReopen]), { status: "none" });
+  // A later valid reopen restores a valid reopened state.
+  const validReopen = {
+    type: "task.resolution.reopened",
+    sequence: 7,
+    payload: { kind: "reopen", note: "again", reopenedAt: TS },
+  };
+  assert.deepEqual(latestTaskResolutionState([validResolve, malformedReopen, validReopen]), {
+    status: "reopened",
+    note: "again",
+    reopenedAt: TS,
+    eventSequence: 7,
+  });
+  // Malformed canonical timestamp on the latest resolve also fails open.
+  assert.deepEqual(
+    latestTaskResolutionState([{
+      type: "task.resolution.completed",
+      sequence: 5,
+      payload: { kind: "resolve", reason: "superseded", resolvedAt: "garbage" },
+    }]),
+    { status: "none" },
+  );
+  // Parseable but non-canonical timestamps (date-only / missing ms) fail open.
+  assert.deepEqual(
+    latestTaskResolutionState([{
+      type: "task.resolution.completed",
+      sequence: 5,
+      payload: { kind: "resolve", reason: "superseded", resolvedAt: "2026-07-25" },
+    }]),
+    { status: "none" },
+  );
+  assert.deepEqual(
+    latestTaskResolutionState([{
+      type: "task.resolution.reopened",
+      sequence: 6,
+      payload: { kind: "reopen", reopenedAt: "2026-07-25T12:00:00Z" },
+    }]),
+    { status: "none" },
+  );
+});
+
+test("reopen rejects a Task that later gained delivered truth", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-reopen-delivered-"));
+  const store = new StateStore(home);
+  const taskId = "44444444-4444-4444-8444-444444444444";
+  const failedTask = makeTask(taskId, "failed");
+  delete failedTask.currentAttemptId;
+  store.createTask(failedTask);
+  store.addEvent(taskId, "attempt-1", "worker.failed", "failed", { failureCategory: "runtime" });
+  resolveTaskResolution(store, taskId, { reason: "handled-elsewhere", confirm: true });
+  // Later Main verifies repaired delivery.
+  store.saveRemediationDisposition(taskId, REPAIRED);
+  // Reopen must fail closed and write no reopen event.
+  assert.throws(
+    () => reopenTaskResolution(store, taskId, { note: "again", confirm: true, delivered: true }),
+    /delivered/,
+  );
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.reopened").length,
+    0,
+  );
+  store.close();
+});
+
+test("resolve and reopen notes are optional but bounded", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-note-"));
+  const store = new StateStore(home);
+  const taskId = "33333333-3333-4333-8333-333333333333";
+  const failedTask = makeTask(taskId, "failed");
+  delete failedTask.currentAttemptId;
+  store.createTask(failedTask);
+  store.addEvent(taskId, "attempt-1", "worker.failed", "failed", { failureCategory: "runtime" });
+
+  // Omitted note succeeds and is omitted from the state projection.
+  const noNote = resolveTaskResolution(store, taskId, { reason: "handled-elsewhere", confirm: true });
+  assert.equal(noNote.existing, false);
+  assert.equal(noNote.state.status, "resolved");
+  assert.ok(!("note" in noNote.state), "note is omitted when not provided");
+
+  // Exact replay with omitted note is idempotent.
+  const replay = resolveTaskResolution(store, taskId, { reason: "handled-elsewhere", confirm: true });
+  assert.equal(replay.existing, true);
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
+    1,
+  );
+
+  // Overlong note fails before mutation.
+  assert.throws(
+    () => resolveTaskResolution(store, taskId, { reason: "superseded", note: "x".repeat(501), confirm: true }),
+    /at most 500/,
+  );
+
+  // Reopen with omitted note succeeds.
+  const reopened = reopenTaskResolution(store, taskId, { confirm: true });
+  assert.equal(reopened.existing, false);
+  assert.equal(reopened.state.status, "reopened");
+  assert.ok(!("note" in reopened.state), "reopen note omitted when not provided");
+  store.close();
+});
+
+test("delivered truth outranks handled resolution in board placement", () => {
+  const resolved = RESOLVED_STATE;
+  assert.deepEqual(
+    projectBoardPlacement({ status: "failed", decisionStage: "delivered", attentionResolution: resolved }),
+    { boardScope: "history", boardReason: "delivered" },
+  );
+  assert.deepEqual(
+    projectBoardPlacement({ status: "failed", decisionStage: "activated", attentionResolution: resolved }),
+    { boardScope: "history", boardReason: "activated" },
+  );
+  assert.deepEqual(
+    projectBoardPlacement({
+      status: "failed",
+      decisionStage: "machine-failed",
+      remediationDisposition: REPAIRED,
+      attentionResolution: resolved,
+    }),
+    { boardScope: "history", boardReason: "repaired-delivered" },
+  );
+});
+
+test("resolve/reopen leave machine, verification, review, delivery, and decision facts unchanged", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-unchanged-"));
+  const store = new StateStore(home);
+  const taskId = "22222222-2222-4222-8222-222222222222";
+  const failedTask = makeTask(taskId, "failed");
+  delete failedTask.currentAttemptId;
+  store.createTask(failedTask);
+  store.addEvent(taskId, "attempt-1", "worker.failed", "failed", { failureCategory: "runtime" });
+  store.addEvent(taskId, "attempt-1", "verification.completed", "failed", {
+    passed: false,
+    behaviorPassed: false,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: "/state/task/diff.patch",
+    sourceUnchanged: false,
+  });
+
+  const before = {
+    task: store.getTask(taskId),
+    attempts: store.listAttempts(taskId),
+    events: store.listEvents(taskId),
+    decision: buildTaskDecisionView({
+      task: store.getTask(taskId),
+      attempts: store.listAttempts(taskId),
+      events: store.listEvents(taskId),
+      integrationResults: store.listIntegrationResults(taskId),
+    }),
+  };
+
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store));
+  coordinator.resolveTask(taskId, "environment-recovered", "env fixed", undefined, true);
+  coordinator.reopenTask(taskId, "needs again", true);
+
+  const afterTask = store.getTask(taskId);
+  const afterAttempts = store.listAttempts(taskId);
+  const afterEvents = store.listEvents(taskId)
+    .filter((e) => e.type !== "task.resolution.completed" && e.type !== "task.resolution.reopened");
+  const afterDecision = buildTaskDecisionView({
+    task: afterTask,
+    attempts: afterAttempts,
+    events: afterEvents,
+    integrationResults: store.listIntegrationResults(taskId),
+  });
+
+  assert.equal(afterTask.status, before.task.status, "machine status unchanged");
+  assert.equal(afterTask.error, before.task.error, "error unchanged");
+  assert.equal(afterTask.updatedAt, before.task.updatedAt, "task updatedAt unchanged");
+  assert.equal(afterTask.currentAttemptId, before.task.currentAttemptId, "currentAttemptId unchanged");
+  assert.deepEqual(afterTask.spec, before.task.spec, "spec and routing evidence unchanged");
+  assert.deepEqual(afterAttempts, before.attempts, "Attempt records unchanged");
+  assert.equal(afterEvents.length, before.events.length, "non-resolution events preserved");
+  for (const event of before.events) {
+    const afterEvent = afterEvents.find((candidate) => candidate.id === event.id);
+    assert.ok(afterEvent, "each original event retained");
+    assert.equal(afterEvent!.type, event.type);
+    assert.equal(afterEvent!.summary, event.summary);
+    assert.deepEqual(afterEvent!.payload, event.payload);
+  }
+  assert.equal(afterDecision.stage, before.decision.stage, "decision stage unchanged");
+  assert.equal(afterDecision.failureCategory, before.decision.failureCategory,
+    "failure classification unchanged");
+  assert.equal(afterDecision.progress.activity, before.decision.progress.activity,
+    "activity unchanged");
+  store.close();
 });

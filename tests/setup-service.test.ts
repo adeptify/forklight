@@ -66,7 +66,7 @@ test("setup bootstrap is read-only, actionable, and exposes plan-aware provider 
   const second = service.bootstrap();
   assert.deepEqual(second, first);
   assert.equal(first.prerequisites.every((item) => item.ready && !item.blocker), true);
-  assert.deepEqual(first.providers.map((item) => item.name), ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai"]);
+  assert.deepEqual(first.providers.map((item) => item.name), ["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"]);
   assert.equal(first.providers.find((item) => item.name === "qwen")?.variants[0]?.id, "token-plan");
   assert.equal(first.providers.find((item) => item.name === "minimax")?.variants.length, 2);
   assert.equal(keychain.reads, 0, "discovery may check presence but must never read key values");

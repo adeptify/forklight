@@ -506,4 +506,8 @@ test("thinking_tokens processing marker does not override no-progress watchdog o
   assert.equal(events[0]?.type, "worker.message");
   assert.notEqual(events[0]?.type, "worker.tool.started");
   assert.notEqual(events[0]?.type, "worker.tool.completed");
+  // Explicit closed evidence: liveness only — never effective progress.
+  const payload = events[0]?.payload as Record<string, unknown>;
+  assert.equal(payload.activityEvidence, "liveness");
+  assert.equal(payload.activityKind, "model-processing");
 });
