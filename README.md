@@ -1,389 +1,138 @@
 # ForkLight
 
-ForkLight is a local-first execution and observability layer for bounded coding
-Workers. A **Main** agent (Codex, Claude Code, Grok Build, OpenCode, or a human
-using CLI) stays accountable for intent, Task Contracts, review, and integration
-approval. Workers never get arbitrary shell, web, or source-tree write authority.
+[中文](#中文) · [English](#english)
 
-The only browser control center is **`forklight hub`**.
+---
 
-## Execution flow
+## 中文
 
-1. Main decides whether a bounded task should be delegated.
-2. The ForkLight MCP server or CLI accepts the task and immediately returns a task ID.
-3. A local daemon records the task in SQLite, prepares an isolated baseline
-   and workspace, and schedules it with a configurable concurrency limit.
-4. A Worker runtime (default `claude-code`, optional `grok-build` with xAI)
-   implements the change under a hard tool policy.
-5. ForkLight independently runs the declared acceptance commands, fingerprints
-   the source project, and stores progress, events, verification, and the diff.
-   **Independent verification is authoritative** for terminal success; Worker
-   checkpoint MCP is a non-authoritative self-check and does not false-fail a
-   green independent verify.
-6. Main polls status, inspects the result, records main review, and only then
-   may authorize integration into the original project.
+### 这是什么
 
-Interrupted tasks are recovered when the daemon restarts. The original project
-is never edited by the Worker.
+ForkLight 是 **local-first、运行时与模型无关的执行中枢**：由一位有能力的 **Main**（人机协作主控）理解目标，拆解并分配有界任务，监督持久 **Worker**，审阅与修正结果，并在授权后安全集成变更。用户应能看清「问了什么、发生了什么、产出了什么、为何失败、保留了什么、花了多少、下一步是什么」，而不必先学内部术语。
 
-## Install
+产品边界：
 
-ForkLight currently supports macOS and requires Node.js 24 or newer, Claude
-Code, and the Codex CLI. It is not published to npm yet and remains explicitly
-unlicensed until the owner chooses a public license.
+| 角色 | 拥有 |
+|------|------|
+| **Main** | 意图对齐、Task Contract、验收、集成/commit/push 授权 |
+| **ForkLight** | 持久 Task/Attempt/Candidate、隔离工作区、预算与有限恢复、独立验证、Hub/CLI/MCP |
+| **Worker** | 仅在隔离工作区内完成被分配的实现；无原仓写权限，无 commit/push 权 |
 
-Install the current Adeptify repository globally:
+项目事实以 [`PROJECT.md`](./PROJECT.md) 为唯一管理源。
 
-```bash
-npm install -g github:adeptify/forklight
-```
+### 主要功能点
 
-Or install a downloaded release tarball:
+1. **任务与合同**  
+   - 结构化 Task Contract：目标、范围、模块、调用链、场景、风险、独立验收  
+   - Attempt / Candidate / 评审图与有限纠错
 
-```bash
-npm install -g ./forklight-0.2.0.tgz
-```
+2. **多运行时 Worker**  
+   - 内置 `claude-code`、`codex-cli`、`grok-build` 等适配  
+   - Worker Profile、就绪探测、权限与预算  
+   - Codex 单次运行与（演进中的）native-goal 执行模式
 
-### Build a verified clean-user bundle (operators)
+3. **隔离工作区与补丁**  
+   - 依赖物化、workspace patch、源集成 fail-closed  
+   - 禁止 Worker 默认写原项目或推送
 
-After product updates, create a frozen install package plus external evidence
-with one checked-in command. The output directory must be new (no overwrite):
+4. **Hub 控制台**  
+   - 双语 UI：现在/历史、输入输出、失败归因、保留工作、下一步  
+   - 设置、经济学摘要、可观测性（非遥测倾倒）
 
-```bash
-npm run bundle:clean -- --output /Users/Shared/ForkLight-Clean-Run.<unique-suffix>
-```
+5. **CLI / Daemon / MCP**  
+   - 同一真相的多入口：本地 daemon、交换收据、MCP 工具面  
+   - 健康与 readiness 检查
 
-The command packs the current tree (`npm pack` / prepack full check), installs
-into a private prefix, loads the installed CLI/MCP entries, starts and cleanly
-stops an isolated Hub/daemon, scans package filenames, and writes:
+6. **路由、竞争与失败归因**  
+   - 模型路由建议（证据不充分时不永久拉黑）  
+   - Competition 仅用于高不确定/多方案例外  
+   - 基础设施/合同/运行时失败与模型质量失败分离
 
-- `forklight-0.2.0.tgz`
-- `build-identity.json`
-- `m1-clean-user-runbook.md`
-- `bundle-evidence.json` (outside the tarball; relative names only)
+7. **Dogfood 与契约文档**  
+   - `examples/dogfood/` 真实任务样例  
+   - M1–M3 验收与实现合同（`docs/`）
 
-This verifies the package on the development machine. It does **not** replace a
-clean-user journey on a new macOS user, disposable VM, or new Mac. See
-`docs/m1-clean-user-runbook.md`.
+### 技术栈
 
-## Quick start (out of the box)
+- TypeScript（Node）、Vitest  
+- 本地 Hub（静态 + server）、Daemon socket  
+- package：`npm` 脚本见下  
 
-### 1. Install
-
-```bash
-# from this repo
-npm install
-npm run build
-npm link          # puts forklight + forklight-mcp on PATH
-```
-
-Or: `npm install -g github:adeptify/forklight`
-
-Prereqs: macOS, Node.js 24+, Claude Code CLI (for the default Worker), and a
-provider key you will store via Hub (DeepSeek/etc. in Keychain).
-
-### 2. Open Hub (daemon + UI)
-
-```bash
-forklight hub
-```
-
-One command starts the **backend daemon** and the **Hub UI** on `127.0.0.1`.
-Ctrl+C stops Hub UI only; stop the daemon with `forklight daemon stop`.
-
-Running `forklight hub` again reopens the same active control center for that
-ForkLight home. It does not start another Hub process or choose another random
-port. A different `FORKLIGHT_HOME` remains an intentionally separate instance.
-
-### Hub recovery guide
-
-`forklight hub` handles common situations safely. Rerun the command as the
-default recovery action. Do **not** manually delete files from
-`FORKLIGHT_HOME`, scan or kill processes, reuse a port that another Hub owns,
-or share the full URL printed by the command (it carries a private local access
-token in the fragment — the bare origin `http://127.0.0.1:PORT/` contains no
-token).
-
-| Situation | What happened | What to do |
-| --- | --- | --- |
-| You run `forklight hub` a second time, from any terminal | The first Hub is still the active control center. The second command prints the existing URL, reopens it in the browser, and exits. | Nothing — the original Hub stays active and the daemon remains separate. **Closing this second terminal does not stop the Hub.** |
-| You pressed Ctrl+C in the Hub terminal | Hub UI stopped. The daemon and any running Worker Tasks continue independently. | Run `forklight hub` again to reopen the Hub UI. The daemon and your tasks are still running. |
-| The Hub crashed or the terminal was force-closed | The recorded owner is no longer running. | Run `forklight hub` again. ForkLight clears only its own stale local ownership data and starts one fresh Hub. |
-| `forklight hub` refuses to start while another Hub seems to be running | ForkLight found a live process but could not prove it is your authenticated Hub. This is a safety decision. | Stop the original Hub you know is running (Ctrl+C in its terminal), then run `forklight hub` again. Do **not** guess a process ID or kill a process manually. |
-| You want to restart the Hub on purpose | The current Hub is alive and authenticated. ForkLight will not take it over. | Stop the known Hub (Ctrl+C in its terminal), then run `forklight hub` again. No other cleanup is needed. |
-| You set a different `FORKLIGHT_HOME` | That is a separate local environment with its own daemon, settings, and task history. | Run `forklight hub` with the same `FORKLIGHT_HOME` each time. Each home can have its own active Hub. |
-
-The daemon is a separate long-running process. Stopping the Hub (with Ctrl+C
-or a closed terminal) does **not** stop the daemon or cancel running Worker
-Tasks. To stop the daemon intentionally, run `forklight daemon stop`.
-
-In the browser (no hand-editing of Main configs for the guided path):
-
-1. **Models** - provider, model id, optional endpoint; paste API key (Keychain only)
-2. **Workers** - runtime (`claude-code` / `grok-build`) + model + per-worker budget/effort;
-   Advanced also controls duration, Token/file/line guidance, Attempt/adaptation
-   bounds, enforcement modes, concurrency, and the optional official pricing route
-3. **Main** - install **Plugin** (Codex only), **MCP**, and/or **Skill** for each client
-4. Overview **Services** - confirm the task service is up (Start if needed)
-
-Overview shows a readiness checklist (Models → Workers → Main channel → task service).
-Board cards show whether a running task is updating, quiet, or has been quiet for several minutes.
-
-### 3. Main session (Grok / Codex / Claude Code)
-
-1. Open a **new** Main session after MCP install (old sessions do not reload MCP).
-2. Call tools in order: `forklight_health` → `forklight_validate` → `forklight_submit`
-   → `forklight_wait` → `forklight_inspect` / `forklight_main_review`.
-3. Or use CLI: `forklight submit path/to/task.yaml` then `forklight wait <task-id> --until terminal`.
-
-Keys never leave Keychain. Main configs only receive the `forklight-mcp` command path.
-
-### Operate from Hub (same daemon as CLI)
-
-| Area | Hub actions |
-|------|-------------|
-| Daemon | Start, stop, restart, live health (pid, queue, identity) |
-| Tasks | Submit an already-authored absolute Task Contract (confirm), resume, revise, main review, preview/apply one bounded policy adaptation, guided direct-Codex capture, integration preflight / apply, history |
-| Providers | Status + **explicit** billable probe (confirm required) |
-| Compete | Status detail + compare/evaluate |
-| Board / Plans / Insights | Live operate views (read + supervise) |
-
-Hub submit deliberately accepts only an already-authored absolute YAML/JSON
-Task Contract path with explicit billable confirmation. Contract authoring and
-decomposition remain Main responsibilities; Hub does not invent a second plan.
-
-For a new structured Task, Main can also provide the short explanation that the
-Hub should show first:
-
-```yaml
-contract:
-  outcome: The precise technical result the Worker must produce.
-  presentation:
-    summary: "用一句话告诉用户，这次任务要解决什么、完成后会得到什么。"
-    language: zh-CN
-```
-
-`presentation` is optional so older Tasks remain valid. ForkLight displays the
-summary exactly as Main wrote it; it does not guess, rewrite, or translate it.
-The technical outcome, scope, checks, and evidence remain available underneath
-and continue to control execution and acceptance.
-
-Hub binds only to `127.0.0.1`. Its private owner record is stored with owner-only
-permissions so the CLI can safely reopen it after a second invocation. The token
-is carried in the URL fragment and removed from the visible URL after the page
-loads. Provider keys are never written into Main client config files — only
-forklight MCP command paths are.
-
-Standalone `forklight console` and `forklight setup` UIs were removed; use
-`forklight hub` only.
-
-For a terminal-only prerequisite report that does not call a Provider or change
-settings:
-
-```bash
-forklight doctor
-forklight doctor --json
-```
-
-## Update and remove
-
-Update from the repository with the same global install command:
-
-```bash
-npm install -g github:adeptify/forklight
-forklight hub
-```
-
-To remove the executable, first stop local processes and then uninstall it:
-
-```bash
-forklight daemon stop
-npm uninstall -g forklight
-```
-
-Uninstalling the package deliberately does not delete task history or Provider
-credentials. Local ForkLight state is under
-`~/Library/Application Support/ForkLight`. Provider credentials are macOS
-Keychain items named `forklight.<provider>.api-key`; remove them in Keychain
-Access only if you also want to revoke the local configuration.
-
-## Development quick start
-
-```bash
-npm install
-npm run check      # build + test
-npm run smoke      # offline verification (no provider calls)
-```
-
-## CLI
-
-Build and install the local command:
+### 开发与启动
 
 ```bash
 npm install
 npm run build
-npm link
+npm run test
+npm run check
+npm run dev          # 开发模式（依 package 定义）
+npm run smoke
 ```
 
-Commands:
+常见入口（以本机 `package.json` / `docs/operations.md` 为准）：
 
 ```bash
-forklight help                                            # show usage
-forklight health [--json]                                 # readiness check
+# CLI（构建后）
+node dist/cli.js --help
 
-forklight run <task.yaml>                                 # foreground execution ★
-forklight submit <task.yaml>                              # queue via daemon ★
-forklight validate <task.yaml> [--json]                   # dry-run contract check
-forklight status <task-id> [--json]                       # task status
-forklight inspect <task-id> [--json]                      # attempts, events, diff
-forklight resume <task-id> [--feedback ...]               # retry interrupted ★
-forklight correct <task-id> --feedback <text> \
-  [--max-budget-usd <number|none>] --confirm              # reuse candidate with one Worker correction ★
-forklight reverify <task-id> \
-  --reason <bounded-reason> --confirm [--json]             # rerun checks only; no Worker or new Attempt
-forklight list [--json]                                   # recent tasks
+# MCP server
+node dist/mcp/server.js
 
-forklight submit-plan <plan.yaml>                         # multi-task plan ★
-forklight inspect-plan <plan-id> [--json]                 # plan board
-forklight board [--json]                                  # all plan summaries
-
-forklight compete <task.yaml> --candidates <json>         # multi-model ★
-forklight competition status <id> [--json]                # progress + evaluation
-forklight competition compare <id> [--weights <json>]     # per-factor scoring
-forklight competition list [--json]
-
-forklight integration preflight <task-id> [--json]        # safety review
-forklight integration apply <task-id> \
-  --receipt <id> --confirm [--json]                         # MUTATES source ★★
-forklight integration history <task-id> [--json]
-
-forklight main-review <task-id> \
-  --decision <accept|revise|reject> --reason <text> --confirm
-
-forklight remediate verify <task-id> \
-  --reason <bounded-reason> --confirm [--json]             # verifies repaired source; preserves machine failure
-
-forklight adapt preview <task-id> \
-  --patch <json> --reason <bounded-reason> [--json]        # read-only
-forklight adapt apply <task-id> \
-  --patch <json> --reason <bounded-reason> --confirm [--json] # creates at most one successor
-
-forklight tokens <task-id> [--json]                       # Worker/exchange/savings evidence
-forklight direct-codex capture-task \
-  --task-id <id> --run-ref <codex-run:id> \
-  --usage <turn.completed-json> [--json]                  # pending count-only sample
-forklight direct-codex inbox \
-  --task-class <class> --profile-id <id> [--json]
-forklight direct-codex review --sample-id <id> \
-  --decision <accepted|rejected> --reviewer <name> \
-  --reviewed-at <canonical-ISO> --schema-version 1 --confirm [--json]
-forklight direct-codex publication-preview \
-  --task-class <class> --profile-id <id> [--json]
-forklight direct-codex publication-register \
-  --task-class <class> --profile-id <id> --method <method> \
-  --confidence <level> --created-at <canonical-ISO> --confirm [--json]
-
-forklight stats [--provider <n>] [--model <n>] [--json] [--deep-audit]
-                                                      # aggregates by default; --deep-audit requires --json
-
-forklight settings get                                    # read effective settings
-forklight settings set <path> <value>                     # partial update
-forklight settings apply <file.yaml>                      # bulk update
-forklight settings reset                                  # restore defaults
-
-forklight daemon start | status | stop                    # daemon lifecycle
-forklight providers status [<name>] [--json]              # cached, no cost
-forklight providers probe [<name>] [--json]               # explicit probe ★
-forklight hub [--no-open] [--port <port>]                 # only control-center UI (configure + operate)
-forklight doctor [--json]                                 # read-only prerequisites
+# Hub
+# 见 docs/operations.md 与 docs/configuration.md
 ```
 
-★ May incur provider API charges.
-★★ Mutates the source project; requires `--confirm` and a passing preflight receipt.
+配置、Main 客户端接入：
 
-Set `FORKLIGHT_HOME` to isolate development state. On macOS the default is
-`~/Library/Application Support/ForkLight`.
+- `docs/configuration.md`  
+- `docs/operations.md`  
+- `docs/main-clients/`  
+- `docs/m1-clean-user-runbook.md`  
 
-## Codex integration (MCP)
+### 目录（摘要）
 
-The MCP server (`src/mcp/server.ts`) exposes these tools over stdio:
+| 路径 | 说明 |
+|------|------|
+| `src/core/` | 任务、路由、统计、失败归因、执行模式 |
+| `src/workers/` | 运行时适配（claude/codex/grok…） |
+| `src/daemon/` | 协调与协议 |
+| `src/hub/` | Web Hub |
+| `src/mcp/` | MCP |
+| `src/workspace/` | 隔离与 patch |
+| `examples/dogfood/` | 验收任务 YAML |
+| `PROJECT.md` | 里程碑与决策 SSOT |
 
-| Tool | Read-only | Description |
-| --- | --- | --- |
-| `forklight_health` | yes | Check daemon, Claude Code, and provider readiness |
-| `forklight_validate` | yes | Validate a Task Contract without submitting |
-| `forklight_submit` | no | Queue a task for execution ★ |
-| `forklight_status` | yes | Read one task's current state |
-| `forklight_inspect` | yes | Inspect attempts, events, and diff |
-| `forklight_resume` | no | Retry an interrupted or failed task ★ |
-| `forklight_list` | yes | List recent tasks |
-| `forklight_main_review` | no | Record an explicit Main accept/revise/reject decision |
-| `forklight_correct` | no | Explicitly reuse a failed candidate for one bounded Worker correction ★ |
-| `forklight_candidate_reverify` | no | Rerun all original checks on an eligible retained candidate without a Worker or new Attempt |
-| `forklight_remediation_verify` | no | Verify repaired current source and record a separate delivery disposition |
-| `forklight_adaptation_preview` | yes | Preview one bounded successor policy change |
-| `forklight_adaptation_apply` | no | Explicitly create at most one bounded successor ★ |
-| `forklight_plan_submit` | no | Submit a multi-task Work Plan ★ |
-| `forklight_plan_inspect` | yes | Read one plan's board and task states |
-| `forklight_plan_board` | yes | List all plan summaries |
-| `forklight_statistics` | yes | Query per-provider/model aggregates (set deepAudit for full failures) |
-| `forklight_settings_get` | yes | Read effective settings |
-| `forklight_settings_update` | no | Apply partial settings patch |
-| `forklight_settings_reset` | no | Restore built-in defaults |
-| `forklight_integration_preflight` | no | Safety review (never mutates source) |
-| `forklight_integration_apply` | no | Apply reviewed patch ★★ |
-| `forklight_integration_history` | yes | Read integration receipts and results |
-| `forklight_direct_codex_capture_task` | no | Capture a pending count-only direct-Main sample using stored Task identity |
-| `forklight_direct_codex_capture` | no | Advanced explicit-metadata capture adapter |
-| `forklight_direct_codex_inbox` | yes | List exact-pair samples and review state |
-| `forklight_direct_codex_review` | no | Record immutable explicit Main sample review |
-| `forklight_direct_codex_publication_preview` | yes | Preview exact-pair publication readiness |
-| `forklight_direct_codex_publication_register` | no | Register a versioned reviewed baseline with explicit confirm |
-| `forklight_compete_submit` | no | Start multi-model competition ★ |
-| `forklight_competition_status` | yes | Read competition progress and evaluation |
-| `forklight_competition_compare` | yes | Per-factor scoring with optional what-if weights |
-| `forklight_competition_list` | yes | List all competitions |
-| `forklight_provider_status` | yes | Read cached provider verification (no cost) |
-| `forklight_provider_probe` | no | Explicit live probe ★ |
+### 原则（摘要）
 
-## Documentation
+- 质量优先于随意 size 限制；隔离与独立验证不可配置掉  
+- 有限自改进：触顶回 Main，不无限修  
+- 先复用再重跑；Competition 非默认重试  
+- 默认不发布/不 commit；需用户明确授权  
 
-- [Project Source of Truth](PROJECT.md) — the only current product Goal,
-  milestone status, decisions, action items, and evidence index.
-- [Operations Guide](docs/operations.md) — complete workflow, module
-  architecture, cost and mutation warnings, recovery.
-- [Configuration Guide](docs/configuration.md) — every configurable policy
-  section, precedence rules, creation-time snapshot boundaries, and
-  non-configurable safety invariants.
+---
 
-## Boundaries
+## English
 
-- DeepSeek, Qwen, MiniMax, GLM, and Volcengine Coding Plan share one provider contract. Each task can
-  override `provider.model`, `provider.endpoint`, `provider.keychainService`,
-  and `provider.keychainAccount` without changing global settings.
-- Provider credentials stay in the macOS Keychain and are injected only into
-  the Worker child process.
-- The macOS Worker sandbox denies reads from the user's home directory except
-  the isolated task workspace, task-owned Claude configuration, and runtime
-  files. Writes are limited to the task workspace, task-owned configuration,
-  and system temporary storage.
-- Workers cannot run shell commands, browse the web, commit, push, create pull
-  requests, or modify Git remotes.
-- Hub binds to loopback only and never exposes credential values.
-- Integration apply is the sole path that mutates source. It requires a
-  passing preflight receipt, explicit confirmation, and verifies every
-  fingerprint before proceeding.
+### What it is
 
-## Default provider configuration
+ForkLight is a **local-first execution hub**: a capable **Main** decomposes work, supervises isolated **Workers**, reviews candidates, and only integrates with explicit authorization. One human-readable Hub plus CLI/MCP share the same durable truth.
 
-| Provider | Default model | Claude Code endpoint | Keychain service |
-| --- | --- | --- | --- |
-| DeepSeek | `deepseek-v4-flash` | `https://api.deepseek.com/anthropic` | `forklight.deepseek.api-key` |
-| Qwen | `qwen3.7-plus` | `https://dashscope.aliyuncs.com/apps/anthropic` | `forklight.qwen.api-key` |
-| MiniMax | `MiniMax-M3` | `https://api.minimax.io/anthropic` | `forklight.minimax.api-key` |
-| Volcengine Coding Plan | `glm-5.2[1M]` | `https://ark.cn-beijing.volces.com/api/coding` | `forklight.volcengine.api-key` |
-| GLM | `glm-5.2` | `https://dashscope.aliyuncs.com/apps/anthropic` | `forklight.qwen.api-key` |
+### Features
 
-Qwen and GLM share the Alibaba Keychain service because the current Alibaba
-account exposes both model families. Override the service and endpoint
-per-task when using a separate GLM account.
+1. Task contracts, attempts, candidates, review graph, finite correction.  
+2. Multi-runtime workers (Claude Code, Codex CLI, Grok Build, …) with profiles and readiness.  
+3. Isolated workspaces, patches, fail-closed integration.  
+4. Bilingual Hub: outcome → state → I/O → reason → retained work → next action.  
+5. Daemon + MCP + exchange receipts.  
+6. Routing advice, exceptional competition, failure attribution before model blame.  
+7. Dogfood YAML examples and milestone contracts under `docs/`.
+
+### Develop & run
+
+```bash
+npm install
+npm run build && npm run test && npm run check
+npm run dev
+```
+
+Project status and milestones: [`PROJECT.md`](./PROJECT.md). Ops: `docs/operations.md`, `docs/configuration.md`.
