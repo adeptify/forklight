@@ -13,11 +13,15 @@ import {
 } from "../core/build-identity.js";
 import { sleepMs as sleep } from "../core/time.js";
 import {
+  parseDaemonShutdownIntent,
   requiresMatchingBuildIdentity,
   type DaemonMethod,
   type DaemonRequest,
   type DaemonResponse,
+  type DaemonShutdownIntent,
 } from "./protocol.js";
+
+export type { DaemonShutdownIntent };
 
 export function daemonExchange(
   method: DaemonMethod,
@@ -304,12 +308,22 @@ export async function probeDaemon(home = forklightHome()): Promise<{
   }
 }
 
+/** Options for graceful Daemon stop. Intent defaults to ordinary stop. */
+export interface StopDaemonOptions {
+  /** Closed stop-versus-restart intent. Omitted means stop (no auto-resume). */
+  intent?: DaemonShutdownIntent;
+}
+
 /** Gracefully stop the daemon after its exact PID and endpoint are both gone. */
-export async function stopDaemon(home = forklightHome()): Promise<{
+export async function stopDaemon(
+  home = forklightHome(),
+  options: StopDaemonOptions = {},
+): Promise<{
   stopped: boolean;
   result?: Record<string, unknown>;
   message: string;
 }> {
+  const intent = parseDaemonShutdownIntent(options.intent ?? "stop");
   let targetPid: number;
   try {
     const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
@@ -327,7 +341,7 @@ export async function stopDaemon(home = forklightHome()): Promise<{
 
   let result: Record<string, unknown> | undefined;
   try {
-    result = await daemonRequest<Record<string, unknown>>("shutdown", {}, home);
+    result = await daemonRequest<Record<string, unknown>>("shutdown", { intent }, home);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (!/ECONNREFUSED|ENOENT/i.test(msg)) throw error;
@@ -447,12 +461,14 @@ export async function stopDaemonForHandoff(
   throw new Error("ForkLight daemon did not relinquish endpoint within 10 seconds");
 }
 
-/** Stop fully, then start a fresh daemon with the same bounded readiness rules. */
+/** Stop fully with restart intent, then start a fresh daemon with the same
+ *  bounded readiness rules. The old Daemon records restart-continuation
+ *  authority for eligible interrupted Workers before exit. */
 export async function restartDaemon(
   home = forklightHome(),
   options: EnsureDaemonOptions = {},
 ): Promise<Record<string, unknown>> {
-  await stopDaemon(home);
+  await stopDaemon(home, { intent: "restart" });
   return ensureDaemon(home, options);
 }
 

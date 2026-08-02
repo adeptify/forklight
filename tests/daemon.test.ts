@@ -34,7 +34,10 @@ import {
   stopDaemonForHandoff,
   type DaemonChildHandle,
 } from "../src/daemon/client.js";
-import { requiresMatchingBuildIdentity } from "../src/daemon/protocol.js";
+import {
+  parseDaemonShutdownIntent,
+  requiresMatchingBuildIdentity,
+} from "../src/daemon/protocol.js";
 import { daemonSocketPath } from "../src/core/config.js";
 import { DetachedDaemonFixture } from "./helpers/detached-daemon.js";
 import { DaemonCoordinator, isManagedWorkerCommand, probeProvidersBounded } from "../src/daemon/coordinator.js";
@@ -51,7 +54,10 @@ import {
 import {
   authorizeExtraAttempt,
   authorizeMainCorrection,
+  authorizeSystemRestartRecovery,
+  recordRestartContinuationsForTasks,
   resolvePendingGrantExecutionOptions,
+  resolvePendingRestartRecoveryGrant,
 } from "../src/core/attempt-authorization.js";
 import { isWorkspaceReady } from "../src/workspace/copy.js";
 import { captureCandidateRevision } from "../src/core/candidate-revision.js";
@@ -85,6 +91,15 @@ test("identity matching protects state changes but lets a new build stop an old 
   // Adaptation preview is read-only; apply is mutating.
   assert.equal(requiresMatchingBuildIdentity("adaptation_preview"), false);
   assert.equal(requiresMatchingBuildIdentity("adaptation_apply"), true);
+});
+
+test("shutdown intent is a closed stop/restart set with stop as the legacy default", () => {
+  assert.equal(parseDaemonShutdownIntent(undefined), "stop");
+  assert.equal(parseDaemonShutdownIntent(null), "stop");
+  assert.equal(parseDaemonShutdownIntent("stop"), "stop");
+  assert.equal(parseDaemonShutdownIntent("restart"), "restart");
+  assert.throws(() => parseDaemonShutdownIntent("reboot"), /shutdown intent must be stop or restart/);
+  assert.throws(() => parseDaemonShutdownIntent(1), /shutdown intent must be stop or restart/);
 });
 
 test("Integration wait socket deadline covers the requested wait interval", () => {
@@ -5643,6 +5658,154 @@ test("Worker and pre-Worker failures release Profile occupancy without stranding
   }
 });
 
+test("cross-Profile queue fairness skips blocked same-Profile head under global cap", async () => {
+  // Global cap 2, each Profile cap 1:
+  //   A (profile-a) holds its Worker slot
+  //   B (profile-a) sits at queue head, blocked by same-Profile occupancy
+  //   C (profile-b) is enqueued behind B and must start while B remains queued
+  // Prove pump's later-queue eligibility scan before any Profile A release.
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-profile-slot-fair-"));
+  const project = path.join(home, "source");
+  await mkdir(path.join(project, "src"), { recursive: true });
+  await writeFile(path.join(project, "src", "hello.ts"), "export const n = 1;\n");
+  const gateScript = await writeVerificationGateScript(home);
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 2);
+  const workerHold = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  const workerStarted = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  installControllableClaudeWorker({ workerHold, workerStarted });
+  try {
+    const gateA = path.join(home, "gate-a");
+    const gateB = path.join(home, "gate-b");
+    const gateC = path.join(home, "gate-c");
+    const taskA = await seedProfileSlotTask({
+      store, home, project, name: "fair-a", profileId: "profile-a",
+      profileMaxConcurrency: 1, gateScript, gatePath: gateA,
+    });
+    const taskB = await seedProfileSlotTask({
+      store, home, project, name: "fair-b", profileId: "profile-a",
+      profileMaxConcurrency: 1, gateScript, gatePath: gateB,
+    });
+    const taskC = await seedProfileSlotTask({
+      store, home, project, name: "fair-c", profileId: "profile-b",
+      profileMaxConcurrency: 1, gateScript, gatePath: gateC,
+    });
+
+    const holdA = createDeferredGate();
+    const holdC = createDeferredGate();
+    const holdB = createDeferredGate();
+    holdB.resolve(); // B finishes its Worker promptly once admitted
+    const startedA = createDeferredGate();
+    const startedB = trackableGate();
+    const startedC = createDeferredGate();
+    workerHold.set(taskA.id, holdA);
+    workerHold.set(taskB.id, holdB);
+    workerHold.set(taskC.id, holdC);
+    workerStarted.set(taskA.id, startedA);
+    workerStarted.set(taskB.id, startedB);
+    workerStarted.set(taskC.id, startedC);
+
+    coordinator.queueTask(taskA.id);
+    await startedA.promise;
+    coordinator.queueTask(taskB.id);
+    assert.deepEqual(coordinator.health().activeTaskIds, [taskA.id]);
+    assert.deepEqual(coordinator.health().queuedTaskIds, [taskB.id]);
+    assert.equal(startedB.started(), false, "B must not start while Profile A is occupied");
+    assert.equal(store.listAttempts(taskB.id).length, 0);
+
+    // Enqueue different-Profile C behind blocked B. Pump must scan past B.
+    coordinator.queueTask(taskC.id);
+    await startedC.promise;
+
+    // Critical fairness window: assert before any Profile A release.
+    const fairnessHealth = coordinator.health();
+    assert.ok(
+      (fairnessHealth.activeTaskIds as string[]).includes(taskA.id),
+      "A remains active while holding its Profile slot",
+    );
+    assert.ok(
+      (fairnessHealth.activeTaskIds as string[]).includes(taskC.id),
+      "C starts under global capacity despite blocked same-Profile head",
+    );
+    assert.equal(
+      (fairnessHealth.activeTaskIds as string[]).includes(taskB.id),
+      false,
+      "B must not be active while Profile A is still occupied",
+    );
+    assert.deepEqual(
+      fairnessHealth.queuedTaskIds,
+      [taskB.id],
+      "B remains the sole queued Task after C bypasses it",
+    );
+    assert.equal(startedB.started(), false, "B Worker must not start before Profile A release");
+    assert.equal(
+      store.listAttempts(taskB.id).length,
+      0,
+      "B must not create an Attempt while blocked at the queue head",
+    );
+    assert.ok(
+      store.listAttempts(taskC.id).length >= 1,
+      "C must create an Attempt when the fair scan admits it",
+    );
+    assert.equal(
+      store.listAttempts(taskA.id).length,
+      1,
+      "A is not duplicated by the fair scan",
+    );
+
+    // Deterministic unwind: release Workers first, keep both Tasks verifying so
+    // global capacity stays full, then free one slot so B can start.
+    holdC.resolve();
+    await waitUntil(
+      () => store.getTask(taskC.id).status === "verifying",
+      "Task C enters independent verification",
+    );
+    // A still holds Profile A; B must remain queued even after C is verifying.
+    assert.equal(startedB.started(), false);
+    assert.deepEqual(coordinator.health().queuedTaskIds, [taskB.id]);
+
+    holdA.resolve();
+    await waitUntil(
+      () => store.getTask(taskA.id).status === "verifying",
+      "Task A enters independent verification after Profile slot release",
+    );
+    // Profile A free, but global still full (A+C verifying). B waits for capacity.
+    assert.equal(
+      (coordinator.health().activeTaskIds as string[]).length,
+      2,
+      "A and C remain in the full active set while verifying",
+    );
+    assert.equal(startedB.started(), false, "B still blocked by global in-flight cap");
+
+    // Free one global slot so B can start; then finish remaining verification.
+    await writeFile(gateC, "release\n");
+    await startedB.promise;
+    assert.equal(
+      (coordinator.health().queuedTaskIds as string[]).includes(taskB.id),
+      false,
+      "B starts after Profile A and global capacity are both available",
+    );
+    await writeFile(gateA, "release\n");
+    await writeFile(gateB, "release\n");
+    await waitUntil(
+      () => isTerminalTaskStatus(store.getTask(taskA.id).status)
+        && isTerminalTaskStatus(store.getTask(taskB.id).status)
+        && isTerminalTaskStatus(store.getTask(taskC.id).status),
+      "all three Tasks finish after verification gates open",
+    );
+    assert.equal(store.getTask(taskA.id).status, "succeeded");
+    assert.equal(store.getTask(taskB.id).status, "succeeded");
+    assert.equal(store.getTask(taskC.id).status, "succeeded");
+    assert.deepEqual(coordinator.health().activeTaskIds, []);
+    assert.deepEqual(coordinator.health().queuedTaskIds, []);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+    resetWorkerRegistryForTests();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("snapshot stores truthful enforcement capability", () => {
   const claudeCaps = enforcementCapabilityForRuntime("claude-code");
   const snap = resolveEffectivePolicy(
@@ -7349,6 +7512,391 @@ test("maxExtraAttempts zero does not block structured correction with maxMainCor
     );
     assert.equal(result.status, "queued");
     assert.equal(store.listEvents(task.id).filter((e) => e.type === "attempt.authorization.granted").length, 1);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+// --- Graceful Daemon restart continuity (FL-004) ---
+
+function interruptedSystemRestartTask(
+  store: StateStore,
+  label: string,
+): { taskId: string; attemptId: string; sessionId: string } {
+  const task = registerTaskFromSpec(store, {
+    version: 1,
+    name: `sys-restart-${label}`,
+    project: "/tmp/src",
+    goal: "Exact native Goal continuity after graceful restart",
+    constraints: [],
+    provider: {
+      name: "openai",
+      model: "gpt-5.4",
+      keychainService: "forklight.test",
+    },
+    runtime: {
+      name: "codex-cli",
+      executable: "codex",
+      effort: "medium",
+      maxBudgetUsd: 1.5,
+    },
+    workspace: { exclude: [] },
+    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+    acceptance: { commands: ["true"] },
+  }, `forklight://test/sys-restart-${label}`);
+  const now = new Date().toISOString();
+  const attemptId = `sys-restart-${label}-a1`;
+  store.createAttempt({
+    id: attemptId,
+    taskId: task.id,
+    ordinal: 1,
+    status: "interrupted",
+    sessionId: task.sessionId,
+    rawLogPath: `/tmp/${attemptId}.jsonl`,
+    startedAt: now,
+    finishedAt: now,
+    exitCode: 130,
+    error: "Worker execution interrupted",
+  });
+  store.setTaskStatus(task.id, "interrupted", {
+    currentAttemptId: attemptId,
+    finishedAt: now,
+    workerPid: null,
+    error: "Worker execution interrupted",
+  });
+  return { taskId: task.id, attemptId, sessionId: task.sessionId };
+}
+
+test("graceful restart recovery enqueues one system continuation for baseMaxAttempts=1", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sys-restart-recover-"));
+  const store = new StateStore(home);
+  const { taskId, attemptId } = interruptedSystemRestartTask(store, "recover");
+  // baseMaxAttempts=1: without the system grant, resume would be rejected.
+  const grant = authorizeSystemRestartRecovery(store, taskId, 1);
+  assert.ok(grant !== null);
+  assert.equal(grant!.maximumOrdinal, 2);
+
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const recovered = await coordinator.recover();
+    assert.ok(recovered.includes(taskId));
+    assert.deepEqual(coordinator.health().queuedTaskIds, [taskId]);
+    // Exactly one grant; recover must not mint another.
+    assert.equal(
+      store.listEvents(taskId).filter((e) => e.type === "attempt.authorization.granted").length,
+      1,
+    );
+    const payload = store.listEvents(taskId)
+      .find((e) => e.type === "attempt.authorization.granted")!
+      .payload as Record<string, unknown>;
+    assert.equal(payload.reason, "system-daemon-restart");
+    assert.equal(payload.priorAttemptId, attemptId);
+    assert.equal(payload.kind, "restart-recovery");
+    // Same Task identity — no replacement Task invented.
+    assert.equal(store.listTasks().length, 1);
+    assert.equal(store.getTask(taskId).sessionId.length > 0, true);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("duplicate recover of a pending system restart grant stays single-queued", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sys-restart-dup-"));
+  const store = new StateStore(home);
+  const { taskId } = interruptedSystemRestartTask(store, "dup");
+  authorizeSystemRestartRecovery(store, taskId, 1);
+
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const first = await coordinator.recover();
+    const second = await coordinator.recover();
+    assert.ok(first.includes(taskId));
+    // Second recover must not re-enqueue or invent grants.
+    assert.ok(!second.includes(taskId));
+    assert.deepEqual(coordinator.health().queuedTaskIds, [taskId]);
+    assert.equal(
+      store.listEvents(taskId).filter((e) => e.type === "attempt.authorization.granted").length,
+      1,
+    );
+    assert.equal(store.listAttempts(taskId).length, 1);
+    assert.equal(store.listTasks().length, 1);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("coordinator manual resume honors a valid system restart grant exactly once", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-coord-resume-restart-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  settings.update({ execution: { maxAttempts: 1, maxExtraAttempts: 2 } });
+  const { taskId } = interruptedSystemRestartTask(store, "manual-resume");
+  const grant = authorizeSystemRestartRecovery(store, taskId, 1);
+  assert.ok(grant !== null);
+  assert.equal(grant!.maximumOrdinal, 2);
+  const coordinator = testCoordinator(store, 0);
+  try {
+    // Manual resume reuses the durable exact restart grant — it must pass the
+    // canonical validator instead of bypassing it via the generic resolver.
+    const queued = coordinator.resume(taskId);
+    assert.equal(queued.id, taskId);
+    assert.deepEqual(coordinator.health().queuedTaskIds, [taskId]);
+    assert.equal(
+      store.listEvents(taskId).filter((e) => e.type === "attempt.authorization.granted").length,
+      1,
+      "manual resume must reuse the durable restart grant, not mint another",
+    );
+    assert.equal(
+      store.listEvents(taskId).filter(
+        (e) => e.type === "attempt.restart-continuation.skipped",
+      ).length,
+      0,
+      "a valid continuation must not be refused",
+    );
+    // One-shot: a second manual resume is rejected as already queued.
+    assert.throws(() => coordinator.resume(taskId), /already queued or running/);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("coordinator manual resume refuses a stale restart grant without queueing", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-coord-resume-stale-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  settings.update({ execution: { maxAttempts: 1, maxExtraAttempts: 2 } });
+  const { taskId, attemptId } = interruptedSystemRestartTask(store, "stale-resume");
+  // A pending restart grant names a prior Attempt that is not the latest.
+  store.addEvent(taskId, attemptId, "attempt.authorization.granted",
+    "Stale prior restart grant", {
+      kind: "restart-recovery",
+      additionalAttempts: 1,
+      targetOrdinal: 2,
+      maxBudgetUsd: 1.5,
+      budgetMode: "capped-for-authorized-attempt",
+      reason: "system-daemon-restart",
+      priorAttemptId: "not-the-latest-attempt",
+    });
+  const coordinator = testCoordinator(store, 0);
+  try {
+    assert.throws(() => coordinator.resume(taskId), /reached maximum attempts/);
+    assert.deepEqual(coordinator.health().queuedTaskIds, []);
+    // One content-free refusal linked to the authoritative Attempt, never the
+    // forged priorAttemptId carried by the stale grant.
+    const skips = store.listEvents(taskId).filter(
+      (e) => e.type === "attempt.restart-continuation.skipped",
+    );
+    assert.equal(skips.length, 1);
+    assert.equal(
+      (skips[0]!.payload as { reasonCode?: string }).reasonCode,
+      "stale-attempt",
+    );
+    assert.equal(skips[0]!.attemptId, attemptId);
+    // No new Attempt and no Worker launch.
+    assert.equal(store.listAttempts(taskId).length, 1);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("ordinary stop intent never records a restart continuation grant", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sys-restart-stop-"));
+  const store = new StateStore(home);
+  const { taskId } = interruptedSystemRestartTask(store, "stop");
+  const coordinator = testCoordinator(store, 0);
+  try {
+    // Stop path: shutdown without restart intent leaves no grant and no queue.
+    await coordinator.shutdown("stop");
+    assert.equal(
+      store.listEvents(taskId).filter((e) => e.type === "attempt.authorization.granted").length,
+      0,
+    );
+    assert.equal(resolvePendingRestartRecoveryGrant(store, taskId, 1), null);
+
+    const recovered = testCoordinator(store, 0);
+    try {
+      const ids = await recovered.recover();
+      assert.ok(!ids.includes(taskId));
+      assert.deepEqual(recovered.health().queuedTaskIds, []);
+      assert.equal(store.getTask(taskId).status, "interrupted");
+      assert.equal(store.listAttempts(taskId).length, 1);
+    } finally {
+      await recovered.shutdown();
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test("shutdown restart intent records grants only for active settled Tasks", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sys-restart-shutdown-"));
+  const store = new StateStore(home);
+  const active = interruptedSystemRestartTask(store, "active");
+  const idle = interruptedSystemRestartTask(store, "idle");
+  const coordinator = testCoordinator(store, 0);
+  try {
+    // Empty active set at shutdown means no grants even with restart intent.
+    await coordinator.shutdown("restart");
+    assert.equal(
+      store.listEvents(active.taskId).filter((e) => e.type === "attempt.authorization.granted").length,
+      0,
+    );
+    // Explicit active list (what graceful restart records after settlement).
+    recordRestartContinuationsForTasks(store, [active.taskId], () => 1);
+    assert.equal(
+      store.listEvents(active.taskId).filter((e) => e.type === "attempt.authorization.granted").length,
+      1,
+    );
+    assert.equal(
+      store.listEvents(idle.taskId).filter((e) => e.type === "attempt.authorization.granted").length,
+      0,
+      "Tasks not active for the requested restart must not receive a grant",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("daemon shutdown request accepts restart intent and defaults omitted intent to stop", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-shutdown-intent-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const omitted = await daemonRequest<Record<string, unknown>>("shutdown", {}, home);
+    assert.equal(omitted.stopping, true);
+    assert.equal(omitted.intent, "stop");
+  } finally {
+    await daemon.close();
+  }
+
+  const home2 = await mkdtemp(path.join(tmpdir(), "forklight-shutdown-intent-restart-"));
+  const daemon2 = new ForkLightDaemon(home2, 0);
+  await daemon2.start();
+  try {
+    const restart = await daemonRequest<Record<string, unknown>>(
+      "shutdown",
+      { intent: "restart" },
+      home2,
+    );
+    assert.equal(restart.stopping, true);
+    assert.equal(restart.intent, "restart");
+    await assert.rejects(
+      () => daemonRequest("shutdown", { intent: "reboot" }, home2),
+      /shutdown intent must be stop or restart/,
+    );
+  } finally {
+    await daemon2.close();
+  }
+});
+
+test("ineligible post-verification Task never auto-queues on recover", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sys-restart-verified-"));
+  const store = new StateStore(home);
+  const { taskId, attemptId } = interruptedSystemRestartTask(store, "verified");
+  store.addEvent(taskId, attemptId, "verification.completed", "Independent verification passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: "/tmp/diff.patch",
+    sourceUnchanged: true,
+  });
+  // Even if a grant is somehow requested, authorization fails closed.
+  assert.equal(authorizeSystemRestartRecovery(store, taskId, 1), null);
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const recovered = await coordinator.recover();
+    assert.ok(!recovered.includes(taskId));
+    assert.deepEqual(coordinator.health().queuedTaskIds, []);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("stale or corrupt restart grants never enqueue and stay observable", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sys-restart-stale-"));
+  const store = new StateStore(home);
+  const { taskId, attemptId } = interruptedSystemRestartTask(store, "stale-grant");
+  // Pending grant bound to the wrong prior Attempt.
+  store.addEvent(taskId, attemptId, "attempt.authorization.granted",
+    "Stale system restart grant", {
+      kind: "restart-recovery",
+      additionalAttempts: 1,
+      targetOrdinal: 2,
+      maxBudgetUsd: 1.5,
+      budgetMode: "capped-for-authorized-attempt",
+      reason: "system-daemon-restart",
+      priorAttemptId: "wrong-prior-attempt",
+    });
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const recovered = await coordinator.recover();
+    assert.ok(!recovered.includes(taskId));
+    assert.deepEqual(coordinator.health().queuedTaskIds, []);
+    assert.equal(store.listAttempts(taskId).length, 1);
+    const skips = store.listEvents(taskId).filter(
+      (e) => e.type === "attempt.restart-continuation.skipped",
+    );
+    assert.equal(skips.length, 1);
+    assert.equal(
+      (skips[0]!.payload as { reasonCode?: string }).reasonCode,
+      "stale-attempt",
+    );
+    // Second recover is idempotent: still one skip, still no queue/Attempt.
+    const again = await coordinator.recover();
+    assert.ok(!again.includes(taskId));
+    assert.deepEqual(coordinator.health().queuedTaskIds, []);
+    assert.equal(
+      store.listEvents(taskId).filter(
+        (e) => e.type === "attempt.restart-continuation.skipped",
+      ).length,
+      1,
+    );
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("corrupt restart grant history is skip-observable and does not block recover", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sys-restart-corrupt-"));
+  const store = new StateStore(home);
+  const corrupt = interruptedSystemRestartTask(store, "corrupt");
+  const healthy = interruptedSystemRestartTask(store, "healthy");
+  store.addEvent(corrupt.taskId, corrupt.attemptId, "attempt.authorization.granted",
+    "Corrupt restart grant", {
+      kind: "restart-recovery",
+      additionalAttempts: 1,
+      targetOrdinal: 2,
+      maxBudgetUsd: 1.5,
+      budgetMode: "capped-for-authorized-attempt",
+      reason: "not-a-valid-restart-reason",
+      priorAttemptId: corrupt.attemptId,
+    });
+  authorizeSystemRestartRecovery(store, healthy.taskId, 1);
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const recovered = await coordinator.recover();
+    assert.ok(!recovered.includes(corrupt.taskId));
+    assert.ok(recovered.includes(healthy.taskId));
+    assert.deepEqual(coordinator.health().queuedTaskIds, [healthy.taskId]);
+    const skips = store.listEvents(corrupt.taskId).filter(
+      (e) => e.type === "attempt.restart-continuation.skipped",
+    );
+    assert.equal(skips.length, 1);
+    assert.equal(
+      (skips[0]!.payload as { reasonCode?: string }).reasonCode,
+      "corrupt-history",
+    );
+    // No raw error text in the observability payload.
+    assert.deepEqual(Object.keys(skips[0]!.payload as object).sort(), ["reasonCode"]);
   } finally {
     await coordinator.shutdown();
     store.close();

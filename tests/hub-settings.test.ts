@@ -1996,6 +1996,96 @@ test("Hub worker profile edit preserves all supplied fields", async () => {
   }
 });
 
+test("Hub worker profile round-trips networkPolicy through save and reload", async () => {
+  const ctx = await makeHub();
+  try {
+    const base = `http://127.0.0.1:${ctx.port}`;
+    const save = await doHttp(`${base}/api/worker-profiles`, "POST", ctx.token, {
+      action: "upsert",
+      profile: {
+        id: "net-test",
+        label: "Net Worker",
+        runtime: "claude-code",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        networkPolicy: {
+          mode: "custom-proxy",
+          httpProxy: "http://127.0.0.1:7890",
+          httpsProxy: "http://127.0.0.1:7891",
+          noProxy: "localhost,127.0.0.1",
+        },
+      },
+    });
+    assert.equal(save.status, 200);
+    const saved = (save.body as { workerProfiles: { profiles: Array<{ id: string; networkPolicy?: Record<string, unknown> }> } }).workerProfiles;
+    const profile = saved.profiles.find((p: { id: string }) => p.id === "net-test");
+    assert.ok(profile, "profile was saved");
+    assert.deepEqual(profile!.networkPolicy, {
+      mode: "custom-proxy",
+      httpProxy: "http://127.0.0.1:7890",
+      httpsProxy: "http://127.0.0.1:7891",
+      noProxy: "localhost,127.0.0.1",
+    });
+
+    const edit = await doHttp(`${base}/api/worker-profiles`, "POST", ctx.token, {
+      action: "upsert",
+      profile: {
+        id: "net-test",
+        label: "Net Worker v2",
+        runtime: "claude-code",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        networkPolicy: { mode: "direct" },
+      },
+    });
+    assert.equal(edit.status, 200);
+    const edited = (edit.body as { workerProfiles: { profiles: Array<{ id: string; networkPolicy?: Record<string, unknown> }> } }).workerProfiles;
+    const editedProfile = edited.profiles.find((p: { id: string }) => p.id === "net-test");
+    assert.deepEqual(editedProfile!.networkPolicy, { mode: "direct" });
+
+    const get = await doHttp(`${base}/api/worker-profiles`, "GET", ctx.token);
+    assert.equal(get.status, 200);
+    const stored = (get.body as { workerProfiles: { profiles: Array<{ id: string; networkPolicy?: Record<string, unknown> }> } }).workerProfiles;
+    const storedProfile = stored.profiles.find((p: { id: string }) => p.id === "net-test");
+    assert.deepEqual(storedProfile!.networkPolicy, { mode: "direct" }, "networkPolicy survives get/load cycle");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("Hub rejects authenticated proxy networkPolicy atomically without echo", async () => {
+  const ctx = await makeHub();
+  try {
+    const base = `http://127.0.0.1:${ctx.port}`;
+    const secretUrl = "http://user:hub-secret-token@private-proxy.example:7890";
+    const reject = await doHttp(`${base}/api/worker-profiles`, "POST", ctx.token, {
+      action: "upsert",
+      profile: {
+        id: "net-bad",
+        label: "Net Bad",
+        runtime: "claude-code",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        networkPolicy: { mode: "custom-proxy", httpProxy: secretUrl },
+      },
+    });
+    assert.equal(reject.status, 422);
+    const errorText = typeof reject.body === "object" && reject.body !== null
+      ? String((reject.body as { error?: string }).error ?? "")
+      : "";
+    assert.ok(!errorText.includes(secretUrl), "API error must not echo the proxy URL");
+    assert.ok(!errorText.includes("hub-secret-token"), "API error must not echo credentials");
+    assert.ok(!errorText.includes("private-proxy.example"), "API error must not echo the hostname");
+    assert.match(errorText, /embedded credentials/);
+
+    const get = await doHttp(`${base}/api/worker-profiles`, "GET", ctx.token);
+    const stored = (get.body as { workerProfiles: { profiles: Array<{ id: string }> } }).workerProfiles;
+    assert.equal(stored.profiles.some((p) => p.id === "net-bad"), false, "invalid profile is not persisted");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test("Hub settings view includes deliveryProfiles", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "fl-hub-dp-view-"));
   const store = new StateStore(home);

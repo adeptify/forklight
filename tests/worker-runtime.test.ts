@@ -19,6 +19,7 @@ import {
 import {
   buildGrokCliArgs,
   buildGrokSandboxProfile,
+  buildGrokWorkerEnv,
   GrokBuildAdapter,
   GROK_CONNECTIVITY_SAFE_ERROR,
   grokAllowTools,
@@ -29,10 +30,16 @@ import {
 } from "../src/workers/grok.js";
 import {
   buildCodexCliArgs,
+  buildCodexWorkerEnv,
   CodexCliAdapter,
   runCodexWorker,
   seedCodexHome,
 } from "../src/workers/codex.js";
+import { childEnvironment } from "../src/workers/claude.js";
+import {
+  DEFAULT_NO_PROXY,
+  validateWorkerNetworkPolicy,
+} from "../src/core/network-policy.js";
 import { failureCategoryFromEvents } from "../src/core/worker-failure.js";
 import { isEffectiveProgressEvent } from "../src/core/runtime-activity.js";
 import { ClaudeEventNormalizer } from "../src/events/normalize.js";
@@ -60,8 +67,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { StateStore } from "../src/state/store.js";
 import {
+  authorizeMainCorrection,
+  authorizeSystemRestartRecovery,
+} from "../src/core/attempt-authorization.js";
+import {
+  correctTask,
   executeAttempt,
+  prepareMainCorrectionTask,
   recordWorkerConnectionEvidenceFromCompletedEvent,
+  resumeTask,
 } from "../src/core/runner.js";
 import type { WorkerAdapter, WorkerDoctorResult } from "../src/workers/types.js";
 import { registerWorkerAdapter } from "../src/workers/registry.js";
@@ -501,7 +515,11 @@ test("seedCodexHome copies only auth and safe catalog with private permissions",
 
 // --- Deterministic Codex adapter integration (fake executable, no live model) ---
 
-async function codexRuntimeFixture(scriptLines: string[], exitCode = 0) {
+async function codexRuntimeFixture(
+  scriptLines: string[],
+  exitCode = 0,
+  networkPolicy?: unknown,
+) {
   const root = await mkdtemp(path.join(tmpdir(), "fl-codex-run-"));
   const source = path.join(root, "source");
   await mkdir(path.join(source, "src"), { recursive: true });
@@ -525,6 +543,14 @@ async function codexRuntimeFixture(scriptLines: string[], exitCode = 0) {
     "  hasOpenAIOrgId: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_ORG_ID'),",
     "  hasOpenAIProject: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_PROJECT'),",
     "  hasCodexApiKey: Object.prototype.hasOwnProperty.call(process.env, 'CODEX_API_KEY'),",
+    "  HTTP_PROXY: process.env.HTTP_PROXY || null,",
+    "  http_proxy: process.env.http_proxy || null,",
+    "  HTTPS_PROXY: process.env.HTTPS_PROXY || null,",
+    "  https_proxy: process.env.https_proxy || null,",
+    "  ALL_PROXY: process.env.ALL_PROXY || null,",
+    "  all_proxy: process.env.all_proxy || null,",
+    "  NO_PROXY: process.env.NO_PROXY || null,",
+    "  no_proxy: process.env.no_proxy || null,",
     "  cwd: process.cwd()",
     "}));",
     `process.exit(${exitCode});`,
@@ -541,6 +567,7 @@ async function codexRuntimeFixture(scriptLines: string[], exitCode = 0) {
       project: source,
       provider: { name: "openai", model: "gpt-5.6-luna", keychainService: "forklight.openai.api-key" },
       runtime: { name: "codex-cli", executable: script, effort: "max", maxBudgetUsd: null },
+      ...(networkPolicy === undefined ? {} : { networkPolicy }),
     }),
     source,
     policy(),
@@ -1972,6 +1999,119 @@ test("executeAttempt release hook is optional, idempotent on failure paths, and 
   }
 });
 
+test("resumeTask succeeds without onWorkerProfileSlotRelease and preserves pre-hook behavior", async () => {
+  // Direct callers (CLI / non-Coordinator) omit the optional release hook.
+  // First Attempt fails, then resumeTask without the hook follows the success path.
+  registerPolicyTestClaude(async () => ({
+    status: "failed",
+    exitCode: 1,
+    error: "simulated first-attempt failure for resume",
+  }));
+  const { store, task } = await policyRunnerFixture({
+    completionMode: "off",
+    changeBudgetMode: "off",
+    baseMaxAttempts: 2,
+  });
+  try {
+    const failed = await executeAttempt(store, task, false);
+    assert.equal(failed.task.status, "failed");
+    assert.equal(store.listAttempts(task.id).length, 1);
+
+    registerPolicyTestClaude(async (ctx) => {
+      // Tiny business edit so independent verification has a real patch artifact.
+      await writeFile(
+        path.join(ctx.task.paths.workspace, "src", "hello.ts"),
+        "export const n = 2;\n",
+      );
+      return { status: "succeeded", exitCode: 0, resultText: "resume ok" };
+    });
+    // Omit onWorkerProfileSlotRelease entirely — arity and success path only.
+    const result = await resumeTask(store, task.id);
+    assert.equal(result.task.status, "succeeded");
+    assert.equal(result.verification?.passed, true);
+    assert.equal(store.listAttempts(task.id).length, 2);
+    assert.equal(result.attempt.ordinal, 2);
+    assert.equal(result.attempt.status, "succeeded");
+    assert.equal(result.attempt.exitCode, 0);
+    assert.ok(
+      store.listEvents(task.id).some((event) => event.type === "verification.started"),
+      "resume without hook still runs independent verification",
+    );
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+  }
+});
+
+test("correctTask succeeds without onWorkerProfileSlotRelease and preserves pre-hook behavior", async () => {
+  // Durable Main-correction grant + queued preparation, then correctTask with
+  // the optional Profile release hook omitted (direct-caller compatibility).
+  registerPolicyTestClaude(async () => ({
+    status: "failed",
+    exitCode: 1,
+    error: "simulated first-attempt failure for correction",
+  }));
+  const { store, task } = await policyRunnerFixture({
+    completionMode: "off",
+    changeBudgetMode: "off",
+    baseMaxAttempts: 1,
+    maxMainCorrections: 1,
+    maxExtraAttempts: 0,
+  });
+  try {
+    const failed = await executeAttempt(store, task, false);
+    assert.equal(failed.task.status, "failed");
+    assert.equal(store.listAttempts(task.id).length, 1);
+
+    const grant = authorizeMainCorrection(
+      store,
+      task.id,
+      {
+        feedback: "Bounded Main correction for no-hook direct caller",
+        maxBudgetUsd: null,
+        confirm: true,
+      },
+      1,
+      1,
+    );
+    assert.equal(grant.maximumOrdinal, 2);
+    const pendingEvents = store.listEvents(task.id).filter(
+      (event) => event.type === "attempt.authorization.granted",
+    );
+    assert.equal(pendingEvents.length, 1);
+    assert.equal(
+      (pendingEvents[0]!.payload as Record<string, unknown>).kind,
+      "correction",
+    );
+
+    const queued = prepareMainCorrectionTask(store, task.id);
+    assert.equal(queued.status, "queued");
+
+    registerPolicyTestClaude(async (ctx) => {
+      await writeFile(
+        path.join(ctx.task.paths.workspace, "src", "hello.ts"),
+        "export const n = 3;\n",
+      );
+      return { status: "succeeded", exitCode: 0, resultText: "correction ok" };
+    });
+    // Omit onWorkerProfileSlotRelease — correctTask must not require the hook.
+    const result = await correctTask(store, task.id);
+    assert.equal(result.task.status, "succeeded");
+    assert.equal(result.verification?.passed, true);
+    assert.equal(store.listAttempts(task.id).length, 2);
+    assert.equal(result.attempt.ordinal, 2);
+    assert.equal(result.attempt.status, "succeeded");
+    assert.equal(result.attempt.exitCode, 0);
+    assert.ok(
+      store.listEvents(task.id).some((event) => event.type === "verification.started"),
+      "correction without hook still runs independent verification",
+    );
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+  }
+});
+
 // --- Codex Runtime-native Goal via deterministic fake app-server (FL-104) ---
 
 interface FakeAppServerPolicy {
@@ -2202,7 +2342,15 @@ function fakeAppServerScript(config: FakeAppServerConfig, logPath: string | null
     "  hasOpenAIBaseUrl: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_BASE_URL'),",
     "  hasOpenAIOrgId: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_ORG_ID'),",
     "  hasOpenAIProject: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_PROJECT'),",
-    "  hasCodexApiKey: Object.prototype.hasOwnProperty.call(process.env, 'CODEX_API_KEY')",
+    "  hasCodexApiKey: Object.prototype.hasOwnProperty.call(process.env, 'CODEX_API_KEY'),",
+    "  HTTP_PROXY: process.env.HTTP_PROXY || null,",
+    "  http_proxy: process.env.http_proxy || null,",
+    "  HTTPS_PROXY: process.env.HTTPS_PROXY || null,",
+    "  https_proxy: process.env.https_proxy || null,",
+    "  ALL_PROXY: process.env.ALL_PROXY || null,",
+    "  all_proxy: process.env.all_proxy || null,",
+    "  NO_PROXY: process.env.NO_PROXY || null,",
+    "  no_proxy: process.env.no_proxy || null",
     "}));",
     "process.on('SIGINT', function(){ process.exit(130); });",
     "process.on('SIGTERM', function(){ process.exit(143); });",
@@ -2255,6 +2403,7 @@ async function codexNativeGoalFixture(options: {
   config?: FakeAppServerConfig;
   effectivePolicy?: TaskRecord["effectivePolicy"];
   allowEdits?: boolean;
+  networkPolicy?: unknown;
 } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "fl-codex-goal-"));
   const source = path.join(root, "source");
@@ -2298,6 +2447,7 @@ async function codexNativeGoalFixture(options: {
       runtime: { name: "codex-cli", executable: script, effort, maxBudgetUsd: null },
       executionPreference: "auto",
       worker: { allowEdits, allowedCommands: [], focusPaths: ["src"] },
+      ...(options.networkPolicy === undefined ? {} : { networkPolicy: options.networkPolicy }),
     }),
     source,
     policy(),
@@ -3053,6 +3203,143 @@ test("Codex native Goal interruption resumes the exact durable Thread", async ()
   }
 });
 
+test("system restart continuation resumes the exact native Goal under baseMaxAttempts=1", async () => {
+  // Frozen single-base-attempt policy: ordinary resume without a system grant
+  // is rejected. The restart grant is infrastructure continuity, not a quality
+  // retry or Main correction.
+  const values = {
+    ...testDefaultAdvancedPolicy(),
+    baseMaxAttempts: 1,
+    maxExtraAttempts: 0,
+    maxMainCorrections: 0,
+  };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  // Interrupt first so the durable Thread binding exists, then resume on a
+  // second spawn of the same fake with goalStatus active.
+  const binding = await runInterruptedNativeGoal();
+  assert.equal(binding.threadId, "thread-1");
+
+  const fixture = await codexNativeGoalFixture({
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "active",
+      after: {
+        "turn/start": exactCurrentTurnTerminalAfter({
+          text: "Restart continuation finished",
+        }),
+      },
+    },
+    effectivePolicy: {
+      profileId: "test",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+    },
+  });
+  try {
+    // Reconstruct the interrupted Attempt/Task on this store so resumeTask
+    // and authorization see the same lineage as a post-shutdown Daemon.
+    const taskId = fixture.task.id;
+    const sessionId = fixture.task.sessionId;
+    const now = new Date().toISOString();
+    fixture.store.updateAttempt(fixture.attempt.id, {
+      status: "interrupted",
+      finishedAt: now,
+      exitCode: 130,
+      error: "Worker execution interrupted",
+    });
+    fixture.store.setTaskStatus(taskId, "interrupted", {
+      currentAttemptId: fixture.attempt.id,
+      finishedAt: now,
+      workerPid: null,
+      error: "Worker execution interrupted",
+    });
+    await writeFile(
+      fixture.bindingPath,
+      `${JSON.stringify(binding, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await mkdir(fixture.task.paths.workspace, { recursive: true, mode: 0o700 });
+
+    // Without the system grant, baseMaxAttempts=1 blocks any further Attempt.
+    // resumeTask rejects before launching a Worker (no doctor / Provider call).
+    await assert.rejects(
+      () => resumeTask(fixture.store, taskId),
+      /maximum attempts/,
+    );
+
+    const grant = authorizeSystemRestartRecovery(fixture.store, taskId, 1);
+    assert.ok(grant !== null, "system restart grant required when baseMaxAttempts=1");
+    assert.equal(grant!.maximumOrdinal, 2);
+    const grantPayload = fixture.store.listEvents(taskId)
+      .find((e) => e.type === "attempt.authorization.granted")!
+      .payload as Record<string, unknown>;
+    assert.equal(grantPayload.reason, "system-daemon-restart");
+    assert.equal(grantPayload.priorAttemptId, fixture.attempt.id);
+    assert.equal(grantPayload.handoffId, undefined);
+
+    // Continuation Attempt under the system grant: same Task/workspace/session,
+    // exact Thread resume. Use the Runtime adapter path directly (deterministic
+    // fake app-server) the same way Coordinator → resumeTask → adapter does.
+    const attempt2: AttemptRecord = {
+      id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      taskId,
+      ordinal: 2,
+      status: "running",
+      sessionId,
+      rawLogPath: path.join(fixture.task.paths.logs, "attempt-2.jsonl"),
+      startedAt: now,
+      runtimeBudgetUsd: null,
+      runtimeBudgetEnforcement: "unsupported",
+    };
+    fixture.store.createAttempt(attempt2);
+    fixture.store.setTaskStatus(taskId, "running", {
+      currentAttemptId: attempt2.id,
+      finishedAt: null,
+      workerPid: null,
+      error: null,
+    });
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.store.getTask(taskId),
+      attempt: attempt2,
+      resuming: true,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.resultText, "Restart continuation finished");
+    assert.equal(fixture.store.listAttempts(taskId).length, 2);
+    assert.equal(fixture.store.listTasks().length, 1, "no replacement Task");
+    assert.equal(fixture.store.getTask(taskId).sessionId, sessionId);
+
+    const events = fixture.store.listEvents(taskId);
+    assert.ok(events.some((e) => e.type === "worker.resumed"), "worker.resumed");
+    assert.equal(
+      events.filter((e) => e.type === "attempt.authorization.granted").length,
+      1,
+      "exactly one infrastructure grant",
+    );
+    const requests = await readRequestLog(fixture.requestLog);
+    const resumeReq = requests.find((r) => r.method === "thread/resume");
+    assertThreadPolicyParams(
+      resumeReq?.params as Record<string, unknown> | undefined,
+      fixture.expectedPolicy,
+      { withThreadId: "thread-1" },
+    );
+    assert.equal(
+      requests.some((r) => r.method === "thread/start"),
+      false,
+      "restart continuation must not create a fresh Thread",
+    );
+    const persisted = await readBindingJson(fixture.bindingPath);
+    assert.equal(persisted.threadId, "thread-1", "exact Thread binding retained");
+  } finally {
+    fixture.store.close();
+  }
+});
+
 test("Codex native Goal identity drift on resume fails closed", async () => {
   // The exact durable Thread binding is retained and carried into the resumed
   // Task so identity drift is measured against the authoritative evidence.
@@ -3164,10 +3451,11 @@ test("Codex native Goal no-progress watchdog terminates and reports a policy lim
 test("Codex native Goal repeated unchanged status/usage cannot reset no-effective-progress stop", async () => {
   // Flood identical Goal status and usage after Turn activation. These are
   // Runtime liveness only: the effective-progress watchdog must still fire.
-  // The watchdog also covers process startup and protocol setup. Give that
-  // phase the same deterministic window used by the other runtime-phase
-  // fixtures, then prove the replayed liveness burst cannot refresh it.
-  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 1_500, workerStopGraceMs: 40 };
+  // The window covers process startup, protocol setup, and the durable
+  // turn/start binding write under full-suite load so the same-burst liveness
+  // batch is always replayed before the stop. This is not a sleep: each proven
+  // setup step still refreshes the interval; the bound only absorbs load.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
   const provenance = Object.fromEntries(
     Object.keys(values).map((field) => [field, "task"]),
   ) as Record<keyof typeof values, "task">;
@@ -4793,5 +5081,266 @@ test("Codex native Goal resume write-window usage replaces promoted pending snap
     assert.equal(result.usage?.cacheCreationInputTokens, 2);
   } finally {
     second.store.close();
+  }
+});
+
+// --- Per-Worker network policy applied to every built-in Runtime (FL-107) ---
+
+function networkPolicyTaskRecord(networkPolicy: unknown): TaskRecord {
+  const spec = parseTaskSpec(
+    minimalContract({
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.deepseek.api-key" },
+      runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: 0.1 },
+      ...(networkPolicy === undefined ? {} : { networkPolicy }),
+    }),
+    "/tmp",
+    policy(),
+  ) as TaskSpec;
+  return {
+    id: "net-policy-task",
+    name: spec.name,
+    status: "running",
+    sourcePath: "/tmp/project",
+    taskFile: "/tmp/task.yaml",
+    spec,
+    paths: {
+      root: "/tmp/run",
+      baseline: "/tmp/run/baseline",
+      workspace: "/tmp/run/workspace",
+      logs: "/tmp/run/logs",
+      claudeConfig: "/tmp/run/claude",
+      diff: "/tmp/run/result.diff",
+    },
+    sessionId: "net-policy-session",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:00:00.000Z",
+  };
+}
+
+const PROXY_PARENT_KEYS = [
+  "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+  "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+] as const;
+
+function withProxyParentEnv<T>(run: () => T): T {
+  const previous: Partial<Record<(typeof PROXY_PARENT_KEYS)[number], string | undefined>> = {};
+  for (const key of PROXY_PARENT_KEYS) {
+    previous[key] = process.env[key];
+    process.env[key] = `parent-${key}-value`;
+  }
+  try {
+    return run();
+  } finally {
+    for (const key of PROXY_PARENT_KEYS) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+}
+
+test("Claude childEnvironment applies the frozen direct network policy without touching auth", () => {
+  withProxyParentEnv(() => {
+    const env = childEnvironment(networkPolicyTaskRecord({ mode: "direct" }), "test-api-key");
+    for (const key of PROXY_PARENT_KEYS) {
+      assert.equal(key in env, false, `${key} must be removed for direct mode`);
+    }
+    // Runtime authentication stays intact.
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, "test-api-key");
+    assert.equal(env.CLAUDE_CONFIG_DIR, "/tmp/run/claude");
+  });
+});
+
+test("Claude childEnvironment applies custom proxy with upper/lower consistency", () => {
+  const env = childEnvironment(networkPolicyTaskRecord({
+    mode: "custom-proxy",
+    httpProxy: "http://127.0.0.1:7890",
+    httpsProxy: "http://127.0.0.1:7891",
+    noProxy: "localhost,127.0.0.1",
+  }), "test-api-key");
+  assert.equal(env.HTTP_PROXY, "http://127.0.0.1:7890");
+  assert.equal(env.http_proxy, "http://127.0.0.1:7890");
+  assert.equal(env.HTTPS_PROXY, "http://127.0.0.1:7891");
+  assert.equal(env.https_proxy, "http://127.0.0.1:7891");
+  assert.equal(env.NO_PROXY, "localhost,127.0.0.1");
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, "test-api-key");
+});
+
+test("Grok worker env builder applies the frozen network policy", () => {
+  withProxyParentEnv(() => {
+    const direct = buildGrokWorkerEnv("", "/task/grok-home", { mode: "direct" });
+    for (const key of PROXY_PARENT_KEYS) {
+      assert.equal(key in direct, false, `${key} must be removed for direct mode`);
+    }
+    assert.equal(direct.GROK_HOME, "/task/grok-home");
+    assert.equal("XAI_API_KEY" in direct, false);
+
+    const custom = buildGrokWorkerEnv("grok-key", "/task/grok-home", {
+      mode: "custom-proxy",
+      httpProxy: "http://127.0.0.1:7890",
+    });
+    assert.equal(custom.HTTP_PROXY, "http://127.0.0.1:7890");
+    assert.equal(custom.http_proxy, "http://127.0.0.1:7890");
+    assert.equal(custom.HTTPS_PROXY, "http://127.0.0.1:7890");
+    assert.equal(custom.NO_PROXY, DEFAULT_NO_PROXY);
+    assert.equal(custom.XAI_API_KEY, "grok-key");
+    assert.equal("ALL_PROXY" in custom, false);
+  });
+});
+
+test("Codex env builder applies the frozen network policy for both execution paths", () => {
+  withProxyParentEnv(() => {
+    const direct = buildCodexWorkerEnv("/task/codex-home", "/task/codex-tmp", { mode: "direct" });
+    for (const key of PROXY_PARENT_KEYS) {
+      assert.equal(key in direct, false, `${key} must be removed for direct mode`);
+    }
+    assert.equal(direct.CODEX_HOME, "/task/codex-home");
+
+    const custom = buildCodexWorkerEnv("/task/codex-home", "/task/codex-tmp", {
+      mode: "custom-proxy",
+      httpProxy: "http://127.0.0.1:7890",
+      httpsProxy: "http://127.0.0.1:7891",
+      noProxy: "localhost,127.0.0.1",
+    });
+    assert.equal(custom.HTTP_PROXY, "http://127.0.0.1:7890");
+    assert.equal(custom.HTTPS_PROXY, "http://127.0.0.1:7891");
+    assert.equal(custom.NO_PROXY, "localhost,127.0.0.1");
+    assert.equal("ALL_PROXY" in custom, false);
+    // Codex authentication stripping stays intact.
+    assert.equal("OPENAI_API_KEY" in custom, false);
+    assert.equal("XAI_API_KEY" in custom, false);
+  });
+});
+
+test("runCodexWorker applies the frozen network policy to the child environment", async () => {
+  const fixture = await codexRuntimeFixture(
+    [
+      '{"type":"thread.started","thread_id":"thread-1"}',
+      '{"type":"turn.started"}',
+      '{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"npm test"}}',
+      '{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"done"}}',
+      '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+    ],
+    0,
+    {
+      mode: "custom-proxy",
+      httpProxy: "http://127.0.0.1:7890",
+      httpsProxy: "http://127.0.0.1:7891",
+      noProxy: "localhost,127.0.0.1",
+    },
+  );
+  const parent = PROXY_PARENT_KEYS.map((key) => [key, process.env[key]] as const);
+  for (const [key, value] of parent) {
+    process.env[key] = value ?? `parent-${key}`;
+  }
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: false,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "succeeded");
+
+    const envDump = JSON.parse(
+      await readFile(path.join(fixture.workspace, "codex-env-dump.json"), "utf8"),
+    ) as Record<string, string | null>;
+    assert.equal(envDump.HTTP_PROXY, "http://127.0.0.1:7890");
+    assert.equal(envDump.http_proxy, "http://127.0.0.1:7890");
+    assert.equal(envDump.HTTPS_PROXY, "http://127.0.0.1:7891");
+    assert.equal(envDump.https_proxy, "http://127.0.0.1:7891");
+    assert.equal(envDump.NO_PROXY, "localhost,127.0.0.1");
+    assert.equal(envDump.no_proxy, "localhost,127.0.0.1");
+    assert.equal(envDump.ALL_PROXY, null, "ALL_PROXY is cleaned before setting custom values");
+  } finally {
+    for (const [key, value] of parent) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fixture.store.close();
+  }
+});
+
+test("runCodexNativeGoal applies the frozen network policy to the app-server child", async () => {
+  const fixture = await codexNativeGoalFixture({
+    config: {
+      after: {
+        "turn/start": exactCurrentTurnTerminalAfter(),
+      },
+    },
+    networkPolicy: { mode: "direct" },
+  });
+  const parent = PROXY_PARENT_KEYS.map((key) => [key, process.env[key]] as const);
+  for (const [key, value] of parent) {
+    process.env[key] = value ?? `parent-${key}`;
+  }
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: false,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "succeeded");
+
+    const envDump = JSON.parse(
+      await readFile(path.join(fixture.task.paths.workspace, "codex-goal-env-dump.json"), "utf8"),
+    ) as Record<string, string | null>;
+    for (const key of PROXY_PARENT_KEYS) {
+      assert.ok(
+        envDump[key] === null || envDump[key] === undefined,
+        `${key} must be absent or null for direct mode in the app-server child`,
+      );
+    }
+  } finally {
+    for (const [key, value] of parent) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fixture.store.close();
+  }
+});
+
+test("Worker-start events record only the network mode, never proxy values", async () => {
+  const proxyUrl = "http://127.0.0.1:7890";
+  const fixture = await codexRuntimeFixture(
+    [
+      '{"type":"thread.started","thread_id":"thread-1"}',
+      '{"type":"turn.started"}',
+      '{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"done"}}',
+      '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+    ],
+    0,
+    { mode: "custom-proxy", httpProxy: proxyUrl },
+  );
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: false,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "succeeded");
+    const events = fixture.store.listEvents(fixture.task.id);
+    const started = events.find((event) => event.type === "worker.started");
+    assert.ok(started, "worker.started event exists");
+    assert.equal(
+      (started.payload as { networkPolicyMode?: string }).networkPolicyMode,
+      "custom-proxy",
+      "start event records the safe mode",
+    );
+    for (const event of events) {
+      const blob = JSON.stringify(event);
+      assert.ok(!blob.includes(proxyUrl), "proxy URL must never reach durable events");
+      assert.ok(!blob.includes("127.0.0.1:7890"), "proxy host:port must never reach durable events");
+    }
+    assert.ok(
+      validateWorkerNetworkPolicy(fixture.task.spec.networkPolicy) !== undefined,
+      "frozen policy still validates",
+    );
+  } finally {
+    fixture.store.close();
   }
 });

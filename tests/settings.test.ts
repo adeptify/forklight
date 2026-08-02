@@ -822,6 +822,87 @@ test("settings update with invalid advanced policy field rejects", async () => {
   assert.equal(service.get().workerProfiles.profiles[0]!.advancedPolicy, undefined);
 });
 
+// --- Worker network policy (FL-107) ---
+
+test("worker profile networkPolicy round-trips through settings update", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-net-"));
+  const service = new SettingsService(new StateStore(home));
+  const profiles = service.get().workerProfiles;
+  const base = structuredClone(profiles.profiles[0]!);
+  const updated = {
+    defaultProfileId: profiles.defaultProfileId,
+    profiles: [{
+      ...base,
+      networkPolicy: {
+        mode: "custom-proxy",
+        httpProxy: "http://127.0.0.1:7890",
+        httpsProxy: "http://127.0.0.1:7891",
+        noProxy: "localhost,127.0.0.1",
+      },
+    }],
+  };
+  const r = service.update({ workerProfiles: updated });
+  const profile = r.workerProfiles.profiles[0]!;
+  assert.deepEqual(profile.networkPolicy, {
+    mode: "custom-proxy",
+    httpProxy: "http://127.0.0.1:7890",
+    httpsProxy: "http://127.0.0.1:7891",
+    noProxy: "localhost,127.0.0.1",
+  });
+  const reloaded = svc(home).get();
+  assert.deepEqual(reloaded.workerProfiles.profiles[0]!.networkPolicy, {
+    mode: "custom-proxy",
+    httpProxy: "http://127.0.0.1:7890",
+    httpsProxy: "http://127.0.0.1:7891",
+    noProxy: "localhost,127.0.0.1",
+  });
+});
+
+test("worker profile networkPolicy direct and inherit persist, legacy stays absent", async () => {
+  const service = svc();
+  const profiles = service.get().workerProfiles;
+  const base = structuredClone(profiles.profiles[0]!);
+  const updated = {
+    defaultProfileId: profiles.defaultProfileId,
+    profiles: [{
+      ...base,
+      networkPolicy: { mode: "direct" },
+    }],
+  };
+  const r = service.update({ workerProfiles: updated });
+  assert.deepEqual(r.workerProfiles.profiles[0]!.networkPolicy, { mode: "direct" });
+  // Legacy profiles without the field keep undefined (inherit behavior).
+  assert.equal(base.networkPolicy, undefined);
+});
+
+test("worker profile rejects authenticated proxy atomically without echoing it", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-net-inv-"));
+  const service = new SettingsService(new StateStore(home));
+  const profiles = service.get().workerProfiles;
+  const base = structuredClone(profiles.profiles[0]!);
+  const secretUrl = "http://user:super-secret@proxy.internal:7890";
+  assert.throws(
+    () => service.update({
+      workerProfiles: {
+        defaultProfileId: profiles.defaultProfileId,
+        profiles: [{
+          ...base,
+          networkPolicy: { mode: "custom-proxy", httpProxy: secretUrl },
+        }],
+      },
+    }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.ok(!message.includes(secretUrl), "error must not echo the proxy URL");
+      assert.ok(!message.includes("super-secret"), "error must not echo credentials");
+      assert.ok(!message.includes("proxy.internal"), "error must not echo the hostname");
+      return /embedded credentials/.test(message);
+    },
+  );
+  // Original profile remains unchanged.
+  assert.equal(service.get().workerProfiles.profiles[0]!.networkPolicy, undefined);
+});
+
 // --- Model routing settings ---
 
 test("model routing defaults match spec", () => {

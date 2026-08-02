@@ -40,6 +40,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
+import { workerNetworkPolicyMode } from "../core/network-policy.js";
 import { currentBuildIdentity } from "../core/build-identity.js";
 import {
   RUNTIME_ACTIVITY_EFFECTIVE,
@@ -570,7 +571,7 @@ export async function runCodexNativeGoal(
   const stderrPath = path.join(task.paths.logs, `attempt-${attempt.ordinal}.stderr.log`);
   const stderrChunks: string[] = [];
 
-  const env = buildCodexWorkerEnv(codexHome, temporaryDirectory);
+  const env = buildCodexWorkerEnv(codexHome, temporaryDirectory, task.spec.networkPolicy);
   const child = spawn(task.spec.runtime.executable || "codex", ["app-server"], {
     cwd: task.paths.workspace,
     env,
@@ -1368,6 +1369,8 @@ export async function runCodexNativeGoal(
             threadId: binding.threadId,
             goalStatus: persistedStatus,
             correctionFeedbackIncluded: Boolean(hooks.feedback),
+            // Privacy-safe: mode-level evidence only; proxy values never reach events.
+            networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
           });
           hooks.onEvent?.({
             type: "worker.resumed",
@@ -1427,6 +1430,8 @@ export async function runCodexNativeGoal(
             threadId,
             goalStatus: goalStatusFromSet,
             correctionFeedbackIncluded: Boolean(hooks.feedback),
+            // Privacy-safe: mode-level evidence only; proxy values never reach events.
+            networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
           });
           hooks.onEvent?.({
             type: "worker.started",

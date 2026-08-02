@@ -2619,3 +2619,135 @@ test("explicit Task preference override wins over the Worker profile", () => {
   assert.equal(spec.executionPreference, "single-run");
   assert.equal(spec.executionMode, "single-run");
 });
+
+// --- Per-Worker network policy freezing (FL-107) ---
+
+function networkPolicyPolicy(): TaskPolicy {
+  const d = cloneDefaults();
+  const catalog = upsertModelConfig(d.modelCatalog, {
+    id: "net-proxy-model",
+    label: "Net Proxy Model",
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+    endpoint: "https://api.deepseek.com/v1",
+  });
+  const workerProfiles = upsertWorkerProfile(d.workerProfiles, {
+    id: "net-worker",
+    label: "Net Worker",
+    runtime: "claude-code",
+    modelConfigId: "net-proxy-model",
+    effort: "high",
+    networkPolicy: {
+      mode: "custom-proxy",
+      httpProxy: "http://127.0.0.1:7890",
+      httpsProxy: "http://127.0.0.1:7891",
+      noProxy: "localhost,127.0.0.1",
+    },
+  }, catalog);
+  return {
+    contractQuality: d.contractQuality,
+    execution: d.execution,
+    providerDefaults: d.providerDefaults,
+    completionPolicy: d.completionPolicy,
+    workerProfiles,
+    modelCatalog: catalog,
+  };
+}
+
+test("Task freezes the resolved network policy from the selected Worker Profile", () => {
+  const spec = parseTaskSpec(
+    { ...contractSpec(), workerProfileId: "net-worker" },
+    process.cwd(),
+    networkPolicyPolicy(),
+  );
+  assert.deepEqual(spec.networkPolicy, {
+    mode: "custom-proxy",
+    httpProxy: "http://127.0.0.1:7890",
+    httpsProxy: "http://127.0.0.1:7891",
+    noProxy: "localhost,127.0.0.1",
+  });
+  assert.ok(Object.isFrozen(spec.networkPolicy), "snapshot must be immutable");
+});
+
+test("Task-level networkPolicy override wins over the Worker Profile", () => {
+  const spec = parseTaskSpec(
+    {
+      ...contractSpec(),
+      workerProfileId: "net-worker",
+      networkPolicy: { mode: "direct" },
+    },
+    process.cwd(),
+    networkPolicyPolicy(),
+  );
+  assert.deepEqual(spec.networkPolicy, { mode: "direct" });
+});
+
+test("Task-level networkPolicy rejects authenticated proxy without echoing it", () => {
+  const secretUrl = "http://user:proxy-secret@private-proxy.example:7890";
+  assert.throws(
+    () => parseTaskSpec(
+      {
+        ...contractSpec(),
+        networkPolicy: { mode: "custom-proxy", httpProxy: secretUrl },
+      },
+      process.cwd(),
+    ),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.ok(!message.includes(secretUrl), "error must not echo the proxy URL");
+      assert.ok(!message.includes("proxy-secret"), "error must not echo credentials");
+      assert.ok(!message.includes("private-proxy.example"), "error must not echo the hostname");
+      return /embedded credentials/.test(message);
+    },
+  );
+});
+
+test("legacy Task without a network policy freezes inherit", () => {
+  const spec = parseTaskSpec(contractSpec(), process.cwd());
+  assert.deepEqual(spec.networkPolicy, { mode: "inherit" });
+});
+
+test("network policy is frozen per Task and later profile edits cannot rewrite history", () => {
+  const policy = networkPolicyPolicy();
+  const spec = parseTaskSpec(
+    { ...contractSpec(), workerProfileId: "net-worker" },
+    process.cwd(),
+    policy,
+  );
+  assert.deepEqual(spec.networkPolicy, {
+    mode: "custom-proxy",
+    httpProxy: "http://127.0.0.1:7890",
+    httpsProxy: "http://127.0.0.1:7891",
+    noProxy: "localhost,127.0.0.1",
+  });
+  // A later settings edit switches the same profile to direct.
+  const d = cloneDefaults();
+  const catalog = upsertModelConfig(d.modelCatalog, {
+    id: "net-proxy-model",
+    label: "Net Proxy Model",
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+    endpoint: "https://api.deepseek.com/v1",
+  });
+  const changed = upsertWorkerProfile(policy.workerProfiles!, {
+    id: "net-worker",
+    label: "Net Worker",
+    runtime: "claude-code",
+    modelConfigId: "net-proxy-model",
+    effort: "high",
+    networkPolicy: { mode: "direct" },
+  }, catalog);
+  const newSpec = parseTaskSpec(
+    { ...contractSpec(), workerProfileId: "net-worker" },
+    process.cwd(),
+    { ...policy, workerProfiles: changed },
+  );
+  // The existing Task keeps its frozen custom policy; the new Task uses direct.
+  assert.deepEqual(spec.networkPolicy, {
+    mode: "custom-proxy",
+    httpProxy: "http://127.0.0.1:7890",
+    httpsProxy: "http://127.0.0.1:7891",
+    noProxy: "localhost,127.0.0.1",
+  });
+  assert.deepEqual(newSpec.networkPolicy, { mode: "direct" });
+});

@@ -140,18 +140,27 @@ function resolveGrantState(
     ) {
       throw new Error("authorization history is corrupt: malformed correction grant payload");
     }
-    if (
-      kind === "restart-recovery"
-      && (
-        p.reason !== "handoff-daemon-restart"
-        || typeof p.priorAttemptId !== "string"
-        || p.priorAttemptId.length === 0
-        || typeof p.handoffId !== "string"
-        || p.handoffId.length === 0
-        || p.handoffId.length > 100
-      )
-    ) {
-      throw new Error("authorization history is corrupt: malformed restart recovery grant");
+    if (kind === "restart-recovery") {
+      if (typeof p.priorAttemptId !== "string" || p.priorAttemptId.length === 0) {
+        throw new Error("authorization history is corrupt: malformed restart recovery grant");
+      }
+      if (p.reason === "handoff-daemon-restart") {
+        // Legacy handoff identity: exact handoffId remains required.
+        if (
+          typeof p.handoffId !== "string"
+          || p.handoffId.length === 0
+          || p.handoffId.length > 100
+        ) {
+          throw new Error("authorization history is corrupt: malformed restart recovery grant");
+        }
+      } else if (p.reason === "system-daemon-restart") {
+        // Non-handoff system continuity: never reuse handoff identity.
+        if (p.handoffId !== undefined) {
+          throw new Error("authorization history is corrupt: malformed restart recovery grant");
+        }
+      } else {
+        throw new Error("authorization history is corrupt: malformed restart recovery grant");
+      }
     }
     if (!p.reason.trim()) {
       throw new Error("authorization history is corrupt: malformed grant event payload");
@@ -200,7 +209,7 @@ function resolveGrantState(
       } : {}),
       ...(kind === "restart-recovery" ? {
         priorAttemptId: p.priorAttemptId as string,
-        handoffId: p.handoffId as string,
+        ...(typeof p.handoffId === "string" ? { handoffId: p.handoffId } : {}),
       } : {}),
       eventSequence: event.sequence,
       kind,
@@ -258,7 +267,14 @@ function resolveGrantState(
   };
 }
 
-/** Return execution options for a pending extra-attempt grant, or null if none exists. */
+/**
+ * Return execution options for a pending grant, or null if none exists.
+ * Restart-recovery grants are exact continuations: every consumer of this
+ * generic resolver (manual resume, local CLI fallback, Coordinator execution
+ * reconstruction, handoff recovery) must pass the same canonical exact
+ * validator before any enqueue or Worker launch. Ordinary extra grants keep
+ * the generic bounded resolver; corrections resolve through their own path.
+ */
 export function resolvePendingGrantExecutionOptions(
   store: StateStore,
   taskId: string,
@@ -269,10 +285,146 @@ export function resolvePendingGrantExecutionOptions(
   const events = store.listEvents(taskId);
   const attemptOrdinals = new Set(store.listAttempts(taskId).map((a) => a.ordinal));
   const { pendingGrant } = resolveGrantState(events, attemptOrdinals, configuredMaxAttempts);
-  if (
-    !pendingGrant
-    || (pendingGrant.kind !== "extra" && pendingGrant.kind !== "restart-recovery")
-  ) return null;
+  if (!pendingGrant) return null;
+  // One canonical exact restart validator, shared by every pending-options
+  // consumer. One-way delegation — restart validation never re-enters the
+  // generic resolver.
+  if (pendingGrant.kind === "restart-recovery") {
+    return resolvePendingRestartRecoveryGrant(store, taskId, configuredMaxAttempts);
+  }
+  if (pendingGrant.kind !== "extra") return null;
+  return {
+    maximumOrdinal: pendingGrant.targetOrdinal,
+    maxBudgetUsdOverride: pendingGrant.maxBudgetUsd,
+    authorizationEventSequence: pendingGrant.eventSequence,
+  };
+}
+
+/** Closed, content-free reason codes for a refused restart continuation. */
+export type RestartContinuationSkipReason =
+  | "not-interrupted"
+  | "verification-complete"
+  | "stale-attempt"
+  | "scope-mismatch"
+  | "corrupt-history"
+  | "already-consumed"
+  | "ineligible";
+
+/**
+ * One bounded, content-free observability event when a restart continuation is
+ * refused. No paths, raw errors, or grant payloads. Idempotent per reasonCode
+ * so repeated recover() loops do not spam.
+ */
+export function noteRestartContinuationSkipped(
+  store: StateStore,
+  taskId: string,
+  reasonCode: RestartContinuationSkipReason,
+  attemptId?: string,
+): void {
+  const already = store.listEvents(taskId).some((event) => {
+    if (event.type !== "attempt.restart-continuation.skipped") return false;
+    if (event.payload === null || typeof event.payload !== "object") return false;
+    return (event.payload as { reasonCode?: unknown }).reasonCode === reasonCode;
+  });
+  if (already) return;
+  store.addEvent(
+    taskId,
+    attemptId,
+    "attempt.restart-continuation.skipped",
+    "Restart continuation skipped",
+    { reasonCode },
+  );
+}
+
+function latestInterruptedAttempt(
+  store: StateStore,
+  taskId: string,
+): { task: TaskRecord; latest: AttemptRecord } | null {
+  const task = store.getTask(taskId);
+  if (task.status !== "interrupted" && task.status !== "failed") return null;
+  const attempts = store.listAttempts(taskId);
+  if (attempts.length === 0) return null;
+  const latest = attempts.reduce((left, right) => (
+    right.ordinal > left.ordinal ? right : left
+  ));
+  if (latest.status !== "interrupted") return null;
+  return { task, latest };
+}
+
+function hasPreVerificationBlockers(
+  store: StateStore,
+  taskId: string,
+  attemptId: string,
+): boolean {
+  return store.listEvents(taskId).some((event) => (
+    event.attemptId === attemptId
+    && (event.type === "verification.completed" || event.type === "candidate.revision.captured")
+  ));
+}
+
+/**
+ * Revalidate a pending restart-recovery grant against the exact latest
+ * interrupted Attempt, pre-verification state, and system/handoff scope.
+ * Returns a skip reason when the grant must not launch a Worker, plus the
+ * authoritative existing Attempt to bind any observable refusal to. The
+ * grant's own priorAttemptId is never trusted for event lineage.
+ */
+function revalidatePendingRestartGrant(
+  store: StateStore,
+  taskId: string,
+  pendingGrant: ValidatedGrant,
+): { skip: RestartContinuationSkipReason | null; authoritativeAttemptId?: string } {
+  if (pendingGrant.kind !== "restart-recovery") return { skip: "ineligible" };
+  const bound = latestInterruptedAttempt(store, taskId);
+  if (bound === null) return { skip: "not-interrupted" };
+  const authoritativeAttemptId = bound.latest.id;
+  if (pendingGrant.priorAttemptId !== authoritativeAttemptId) {
+    return { skip: "stale-attempt", authoritativeAttemptId };
+  }
+  if (hasPreVerificationBlockers(store, taskId, authoritativeAttemptId)) {
+    return { skip: "verification-complete", authoritativeAttemptId };
+  }
+  const handoff = store.getCandidateHandoffBySuccessorTaskId(taskId);
+  if (pendingGrant.reason === "system-daemon-restart") {
+    // System scope never reuses handoff identity.
+    if (pendingGrant.handoffId !== undefined) return { skip: "scope-mismatch", authoritativeAttemptId };
+    if (handoff !== undefined) return { skip: "scope-mismatch", authoritativeAttemptId };
+    return { skip: null, authoritativeAttemptId };
+  }
+  if (pendingGrant.reason === "handoff-daemon-restart") {
+    if (typeof pendingGrant.handoffId !== "string" || pendingGrant.handoffId.length === 0) {
+      return { skip: "scope-mismatch", authoritativeAttemptId };
+    }
+    if (handoff === undefined || handoff.id !== pendingGrant.handoffId) {
+      return { skip: "scope-mismatch", authoritativeAttemptId };
+    }
+    return { skip: null, authoritativeAttemptId };
+  }
+  return { skip: "ineligible", authoritativeAttemptId };
+}
+
+/** Pending restart-continuation grant only (system or handoff). Never a quality retry.
+ *  Revalidates the exact prior Attempt and scope before returning options.
+ *  Refusals record one bounded skip bound to the authoritative existing
+ *  Attempt — a stale grant's forged priorAttemptId never enters lineage. */
+export function resolvePendingRestartRecoveryGrant(
+  store: StateStore,
+  taskId: string,
+  configuredMaxAttempts: number,
+): AttemptExecutionOptions | null {
+  const events = store.listEvents(taskId);
+  const attemptOrdinals = new Set(store.listAttempts(taskId).map((a) => a.ordinal));
+  const { pendingGrant } = resolveGrantState(events, attemptOrdinals, configuredMaxAttempts);
+  if (!pendingGrant || pendingGrant.kind !== "restart-recovery") return null;
+  const { skip, authoritativeAttemptId } = revalidatePendingRestartGrant(
+    store,
+    taskId,
+    pendingGrant,
+  );
+  if (skip !== null) {
+    noteRestartContinuationSkipped(store, taskId, skip, authoritativeAttemptId);
+    return null;
+  }
   return {
     maximumOrdinal: pendingGrant.targetOrdinal,
     maxBudgetUsdOverride: pendingGrant.maxBudgetUsd,
@@ -291,30 +443,21 @@ export function authorizeHandoffRestartRecovery(
   handoffId: string,
   configuredMaxAttempts: number,
 ): AttemptExecutionOptions | null {
-  const task = store.getTask(taskId);
-  if (task.status !== "interrupted" && task.status !== "failed") return null;
-  const attempts = store.listAttempts(taskId);
-  if (attempts.length === 0) return null;
-  const latest = attempts.reduce((left, right) => (
-    right.ordinal > left.ordinal ? right : left
-  ));
-  if (latest.status !== "interrupted") return null;
+  const bound = latestInterruptedAttempt(store, taskId);
+  if (bound === null) return null;
+  const { task, latest } = bound;
+  if (hasPreVerificationBlockers(store, taskId, latest.id)) return null;
 
-  const events = store.listEvents(taskId);
-  if (events.some((event) => (
-    event.attemptId === latest.id
-    && (event.type === "verification.completed" || event.type === "candidate.revision.captured")
-  ))) return null;
-
-  const attemptOrdinals = new Set(attempts.map((attempt) => attempt.ordinal));
+  const attemptOrdinals = new Set(store.listAttempts(taskId).map((attempt) => attempt.ordinal));
   const { pendingGrant, restartRecoveryConsumed } = resolveGrantState(
-    events,
+    store.listEvents(taskId),
     attemptOrdinals,
     configuredMaxAttempts,
   );
   if (pendingGrant !== null) {
     if (
       pendingGrant.kind === "restart-recovery"
+      && pendingGrant.reason === "handoff-daemon-restart"
       && pendingGrant.handoffId === handoffId
       && pendingGrant.priorAttemptId === latest.id
     ) {
@@ -353,6 +496,118 @@ export function authorizeHandoffRestartRecovery(
     maxBudgetUsdOverride: budget,
     authorizationEventSequence: event.sequence,
   };
+}
+
+/**
+ * Authorize at most one system restart continuation for a non-handoff Task
+ * interrupted before independent verification. Infrastructure continuity after
+ * an intentional graceful Daemon restart — not a quality retry, not a Main
+ * correction, and independent of baseMaxAttempts / maxExtraAttempts /
+ * maxMainCorrections. Never reuses handoff identity.
+ */
+export function authorizeSystemRestartRecovery(
+  store: StateStore,
+  taskId: string,
+  configuredMaxAttempts: number,
+): AttemptExecutionOptions | null {
+  const bound = latestInterruptedAttempt(store, taskId);
+  if (bound === null) return null;
+  const { task, latest } = bound;
+  if (hasPreVerificationBlockers(store, taskId, latest.id)) return null;
+
+  const attemptOrdinals = new Set(store.listAttempts(taskId).map((attempt) => attempt.ordinal));
+  const { pendingGrant, restartRecoveryConsumed } = resolveGrantState(
+    store.listEvents(taskId),
+    attemptOrdinals,
+    configuredMaxAttempts,
+  );
+  if (pendingGrant !== null) {
+    if (
+      pendingGrant.kind === "restart-recovery"
+      && pendingGrant.reason === "system-daemon-restart"
+      && pendingGrant.handoffId === undefined
+      && pendingGrant.priorAttemptId === latest.id
+    ) {
+      return {
+        maximumOrdinal: pendingGrant.targetOrdinal,
+        maxBudgetUsdOverride: pendingGrant.maxBudgetUsd,
+        authorizationEventSequence: pendingGrant.eventSequence,
+      };
+    }
+    return null;
+  }
+  if (restartRecoveryConsumed >= 1) return null;
+
+  const targetOrdinal = latest.ordinal + 1;
+  const budget = task.spec.runtime.maxBudgetUsd;
+  const event = store.addEvent(
+    taskId,
+    latest.id,
+    "attempt.authorization.granted",
+    `One system restart continuation authorized for ordinal ${targetOrdinal}`,
+    {
+      kind: "restart-recovery",
+      additionalAttempts: 1,
+      targetOrdinal,
+      maxBudgetUsd: budget,
+      budgetMode: budget === null
+        ? "uncapped-for-authorized-attempt"
+        : "capped-for-authorized-attempt",
+      reason: "system-daemon-restart",
+      priorAttemptId: latest.id,
+    },
+  );
+  return {
+    maximumOrdinal: targetOrdinal,
+    maxBudgetUsdOverride: budget,
+    authorizationEventSequence: event.sequence,
+  };
+}
+
+/**
+ * Persist at most one restart-continuation grant for each Task that was
+ * actively running when a graceful restart began and settled interrupted
+ * before independent verification. Handoff successors keep handoff identity;
+ * all other Tasks use the non-handoff system scope. Refusals emit one bounded
+ * content-free skip event; corrupt history never blocks remaining Tasks.
+ */
+export function recordRestartContinuationsForTasks(
+  store: StateStore,
+  taskIds: readonly string[],
+  resolveConfiguredMaxAttempts: (taskId: string) => number,
+): void {
+  for (const taskId of taskIds) {
+    let latestAttemptId: string | undefined;
+    try {
+      const bound = latestInterruptedAttempt(store, taskId);
+      latestAttemptId = bound?.latest.id;
+      if (bound === null) {
+        noteRestartContinuationSkipped(store, taskId, "ineligible");
+        continue;
+      }
+      const configuredMaxAttempts = resolveConfiguredMaxAttempts(taskId);
+      const handoff = store.getCandidateHandoffBySuccessorTaskId(taskId);
+      const granted = handoff !== undefined
+        ? authorizeHandoffRestartRecovery(store, taskId, handoff.id, configuredMaxAttempts)
+        : authorizeSystemRestartRecovery(store, taskId, configuredMaxAttempts);
+      if (granted === null) {
+        // Authorization already fail-closed (verification, consumed, etc.).
+        // Surface one observable refusal without raw error content.
+        const reason: RestartContinuationSkipReason = hasPreVerificationBlockers(
+          store,
+          taskId,
+          bound.latest.id,
+        )
+          ? "verification-complete"
+          : "ineligible";
+        noteRestartContinuationSkipped(store, taskId, reason, bound.latest.id);
+      }
+    } catch {
+      // Per-Task fail-closed: corrupt history stays inspectable and must not
+      // block remaining Tasks or Daemon shutdown itself.
+      noteRestartContinuationSkipped(store, taskId, "corrupt-history", latestAttemptId);
+    }
+  }
 }
 
 /** Reconstruct one pending Main correction, including the exact bounded feedback. */

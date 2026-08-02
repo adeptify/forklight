@@ -777,6 +777,73 @@ test("Hub Worker cards explain canonical readiness in both languages", async () 
   }
 });
 
+test("Hub Worker editor exposes network route fields and truthful card copy", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+  assert.ok(block.includes("fl-wp-network-mode"), "network mode select exists in the editor");
+  assert.ok(block.includes("fl-wp-network-http"), "HTTP proxy input exists in the editor");
+  assert.ok(block.includes("fl-wp-network-https"), "HTTPS proxy input exists in the editor");
+  assert.ok(block.includes("fl-wp-network-noproxy"), "no-proxy input exists in the editor");
+  assert.ok(block.includes("profile.networkPolicy = { mode: \"custom-proxy\", httpProxy"), "custom proxy is collected on save");
+  assert.ok(block.includes("profile.networkPolicy = { mode: \"direct\" }"), "direct is collected on save");
+  assert.ok(block.includes("workersNetworkProxyRequired"), "missing proxy URL is rejected with a fixed message");
+  assert.ok(block.includes("networkPolicySummary(prof.networkPolicy)"), "card shows the chosen route");
+  assert.ok(block.includes("workersNetworkCardNotProof"), "card says configuration is not proof of reachability");
+
+  const summary = new Function("t", `
+    ${extractFunctionSource(src, "networkPolicySummary")}
+    return networkPolicySummary;
+  `)((key: string) => key) as (policy: {
+    mode?: string;
+    httpProxy?: string;
+    httpsProxy?: string;
+    noProxy?: string;
+  } | undefined) => string;
+  assert.equal(summary(undefined), "workersNetworkCardInherit");
+  assert.equal(summary({ mode: "inherit" }), "workersNetworkCardInherit");
+  assert.equal(summary({ mode: "direct" }), "workersNetworkCardDirect");
+  assert.equal(summary({ mode: "custom-proxy", httpProxy: "http://127.0.0.1:7890" }), "workersNetworkCardCustom");
+  // The full custom-proxy label+input group hides together outside custom mode,
+  // never just the inner input.
+  assert.ok(block.includes("netHttpField.wrap.hidden = !custom"), "HTTP proxy label+input group hides with mode");
+  assert.ok(block.includes("netHttpsField.wrap.hidden = !custom"), "HTTPS proxy label+input group hides with mode");
+  assert.ok(block.includes("netNoProxyField.wrap.hidden = !custom"), "no-proxy label+input group hides with mode");
+});
+
+test("Hub i18n carries network route copy in both languages", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  for (const phrase of [
+    "Follow ForkLight's current network",
+    "Direct connection (no proxy)",
+    "Custom proxy",
+    "This is the configured route, not proof the connection works. Only a real Worker run proves it.",
+    "跟随 ForkLight 当前的网络",
+    "直接连接（不使用代理）",
+    "自定义代理",
+    "这只是配置的路由，并不代表连接一定可用；只有真实的 Worker 运行才能证明。",
+  ]) {
+    assert.ok(i18n.includes(phrase), phrase);
+  }
+  // Plain-language copy must avoid internal Daemon/Provider vocabulary and must
+  // keep the route separate from proven connectivity. Bound the slice to the
+  // network block (next sibling key) so unrelated copy cannot fail the check.
+  const parts = splitI18n(i18n);
+  const enNetStart = parts.enSection.indexOf("workersNetworkLabel");
+  const enNetEnd = parts.enSection.indexOf("mainGuideTitle", enNetStart);
+  const enNet = parts.enSection.slice(enNetStart, enNetEnd > 0 ? enNetEnd : parts.enSection.length);
+  const zhNetStart = parts.zhSection.indexOf("workersNetworkLabel");
+  const zhNetEnd = parts.zhSection.indexOf("mainGuideTitle", zhNetStart);
+  const zhNet = parts.zhSection.slice(zhNetStart, zhNetEnd > 0 ? zhNetEnd : parts.zhSection.length);
+  assert.ok(!enNet.includes("Daemon"), "English network copy avoids internal Daemon vocabulary");
+  assert.ok(!enNet.includes("Provider"), "English network copy avoids Provider vocabulary");
+  assert.ok(!zhNet.includes("Daemon"), "Chinese network copy avoids internal Daemon vocabulary");
+  assert.ok(!zhNet.includes("Provider"), "Chinese network copy avoids Provider vocabulary");
+  assert.ok(enNet.includes("not proof the connection works"), "English separates configured route from proof");
+  assert.ok(zhNet.includes("并不代表连接一定可用"), "Chinese separates configured route from proof");
+});
+
 test("Hub model-routing unsaved state compares semantic values", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const keysStart = src.indexOf("var MR_WEIGHT_KEYS = ");

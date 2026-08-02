@@ -30,6 +30,10 @@ import {
 import {
   validateAdvancedPolicyPatch as validateAdvancedPolicyRaw,
 } from "./advanced-policy.js";
+import {
+  validateWorkerNetworkPolicy,
+  type WorkerNetworkPolicy,
+} from "./network-policy.js";
 
 const PROFILE_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 const MODEL_PATTERN = /^[A-Za-z0-9._+:/\[\]-]{1,128}$/;
@@ -78,6 +82,9 @@ export interface WorkerProfile {
    *  created Workers to `auto`. Forced `native-goal` fails validation when the
    *  selected Runtime cannot prove a native Goal contract. */
   executionPreference?: ExecutionPreference;
+  /** Optional per-Worker network policy. Legacy profiles with no field inherit
+   *  the Daemon network environment exactly as before. */
+  networkPolicy?: WorkerNetworkPolicy;
 }
 
 export interface WorkerProfilesSettings {
@@ -104,6 +111,9 @@ export interface ResolvedWorkerSelection {
    *  otherwise inherited from the selected Worker profile.
    *  Absent for legacy selections without a preference (single-run). */
   executionPreference?: ExecutionPreference;
+  /** Resolved network policy from the selected Worker profile.
+   *  Absent for legacy selections without a policy (inherit). */
+  networkPolicy?: WorkerNetworkPolicy;
 }
 
 export function isWorkerProfileId(value: string): boolean {
@@ -337,6 +347,11 @@ export function validateWorkerProfile(
     }
   }
 
+  let networkPolicy: WorkerNetworkPolicy | undefined;
+  if (o.networkPolicy !== undefined) {
+    networkPolicy = validateWorkerNetworkPolicy(o.networkPolicy, `${label}.networkPolicy`);
+  }
+
   return {
     id: o.id,
     label: o.label.trim(),
@@ -352,6 +367,7 @@ export function validateWorkerProfile(
     ...(contractQuality === undefined ? {} : { contractQuality }),
     ...(pricingRoute === undefined ? {} : { pricingRoute }),
     ...(executionPreference === undefined ? {} : { executionPreference }),
+    ...(networkPolicy === undefined ? {} : { networkPolicy }),
   };
 }
 
@@ -571,6 +587,8 @@ export function resolveWorkerSelection(
     );
   }
 
+  const networkPolicy = base?.networkPolicy;
+
   return {
     profileId,
     modelConfigId: baseModel?.modelConfigId,
@@ -584,6 +602,7 @@ export function resolveWorkerSelection(
     noProgressTimeoutMs,
     ...(pricingRoute === undefined ? {} : { pricingRoute }),
     ...(executionPreference === undefined ? {} : { executionPreference }),
+    ...(networkPolicy === undefined ? {} : { networkPolicy }),
   };
 }
 

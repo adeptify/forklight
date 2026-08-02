@@ -7,6 +7,11 @@ import { createInterface } from "node:readline";
 import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
 import { executionModeFromTaskSpec } from "../core/execution-mode.js";
 import { isEffectiveProgressEvent } from "../core/runtime-activity.js";
+import {
+  applyWorkerNetworkPolicy,
+  workerNetworkPolicyMode,
+  type WorkerNetworkPolicy,
+} from "../core/network-policy.js";
 import { buildWorkerPrompt, workerPromptAppendicesForTask } from "../core/task.js";
 import type { NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
 import {
@@ -168,6 +173,7 @@ function codexCheckpointLines(): string[] {
 export function buildCodexWorkerEnv(
   codexHome: string,
   temporaryDirectory: string,
+  networkPolicy?: WorkerNetworkPolicy,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -185,7 +191,9 @@ export function buildCodexWorkerEnv(
   delete env.ANTHROPIC_AUTH_TOKEN;
   delete env.ANTHROPIC_BASE_URL;
   delete env.XAI_API_KEY;
-  return env;
+  // The same frozen per-Task network policy applies to Codex single-run and
+  // Codex native-Goal children (both call this builder).
+  return applyWorkerNetworkPolicy(env, networkPolicy);
 }
 
 export async function runCodexWorker(
@@ -284,9 +292,11 @@ export async function runCodexWorker(
     authSeeded: seed.seeded,
     executionMode: "single-run",
     correctionFeedbackIncluded: Boolean(hooks.feedback),
+    // Privacy-safe: mode-level evidence only; proxy values never reach events.
+    networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
   });
 
-  const env = buildCodexWorkerEnv(codexHome, temporaryDirectory);
+  const env = buildCodexWorkerEnv(codexHome, temporaryDirectory, task.spec.networkPolicy);
 
   child = spawn(task.spec.runtime.executable || "codex", args, {
     cwd: task.paths.workspace,

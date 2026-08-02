@@ -18,6 +18,11 @@ import {
   type RuntimeName,
 } from "./runtime-names.js";
 import { isPricingRouteId, resolveWorkerSelection } from "./worker-profiles.js";
+import {
+  freezeWorkerNetworkPolicy,
+  validateWorkerNetworkPolicy,
+  type WorkerNetworkPolicy,
+} from "./network-policy.js";
 import { selectDeliveryProfile } from "./delivery-profiles.js";
 import {
   expandHome,
@@ -434,6 +439,7 @@ export function parseTaskSpec(
     maxBudgetUsd?: number | null;
     pricingRoute?: string;
     executionPreference?: string;
+    networkPolicy?: WorkerNetworkPolicy;
   } = {};
   let selectedProfileId: string | undefined;
   const profileIdRaw = root.workerProfileId;
@@ -463,6 +469,7 @@ export function parseTaskSpec(
       ...(resolved.executionPreference === undefined
         ? {}
         : { executionPreference: resolved.executionPreference }),
+      ...(resolved.networkPolicy === undefined ? {} : { networkPolicy: resolved.networkPolicy }),
     };
   } else if (
     workerProfiles !== undefined
@@ -492,6 +499,7 @@ export function parseTaskSpec(
       ...(resolved.executionPreference === undefined
         ? {}
         : { executionPreference: resolved.executionPreference }),
+      ...(resolved.networkPolicy === undefined ? {} : { networkPolicy: resolved.networkPolicy }),
     };
   }
   const providerName = stringValue(
@@ -701,6 +709,23 @@ export function parseTaskSpec(
   const frozenExecutionPreference: ExecutionPreference = executionResolution.preference;
   const frozenExecutionMode: ResolvedExecutionMode = executionResolution.mode;
 
+  // --- Network policy resolution ---
+  // A saved per-Worker route is turned into one immutable per-Task snapshot
+  // before admission. Explicit Task override wins over the selected Worker
+  // Profile; legacy Tasks with no field (and no profile field) freeze inherit
+  // so the Daemon environment is preserved exactly as before. Later settings
+  // edits can never rewrite an existing Task or its resumed Attempts.
+  const taskNetworkPolicyOverride = (() => {
+    const raw = root.networkPolicy;
+    if (raw === undefined) return undefined;
+    return validateWorkerNetworkPolicy(raw, "task.networkPolicy");
+  })();
+  const frozenNetworkPolicy = freezeWorkerNetworkPolicy(
+    taskNetworkPolicyOverride
+      ?? profileDefaults.networkPolicy
+      ?? { mode: "inherit" },
+  );
+
   const common = {
     name: stringValue(root.name, "task.name"),
     project,
@@ -763,6 +788,7 @@ export function parseTaskSpec(
     },
     executionPreference: frozenExecutionPreference,
     executionMode: frozenExecutionMode,
+    networkPolicy: frozenNetworkPolicy,
   };
 
   // Post-resolve validation: routingDecision must bind to the resolved Task identity.

@@ -16,6 +16,10 @@ import {
 } from "../core/task.js";
 import { checkpointLaunch } from "../core/checkpoint.js";
 import { providerEnvironment, resolveProvider } from "../core/providers.js";
+import {
+  applyWorkerNetworkPolicy,
+  workerNetworkPolicyMode,
+} from "../core/network-policy.js";
 import { readProviderKey } from "../core/secrets.js";
 import { isEffectiveProgressEvent } from "../core/runtime-activity.js";
 import { ClaudeEventNormalizer } from "../events/normalize.js";
@@ -137,14 +141,14 @@ function claudeArguments(
   return args;
 }
 
-function childEnvironment(
+export function childEnvironment(
   task: TaskRecord,
   apiKey: string,
   providerDefaults?: ProviderDefaultSettings,
 ): NodeJS.ProcessEnv {
   const provider = resolveProvider(task.spec.provider.name, task.spec.provider, providerDefaults);
   const temporaryDirectory = runtimeTemporaryDirectory();
-  return providerEnvironment(provider, apiKey, {
+  return applyWorkerNetworkPolicy(providerEnvironment(provider, apiKey, {
     ...process.env,
     CLAUDE_CONFIG_DIR: task.paths.claudeConfig,
     // sandbox-exec resolves /tmp to /private/tmp when building the allowlist,
@@ -153,7 +157,7 @@ function childEnvironment(
     TMPDIR: temporaryDirectory,
     TMP: temporaryDirectory,
     TEMP: temporaryDirectory,
-  });
+  }), task.spec.networkPolicy);
 }
 
 export function runtimeTemporaryDirectory(
@@ -425,6 +429,8 @@ export async function runClaudeWorker(
       runtime: task.spec.runtime.name,
       isolation: launch.isolation,
       correctionFeedbackIncluded: Boolean(hooks.feedback),
+      // Privacy-safe: mode-level evidence only; proxy values never reach events.
+      networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
     },
   );
 

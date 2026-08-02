@@ -142,4 +142,16 @@ function isMutatingDaemonMethod(method: DaemonMethod): boolean {
 export function requiresMatchingBuildIdentity(method: DaemonMethod): boolean {
   return isMutatingDaemonMethod(method) && method !== "shutdown" && method !== "activation_handoff_shutdown";
 }
+
+/** Closed lifecycle intent for graceful Daemon shutdown.
+ *  Omitted or legacy clients default to ordinary stop (no auto-resume). */
+export type DaemonShutdownIntent = "stop" | "restart";
+
+/** Parse shutdown intent. Unknown values fail closed; omit/null means stop. */
+export function parseDaemonShutdownIntent(value: unknown): DaemonShutdownIntent {
+  if (value === undefined || value === null) return "stop";
+  if (value === "stop" || value === "restart") return value;
+  throw new Error("shutdown intent must be stop or restart");
+}
+
 import type { BuildIdentity } from "../core/build-identity.js";

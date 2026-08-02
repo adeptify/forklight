@@ -6209,6 +6209,13 @@ function executionPreferenceUnsupported(result){
   return Boolean(result && result.reason === "native-goal-unsupported");
 }
 
+function networkPolicySummary(policy){
+  if(!policy) return t("workersNetworkCardInherit");
+  if(policy.mode === "direct") return t("workersNetworkCardDirect");
+  if(policy.mode === "custom-proxy") return t("workersNetworkCardCustom");
+  return t("workersNetworkCardInherit");
+}
+
 function rWorker(){
   viewEl.textContent = "";
   flashError("");
@@ -6269,6 +6276,8 @@ function rWorker(){
     var execModeText = resolvedExecutionModeText(readiness);
     story.appendChild(h("div", "profile-story-line",
       execModeText ? (execPrefText + " · " + execModeText) : execPrefText));
+    story.appendChild(h("div", "profile-story-line", networkPolicySummary(prof.networkPolicy)));
+    story.appendChild(h("div", "profile-story-line dim fs11", t("workersNetworkCardNotProof")));
     story.appendChild(h("div", "profile-story-line", t("workersCardRunsWith", {
       model: modelLine, runtime: runtimeDisplayName(prof.runtime)
     })));
@@ -6535,6 +6544,72 @@ function rWorker(){
   advDetails.appendChild(advSummary);
   var advBody = h("div", "advanced-body");
   advBody.appendChild(h("div", "summary-line dim mb-8", t("workersAdvancedClosed")));
+  /* --- Network route (FL-107): inherit / direct / credential-free custom proxy --- */
+  var netRow = h("div", "advanced-row");
+  var netLab = h("label", "", t("workersNetworkLabel"));
+  var selNet = h("select", "");
+  selNet.id = "fl-wp-network-mode";
+  netLab.htmlFor = selNet.id;
+  [
+    ["inherit", t("workersNetworkInherit")],
+    ["direct", t("workersNetworkDirect")],
+    ["custom-proxy", t("workersNetworkCustomProxy")]
+  ].forEach(function(pair){
+    var o = document.createElement("option");
+    o.value = pair[0]; o.textContent = pair[1]; selNet.appendChild(o);
+  });
+  netLab.appendChild(selNet);
+  netRow.appendChild(netLab);
+  function netField(id, label, placeholder){
+    var inp = h("input", "");
+    inp.type = "text"; inp.id = id; inp.placeholder = placeholder;
+    var lab = h("label", "", label);
+    lab.htmlFor = id;
+    lab.appendChild(inp);
+    var wrap = h("div", "network-field");
+    wrap.appendChild(lab);
+    netRow.appendChild(wrap);
+    return { wrap: wrap, input: inp };
+  }
+  var netHttpField = netField("fl-wp-network-http", t("workersNetworkHttpProxy"), "http://127.0.0.1:7890");
+  var netHttpsField = netField("fl-wp-network-https", t("workersNetworkHttpsProxy"), "http://127.0.0.1:7891");
+  var netNoProxyField = netField("fl-wp-network-noproxy", t("workersNetworkNoProxy"), "localhost,127.0.0.1");
+  var netHttp = netHttpField.input;
+  var netHttps = netHttpsField.input;
+  var netNoProxy = netNoProxyField.input;
+  var netHint = h("div", "hint-inline dim fs11", t("workersNetworkInheritHint"));
+  advBody.appendChild(netRow);
+  advBody.appendChild(netHint);
+  if(isEdit && editingProfile.networkPolicy){
+    var netPolicy = editingProfile.networkPolicy;
+    if(netPolicy.mode === "direct"){
+      selNet.value = "direct";
+    } else if(netPolicy.mode === "custom-proxy"){
+      selNet.value = "custom-proxy";
+      netHttp.value = netPolicy.httpProxy || "";
+      if(netPolicy.httpsProxy) netHttps.value = netPolicy.httpsProxy;
+      if(netPolicy.noProxy) netNoProxy.value = netPolicy.noProxy;
+    } else {
+      selNet.value = "inherit";
+    }
+  } else {
+    selNet.value = "inherit";
+  }
+  function syncNetworkFields(){
+    var custom = selNet.value === "custom-proxy";
+    netHttpField.wrap.hidden = !custom;
+    netHttpsField.wrap.hidden = !custom;
+    netNoProxyField.wrap.hidden = !custom;
+    if(selNet.value === "direct"){
+      netHint.textContent = t("workersNetworkDirectHint");
+    } else if(selNet.value === "custom-proxy"){
+      netHint.textContent = t("workersNetworkCustomProxyHint");
+    } else {
+      netHint.textContent = t("workersNetworkInheritHint");
+    }
+  }
+  selNet.addEventListener("change", syncNetworkFields);
+  syncNetworkFields();
   advBody.appendChild(policyModeNote());
   var advFields = buildAdvancedFields();
   advBody.appendChild(advFields);
@@ -6596,6 +6671,20 @@ function rWorker(){
     };
     if(selEf.value) profile.effort = selEf.value;
     if(selEx.value) profile.executionPreference = selEx.value;
+    if(selNet.value === "custom-proxy"){
+      var netHttpValue = netHttp.value.trim();
+      if(!netHttpValue){
+        flashError(t("workersNetworkProxyRequired"));
+        return;
+      }
+      profile.networkPolicy = { mode: "custom-proxy", httpProxy: netHttpValue };
+      if(netHttps.value.trim()) profile.networkPolicy.httpsProxy = netHttps.value.trim();
+      if(netNoProxy.value.trim()) profile.networkPolicy.noProxy = netNoProxy.value.trim();
+    } else if(selNet.value === "direct"){
+      profile.networkPolicy = { mode: "direct" };
+    } else {
+      profile.networkPolicy = { mode: "inherit" };
+    }
     if(budgetMode.value === "unlimited"){
       profile.maxBudgetUsd = null;
     } else if(budgetMode.value === "limited"){

@@ -175,11 +175,12 @@ export class DetachedDaemonFixture {
     return waitForDaemonReady(this.home);
   }
 
-  /** Stop the current daemon through the production graceful stop, then start
-   *  a tracked replacement and await readiness. Mirrors `restartDaemon` while
-   *  keeping the replacement PID under this fixture's authority. */
+  /** Stop the current daemon through the production graceful restart stop,
+   *  then start a tracked replacement and await readiness. Mirrors
+   *  `restartDaemon` (intent=restart) while keeping the replacement PID under
+   *  this fixture's authority. */
   async restart(): Promise<Record<string, unknown>> {
-    await stopDaemon(this.home);
+    await stopDaemon(this.home, { intent: "restart" });
     this.start();
     return waitForDaemonReady(this.home);
   }

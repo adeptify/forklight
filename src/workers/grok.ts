@@ -18,6 +18,11 @@ import {
 import { readProviderKey } from "../core/secrets.js";
 import { cloneDefaults } from "../core/settings.js";
 import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
+import {
+  applyWorkerNetworkPolicy,
+  workerNetworkPolicyMode,
+  type WorkerNetworkPolicy,
+} from "../core/network-policy.js";
 import { isEffectiveProgressEvent } from "../core/runtime-activity.js";
 import type { NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
 import {
@@ -214,6 +219,31 @@ export function buildGrokSandboxProfile(input: {
   (subpath "${sandboxLiteral(input.logs)}")
   (subpath "${sandboxLiteral(input.temporaryDirectory)}"))
 (allow network*)`;
+}
+
+/**
+ * Task-local Grok environment: seeded GROK_HOME, optional XAI_API_KEY, and a
+ * deliberate Anthropic-compat strip, then the frozen per-Task network policy.
+ * Pure so adapter tests can assert the exact child environment.
+ */
+export function buildGrokWorkerEnv(
+  apiKey: string,
+  grokHome: string,
+  networkPolicy?: WorkerNetworkPolicy,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GROK_HOME: grokHome,
+  };
+  if (apiKey) {
+    env.XAI_API_KEY = apiKey;
+  } else {
+    delete env.XAI_API_KEY;
+  }
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  delete env.ANTHROPIC_BASE_URL;
+  return applyWorkerNetworkPolicy(env, networkPolicy);
 }
 
 function redact(value: string, secret: string): string {
@@ -553,22 +583,12 @@ export class GrokBuildAdapter implements WorkerAdapter {
         grokHome,
         authMode: apiKey ? "api-key" : authSeed.mode,
         ...(authSeed.seeded.length > 0 ? { authSeeded: authSeed.seeded } : {}),
+        // Privacy-safe: mode-level evidence only; proxy values never reach events.
+        networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
       },
     );
 
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      GROK_HOME: grokHome,
-      // Prevent accidental Anthropic-compat injection for Grok.
-    };
-    if (apiKey) {
-      env.XAI_API_KEY = apiKey;
-    } else {
-      delete env.XAI_API_KEY;
-    }
-    delete env.ANTHROPIC_API_KEY;
-    delete env.ANTHROPIC_AUTH_TOKEN;
-    delete env.ANTHROPIC_BASE_URL;
+    const env = buildGrokWorkerEnv(apiKey, grokHome, task.spec.networkPolicy);
 
     child = spawn(launchCommand, launchArgs, {
       cwd: task.paths.workspace,

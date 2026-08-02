@@ -22,8 +22,8 @@ import { DaemonCoordinator } from "./coordinator.js";
 import type { TaskHistoryPageRequest } from "../core/task-history.js";
 import { HISTORY_INVALID_REQUEST_REASON } from "../core/task-history.js";
 import type { ProviderAuthInspector } from "../core/providers.js";
-import type { DaemonRequest, DaemonResponse } from "./protocol.js";
-import { requiresMatchingBuildIdentity } from "./protocol.js";
+import type { DaemonRequest, DaemonResponse, DaemonShutdownIntent } from "./protocol.js";
+import { parseDaemonShutdownIntent, requiresMatchingBuildIdentity } from "./protocol.js";
 import {
   compareBuildIdentity,
   currentBuildIdentity,
@@ -203,6 +203,8 @@ export class ForkLightDaemon {
   private server: net.Server | undefined = undefined;
   private ownedSocket: { dev: number; ino: number } | undefined = undefined;
   private readonly buildIdentity: BuildIdentity = currentBuildIdentity();
+  /** Intent captured from an authenticated shutdown request; defaults to stop. */
+  private shutdownIntent: DaemonShutdownIntent = "stop";
 
   constructor(
     home: string,
@@ -334,7 +336,7 @@ export class ForkLightDaemon {
 
   async close(): Promise<void> {
     try {
-      await this.coordinator.shutdown();
+      await this.coordinator.shutdown(this.shutdownIntent);
       let backupPath: string | undefined;
       if (this.server && this.ownedSocket) {
         let current: Awaited<ReturnType<typeof stat>> | undefined;
@@ -728,9 +730,12 @@ export class ForkLightDaemon {
           requiredString(params.taskId, "taskId"),
           requiredString(params.receiptId, "receiptId"),
         );
-      case "shutdown":
+      case "shutdown": {
+        // Closed stop/restart intent. Omitted or legacy clients stay on stop.
+        this.shutdownIntent = parseDaemonShutdownIntent(params.intent);
         setImmediate(() => process.kill(process.pid, "SIGTERM"));
-        return { stopping: true };
+        return { stopping: true, intent: this.shutdownIntent };
+      }
       case "competition_submit_file":
         return this.coordinator.submitCompetitionFile(
           requiredString(params.taskFile, "taskFile"),

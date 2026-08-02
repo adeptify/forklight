@@ -1,6 +1,7 @@
 import type { PricingUnavailableReason } from "./pricing.js";
 import type { QuotedCost, UnavailableCost } from "./pricing-calculator.js";
 import type { RuntimeName } from "./runtime-names.js";
+import type { WorkerNetworkPolicy } from "./network-policy.js";
 
 export type TaskStatus =
   | "queued"
@@ -49,6 +50,7 @@ export type EventType =
   | "checkpoint.completed"
   | "checkpoint.skipped"
   | "attempt.authorization.granted"
+  | "attempt.restart-continuation.skipped"
   | "main-review.completed"
   | "main.failure-attribution.recorded"
   | "competition.main-decision.completed"
@@ -268,6 +270,10 @@ interface SharedTaskSpec {
   /** Frozen effective execution mode for this Task (auto already resolved).
    *  Absent only on legacy stored Tasks; runtime code falls back to single-run. */
   executionMode?: ResolvedExecutionMode;
+  /** Creation-time snapshot of the resolved per-Worker network policy.
+   *  Absent only on legacy stored Tasks predating network-policy support;
+   *  runtime code must treat absence as inherit. */
+  networkPolicy?: WorkerNetworkPolicy;
 }
 
 export interface LegacyTaskSpec extends SharedTaskSpec {

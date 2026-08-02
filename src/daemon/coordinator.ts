@@ -35,10 +35,14 @@ import { runCheckpoint } from "../core/checkpoint.js";
 import {
   authorizeExtraAttempt,
   authorizeMainCorrection,
+  noteRestartContinuationSkipped,
+  recordRestartContinuationsForTasks,
   resolvePendingCorrectionGrant,
   resolvePendingGrantExecutionOptions,
+  resolvePendingRestartRecoveryGrant,
   type MainCorrectionAuthorization,
 } from "../core/attempt-authorization.js";
+import type { DaemonShutdownIntent } from "./protocol.js";
 import { latestMainReview, recordMainReview } from "../core/main-review.js";
 import {
   projectMainFailureAttribution,
@@ -2455,6 +2459,40 @@ export class DaemonCoordinator {
       this.enqueue({ taskId: task.id, resuming: true, correcting: true });
       recovered.push(task.id);
     }
+    // Graceful restart continuity: a durable restart-continuation grant binds
+    // one system (or handoff) recovery Attempt outside quality-retry budgets.
+    // Only pending restart-recovery grants that revalidate against the exact
+    // interrupted Attempt and scope auto-queue; ordinary stop leaves
+    // interrupted Tasks for Main without inventing success or a new Task.
+    for (const task of this.store.listTasks(["failed", "interrupted"])) {
+      if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) continue;
+      const exec = this.settings.get().execution;
+      const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
+      let restartPending: ReturnType<typeof resolvePendingRestartRecoveryGrant>;
+      try {
+        restartPending = resolvePendingRestartRecoveryGrant(
+          this.store,
+          task.id,
+          baseMaxAttempts,
+        );
+      } catch {
+        // Corrupt history: one content-free skip event; unrelated Tasks continue.
+        noteRestartContinuationSkipped(
+          this.store,
+          task.id,
+          "corrupt-history",
+          task.currentAttemptId,
+        );
+        continue;
+      }
+      if (restartPending === null) continue;
+      this.enqueue({
+        taskId: task.id,
+        resuming: true,
+        executionOptions: restartPending,
+      }, true);
+      recovered.push(task.id);
+    }
     // An adaptation transition commits its lineage edge and queued child in
     // one transaction before the in-memory enqueue. A crash in that narrow
     // window must not strand the durable successor.
@@ -2515,9 +2553,16 @@ export class DaemonCoordinator {
     return recovered;
   }
 
-  async shutdown(): Promise<void> {
+  /**
+   * Graceful coordinator shutdown. Intent defaults to stop.
+   * On restart, after active Workers settle interrupted, persist at most one
+   * restart-continuation grant per eligible Task (before Store close).
+   * Stop never records continuation authority.
+   */
+  async shutdown(intent: DaemonShutdownIntent = "stop"): Promise<void> {
     this.closing = true;
-    for (const taskId of this.active.keys()) {
+    const activeAtShutdown = [...this.active.keys()];
+    for (const taskId of activeAtShutdown) {
       const task = this.store.getTask(taskId);
       if (task.workerPid !== undefined && processExists(task.workerPid) && looksLikeWorker(task.workerPid)) {
         process.kill(task.workerPid, "SIGINT");
@@ -2525,6 +2570,19 @@ export class DaemonCoordinator {
     }
     await Promise.allSettled(this.active.values());
     await Promise.allSettled(this.activeIntegrations.values());
+    // Bind only after truthful Attempt settlement: grants require the latest
+    // Attempt to already be interrupted and pre-verification.
+    if (intent === "restart") {
+      recordRestartContinuationsForTasks(
+        this.store,
+        activeAtShutdown,
+        (taskId) => {
+          const task = this.store.getTask(taskId);
+          return task.effectivePolicy?.values.baseMaxAttempts
+            ?? this.settings.get().execution.maxAttempts;
+        },
+      );
+    }
   }
 
   private recoverIntegrationOperations(): void {

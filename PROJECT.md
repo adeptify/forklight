@@ -99,9 +99,11 @@ Passing the active milestone alone does not complete the Goal.
    Worker Runtime alongside `claude-code` and `grok-build`. A saved Worker
    selects an explicit Codex model and a model-supported reasoning effort; both
    are frozen into the Task identity and remain distinct from the Main session's
-   model and effort. Single-run and native-Goal execution are implemented and
-   real-smoked; restart/resume continuity and a second real Profile remain
-   graduation work.
+   model and effort. Single-run, native-Goal execution, graceful Daemon
+   restart/resume continuity, and two saved effort Profiles are now
+   real-smoked. One intentional restart continued the exact prior Thread in the
+   same Task/workspace/session rather than creating a replacement Task or
+   consuming a quality retry.
    Runtime support preserves the same isolation, finite execution, independent
    verification, and Main authority as every other Worker.
 10. **ForkLight evolves through real self-dogfooding.** Every meaningful
@@ -125,6 +127,10 @@ Passing the active milestone alone does not complete the Goal.
    bounded end-to-end implementation, while ForkLight still owns the Task
    Contract, workspace boundary, independent acceptance, no-progress stop,
    finite correction/retry authority, and return to Main.
+13. **Classify generated output in every build-producing Task.** Task contracts
+   declare paths such as `dist/**` in `workspace.generatedPaths`; generated
+   artifacts remain reviewable evidence but do not consume product file/line
+   limits or obscure the actual delivery boundary.
 
 ## Milestone roadmap
 
@@ -214,26 +220,28 @@ Passing the active milestone alone does not complete the Goal.
 - Build and source identity: **matched** at the last authenticated health check;
   exact hashes remain machine-owned because editing this file changes the
   source digest.
-- Daemon: post-activation Grok path is healthy after restart. Fresh smoke
-  `5e618a72-15b9-416f-86bf-a2cfc2fee046` succeeded (~12s, zero diff); a later
-  Grok judge also succeeded; Daemon xAI evidence is verified. Earlier proxy
-  smokes `98e3fbe1-a2c5-4008-968e-8078c3c278b2` (~10s, zero diff) and
-  `045c2499-42f0-4f9e-9310-68029ecf9e61` also succeeded after proxy-enabled
-  restarts with Daemon inheriting `HTTP_PROXY`/`HTTPS_PROXY` at
-  `http://127.0.0.1:7890`. Transient Hub/PID state is read live from the CLI
-  and is not asserted here.
+- Daemon: Grok no longer depends on terminal or Daemon proxy inheritance. Saved
+  Profile `local-grok-builder` freezes `custom-proxy`; zero-Diff Task
+  `0be3aa84-14b5-41bf-82ea-8df74034f296` returned the exact marker after the
+  Daemon was intentionally restarted with zero HTTP(S)/ALL/NO proxy variables.
+  Its public Worker event recorded only `networkPolicyMode=custom-proxy`.
+  Transient Hub/PID state is read live from the CLI and is not asserted here.
 - M0: `required=3`, `achieved=3`, `remaining=0`, `state=ready`. Streak
   membership and the Store's current qualifying operation are transient;
   read them live with `forklight upgrade status --required 3` rather than
   freezing an Integration ID here.
-- M3 coverage: `342 terminal / 228 class / 110 family / 57 complete`, across
-  186 task classes and 28 families. Decision readiness is `14 single / 0 fair
-  comparable / 43 unknown multi / 0 unusable`. M3 is **not** complete: still
-  zero fair comparable cohorts.
+- M3 coverage: `394 terminal / 280 class / 159 family / 82 complete`, across
+  220 task classes and 33 families. Frozen decision readiness is `22 single / 2
+  task-family-scoped multi / 58 unknown multi / 0 unusable`. The scoped
+  multi-Worker decisions are not yet reviewed same-work comparison cohorts;
+  M3 remains **not complete** until natural same-scope outcomes support a fair
+  recommendation.
 - M4 direct-Main paired evidence: 2 low-confidence samples across 2 classes and
   2 Profiles; not enough for a general savings claim.
-- Latest accepted full-suite evidence: build plus **2400/2400** tests and
-  `git diff --check` passed after FL-106 dual-clock delivery. The first full
+- Latest accepted full-suite evidence: build plus **2459/2459** tests,
+  JavaScript UI checks, the bounded Impeccable detector, browser interaction
+  checks, and `git diff --check` passed after FL-107 Integration.
+  The first full
   run also exposed a pre-existing slow-start test cleanup leak; Main made the
   fixture release and join its fake Runtime on every exit, then the complete
   suite passed without a stranded process.
@@ -246,8 +254,8 @@ Passing the active milestone alone does not complete the Goal.
   after protocol repairs, Main-accepted, and integrated by operation
   `11b0fa7f-de4c-4c3f-974e-f9705f43f71f` (source verification, build,
   activation, and activation checks all passed). The real model-backed
-  native-Goal smoke now passes; only real daemon restart/resume continuity
-  remains open.
+  native-Goal smoke passes. FL-004 has now closed the real Daemon
+  restart/resume and second-Profile graduation gaps.
 - The long-term Codex Goal is active with the exact `Long-term Goal` objective.
   FL-001 and FL-002 are complete; FL-002 used a recorded `workers-unavailable`
   Main-direct recovery only after both selected Worker paths ended before a
@@ -262,158 +270,27 @@ Passing the active milestone alone does not complete the Goal.
 
 ### Current delivery slices
 
-1. **Profile Worker slot release.** Task
-   `e6294b47-b652-4538-ae37-a3bef793f2ff` implemented the intended distinction:
-   a Profile's model-execution slot is released when its Worker returns, while
-   the full Task remains active through verification and global concurrency
-   remains bounded. Focused behavior passed 183/183; the full suite's sole
-   failure came from an unrelated process-start timing window. Main has now
-   recorded the first failed verification as Candidate/model-quality and the
-   later failed verification as verification-infrastructure/non-model. The
-   exact source patch is present locally, but the machine Task remains failed
-   and there is no fabricated Main acceptance or Integration.
-2. **Exact Main failure attribution.** The capability is complete across Core,
-   CLI, Daemon, MCP, statistics/routing, and bilingual Hub Task Detail. It binds
-   one immutable Main judgment to one failed verification and exact Candidate
-   Revision, keeps machine and final-delivery truth unchanged, makes identical
-   replay idempotent, and rejects conflicting or malformed history. Grok
-   Task `8a542f9e-6867-4f30-8cdc-09d88418a155`, Attempt
-   `54f64a40-c9a9-402a-9f1a-4e039503868d`, failed before a Candidate because the
-   Grok proxy request stream could not send. Diff is empty, usage and
-   verification are absent, and the failure is Runtime/transport evidence—not
-   model-quality evidence. The single replacement Task
-   `9f6f882d-9d2e-4355-8152-0ba8fcbfad5d` also failed before a Candidate because
-   Claude Code tried to create `/tmp/claude-501` while the macOS sandbox had
-   canonicalized its writable temp root to `/private/tmp`. The replacement has
-   an empty Diff and no usage or verification. The canonical temp bootstrap and
-   FL-002 implementation therefore completed under Main-direct record
-   `31e274af-a8fd-4e9a-831c-cafed965413c`; no third implementation Task,
-   reverify, correction, reusable Worker output, or M0 Integration is claimed.
-3. **Declared local dependency materialization.** Accepted revision
-   `75c99cb4-cae1-4572-959d-22ad6ee03cdf` was activated by Integration
-   `01e1c560-ebe9-40a5-9afe-2ac0036f230f`. An earlier operation
-   `c2cf0838-d0b0-4e7b-a6e4-c6a7cf313723` rolled back because its Daemon PATH
-   lacked `node`/`npm`. That rollback is why earlier evidence showed the honest
-   M0 streak at 1/3 before the two Codex Runtime Integrations below landed.
-4. **Codex Worker Runtime foundation.** DeepSeek Flash Task
-   `5cef4acd-13e4-4c95-92a8-a40affcfcb4f` implemented the minimum complete
-   `codex-cli` single-run path: it retained its first Candidate, corrected its
-   own initial independent-verification gaps, passed focused and full
-   verification, and integrated as `f097ca23-0e34-4bc4-8970-cb78f8d6c3b9`. Grok
-   Review Graph `4e9ea38d-294b-400f-8819-ad21760d530d` then proposed accept
-   with two informational findings; follow-up Task
-   `ee55a008-22e9-4556-8e9e-d0ee764567b5` closed those two findings and
-   integrated as `892bad32-16a9-423e-ab9d-972773f37729`. Together with the
-   qualifying Integration `01e1c560-ebe9-40a5-9afe-2ac0036f230f`, M0 is
-   complete at 3/3. Current streak membership remains machine-owned via
-   `forklight upgrade status --required 3`.
-5. **FL-104 — executionPreference + Codex native Goal path.** Integrated by
-   `11b0fa7f-de4c-4c3f-974e-f9705f43f71f` from Candidate Task
-   `7ba94774-0289-482a-a23a-8224d1e97fa9` (suite then **2339/2339**; superseded
-   as latest full-suite by the 2359 evidence below). Per-Worker
-   `executionPreference` is `auto` / `single-run` / `native-goal`; `auto`
-   resolves Codex to native-goal and unsupported Runtimes to single-run; forced
-   unsupported native-goal fails closed. The Codex native Goal app-server path
-   performs initialize/initialized, binds exact Thread and Goal identity,
-   resumes that binding, handles canonical goal/turn/token notifications, and
-   repeats frozen cwd/model/effort/approval/sandbox policy at every relevant
-   wire boundary. An earlier real no-model Codex app-server probe exposed an
-   ignored workspace field; Grok's first read-only judge incorrectly proposed
-   accept, so judge votes remain advisory and Main evidence review remains
-   authoritative—track review quality by task family. Real Task
-   `c53c97e4-22ad-44da-9787-d3af55297581` then proved the installed Codex
-   app-server can return `FORKLIGHT_CODEX_GOAL_OK` with exact Thread, late
-   correlated Turn, Goal completion, canonical final output, observed usage,
-   zero source changes, and independent verification. The smoke exposed and
-   closed both real orderings: `turn/started` may arrive before or after the
-   `turn/start` response and may use a different id. **Remaining live gap:**
-   daemon restart/resume on the same durable lineage. Saved `codex-luna-max`
-   remains `executionPreference=auto` (resolves native-goal).
-6. **Explicit handled-failure resolve/reopen truth.** Candidate Task
-   `67d507f6-6a1c-4b23-9be5-2b07caae146f` (with tiny Grok proof Task
-   `591d588a-64be-4d32-a7c8-05ed16859747` as operation
-   `713c3613-ba84-4f2d-8ac8-389357fa7b78`) passed build, focused surfaces,
-   **2359/2359**, and `git diff --check` after one retained correction and one
-   Main reverification. Review Graph `65739c97-19f3-496a-9acb-1afd23d738ec`
-   (reviewer Task `3aca83f1-5942-4136-b341-bf295b8800f6`) proposed accept; Main
-   accepted exact revision `3ae90a0b-2e6f-42ad-b218-bac2017c5716` (digest
-   `323f72bc9b9c1af289c43937300308b3dac03e7b7eb2f22ae4435924a0da4f38`).
-   Integration `676bc933-b0b9-4554-a85b-a746acfdb3ee` passed source apply,
-   4-command source verification, build, Daemon activation, and activation
-   checks. Real old Grok connectivity Task
-   `1b23dca5-6c2b-4fb6-87db-1a1de12dd419` stayed machine **failed**, was
-   explicitly attention-resolved as environment-recovered, reopened once,
-   resolved again with evidence Task `5e618a72-15b9-416f-86bf-a2cfc2fee046`, and
-   exact resolve replay returned `existing=true`. Hub browser audit: absent
-   from Now, present in History under a distinct Handled group, still labelled
-   failed/network-connectivity; Task Detail says environment recovered—not
-   delivered or succeeded—with related Task and Reopen. English and Chinese
-   checked at desktop width; Chinese Task Detail at 390×844 had no horizontal
-   overflow and no browser console errors. **Truth invariant:** a handled
-   failure remains a machine failure and is never model-quality, Token savings,
-   or delivery success evidence. FL-103 exit evidence is met.
-7. **FL-106 — Runtime signal versus effective progress.** Grok Task
-   `f5f0fd47-59cc-41ad-a6e3-d02a78227faa` retained Candidate revision
-   `9aaf6e49-3a61-4933-a106-f5f1129c5462` after one bounded correction. The
-   adapters now label Runtime liveness separately from substantive response,
-   tool, file, Goal-status, and usage progress; each new Attempt resets its own
-   progress baseline. The existing configurable `noProgressTimeoutMs` is the
-   no-effective-progress stop, while `maxDurationMs` remains the separate total
-   wall-time limit. Hub board, Task Detail, and Worker advanced settings explain
-   both clocks in plain English and Chinese without claiming that Runtime
-   speech proves network health or failure. Grok's correction reached
-   2399/2400; the sole red test was an acceptance fixture that expired before
-   its fake app-server received setup. Main retained the production Candidate,
-   corrected that fixture under Main-direct record
-   `c17676e3-1fe6-4dda-b2ff-7efc497abcd0`, fixed one older slow-start cleanup
-   leak exposed by full-suite load, and passed build, focused checks,
-   **2400/2400**, JavaScript syntax checks, and `git diff --check`. No second
-   correction loop, full-task rerun, commit, or push was used.
+Completed slices stay compact here; exact events, outputs, Diffs, and timings remain
+in ForkLight Store and the evidence registry.
 
-### Accepted capability: Codex as a Worker Runtime
+| Slice | Delivered outcome | Primary evidence |
+| --- | --- | --- |
+| FL-003 | A Worker releases its Profile slot when model execution ends, while global in-flight limits still cover verification. The original failed Task remains failed; production behavior was not applied twice. | Failed Task `e6294b47-b652-4538-ae37-a3bef793f2ff`; audits `3693528a-4adb-46f9-a21c-e5ded3087d7d` and `3ae3a5dd-57b9-40e6-98dc-ca2555c4b541`; Candidate `cc955b59-b2bb-4a6d-acce-b3984ab386dd`; Integration `8623fc4d-aa12-4137-bedf-580a5ad20499`. |
+| Main failure attribution | Main can bind one immutable judgment to the exact failed verification and Candidate without relabelling delivery truth. | Main-direct `31e274af-a8fd-4e9a-831c-cafed965413c`; the two pre-Candidate Grok/Claude failures retain empty Diffs and Runtime/infrastructure attribution. |
+| Local dependencies | Declared sibling packages are materialized inside the isolated workspace and verified without exposing the source tree. | Candidate `75c99cb4-cae1-4572-959d-22ad6ee03cdf`; Integration `01e1c560-ebe9-40a5-9afe-2ac0036f230f`. |
+| Codex Worker foundation | `codex-cli` is a first-class single-run Worker with frozen model/effort, isolated auth and exact usage evidence. | DeepSeek Task `5cef4acd-13e4-4c95-92a8-a40affcfcb4f`; Integrations `f097ca23-0e34-4bc4-8970-cb78f8d6c3b9` and `892bad32-16a9-423e-ab9d-972773f37729`. |
+| FL-104 | Per-Worker `auto` / `single-run` / `native-goal` execution and the real Codex native Goal path are integrated. | Candidate Task `7ba94774-0289-482a-a23a-8224d1e97fa9`; Integration `11b0fa7f-de4c-4c3f-974e-f9705f43f71f`; live Goal `c53c97e4-22ad-44da-9787-d3af55297581`. |
+| FL-103 | A handled failure stays failed but can leave Now, enter a distinct History group, explain recovery, and be reopened. | Candidate `3ae90a0b-2e6f-42ad-b218-bac2017c5716`; Integration `676bc933-b0b9-4554-a85b-a746acfdb3ee`; bilingual desktop and 390×844 browser audit. |
+| FL-106 | Runtime liveness and effective progress use separate clocks; one cannot indefinitely defeat the configurable no-progress stop. | Grok Task `f5f0fd47-59cc-41ad-a6e3-d02a78227faa`; Candidate `9aaf6e49-3a61-4933-a106-f5f1129c5462`; Main-direct `c17676e3-1fe6-4dda-b2ff-7efc497abcd0`. |
+| FL-004 | Codex native Goal survives an intentional Daemon restart using the exact prior Task, workspace, session and Thread; a second effort Profile also passed. | Main-direct `aa89bfcc-7334-43bf-9147-a87330e19740`; restart Task `28e167d7-164c-4df4-aaea-75e774054448`; low-effort Task `78096848-c881-41bc-9f25-acebbf181f30`. |
+| FL-107 | Each Worker can freeze `inherit`, `direct`, or credential-free `custom-proxy` routing. Claude, Grok and both Codex paths apply it; events expose only the mode; Hub advanced settings load and switch it bilingually. | DeepSeek Task `b064f658-88fb-4dbb-9ad8-7e5046260da3`; Candidate `28f133fd-72cf-4c91-9bf7-026df9608577`; Grok judge `8e231382-71a0-4643-a0c3-cf3cd88ef204`; Integration `cc146c23-81e9-4286-84c7-c5e458bc8d27`; zero-Diff Grok smoke `0be3aa84-14b5-41bf-82ea-8df74034f296`. |
 
-Single-run and native-Goal execution are real-smoked. Restart/resume continuity
-and a second real model/effort Profile remain open.
-
-- **Configuration input:** implemented. One saved Worker Profile (`codex-luna-max`)
-  selects `runtime=codex-cli`, an explicit Codex model, one effort supported by
-  that model, and `executionPreference=auto` (resolves to native-goal). Hub
-  discovers valid combinations from the local Codex catalog instead of
-  maintaining a guessed global effort list. Unsupported combinations fail
-  before Task creation; there is no silent fallback.
-- **Execution input:** implemented for both modes. Single-run passes the bounded
-  Task Contract to a fresh non-interactive `codex exec --json` session.
-  Native-goal uses the Codex app-server Goal path with exact Thread/Goal
-  binding and frozen policy at wire boundaries. Main's conversation, model,
-  effort, and mutable user configuration do not leak into the Worker identity.
-- **Execution output:** implemented. A Codex Runtime adapter normalizes JSONL
-  progress, terminal result, session identity, usage, interruption, and failure
-  into the same ForkLight Attempt/Event/Candidate contracts used by other
-  Runtimes. Missing usage or cost remains unavailable rather than inferred.
-- **Isolation boundary:** implemented as designed. Codex receives only the Task
-  workspace and the minimum authentication/runtime material proven necessary.
-  User plugins, MCP servers, hooks, web access, nested agents, and broader
-  filesystem access stay disabled unless a focused safety spike proves an
-  equivalent bounded policy; `ultra` effort stays disabled while its automatic
-  delegation behavior cannot be accounted for by ForkLight concurrency and
-  evidence.
-- **Control boundary:** implemented. ForkLight owns duration/no-progress
-  termination, Profile/global concurrency, verification, Candidate capture, and
-  recovery. Codex never writes the original project, reviews itself as Main,
-  integrates, commits, or pushes.
-- **Continuation:** **remaining gap.** Runtime session resume bound to the same
-  Task/Attempt lineage and exact isolated workspace is implemented in the
-  adapter but not yet proven on a real resumed daemon session. It is not a
-  hidden retry or a way around correction limits.
-- **Acceptance:** **native-Goal live gate met; graduation still partial.** Single-run real smoke
-  `c06a8524-7c5f-4220-9459-e283146483a4` returned `FORKLIGHT_CODEX_WORKER_OK`
-  with 34,451 input, 1,475 output, and 19,968 cache-read Tokens and zero changed
-  files. FL-104 Integration was 2339/2339; current protocol-hardening acceptance
-  is **2388/2388**. Native-Goal smoke
-  `c53c97e4-22ad-44da-9787-d3af55297581` returned exact marker
-  `FORKLIGHT_CODEX_GOAL_OK` with zero changed files. A real restart/resume proof
-  and a second real model/effort Profile remain open (FL-004).
-
+FL-107 also exposed one contract-authoring lesson: its first Task omitted
+`workspace.generatedPaths: ["dist/**"]`, so verifier build output inflated the
+reviewed patch from 16 product/test paths to 52 total paths. Main temporarily
+raised the configurable Integration review limit from 50 to 60, integrated the
+verified Candidate, and restored it to 50. Future build-producing Task
+contracts must classify generated output rather than treating it as product work.
 ### External coordination boundary
 
 The last received Client-Core SDK coordination message still requires a
@@ -429,11 +306,8 @@ finishing a Task does not automatically add another Task.
 
 ### Now
 
-| ID | Owner | State | Action | Done when |
-| --- | --- | --- | --- | --- |
-| FL-104 | Main | **Implemented; real native-Goal smoke complete** | Implementation, Integration, protocol hardening, and the minimal real-model smoke are complete. Preserve Task `c53c97e4-22ad-44da-9787-d3af55297581` as the live proof; do not spend more Codex quota repeating it. Remaining continuity work moves to FL-004. | Exit met: exact Thread/Goal binding, both real Turn-start orderings, canonical final marker, observed usage, zero source changes, 2388/2388 tests, and Main acceptance. |
-| FL-004 | Main + selected Worker | **In progress: both execution modes smoked** | Graduate `codex-cli` by proving real daemon restart/resume continuity and adding a second saved Profile with a different valid model/effort combination, preserving exact identities and isolation/control boundaries. | Two real Codex model/effort Profiles preserve exact identity; post-activation identity and single-process checks pass; a real restart/continuation proof exists. |
-| FL-003 | Main | Actionable now that the Codex Runtime single-run path exists | Resolve the retained Profile-slot slice using the new attribution truth, review the actual local diff, and choose one honest delivery path. | Source and machine evidence agree; no unrelated timing failure is called model failure; no duplicate Worker run; accepted work is either safely integrated or explicitly left undelivered. |
+No implementation slice is in flight. Main selects the next item with 一骏
+before dispatch; completing FL-107 does not silently start another feature.
 
 ### Next
 
@@ -441,14 +315,13 @@ finishing a Task does not automatically add another Task.
 | --- | --- | --- | --- |
 | FL-101 | M3 | Accumulate natural same-scope evidence and form the first fair comparable cohort; improve recommendations only where the cohort supports it. | At least one comparable exact-class or family cohort; plain-language recommendation and override path verified. |
 | FL-102 | M1 | Run the clean-user protocol on a new macOS account, disposable VM, or new Mac with an unfamiliar user. | Complete worksheet, timing, interventions, comprehension, reviewed delivery, and restart evidence. |
-| FL-103 | M3/UX | **Completed.** Hub Now/History handled-failure story, Task Detail environment-recovered copy, bilingual desktop and 390×844 Chinese audit, and resolve/reopen dogfood are recorded under Current delivery slice 6 and the evidence registry. | Exit met: real bilingual browser audit at desktop and narrow width; failed Tasks stay failed while attention can be closed or reopened with evidence. |
+| FL-108 | M3/UX | Recompose Hub information around “发生了什么、结果是什么、下一步做什么” without deleting evidence. Start by combining configured connection routing and latest real connection evidence into one human sentence instead of repeating a technical caveat on every Worker card. | Main-approved information architecture; bilingual browser audit; default cards are calmer while Task inputs, outputs, process, failure, retained work, cost and technical evidence remain progressively available. |
 
 ### Later
 
 | ID | Milestone | Action | Exit evidence |
 | --- | --- | --- | --- |
 | FL-105 | M3/UX | Bounded hardening debts found during handled-failure delivery (do not displace FL-104 live proofs): require the internal delivered-truth parameter at the type boundary; reject/describe unknown resolve CLI flags and document `--evidence`; raise mobile task-detail controls toward 44px targets; replace repeated side-accent borders in one later UI hardening batch. | Type-level delivered-truth required; unknown resolve flags rejected/described with `--evidence` documented; mobile controls approach 44px; side-accent borders deduplicated without regressing handled-failure truth. |
-| FL-106 | M2/M3 | **Completed.** Runtime liveness and effective progress now use separate event evidence, Attempt-scoped clocks, watchdog behavior, and plain-language Hub presentation; the DeepSeek ten-minute processing-only incident is now represented truthfully. | Exit met: liveness cannot indefinitely defeat the configurable no-effective-progress stop; Hub shows both clocks without treating Runtime speech as proof of network health or failure; build and 2400/2400 tests passed. |
 | FL-201 | M4 | Capture reviewed exact-pair direct-Main baselines for small fix, standard feature, and refactor. | Three task shapes with comparable acceptance plus quality/time/correction/cost evidence. |
 | FL-202 | M4 | Turn paired evidence into cautious value reporting and user-tunable preferences. | Only supported comparisons say “saved”; low-confidence and missing baselines remain explicit. |
 | FL-301 | M5 | Prepare a private external-user pilot and security/release checklist. | 3-5 independent end-to-end users, explicit security findings, stable lifecycle docs. |
@@ -468,21 +341,22 @@ in ForkLight Store or Git history.
 | M1 clean-user gate remains open | `docs/m1-clean-user-runbook.md` |
 | M2 durable Goals | Relay history Goal `examples/dogfood/relay-gmail-history-goal.json` 5/5; four-Task restart Goal 4/4 |
 | M2 cross-Worker handoff | `decbae4e-4ac8-48c3-a5d2-78801662ccb4` -> `dd837113-bb99-4557-b5ae-c08fc9881549`; restart path `0d829248-7cbc-4f10-83d8-afb3531b31f2` -> `9c69323e-af1c-43de-afb5-59129904dadf` |
-| Profile slot release | Task `e6294b47-b652-4538-ae37-a3bef793f2ff`; `docs/m3-profile-worker-slot-release-contract.md` |
+| Profile slot release is delivered without rewriting failed history | Original failed Task `e6294b47-b652-4538-ae37-a3bef793f2ff`; production commit `e6a6cc0`; DeepSeek audit `3693528a-4adb-46f9-a21c-e5ded3087d7d`; Grok follow-up `3ae3a5dd-57b9-40e6-98dc-ca2555c4b541`; accepted revision `cc955b59-b2bb-4a6d-acce-b3984ab386dd`; Integration `8623fc4d-aa12-4137-bedf-580a5ad20499`; **2431/2431** |
 | Failure-attribution first attempt is Runtime failure | Task `8a542f9e-6867-4f30-8cdc-09d88418a155`; Attempt `54f64a40-c9a9-402a-9f1a-4e039503868d`; `docs/m3-main-failure-attribution-contract.md` |
 | Failure-attribution replacement is also pre-Candidate Runtime failure | Task `9f6f882d-9d2e-4355-8152-0ba8fcbfad5d`; Attempt `7d7c9857-c645-4996-a104-3cae8295da13`; empty Diff; `/tmp/claude-501` EPERM under canonical `/private/tmp` sandbox allowlist |
 | Exact failure attribution is operational | Main-direct record `31e274af-a8fd-4e9a-831c-cafed965413c`; Task `e6294b47-b652-4538-ae37-a3bef793f2ff` events `1389` and `1390`; identical replay of event `1390` returned `existing=true`; Task remains failed; prior full suite 2,302/2,302 (superseded by later 2339 then **2359** evidence below) |
 | Codex Worker Runtime foundation is implemented and real-smoked | Real smoke `c06a8524-7c5f-4220-9459-e283146483a4` returned `FORKLIGHT_CODEX_WORKER_OK` (34,451 input / 1,475 output / 19,968 cache-read Tokens, zero changed files) on saved Profile `codex-luna-max`; local `codex-cli`; per-run `model_reasoning_effort`; catalog reports model-specific effort sets |
 | DeepSeek implemented the Codex Runtime foundation | Task `5cef4acd-13e4-4c95-92a8-a40affcfcb4f` (DeepSeek Flash) retained its first Candidate, corrected its own initial independent-verification gaps, passed focused/full verification, integrated as `f097ca23-0e34-4bc4-8970-cb78f8d6c3b9` |
 | Grok review proposed accept with two informational findings; follow-up closed them | Review Graph `4e9ea38d-294b-400f-8819-ad21760d530d`; follow-up Task `ee55a008-22e9-4556-8e9e-d0ee764567b5` closed both findings, integrated as `892bad32-16a9-423e-ab9d-972773f37729` |
-| FL-104 native Goal is implemented and real-smoked | Original Candidate `7ba94774-0289-482a-a23a-8224d1e97fa9`; Integration `11b0fa7f-de4c-4c3f-974e-f9705f43f71f`; protocol Candidate `776de7a9-a9ed-4a23-b2ec-959fb9af38d4`; DeepSeek review `2c4726b4-898b-41da-8941-b58f0b6aa04e`; Main-direct `809d03de-405a-468d-ac0c-644b902138ac`; live Task `c53c97e4-22ad-44da-9787-d3af55297581`; exact marker `FORKLIGHT_CODEX_GOAL_OK`; zero diff; current suite **2388/2388**; restart/resume remains FL-004 |
+| Codex native Goal and FL-004 graduation are complete | FL-104 Candidate `7ba94774-0289-482a-a23a-8224d1e97fa9`; Integration `11b0fa7f-de4c-4c3f-974e-f9705f43f71f`; first live Goal `c53c97e4-22ad-44da-9787-d3af55297581`; FL-004 Grok revision `438e0a03-65f5-4449-b2b1-c2d1620b2752`; DeepSeek follow-up revision `979ae24f-5b0c-4833-914e-d0d869c62d62`; Main-direct `aa89bfcc-7334-43bf-9147-a87330e19740`; restart Task `28e167d7-164c-4df4-aaea-75e774054448`; low-effort Profile Task `78096848-c881-41bc-9f25-acebbf181f30`; exact markers; zero Diff; current suite **2428/2428** |
 | Handled-failure resolve/reopen is integrated | Candidate `67d507f6-6a1c-4b23-9be5-2b07caae146f`; revision `3ae90a0b-2e6f-42ad-b218-bac2017c5716`; Integration `676bc933-b0b9-4554-a85b-a746acfdb3ee`; full suite **2359/2359** |
 | Real Grok connectivity failure stayed failed and was attention-resolved | Task `1b23dca5-6c2b-4fb6-87db-1a1de12dd419` machine failed/network-connectivity; attention-resolved environment-recovered; reopened once; resolved again with evidence Task `5e618a72-15b9-416f-86bf-a2cfc2fee046`; exact resolve replay `existing=true`; never delivered/succeeded |
 | Fresh Grok recovery smoke and FL-103 browser exit | Smoke `5e618a72-15b9-416f-86bf-a2cfc2fee046` (~12s, zero diff); later Grok judge succeeded; Hub History Handled group + Task Detail environment recovered; EN/ZH desktop and ZH 390×844 no overflow/console errors; FL-103 **completed** |
-| Post-activation Grok proxy path is healthy | Fresh smoke `5e618a72-15b9-416f-86bf-a2cfc2fee046`; earlier `98e3fbe1-a2c5-4008-968e-8078c3c278b2` (~10s, zero diff) and `045c2499-42f0-4f9e-9310-68029ecf9e61`; Daemon HTTP(S)_PROXY `http://127.0.0.1:7890` after proxy-enabled restart |
-| Grok proxy recovery is infrastructure, not model quality | Preceding Grok pre-Candidate failures were connectivity/transport; repaired path and attention-resolved historical failure are not model-quality, Token savings, or delivery-success evidence |
+| FL-107 durable Worker networking is integrated | DeepSeek Task `b064f658-88fb-4dbb-9ad8-7e5046260da3`; Candidate `28f133fd-72cf-4c91-9bf7-026df9608577`, digest `89f91ab1c99a556c549441a5c26298f56af7ef552404862e2f2043c4e2ffe689`; Grok Review Graph `192f6c77-34fb-4473-b587-3e33e98c6e9a`; Integration `cc146c23-81e9-4286-84c7-c5e458bc8d27`; full suite **2459/2459** |
+| Grok succeeds without Daemon proxy inheritance | Daemon proxy environment count `0`; saved Profile `local-grok-builder` uses `custom-proxy`; Task `0be3aa84-14b5-41bf-82ea-8df74034f296` returned `FORKLIGHT_GROK_SAVED_PROXY_OK`, zero Diff, 2/2 verification; public event exposed only the mode |
+| Grok proxy failures are infrastructure, not model quality | Preceding Grok pre-Candidate failures were connectivity/transport; repaired path and attention-resolved historical failure are not model-quality, Token savings, or delivery-success evidence |
 | FL-106 dual-clock delivery is verified | Grok Task `f5f0fd47-59cc-41ad-a6e3-d02a78227faa`; retained revision `9aaf6e49-3a61-4933-a106-f5f1129c5462`, digest `dded4b57b794fe02cc45e29bd21a9f960e5ec65a8a05d3b695dfe5c6caa30d08`; Main-direct `c17676e3-1fe6-4dda-b2ff-7efc497abcd0`; fresh Grok runtime smoke `fd1679cb-79c1-4253-a77f-ee24acb2f66b`; build + focused checks + **2400/2400** + JavaScript syntax + `git diff --check` |
-| M3 coverage | `routing_evidence_coverage` from the build-matched Daemon: 342/228/110/57 and 0 comparable; M3 not complete |
+| M3 coverage | `routing_evidence_coverage` from the build-matched Daemon: 394/280/159/82; two task-family-scoped multi decisions are not yet reviewed fair outcome cohorts; M3 not complete |
 | M4 paired evidence is insufficient | `dc-cli-20260723-001` for Task `fe894ff7...`; `smp-27cf...` for Task `8de01a79...`; both sample-size one |
 
 ## Update protocol

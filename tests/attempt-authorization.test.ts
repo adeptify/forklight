@@ -5,11 +5,17 @@ import path from "node:path";
 import test from "node:test";
 import {
   authorizeExtraAttempt,
+  authorizeHandoffRestartRecovery,
   authorizeMainCorrection,
+  authorizeSystemRestartRecovery,
+  noteRestartContinuationSkipped,
+  recordRestartContinuationsForTasks,
   resolvePendingCorrectionGrant,
   resolvePendingGrantExecutionOptions,
+  resolvePendingRestartRecoveryGrant,
 } from "../src/core/attempt-authorization.js";
-import { registerTaskFromSpec } from "../src/core/runner.js";
+import type { CandidateHandoffRecord } from "../src/core/types.js";
+import { buildTaskRecord, registerTaskFromSpec } from "../src/core/runner.js";
 import { StateStore } from "../src/state/store.js";
 
 async function exhaustedBaseTask(): Promise<{ store: StateStore; taskId: string; sessionId: string }> {
@@ -533,4 +539,542 @@ test("maxExtraAttempts zero does not block correction when maxMainCorrections is
     }, 1, 1, 20);
     assert.equal(opts.maximumOrdinal, 2);
   } finally { store2.close(); }
+});
+
+// --- System daemon-restart continuation (FL-004) ---
+
+async function interruptedBaseOneTask(): Promise<{
+  store: StateStore;
+  taskId: string;
+  sessionId: string;
+  attemptId: string;
+}> {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-sys-restart-"));
+  const store = new StateStore(home);
+  const task = registerTaskFromSpec(store, {
+    version: 1, name: "native-goal-restart", project: "/tmp/source",
+    goal: "Continue the exact native Goal after graceful Daemon restart",
+    constraints: [],
+    provider: { name: "openai", model: "gpt-5.4", keychainService: "forklight.test" },
+    runtime: { name: "codex-cli", executable: "codex", effort: "medium", maxBudgetUsd: 2 },
+    workspace: { exclude: [] },
+    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+    acceptance: { commands: ["true"] },
+  }, "forklight://test/system-restart");
+  const now = new Date().toISOString();
+  const attemptId = "sys-restart-attempt-1";
+  store.createAttempt({
+    id: attemptId,
+    taskId: task.id,
+    ordinal: 1,
+    status: "interrupted",
+    sessionId: task.sessionId,
+    rawLogPath: "/tmp/sys-restart-1.jsonl",
+    startedAt: now,
+    finishedAt: now,
+    exitCode: 130,
+    error: "Worker execution interrupted",
+  });
+  store.setTaskStatus(task.id, "interrupted", {
+    currentAttemptId: attemptId,
+    finishedAt: now,
+    error: "Worker execution interrupted",
+    workerPid: null,
+  });
+  return { store, taskId: task.id, sessionId: task.sessionId, attemptId };
+}
+
+test("system restart continuation is authorized outside baseMaxAttempts=1", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    const opts = authorizeSystemRestartRecovery(store, taskId, 1);
+    assert.ok(opts !== null);
+    assert.equal(opts!.maximumOrdinal, 2);
+    assert.equal(opts!.maxBudgetUsdOverride, 2);
+    const grants = store.listEvents(taskId).filter((e) => e.type === "attempt.authorization.granted");
+    assert.equal(grants.length, 1);
+    const payload = grants[0]!.payload as Record<string, unknown>;
+    assert.equal(payload.kind, "restart-recovery");
+    assert.equal(payload.reason, "system-daemon-restart");
+    assert.equal(payload.priorAttemptId, attemptId);
+    assert.equal(payload.handoffId, undefined);
+    assert.equal(payload.targetOrdinal, 2);
+    // Not a quality retry or Main correction surface.
+    assert.equal(resolvePendingCorrectionGrant(store, taskId, 1), null);
+    const pending = resolvePendingRestartRecoveryGrant(store, taskId, 1);
+    assert.ok(pending !== null);
+    assert.equal(pending!.maximumOrdinal, 2);
+    assert.equal(
+      pending!.authorizationEventSequence,
+      opts!.authorizationEventSequence,
+    );
+  } finally { store.close(); }
+});
+
+test("system restart continuation is idempotent for the exact prior Attempt", async () => {
+  const { store, taskId } = await interruptedBaseOneTask();
+  try {
+    const first = authorizeSystemRestartRecovery(store, taskId, 1);
+    const second = authorizeSystemRestartRecovery(store, taskId, 1);
+    assert.ok(first !== null && second !== null);
+    assert.equal(second!.authorizationEventSequence, first!.authorizationEventSequence);
+    assert.equal(
+      store.listEvents(taskId).filter((e) => e.type === "attempt.authorization.granted").length,
+      1,
+    );
+  } finally { store.close(); }
+});
+
+test("system restart refuses a second recovery after the continuation is consumed", async () => {
+  const { store, taskId, sessionId } = await interruptedBaseOneTask();
+  try {
+    const grant = authorizeSystemRestartRecovery(store, taskId, 1);
+    assert.ok(grant !== null);
+    const now = new Date().toISOString();
+    store.createAttempt({
+      id: "sys-restart-attempt-2",
+      taskId,
+      ordinal: 2,
+      status: "interrupted",
+      sessionId,
+      rawLogPath: "/tmp/sys-restart-2.jsonl",
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 130,
+      error: "Interrupted again",
+    });
+    store.setTaskStatus(taskId, "interrupted", {
+      currentAttemptId: "sys-restart-attempt-2",
+      finishedAt: now,
+      error: "Interrupted again",
+    });
+    assert.equal(authorizeSystemRestartRecovery(store, taskId, 1), null);
+    assert.equal(resolvePendingRestartRecoveryGrant(store, taskId, 1), null);
+    assert.equal(
+      store.listEvents(taskId).filter((e) => e.type === "attempt.authorization.granted").length,
+      1,
+    );
+  } finally { store.close(); }
+});
+
+test("system restart fails closed after verification and for non-interrupted work", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    store.addEvent(taskId, attemptId, "verification.completed", "Independent verification passed", {
+      passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
+      commands: [], diffPath: "/tmp/diff.patch", sourceUnchanged: true,
+    });
+    assert.equal(authorizeSystemRestartRecovery(store, taskId, 1), null);
+
+    // Reset evidence: failed (not interrupted) latest Attempt is ineligible.
+    const home2 = await mkdtemp(path.join(tmpdir(), "forklight-sys-restart-fail-"));
+    const store2 = new StateStore(home2);
+    const task = registerTaskFromSpec(store2, {
+      version: 1, name: "failed-not-interrupted", project: "/tmp/source",
+      goal: "No restart", constraints: [],
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test" },
+      runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 1 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+    }, "forklight://test/system-restart-failed");
+    const now = new Date().toISOString();
+    store2.createAttempt({
+      id: "fail-1", taskId: task.id, ordinal: 1, status: "failed",
+      sessionId: task.sessionId, rawLogPath: "/tmp/fail-1.jsonl",
+      startedAt: now, finishedAt: now, exitCode: 1, error: "model failed",
+    });
+    store2.setTaskStatus(task.id, "failed", { error: "model failed", currentAttemptId: "fail-1" });
+    assert.equal(authorizeSystemRestartRecovery(store2, task.id, 1), null);
+    store2.close();
+  } finally { store.close(); }
+});
+
+test("system restart grant rejects mixed handoff identity as corrupt history", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    // Mixed identity is corrupt for the system scope.
+    store.addEvent(taskId, attemptId, "attempt.authorization.granted",
+      "Corrupt mixed restart grant", {
+        kind: "restart-recovery",
+        additionalAttempts: 1,
+        targetOrdinal: 2,
+        maxBudgetUsd: 2,
+        budgetMode: "capped-for-authorized-attempt",
+        reason: "system-daemon-restart",
+        priorAttemptId: attemptId,
+        handoffId: "handoff-should-not-be-here",
+      });
+    assert.throws(
+      () => resolvePendingRestartRecoveryGrant(store, taskId, 1),
+      /authorization history is corrupt/,
+    );
+  } finally { store.close(); }
+});
+
+test("legacy handoff restart grant remains readable and idempotent", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-restart-legacy-"));
+  const handoffStore = new StateStore(home);
+  try {
+    const task = registerTaskFromSpec(handoffStore, {
+      version: 1, name: "handoff-successor", project: "/tmp/source",
+      goal: "Handoff restart", constraints: [],
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test" },
+      runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: null },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+    }, "forklight://test/handoff-restart");
+    const now = new Date().toISOString();
+    const attemptId = "handoff-attempt-1";
+    handoffStore.createAttempt({
+      id: attemptId, taskId: task.id, ordinal: 1, status: "interrupted",
+      sessionId: task.sessionId, rawLogPath: "/tmp/handoff-1.jsonl",
+      startedAt: now, finishedAt: now, exitCode: 130,
+      error: "ForkLight daemon restarted during execution",
+    });
+    handoffStore.setTaskStatus(task.id, "interrupted", {
+      currentAttemptId: attemptId, finishedAt: now,
+      error: "ForkLight daemon restarted during execution",
+    });
+    const first = authorizeHandoffRestartRecovery(handoffStore, task.id, "handoff-id-1", 1);
+    const second = authorizeHandoffRestartRecovery(handoffStore, task.id, "handoff-id-1", 1);
+    assert.ok(first !== null && second !== null);
+    assert.equal(first!.authorizationEventSequence, second!.authorizationEventSequence);
+    const payload = handoffStore.listEvents(task.id)
+      .find((e) => e.type === "attempt.authorization.granted")!
+      .payload as Record<string, unknown>;
+    assert.equal(payload.reason, "handoff-daemon-restart");
+    assert.equal(payload.handoffId, "handoff-id-1");
+  } finally { handoffStore.close(); }
+});
+
+test("recordRestartContinuationsForTasks grants only eligible interrupted Tasks", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    // Ineligible sibling: succeeded Task must not receive a grant.
+    const other = registerTaskFromSpec(store, {
+      version: 1, name: "already-done", project: "/tmp/source",
+      goal: "Done", constraints: [],
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test" },
+      runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 1 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+    }, "forklight://test/system-restart-done");
+    store.setTaskStatus(other.id, "succeeded", { error: null });
+
+    recordRestartContinuationsForTasks(store, [taskId, other.id], () => 1);
+    recordRestartContinuationsForTasks(store, [taskId, other.id], () => 1);
+
+    const grants = store.listEvents(taskId).filter((e) => e.type === "attempt.authorization.granted");
+    assert.equal(grants.length, 1);
+    assert.equal((grants[0]!.payload as { priorAttemptId?: string }).priorAttemptId, attemptId);
+    assert.equal(
+      store.listEvents(other.id).filter((e) => e.type === "attempt.authorization.granted").length,
+      0,
+    );
+    // Ineligible sibling is observable without raw error content.
+    const skips = store.listEvents(other.id).filter(
+      (e) => e.type === "attempt.restart-continuation.skipped",
+    );
+    assert.equal(skips.length, 1);
+    assert.equal(
+      (skips[0]!.payload as { reasonCode?: string }).reasonCode,
+      "ineligible",
+    );
+  } finally { store.close(); }
+});
+
+test("pending restart grant fails closed on stale prior Attempt", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    // Inject a pending grant bound to a non-latest prior Attempt id.
+    store.addEvent(
+      taskId,
+      attemptId,
+      "attempt.authorization.granted",
+      "Stale prior restart grant",
+      {
+        kind: "restart-recovery",
+        additionalAttempts: 1,
+        targetOrdinal: 2,
+        maxBudgetUsd: 2,
+        budgetMode: "capped-for-authorized-attempt",
+        reason: "system-daemon-restart",
+        priorAttemptId: "not-the-latest-attempt",
+      },
+    );
+    assert.notEqual(attemptId, "not-the-latest-attempt");
+    assert.equal(resolvePendingRestartRecoveryGrant(store, taskId, 1), null);
+    const skips = store.listEvents(taskId).filter(
+      (e) => e.type === "attempt.restart-continuation.skipped",
+    );
+    assert.equal(skips.length, 1);
+    assert.equal(
+      (skips[0]!.payload as { reasonCode?: string }).reasonCode,
+      "stale-attempt",
+    );
+    // Idempotent observability for repeated recover loops.
+    noteRestartContinuationSkipped(store, taskId, "stale-attempt");
+    assert.equal(
+      store.listEvents(taskId).filter(
+        (e) => e.type === "attempt.restart-continuation.skipped",
+      ).length,
+      1,
+    );
+  } finally { store.close(); }
+});
+
+test("malformed restart grant history fails closed without launching", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    store.addEvent(taskId, attemptId, "attempt.authorization.granted",
+      "Malformed restart grant", {
+        kind: "restart-recovery",
+        additionalAttempts: 1,
+        targetOrdinal: 2,
+        maxBudgetUsd: 2,
+        budgetMode: "capped-for-authorized-attempt",
+        reason: "not-a-valid-restart-reason",
+        priorAttemptId: attemptId,
+      });
+    assert.throws(
+      () => resolvePendingRestartRecoveryGrant(store, taskId, 1),
+      /authorization history is corrupt/,
+    );
+    assert.throws(
+      () => authorizeSystemRestartRecovery(store, taskId, 1),
+      /authorization history is corrupt/,
+    );
+  } finally { store.close(); }
+});
+
+// --- FL-004 follow-up: one canonical exact restart validator for every
+// pending-options consumer (manual resume, CLI fallback, Coordinator
+// execution reconstruction, handoff recovery). ---
+
+test("generic resolver exact-validates a valid system restart grant through the canonical validator", async () => {
+  const { store, taskId, sessionId } = await interruptedBaseOneTask();
+  try {
+    const grant = authorizeSystemRestartRecovery(store, taskId, 1);
+    assert.ok(grant !== null);
+    const pending = resolvePendingGrantExecutionOptions(store, taskId, 1, 2);
+    assert.ok(pending !== null);
+    assert.deepEqual(pending, grant);
+    // Valid continuations are refused nowhere: no skip event is observable.
+    assert.equal(
+      store.listEvents(taskId).filter(
+        (e) => e.type === "attempt.restart-continuation.skipped",
+      ).length,
+      0,
+    );
+    // A consumed continuation never re-appears through the generic resolver.
+    const now = new Date().toISOString();
+    store.createAttempt({
+      id: "generic-consume-2", taskId, ordinal: 2, status: "interrupted",
+      sessionId, rawLogPath: "/tmp/generic-consume-2.jsonl",
+      startedAt: now, finishedAt: now, exitCode: 130,
+      error: "Interrupted again",
+    });
+    store.setTaskStatus(taskId, "interrupted", {
+      currentAttemptId: "generic-consume-2", finishedAt: now, error: "Interrupted again",
+    });
+    assert.equal(resolvePendingGrantExecutionOptions(store, taskId, 1, 2), null);
+  } finally { store.close(); }
+});
+
+test("generic resolver refuses a stale restart grant and binds skip to the authoritative Attempt", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    store.addEvent(taskId, attemptId, "attempt.authorization.granted",
+      "Stale prior restart grant", {
+        kind: "restart-recovery",
+        additionalAttempts: 1,
+        targetOrdinal: 2,
+        maxBudgetUsd: 2,
+        budgetMode: "capped-for-authorized-attempt",
+        reason: "system-daemon-restart",
+        priorAttemptId: "not-the-latest-attempt",
+      });
+    assert.equal(resolvePendingGrantExecutionOptions(store, taskId, 1, 2), null);
+    const skips = store.listEvents(taskId).filter(
+      (e) => e.type === "attempt.restart-continuation.skipped",
+    );
+    assert.equal(skips.length, 1);
+    assert.equal(
+      (skips[0]!.payload as { reasonCode?: string }).reasonCode,
+      "stale-attempt",
+    );
+    // The refusal is linked to the authoritative existing Attempt, never the
+    // forged priorAttemptId carried by the stale grant.
+    assert.equal(skips[0]!.attemptId, attemptId);
+  } finally { store.close(); }
+});
+
+test("generic resolver refuses a handoff grant with no matching durable handoff record", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    store.addEvent(taskId, attemptId, "attempt.authorization.granted",
+      "Missing handoff grant", {
+        kind: "restart-recovery",
+        additionalAttempts: 1,
+        targetOrdinal: 2,
+        maxBudgetUsd: 2,
+        budgetMode: "capped-for-authorized-attempt",
+        reason: "handoff-daemon-restart",
+        priorAttemptId: attemptId,
+        handoffId: "missing-handoff-id",
+      });
+    assert.equal(resolvePendingGrantExecutionOptions(store, taskId, 1, 2), null);
+    const skips = store.listEvents(taskId).filter(
+      (e) => e.type === "attempt.restart-continuation.skipped",
+    );
+    assert.equal(skips.length, 1);
+    assert.equal(
+      (skips[0]!.payload as { reasonCode?: string }).reasonCode,
+      "scope-mismatch",
+    );
+    assert.equal(skips[0]!.attemptId, attemptId);
+  } finally { store.close(); }
+});
+
+test("generic resolver refuses a restart grant after verification completes", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    authorizeSystemRestartRecovery(store, taskId, 1);
+    store.addEvent(taskId, attemptId, "verification.completed",
+      "Independent verification passed", {
+        passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
+        commands: [], diffPath: "/tmp/diff.patch", sourceUnchanged: true,
+      });
+    assert.equal(resolvePendingGrantExecutionOptions(store, taskId, 1, 2), null);
+    const skips = store.listEvents(taskId).filter(
+      (e) => e.type === "attempt.restart-continuation.skipped",
+    );
+    assert.equal(skips.length, 1);
+    assert.equal(
+      (skips[0]!.payload as { reasonCode?: string }).reasonCode,
+      "verification-complete",
+    );
+    assert.equal(skips[0]!.attemptId, attemptId);
+  } finally { store.close(); }
+});
+
+test("generic resolver fails closed on corrupt restart grant history", async () => {
+  const { store, taskId, attemptId } = await interruptedBaseOneTask();
+  try {
+    store.addEvent(taskId, attemptId, "attempt.authorization.granted",
+      "Corrupt restart grant", {
+        kind: "restart-recovery",
+        additionalAttempts: 1,
+        targetOrdinal: 2,
+        maxBudgetUsd: 2,
+        budgetMode: "capped-for-authorized-attempt",
+        reason: "not-a-valid-restart-reason",
+        priorAttemptId: attemptId,
+      });
+    assert.throws(
+      () => resolvePendingGrantExecutionOptions(store, taskId, 1, 2),
+      /authorization history is corrupt/,
+    );
+  } finally { store.close(); }
+});
+
+test("generic resolver resolves a valid handoff restart grant exactly once against a durable handoff", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-generic-"));
+  const store = new StateStore(home);
+  try {
+    const now = new Date().toISOString();
+    const source = registerTaskFromSpec(store, {
+      version: 1, name: "handoff-source", project: "/tmp/source",
+      goal: "Handoff origin", constraints: [],
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test" },
+      runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 1 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: false, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+    }, "forklight://test/handoff-generic");
+    const successor = buildTaskRecord({
+      spec: {
+        version: 1, name: "handoff-successor", project: "/tmp/source",
+        goal: "Handoff continuation", constraints: [],
+        provider: { name: "openai", model: "gpt-5.4", keychainService: "forklight.test" },
+        runtime: { name: "codex-cli", executable: "codex", effort: "medium", maxBudgetUsd: 2 },
+        workspace: { exclude: [] },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+        acceptance: { commands: ["true"] },
+      },
+      taskFile: "/tmp/handoff.yaml",
+      home: path.dirname(store.databasePath),
+      id: "handoff-successor-1",
+      sessionId: "handoff-session-1",
+      createdAt: now,
+    });
+    const record: CandidateHandoffRecord = {
+      schemaVersion: 1,
+      id: "handoff-id-1",
+      status: "prepared",
+      origin: { kind: "goal-task", goalId: "goal-1", itemId: "item-1" },
+      sourceTaskId: source.id,
+      sourceCandidateRevisionId: "rev-1",
+      sourcePatchDigest: "a".repeat(64),
+      gapContractDigest: "b".repeat(64),
+      reusablePathCount: 1,
+      remainingGapCount: 0,
+      reusablePaths: ["src/a.ts"],
+      remainingGaps: [],
+      destinationWorkerProfileId: "grok-builder",
+      destinationIdentity: {
+        provider: "openai", model: "gpt-5.4", runtime: "codex-cli",
+        effort: "medium", workerProfileId: "grok-builder",
+      },
+      successorTaskId: successor.id,
+      reason: "Hand the module to another Worker",
+      createdAt: now,
+      updatedAt: now,
+      nextAction: "wait-for-successor",
+    };
+    store.createCandidateHandoff({
+      record,
+      task: successor,
+      authorizationEvent: {
+        summary: "Test handoff authorized",
+        payload: { handoffId: record.id },
+      },
+    });
+    // Interrupt the successor before independent verification.
+    const attemptId = "handoff-attempt-1";
+    store.createAttempt({
+      id: attemptId, taskId: successor.id, ordinal: 1, status: "interrupted",
+      sessionId: successor.sessionId, rawLogPath: "/tmp/handoff-1.jsonl",
+      startedAt: now, finishedAt: now, exitCode: 130,
+      error: "ForkLight daemon restarted during execution",
+    });
+    store.setTaskStatus(successor.id, "interrupted", {
+      currentAttemptId: attemptId, finishedAt: now,
+      error: "ForkLight daemon restarted during execution", workerPid: null,
+    });
+    const grant = authorizeHandoffRestartRecovery(store, successor.id, record.id, 1);
+    assert.ok(grant !== null);
+    assert.equal(grant!.maximumOrdinal, 2);
+    // The generic resolver delegates to the canonical exact validator, which
+    // requires the durable handoff identity to match the grant.
+    const pending = resolvePendingGrantExecutionOptions(store, successor.id, 1, 2);
+    assert.ok(pending !== null);
+    assert.deepEqual(pending, grant);
+    assert.equal(
+      store.listEvents(successor.id).filter(
+        (e) => e.type === "attempt.authorization.granted",
+      ).length,
+      1,
+      "generic resolver must reuse the durable grant, not mint another",
+    );
+    assert.equal(
+      store.listEvents(successor.id).filter(
+        (e) => e.type === "attempt.restart-continuation.skipped",
+      ).length,
+      0,
+    );
+  } finally { store.close(); }
 });
