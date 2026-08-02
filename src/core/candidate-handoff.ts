@@ -49,7 +49,10 @@ import {
 } from "./advanced-policy.js";
 import { buildTaskRecord } from "./runner.js";
 import { authorizeHandoffRestartRecovery } from "./attempt-authorization.js";
-import { resolveWorkerSelection } from "./worker-profiles.js";
+import {
+  applyResolvedNetworkPolicy,
+  resolveWorkerSelection,
+} from "./worker-profiles.js";
 import { defaultExecutableForRuntime } from "./runtime-names.js";
 import type { ForkLightSettings } from "./settings.js";
 import { isoTimestamp as timestamp } from "./time.js";
@@ -370,7 +373,10 @@ export function buildHandoffSuccessorSpec(
       ],
     };
   }
-  return cloned;
+  // Freeze the destination Profile's network policy. Legacy destination omission
+  // deletes the source Task's frozen policy so the successor inherits the Daemon
+  // environment instead of routing through the source Worker's route.
+  return applyResolvedNetworkPolicy(selection, cloned);
 }
 
 /** True when the Competition request is an exact replay of an authorized handoff. */

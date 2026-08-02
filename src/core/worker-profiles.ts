@@ -22,6 +22,7 @@ import type {
   ContractQualityOverrides,
   ExecutionPreference,
   PolicyMode,
+  TaskSpec,
 } from "./types.js";
 import {
   isExecutionPreference,
@@ -31,6 +32,7 @@ import {
   validateAdvancedPolicyPatch as validateAdvancedPolicyRaw,
 } from "./advanced-policy.js";
 import {
+  freezeWorkerNetworkPolicy,
   validateWorkerNetworkPolicy,
   type WorkerNetworkPolicy,
 } from "./network-policy.js";
@@ -604,6 +606,27 @@ export function resolveWorkerSelection(
     ...(executionPreference === undefined ? {} : { executionPreference }),
     ...(networkPolicy === undefined ? {} : { networkPolicy }),
   };
+}
+
+/**
+ * FL-107B canonical boundary: apply the selected destination Worker's resolved
+ * network policy onto a derived TaskSpec (reviewer, candidate, or successor).
+ * The resolved selection is the sole authority: an explicit policy is frozen in
+ * place, while legacy omission deletes any stale cloned policy so the derived
+ * Task inherits the Daemon network environment exactly as before instead of
+ * carrying a source Task's route. Does not resolve Profiles, read settings,
+ * inject environment variables, or mutate the source Task.
+ */
+export function applyResolvedNetworkPolicy<S extends TaskSpec>(
+  selection: Pick<ResolvedWorkerSelection, "networkPolicy">,
+  spec: S,
+): S {
+  if (selection.networkPolicy === undefined) {
+    delete spec.networkPolicy;
+    return spec;
+  }
+  spec.networkPolicy = freezeWorkerNetworkPolicy(selection.networkPolicy);
+  return spec;
 }
 
 /** Upsert a profile into a copy of settings (pure). Replaces same id or appends. */

@@ -2707,6 +2707,45 @@ test("legacy Task without a network policy freezes inherit", () => {
   assert.deepEqual(spec.networkPolicy, { mode: "inherit" });
 });
 
+test("frozen network policy is preserved when a parsed Task is registered (reuse path)", async () => {
+  const spec = parseTaskSpec(
+    { ...contractSpec(), workerProfileId: "net-worker" },
+    process.cwd(),
+    networkPolicyPolicy(),
+  );
+  assert.deepEqual(spec.networkPolicy, {
+    mode: "custom-proxy",
+    httpProxy: "http://127.0.0.1:7890",
+    httpsProxy: "http://127.0.0.1:7891",
+    noProxy: "localhost,127.0.0.1",
+  });
+  assert.ok(Object.isFrozen(spec.networkPolicy), "snapshot must be immutable");
+
+  // Ordinary registration / resume reuse persists the exact frozen snapshot.
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-netpolicy-register-"));
+  const store = new StateStore(home);
+  try {
+    const record = registerTaskFromSpec(store, spec, "forklight://test/net-policy");
+    const stored = store.getTask(record.id);
+    assert.deepEqual(stored.spec.networkPolicy, {
+      mode: "custom-proxy",
+      httpProxy: "http://127.0.0.1:7890",
+      httpsProxy: "http://127.0.0.1:7891",
+      noProxy: "localhost,127.0.0.1",
+    });
+    // The public task.created event never serializes proxy values.
+    const eventText = store
+      .listEvents(record.id)
+      .map((event) => JSON.stringify(event.payload))
+      .join("\n");
+    assert.ok(!eventText.includes("127.0.0.1:7890"));
+    assert.ok(!eventText.includes("httpProxy"));
+    assert.ok(!eventText.includes("noProxy"));
+  } finally {
+    store.close();
+  }
+});
+
 test("network policy is frozen per Task and later profile edits cannot rewrite history", () => {
   const policy = networkPolicyPolicy();
   const spec = parseTaskSpec(

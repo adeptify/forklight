@@ -658,6 +658,10 @@ export class ForkLightDaemon {
         return this.coordinator.listPlanBoards(
           typeof params.limit === "number" ? params.limit : undefined,
         );
+      case "work_hierarchy":
+        // Read-only canonical hierarchy. Strict filter parsing lives in Core;
+        // malformed filters fail closed with a fixed privacy-safe reason.
+        return this.coordinator.getWorkHierarchy(params);
       case "task_plan_context":
         return this.coordinator.getTaskPlanContext(requiredString(params.taskId, "taskId"));
       case "statistics": {

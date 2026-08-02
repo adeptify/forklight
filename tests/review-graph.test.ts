@@ -44,6 +44,8 @@ import {
   workerPromptAppendicesForTask,
 } from "../src/core/task.js";
 import { SettingsService, type IntegrationSettings } from "../src/core/settings.js";
+import { upsertModelConfig } from "../src/core/model-catalog.js";
+import { upsertWorkerProfile } from "../src/core/worker-profiles.js";
 import type {
   AttemptRecord,
   TaskRecord,
@@ -1279,6 +1281,93 @@ test("safe projection never includes private packet, raw patch, or resultText", 
     assert.ok(!text.includes("keychain"));
     assert.ok(!/\/Users\//.test(text));
     assert.ok(!text.includes("diff --git"));
+  } finally {
+    fx.store.close();
+  }
+});
+
+test("Review Graph reviewer Tasks freeze the reviewer Profile network policy per judge", async () => {
+  const fx = await buildSucceededCandidate();
+  try {
+    // Seed a reviewer Profile with a credential-free custom proxy.
+    const current = fx.settings.get();
+    const catalog = upsertModelConfig(current.modelCatalog, {
+      id: "reviewer-proxy-model",
+      label: "Reviewer Proxy Model",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      endpoint: "https://api.deepseek.com/v1",
+    });
+    const profiles = upsertWorkerProfile(
+      current.workerProfiles,
+      {
+        id: "reviewer-proxy",
+        label: "Reviewer Proxy",
+        runtime: "claude-code",
+        modelConfigId: "reviewer-proxy-model",
+        effort: "medium",
+        networkPolicy: {
+          mode: "custom-proxy",
+          httpProxy: "http://127.0.0.1:7890",
+          httpsProxy: "http://127.0.0.1:7891",
+          noProxy: "localhost,127.0.0.1",
+        },
+      },
+      catalog,
+    );
+    fx.settings.update({ modelCatalog: catalog, workerProfiles: profiles });
+
+    // One legacy-inherit judge plus one custom-proxy judge.
+    const created = await createReviewGraph(fx.store, fx.settings.get(), {
+      candidateTaskId: fx.task.id,
+      reviewerWorkerProfileIds: [fx.profileId, "reviewer-proxy"],
+      reason: "Freeze reviewer network policy",
+      confirm: true,
+    });
+    assert.equal(created.reviewerTaskIds.length, 2);
+
+    const [inheritReviewer, proxyReviewer] = fx.store
+      .listReviewAssignments(created.graph.id)
+      .sort((a, b) => a.ordinal - b.ordinal)
+      .map((assignment) => fx.store.getTask(assignment.reviewerTaskId));
+
+    // Legacy-inherit Profile: absence of the field is the exact inherit behavior.
+    assert.equal(inheritReviewer!.spec.networkPolicy, undefined);
+    // Custom-proxy Profile: the reviewer Task freezes the exact policy.
+    assert.deepEqual(proxyReviewer!.spec.networkPolicy, {
+      mode: "custom-proxy",
+      httpProxy: "http://127.0.0.1:7890",
+      httpsProxy: "http://127.0.0.1:7891",
+      noProxy: "localhost,127.0.0.1",
+    });
+
+    // Public projection exposes only mode-level identity, never proxy values.
+    const view = projectReviewGraph(
+      fx.store.getReviewGraph(created.graph.id),
+      fx.store.listReviewAssignments(created.graph.id),
+      fx.store.listEvents(fx.task.id),
+    );
+    const viewText = JSON.stringify(view);
+    assert.ok(!viewText.includes("127.0.0.1:7890"));
+    assert.ok(!viewText.includes("127.0.0.1:7891"));
+    assert.ok(!viewText.includes("localhost,127.0.0.1"));
+    assert.ok(!viewText.includes("httpProxy"));
+    assert.ok(!viewText.includes("noProxy"));
+
+    // Durable creation events (candidate + reviewer Tasks) never serialize proxy values.
+    const candidateEventText = fx.store
+      .listEvents(fx.task.id)
+      .map((event) => JSON.stringify(event.payload))
+      .join("\n");
+    const reviewerEventText = created.reviewerTaskIds
+      .flatMap((taskId) => fx.store.listEvents(taskId))
+      .map((event) => JSON.stringify(event.payload))
+      .join("\n");
+    for (const eventText of [candidateEventText, reviewerEventText]) {
+      assert.ok(!eventText.includes("127.0.0.1:7890"));
+      assert.ok(!eventText.includes("noProxy"));
+      assert.ok(!eventText.includes("httpProxy"));
+    }
   } finally {
     fx.store.close();
   }

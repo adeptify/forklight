@@ -76,6 +76,7 @@ export type DaemonMethod =
   | "main_direct_recent"
   | "self_upgrade_evidence"
   | "task_plan_context"
+  | "work_hierarchy"
   | "shutdown";
 
 export interface DaemonRequest {
@@ -133,6 +134,7 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "main_direct_recent",
   "self_upgrade_evidence",
   "task_plan_context",
+  "work_hierarchy",
 ]);
 
 function isMutatingDaemonMethod(method: DaemonMethod): boolean {

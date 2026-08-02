@@ -2269,6 +2269,21 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   font-size: 12px;
   line-height: 1.55;
 }
+.profile-story-connection {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: flex-start;
+  margin: 2px 0 4px;
+}
+.profile-story-conclusion {
+  flex: 1 1 240px;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
 
 /* Configure / Main grids */
 .configure-split {

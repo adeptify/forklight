@@ -27,6 +27,7 @@ import {
 } from "./candidate-revision.js";
 import { isoTimestamp as timestamp } from "./time.js";
 import {
+  applyResolvedNetworkPolicy,
   getWorkerProfile,
   resolveWorkerSelection,
 } from "./worker-profiles.js";
@@ -874,7 +875,7 @@ function buildReviewerSpec(
   revisionId: string,
 ): ContractTaskSpec {
   const defaultExecutable = defaultExecutableForRuntime(selection.runtime);
-  return {
+  const spec: ContractTaskSpec = {
     version: 2,
     name: `Read-only review of ${candidate.name}`.slice(0, 120),
     project: projectDir,
@@ -974,6 +975,9 @@ function buildReviewerSpec(
       changeBudgetMode: "warn",
     },
   };
+  // Freeze the reviewer Profile's network policy (or clear it for legacy
+  // inherit) so read-only judges never fall back to a different environment.
+  return applyResolvedNetworkPolicy(selection, spec);
 }
 
 // --- Create ---

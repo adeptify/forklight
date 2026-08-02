@@ -133,6 +133,10 @@ import {
 } from "../core/dependency-resolver.js";
 import { BoardService, type PlanBoard, type PlanBoardSummary } from "../core/board.js";
 import {
+  WorkHierarchyService,
+  type WorkHierarchyView,
+} from "../core/work-hierarchy.js";
+import {
   StatisticsService,
   type ProviderModelSummary,
   type RoutingEvidenceCoverage,
@@ -1678,6 +1682,19 @@ export class DaemonCoordinator {
 
   listPlanBoards(limit?: number): PlanBoardSummary[] {
     return new BoardService(this.store).listPlanBoards(limit);
+  }
+
+  /**
+   * Read-only canonical Goal -> Plan -> Task hierarchy (FL-109A).
+   * Reuses the shared SafeTaskSummary projector so Decision Stage and board
+   * placement stay single-authority. Never mutates lifecycle state.
+   */
+  getWorkHierarchy(filterInput?: Record<string, unknown>): WorkHierarchyView {
+    const nowMs = Date.now();
+    return new WorkHierarchyService(
+      this.store,
+      (task) => this.projectOneTaskSurface(task, nowMs),
+    ).getWorkHierarchy(filterInput);
   }
 
   /** Bounded, privacy-safe Plan context for a single Task. Returns undefined

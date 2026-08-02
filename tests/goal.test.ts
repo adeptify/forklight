@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -35,8 +35,15 @@ import { resolveReadiness } from "../src/core/dependency-resolver.js";
 import { SettingsService } from "../src/core/settings.js";
 import { upsertModelConfig } from "../src/core/model-catalog.js";
 import { upsertWorkerProfile } from "../src/core/worker-profiles.js";
+import {
+  defaultAdvancedPolicyFields,
+  enforcementCapabilityForRuntime,
+  resolveEffectivePolicy,
+} from "../src/core/advanced-policy.js";
+import { registerTaskFromSpec } from "../src/core/runner.js";
 import type {
   AttemptRecord,
+  EffectivePolicySnapshot,
   IntegrationReceiptRecord,
   IntegrationResultRecord,
   RemediationCheckRecord,
@@ -2832,6 +2839,177 @@ test("handoff successor original-acceptance remediation satisfies integration an
     await coordinator.recover();
     assert.equal(store.getTask(followOn).status, "queued");
     assert.equal(store.getTask(service).status, "failed", "original stays failed history");
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+// --- FL-107B derived-Task network policy preservation ---
+
+const NETWORK_PROXY_POLICY = {
+  mode: "custom-proxy" as const,
+  httpProxy: "http://127.0.0.1:7890",
+  httpsProxy: "http://127.0.0.1:7891",
+  noProxy: "localhost,127.0.0.1",
+};
+
+/** Seed one saved Worker Profile whose resolved network policy is custom-proxy. */
+function seedNetworkPolicyProfile(settings: SettingsService): void {
+  const current = settings.get();
+  const profiles = upsertWorkerProfile(
+    current.workerProfiles,
+    {
+      id: "net-worker",
+      label: "Net Worker",
+      runtime: "claude-code",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      effort: "medium",
+      networkPolicy: NETWORK_PROXY_POLICY,
+    },
+  );
+  settings.update({ workerProfiles: profiles });
+}
+
+/** Write a four-item plan whose templates reference the custom-proxy Profile. */
+async function writeNetworkPolicyPlan(root: string): Promise<string> {
+  // The plan quality gate loads each template through loadTaskSpec, which
+  // requires the resolved project directory to exist and be readable. Copy the
+  // known-good checkout contract (passes the quality gate) but repoint its
+  // project at a bounded temp fixture so the plan loads deterministically.
+  const projectDir = path.join(root, "project");
+  mkdirSync(path.join(projectDir, "src"), { recursive: true });
+  writeFileSync(path.join(projectDir, "src", "main.ts"), "export const x = 1;\n");
+  writeFileSync(path.join(projectDir, "README.md"), "# Fixture\n");
+  const example = await readFile(taskTemplate, "utf8");
+  const repointed = example.replace(/^project: .*$/m, "project: ./project");
+  const template = path.join(root, "net-task.yaml");
+  await writeFile(template, `${repointed.trimEnd()}\nworkerProfileId: net-worker\n`);
+  const planFile = path.join(root, "net-plan.json");
+  await writeFile(
+    planFile,
+    JSON.stringify({
+      version: 1,
+      name: "Network policy plan",
+      objective: "Prove plan tasks freeze the profile network policy.",
+      items: [
+        { id: "net-a", task: template, dependsOn: [] },
+        { id: "net-b", task: template, dependsOn: ["net-a"] },
+        { id: "net-c", task: template, dependsOn: ["net-a"] },
+        { id: "net-d", task: template, dependsOn: ["net-b", "net-c"] },
+      ],
+    }),
+  );
+  return planFile;
+}
+
+const NETWORK_GOAL_MILESTONES = [
+  { itemId: "net-a", gate: "machine" },
+  { itemId: "net-b", gate: "machine" },
+  { itemId: "net-c", gate: "machine" },
+  { itemId: "net-d", gate: "machine" },
+];
+
+test("Plan and Goal Tasks preserve the frozen network policy from parsed templates", async () => {
+  // Standalone Plan registration.
+  const planHome = await mkdtemp(path.join(tmpdir(), "forklight-netpolicy-plan-"));
+  const planStore = new StateStore(planHome);
+  const planSettings = new SettingsService(planStore);
+  seedNetworkPolicyProfile(planSettings);
+  const planCoordinator = new DaemonCoordinator(planStore, planSettings, 0);
+  try {
+    const planFile = await writeNetworkPolicyPlan(planHome);
+    const planResult = await planCoordinator.submitPlanFile(planFile);
+    const planTask = planStore.getTask(planResult.taskIdsByItemId["net-a"]!);
+    assert.deepEqual(planTask.spec.networkPolicy, NETWORK_PROXY_POLICY);
+  } finally {
+    await planCoordinator.shutdown();
+    planStore.close();
+  }
+
+  // Goal registration re-parses the same template shape.
+  const goalHome = await mkdtemp(path.join(tmpdir(), "forklight-netpolicy-goal-"));
+  const goalStore = new StateStore(goalHome);
+  const goalSettings = new SettingsService(goalStore);
+  seedNetworkPolicyProfile(goalSettings);
+  const goalCoordinator = new DaemonCoordinator(goalStore, goalSettings, 0);
+  try {
+    const planFile = await writeNetworkPolicyPlan(goalHome);
+    const goalFile = await writeGoalFile(goalHome, planFile, {
+      name: "Network policy goal",
+      objective: "Prove goal tasks freeze the profile network policy.",
+      milestones: NETWORK_GOAL_MILESTONES,
+    });
+    const goalResult = await goalCoordinator.submitGoalFile(goalFile);
+    const goalTask = goalStore.getTask(goalResult.taskIdsByItemId["net-a"]!);
+    assert.deepEqual(goalTask.spec.networkPolicy, NETWORK_PROXY_POLICY);
+
+    // Public task.created events never serialize proxy values.
+    const eventText = goalStore
+      .listEvents(goalTask.id)
+      .map((event) => JSON.stringify(event.payload))
+      .join("\n");
+    assert.ok(!eventText.includes("127.0.0.1:7890"));
+    assert.ok(!eventText.includes("httpProxy"));
+    assert.ok(!eventText.includes("noProxy"));
+  } finally {
+    await goalCoordinator.shutdown();
+    goalStore.close();
+  }
+});
+
+test("adaptation copies the parent TaskSpec and preserves the frozen network policy", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-netpolicy-adapt-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  seedNetworkPolicyProfile(settings);
+  const coordinator = new DaemonCoordinator(store, settings, 0);
+  const caps = enforcementCapabilityForRuntime("claude-code");
+  const base = resolveEffectivePolicy(
+    undefined,
+    undefined,
+    defaultAdvancedPolicyFields(),
+    "net-worker",
+    caps,
+  );
+  const snapshot: EffectivePolicySnapshot = {
+    ...base,
+    values: { ...base.values, maxAdaptationRounds: 1 },
+  };
+  const parent = registerTaskFromSpec(
+    store,
+    {
+      version: 1,
+      name: "adapt-net-parent",
+      project: "/tmp/net-adapt-src",
+      goal: "Adaptation transition test",
+      constraints: [],
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test.api-key" },
+      runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+      acceptance: { commands: ["true"] },
+      workerProfileId: "net-worker",
+      // Real parsed Tasks freeze the snapshot; mirror that for the parent.
+      networkPolicy: Object.freeze({ ...NETWORK_PROXY_POLICY }),
+    },
+    "forklight://test/net-adapt",
+    snapshot,
+  );
+  try {
+    store.setTaskStatus(parent.id, "succeeded", { error: null });
+    const result = coordinator.adaptationApply({
+      taskId: parent.id,
+      patch: { maxDurationMs: 600_000 },
+      reason: "duration-budget",
+      confirm: true,
+    });
+    assert.equal(result.status, "eligible");
+    const child = store.getTask(result.childTaskId!);
+    assert.deepEqual(child.spec.networkPolicy, NETWORK_PROXY_POLICY);
+    // Parent Task stays byte-equivalent on the network policy.
+    assert.deepEqual(store.getTask(parent.id).spec.networkPolicy, NETWORK_PROXY_POLICY);
   } finally {
     await coordinator.shutdown();
     store.close();

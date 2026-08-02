@@ -13,6 +13,7 @@ import { isoTimestamp as timestamp } from "./time.js";
 import { isTerminalTaskStatus } from "./task-progress.js";
 import { assertProviderRuntimePair, defaultExecutableForRuntime } from "./runtime-names.js";
 import {
+  applyResolvedNetworkPolicy,
   resolveWorkerSelection,
   type ResolvedWorkerSelection,
 } from "./worker-profiles.js";
@@ -617,7 +618,9 @@ function cloneSpecFromIdentity(
   if (resolved.profileId !== undefined) {
     cloned.workerProfileId = resolved.profileId;
   }
-  return cloned;
+  // Each candidate freezes its own Profile's network policy; legacy omission
+  // clears any stale policy cloned from the source contract.
+  return applyResolvedNetworkPolicy(resolved, cloned);
 }
 
 function identityKey(identity: CompetitionCandidateIdentity): string {

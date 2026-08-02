@@ -353,6 +353,100 @@ async function makeOpsHub(options: { guidedSample?: boolean } = {}) {
           progress: { satisfied: 1, total: 4, percent: 25 },
         }] as T;
       }
+      if (method === "work_hierarchy") {
+        // Echo filters and return a privacy-safe canonical projection stub.
+        if (params.column === "queued" || params.column === "bogus") {
+          throw new Error("Work hierarchy filter is invalid.");
+        }
+        return {
+          schemaVersion: 1,
+          columns: [
+            { code: "not-started", order: 0 },
+            { code: "ready", order: 1 },
+            { code: "running", order: 2 },
+            { code: "waiting-verification", order: 3 },
+            { code: "waiting-user-decision", order: 4 },
+            { code: "completed", order: 5 },
+            { code: "stopped-failed", order: 6 },
+          ],
+          goals: [{
+            kind: "goal",
+            goalId: "goal-1",
+            name: "Durable goal",
+            objective: "Supervise four tasks",
+            status: "waiting",
+            updatedAt: "2026-08-03T00:00:00.000Z",
+            summary: {
+              whatCompleted: "Foundation delivered.",
+              blocker: "Waiting for Main accept.",
+              nextAction: "Record a fresh Main accept.",
+              progress: { total: 4, completed: 1, percent: 25 },
+            },
+            plans: [{
+              kind: "plan",
+              planId: "plan-1",
+              name: "Plan one",
+              objective: "Four tasks",
+              updatedAt: "2026-08-03T00:00:00.000Z",
+              summary: {
+                whatCompleted: "Foundation delivered.",
+                blocker: "Waiting for Main accept.",
+                nextAction: "Record a fresh Main accept.",
+                progress: { total: 4, completed: 1, percent: 25 },
+              },
+              columns: {
+                "not-started": [],
+                ready: [],
+                running: [],
+                "waiting-verification": [],
+                "waiting-user-decision": [{
+                  taskId: "task-service",
+                  name: "Service",
+                  column: "waiting-user-decision",
+                  placementReason: "awaiting-main-decision",
+                  status: "succeeded",
+                  provider: "deepseek",
+                  model: "v4",
+                  runtime: "claude-code",
+                  project: "/tmp/proj",
+                  breadcrumb: {
+                    goalId: "goal-1",
+                    goalName: "Durable goal",
+                    planId: "plan-1",
+                    planName: "Plan one",
+                    taskId: "task-service",
+                    taskName: "Service",
+                  },
+                  namedDependencies: [],
+                  namedRequiredBy: [],
+                  blockers: [],
+                  whatCompleted: "Nothing completed yet.",
+                  nextAction: "Waiting for a Main decision.",
+                  updatedAt: "2026-08-03T00:00:00.000Z",
+                }],
+                completed: [],
+                "stopped-failed": [],
+              },
+            }],
+          }],
+          independentPlans: [],
+          filter: {
+            applied: {
+              ...(typeof params.project === "string" ? { project: params.project } : {}),
+              ...(typeof params.workerProfileId === "string"
+                ? { workerProfileId: params.workerProfileId }
+                : {}),
+              ...(params.column !== undefined
+                ? {
+                    columns: Array.isArray(params.column)
+                      ? params.column
+                      : String(params.column).split(","),
+                  }
+                : {}),
+            },
+          },
+        } as T;
+      }
       if (method === "goal_status") {
         return {
           goalId: params.goalId,
@@ -1464,6 +1558,52 @@ test("goal list/status and confirmed advance/stop stay privacy-safe", async () =
     assert.equal(stop.status, 200);
     assert.equal((stop.body as { action: string }).action, "goal_stop");
     assert.ok(ctx.calls.some((c) => c.method === "goal_stop" && c.params.confirm === true));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("GET /api/ops/work-hierarchy forwards bounded filters and returns canonical projection", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const res = await doHttp(
+      `${ctx.base}/api/ops/work-hierarchy?project=%2Ftmp%2Fproj&column=waiting-user-decision&workerProfileId=deepseek-builder`,
+      "GET",
+      ctx.token,
+    );
+    assert.equal(res.status, 200);
+    const body = res.body as {
+      schemaVersion: number;
+      columns: Array<{ code: string }>;
+      goals: Array<{ kind: string; plans: unknown[] }>;
+      filter: { applied: Record<string, unknown> };
+    };
+    assert.equal(body.schemaVersion, 1);
+    assert.equal(body.columns.length, 7);
+    assert.equal(body.goals[0]?.kind, "goal");
+    assert.ok(Array.isArray(body.goals[0]?.plans));
+    assert.equal(body.filter.applied.project, "/tmp/proj");
+    assert.equal(body.filter.applied.workerProfileId, "deepseek-builder");
+    assert.deepEqual(body.filter.applied.columns, ["waiting-user-decision"]);
+    assert.ok(ctx.calls.some((c) => c.method === "work_hierarchy"));
+    // Match real secret/proxy markers only — bare `sk-` false-positives on ids like task-service.
+    assert.doesNotMatch(JSON.stringify(body), /resultText|sk-private|sk-live|proxy:\/\//);
+
+    // Malformed column fails closed without mutation
+    const bad = await doHttp(
+      `${ctx.base}/api/ops/work-hierarchy?column=queued`,
+      "GET",
+      ctx.token,
+    );
+    assert.equal(bad.status, 400);
+    assert.equal(
+      (bad.body as { error: string }).error,
+      "Work hierarchy filter is invalid.",
+    );
+    // No mutating daemon methods were invoked for the hierarchy read path
+    assert.ok(!ctx.calls.some((c) =>
+      c.method === "submit" || c.method === "resume" || c.method === "goal_advance",
+    ));
   } finally {
     await ctx.cleanup();
   }

@@ -6149,26 +6149,51 @@ function workerReadinessFor(workerId){
   return rows.find(function(row){ return row && row.workerId === workerId; }) || null;
 }
 
-function workerReadinessPresentation(result){
-  var stateMap = {
-    ready: ["workersReadinessReady", "badge-ok"],
-    launchable: ["workersReadinessLaunchable", "badge-info"],
-    "needs-attention": ["workersReadinessAttention", "badge-warn"],
-    blocked: ["workersReadinessBlocked", "badge-warn"]
+function workerConnectionStory(readiness, networkMode){
+  var mode = networkMode === "direct" || networkMode === "custom-proxy" ? networkMode : "inherit";
+  var reason = readiness && readiness.reason ? readiness.reason : "model-invalid";
+  var state = readiness && readiness.state ? readiness.state : "blocked";
+  var labelMap = {
+    ready: "workersReadinessReady",
+    launchable: "workersReadinessLaunchable",
+    "needs-attention": "workersReadinessAttention",
+    blocked: "workersReadinessBlocked"
   };
-  var reasonMap = {
-    ready: "workersReadinessReasonReady",
-    "connection-unverified": "workersReadinessReasonConnectionUnverified",
-    "connection-stale": "workersReadinessReasonConnectionStale",
-    "connection-failed": "workersReadinessReasonConnectionFailed",
-    "authentication-missing": "workersReadinessReasonAuthenticationMissing",
-    "runtime-unavailable": "workersReadinessReasonRuntimeUnavailable",
-    "pairing-invalid": "workersReadinessReasonPairingInvalid",
-    "model-invalid": "workersReadinessReasonModelInvalid",
-    "native-goal-unsupported": "workersReadinessReasonNativeGoalUnsupported"
+  var toneMap = {
+    ready: "badge-ok",
+    launchable: "badge-info",
+    "needs-attention": "badge-warn",
+    blocked: "badge-warn"
+  };
+  var storyMap = {
+    ready: {
+      inherit: "workersStoryReadyInherit",
+      direct: "workersStoryReadyDirect",
+      "custom-proxy": "workersStoryReadyCustom"
+    },
+    "connection-unverified": {
+      inherit: "workersStoryLaunchUnverifiedInherit",
+      direct: "workersStoryLaunchUnverifiedDirect",
+      "custom-proxy": "workersStoryLaunchUnverifiedCustom"
+    },
+    "connection-stale": {
+      inherit: "workersStoryLaunchStaleInherit",
+      direct: "workersStoryLaunchStaleDirect",
+      "custom-proxy": "workersStoryLaunchStaleCustom"
+    },
+    "connection-failed": {
+      inherit: "workersStoryLaunchFailedInherit",
+      direct: "workersStoryLaunchFailedDirect",
+      "custom-proxy": "workersStoryLaunchFailedCustom"
+    },
+    "authentication-missing": "workersStoryBlockedAuth",
+    "runtime-unavailable": "workersStoryBlockedRuntime",
+    "pairing-invalid": "workersStoryBlockedPairing",
+    "model-invalid": "workersStoryBlockedModel",
+    "native-goal-unsupported": "workersStoryBlockedExecution"
   };
   var nextMap = {
-    none: "workersReadinessNextNone",
+    none: null,
     "run-smoke-check": "workersReadinessNextSmoke",
     "check-provider": "workersReadinessNextProvider",
     "configure-authentication": "workersReadinessNextAuth",
@@ -6177,12 +6202,16 @@ function workerReadinessPresentation(result){
     "choose-model": "workersReadinessNextModel",
     "choose-execution-mode": "workersReadinessNextExecutionMode"
   };
-  var state = stateMap[result && result.state] || stateMap.blocked;
+  var entry = storyMap[reason];
+  var conclusion = entry && typeof entry === "object"
+    ? (entry[mode] || entry.inherit)
+    : (entry || storyMap["model-invalid"]);
   return {
-    label: t(state[0]),
-    tone: state[1],
-    reason: t(reasonMap[result && result.reason] || "workersReadinessReasonModelInvalid"),
-    next: t(nextMap[result && result.nextAction] || "workersReadinessNextModel")
+    label: labelMap[state] || "workersReadinessBlocked",
+    tone: toneMap[state] || "badge-warn",
+    conclusion: conclusion,
+    next: nextMap[readiness && readiness.nextAction] || null,
+    route: networkPolicySummary({ mode: mode })
   };
 }
 
@@ -6260,27 +6289,42 @@ function rWorker(){
     var purpose = isDef ? t("workersCardDefaultPurpose") : t("workersCardReusablePurpose");
     var story = h("div", "profile-story");
     story.appendChild(h("div", "profile-story-purpose", purpose));
+
+    /* One connection conclusion: status badge plus one plain-language sentence.
+     * The pure helper combines canonical readiness with only the frozen network
+     * mode, so the default card never repeats a generic route caveat and never
+     * exposes proxy URLs. */
     var readiness = workerReadinessFor(prof.id);
     if(readiness){
-      var readinessView = workerReadinessPresentation(readiness);
-      story.appendChild(hd("div", "profile-story-line", [
-        h("span", "badge " + readinessView.tone, readinessView.label)
-      ]));
-      story.appendChild(h("div", "profile-story-line", readinessView.reason));
-      story.appendChild(h("div", "profile-story-line dim fs11",
-        t("workersReadinessNextLabel", { action: readinessView.next })));
+      var storyData = workerConnectionStory(readiness, (prof.networkPolicy || {}).mode);
+      var connection = hd("div", "profile-story-connection", [
+        h("span", "badge " + storyData.tone, t(storyData.label)),
+        h("div", "profile-story-conclusion", t(storyData.conclusion))
+      ]);
+      connection.setAttribute("data-fl-role", "worker-connection");
+      story.appendChild(connection);
+      if(storyData.next){
+        story.appendChild(h("div", "profile-story-line dim fs11",
+          t("workersReadinessNextLabel", { action: t(storyData.next) })));
+      }
     }
+
+    /* One compact execution identity line: model, runtime, resolved mode. */
     var execPrefText = prof.executionPreference === undefined
       ? t("workersExecutionSingleRun")
       : executionPreferenceLabel(prof.executionPreference);
-    var execModeText = resolvedExecutionModeText(readiness);
-    story.appendChild(h("div", "profile-story-line",
-      execModeText ? (execPrefText + " · " + execModeText) : execPrefText));
-    story.appendChild(h("div", "profile-story-line", networkPolicySummary(prof.networkPolicy)));
-    story.appendChild(h("div", "profile-story-line dim fs11", t("workersNetworkCardNotProof")));
-    story.appendChild(h("div", "profile-story-line", t("workersCardRunsWith", {
-      model: modelLine, runtime: runtimeDisplayName(prof.runtime)
+    var execModeText = (readiness && readiness.state !== "blocked")
+      ? resolvedExecutionModeText(readiness)
+      : "";
+    story.appendChild(h("div", "profile-story-line", t("workersCardExecutionIdentity", {
+      model: modelLine,
+      runtime: runtimeDisplayName(prof.runtime),
+      mode: execModeText || execPrefText
     })));
+    cardEl.appendChild(story);
+
+    /* Execution behavior and limits stay available under one disclosure. */
+    var behavior = h("div", "journey-list");
     var budgetText = prof.maxBudgetUsd === null
       ? t("workersCardBudgetUnlimited")
       : (prof.maxBudgetUsd === undefined
@@ -6293,7 +6337,7 @@ function rWorker(){
       : (progressValue === undefined
         ? t("workersCardNoEffectiveProgressInherited")
         : t("workersCardNoEffectiveProgressLimited", { duration: readableDuration(progressValue) }));
-    story.appendChild(h("div", "profile-story-line", budgetText + " "
+    behavior.appendChild(h("div", "journey-list-item", budgetText + " "
       + t("workersCardEffort", { effort: effortLabel(prof.effort) }) + " " + progressText));
     var baseAttempts = advanced.baseMaxAttempts;
     var extraAttempts = advanced.maxExtraAttempts;
@@ -6307,7 +6351,7 @@ function rWorker(){
       : (advanced.maxAdaptationRounds === 0
         ? t("workersCardAdaptationOff")
         : t("workersCardAdaptationOn", { count: String(advanced.maxAdaptationRounds) }));
-    story.appendChild(h("div", "profile-story-line", attemptText + " " + adaptationText));
+    behavior.appendChild(h("div", "journey-list-item", attemptText + " " + adaptationText));
     /* Contract Quality summary: short human-readable label only. */
     var cq = prof.contractQuality;
     var qualitySummary = "";
@@ -6320,8 +6364,10 @@ function rWorker(){
     } else {
       qualitySummary = t("workersQualitySummaryOff");
     }
-    story.appendChild(h("div", "profile-story-line dim fs11", qualitySummary));
-    cardEl.appendChild(story);
+    behavior.appendChild(h("div", "journey-list-item dim fs11", qualitySummary));
+    var behaviorDisclosure = journeyDisclosure(t("workersCardExecutionBehavior"), behavior);
+    behaviorDisclosure.setAttribute("data-fl-role", "worker-execution-details");
+    cardEl.appendChild(behaviorDisclosure);
 
     var technical = h("div", "journey-list");
     technical.appendChild(h("div", "journey-list-item mono dim", "Worker ID: " + prof.id));
@@ -6350,6 +6396,7 @@ function rWorker(){
     }
     routeLine.appendChild(document.createTextNode(" · " + t("workersPricingRouteBillingOnly")));
     technical.appendChild(routeLine);
+    technical.appendChild(h("div", "journey-list-item dim fs11", t("workersNetworkCardNotProof")));
     cardEl.appendChild(journeyDisclosure(t("workersCardTechnicalDetails"), technical));
     var actions = h("div", "actions");
     var editBtn = h("button", "btn sm " + (isEditing ? "primary" : ""), t("workersEdit"));

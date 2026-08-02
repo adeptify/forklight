@@ -1255,6 +1255,51 @@ const REASONED_OPTIONS = {
   },
 };
 
+/** Seed three launchable Profiles with distinct network policies: direct,
+ *  custom-proxy, and legacy inherit (no policy field). */
+function seedNetworkProfiles(settings: SettingsService): void {
+  const current = settings.get();
+  const profiles = upsertWorkerProfile(
+    upsertWorkerProfile(
+      upsertWorkerProfile(
+        current.workerProfiles,
+        {
+          id: "net-direct",
+          label: "Net Direct",
+          runtime: "claude-code",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          effort: "medium",
+          networkPolicy: { mode: "direct" },
+        },
+      ),
+      {
+        id: "net-proxy",
+        label: "Net Proxy",
+        runtime: "claude-code",
+        provider: "minimax",
+        model: "MiniMax-M3",
+        effort: "medium",
+        networkPolicy: {
+          mode: "custom-proxy",
+          httpProxy: "http://127.0.0.1:7890",
+          httpsProxy: "http://127.0.0.1:7891",
+          noProxy: "localhost,127.0.0.1",
+        },
+      },
+    ),
+    {
+      id: "net-inherit",
+      label: "Net Inherit",
+      runtime: "claude-code",
+      provider: "volcengine",
+      model: "glm-5.2[1M]",
+      effort: "medium",
+    },
+  );
+  settings.update({ workerProfiles: profiles });
+}
+
 /** Simulate a terminal candidate with verification, optional revision, and an
  *  optional bound Main Review. Mirrors how the daemon records real evidence. */
 function completeCandidate(
@@ -1377,6 +1422,150 @@ test("mixed-runtime competition freezes each candidate's own Worker identity fro
     assert.equal(claudeTask.spec.runtime.name, "claude-code");
     assert.equal(grokTask.spec.runtime.name, "grok-build");
     assert.equal(grokTask.spec.provider.name, "xai");
+  } finally {
+    cleanup();
+  }
+});
+
+test("Worker-Profile Competition candidates each freeze their own network policy", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedNetworkProfiles(settings);
+    const baseSpec = makeContractSpec(src);
+    // Source contract carries a frozen inherit policy that must never win.
+    const sourceSpec: TaskSpec = { ...baseSpec, networkPolicy: { mode: "inherit" } };
+    const sourceBefore = structuredClone(sourceSpec);
+
+    const { competition } = await coordinator.create(sourceSpec, "/test.yaml", [
+      { workerProfileId: "net-direct" },
+      { workerProfileId: "net-proxy" },
+      { workerProfileId: "net-inherit" },
+    ], REASONED_OPTIONS);
+
+    // Candidate cloning must not mutate the source contract.
+    assert.deepEqual(sourceSpec, sourceBefore);
+
+    const candidates = store.getCompetitionCandidates(competition.id);
+    assert.equal(candidates.length, 3);
+    const byProfile = new Map(candidates.map((c) => [c.identity?.workerProfileId, c]));
+
+    const direct = store.getTask(byProfile.get("net-direct")!.taskId);
+    const proxy = store.getTask(byProfile.get("net-proxy")!.taskId);
+    const inherit = store.getTask(byProfile.get("net-inherit")!.taskId);
+
+    // Each candidate freezes its own Profile policy.
+    assert.deepEqual(direct.spec.networkPolicy, { mode: "direct" });
+    assert.deepEqual(proxy.spec.networkPolicy, {
+      mode: "custom-proxy",
+      httpProxy: "http://127.0.0.1:7890",
+      httpsProxy: "http://127.0.0.1:7891",
+      noProxy: "localhost,127.0.0.1",
+    });
+
+    // Neither inherits the source contract's policy.
+    assert.equal(direct.spec.networkPolicy?.mode, "direct");
+    assert.equal(proxy.spec.networkPolicy?.mode, "custom-proxy");
+    // Legacy-inherit candidate clears the cloned source policy (absence = inherit).
+    assert.equal(inherit.spec.networkPolicy, undefined);
+
+    // Creation events never serialize proxy values.
+    const eventText = [direct.id, proxy.id, inherit.id]
+      .flatMap((taskId) => store.listEvents(taskId))
+      .map((event) => JSON.stringify(event.payload))
+      .join("\n");
+    assert.ok(!eventText.includes("127.0.0.1:7890"));
+    assert.ok(!eventText.includes("httpProxy"));
+    assert.ok(!eventText.includes("noProxy"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("cross-Worker handoff freezes destination network policy and clears stale source policy", async () => {
+  const src = makeTwoFileSourceProject();
+  const { store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedNetworkProfiles(settings);
+    const coordinator = new CompetitionCoordinator(store, settings);
+    const baseSpec = makeContractSpec(src);
+    const { competition } = await coordinator.create(baseSpec, "/test.yaml", [
+      { workerProfileId: "net-direct" },
+      { workerProfileId: "net-proxy" },
+    ], {
+      ...REASONED_OPTIONS,
+      readinessVerifier: () => {},
+    });
+    const candidates = store.getCompetitionCandidates(competition.id);
+    const source = candidates.find((c) => c.identity?.workerProfileId === "net-direct")!;
+    const sourceTask = store.getTask(source.taskId);
+    // Source candidate froze direct.
+    assert.deepEqual(sourceTask.spec.networkPolicy, { mode: "direct" });
+
+    const { revisionId } = completeTwoFileCandidate(store, sourceTask, { passed: false });
+    coordinator.recordRetainedPartial(
+      competition.id,
+      source.id,
+      ["src/a.ts"],
+      [{
+        description: "src/b.ts still needs the second export completed",
+        acceptanceExpectation: "src/b.ts exports the updated constant and acceptance passes",
+      }],
+    );
+
+    const view = await executeCandidateHandoff(
+      store,
+      settings.get(),
+      {
+        competitionId: competition.id,
+        candidateId: source.id,
+        candidateRevisionId: revisionId,
+        destinationWorkerProfileId: "net-proxy",
+        reason: "Hand direct candidate to the custom-proxy Worker for the remaining gap.",
+        confirm: true,
+      },
+      { canLaunch: () => ({ ok: true }) },
+    );
+    assert.equal(view.status, "prepared");
+
+    // Successor freezes the destination custom-proxy policy.
+    const successor = store.getTask(view.successorTaskId);
+    assert.deepEqual(successor.spec.networkPolicy, {
+      mode: "custom-proxy",
+      httpProxy: "http://127.0.0.1:7890",
+      httpsProxy: "http://127.0.0.1:7891",
+      noProxy: "localhost,127.0.0.1",
+    });
+    // Source Task is not mutated.
+    assert.deepEqual(store.getTask(sourceTask.id).spec.networkPolicy, { mode: "direct" });
+
+    // Public handoff projection never exposes proxy values.
+    const viewText = JSON.stringify(view);
+    assert.ok(!viewText.includes("127.0.0.1:7890"));
+    assert.ok(!viewText.includes("httpProxy"));
+    assert.ok(!viewText.includes("noProxy"));
+
+    // Pure builder: a legacy-inherit destination removes the stale direct policy.
+    const inheritSelection = resolveWorkerSelection(
+      { workerProfileId: "net-inherit" },
+      {
+        execution: settings.get().execution,
+        providerDefaults: settings.get().providerDefaults,
+        workerProfiles: settings.get().workerProfiles,
+        ...(settings.get().modelCatalog === undefined
+          ? {}
+          : { modelCatalog: settings.get().modelCatalog }),
+      },
+    );
+    const built = buildHandoffSuccessorSpec(store.getTask(sourceTask.id).spec, inheritSelection, {
+      reusablePaths: ["src/a.ts"],
+      remainingGaps: [{
+        description: "src/b.ts still needs the second export completed",
+        acceptanceExpectation: "src/b.ts exports the updated constant and acceptance passes",
+      }],
+      digestPrefix: "abcd1234ef00",
+    });
+    assert.equal(built.networkPolicy, undefined, "inherit destination must remove the stale direct policy");
   } finally {
     cleanup();
   }

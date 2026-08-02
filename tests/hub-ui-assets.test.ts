@@ -744,34 +744,42 @@ test("Hub Worker editor filters impossible Provider/runtime pairings before save
 test("Hub Worker cards explain canonical readiness in both languages", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
-  const presentation = new Function("t", `
-    ${extractFunctionSource(src, "workerReadinessPresentation")}
-    return workerReadinessPresentation;
-  `)((key: string) => key) as (value: { state: string; reason: string; nextAction: string }) => {
-    label: string; tone: string; reason: string; next: string;
+  const story = new Function("t", `
+    ${extractFunctionSource(src, "networkPolicySummary")}
+    ${extractFunctionSource(src, "workerConnectionStory")}
+    return workerConnectionStory;
+  `)((key: string) => key) as (
+    readiness: { state: string; reason: string; nextAction: string },
+    mode?: string,
+  ) => {
+    label: string; tone: string; conclusion: string; next: string | null; route: string;
   };
-  assert.deepEqual(presentation({
+  const launchable = story({
     state: "launchable",
     reason: "connection-unverified",
     nextAction: "run-smoke-check",
-  }), {
+  }, "inherit");
+  assert.deepEqual(launchable, {
     label: "workersReadinessLaunchable",
     tone: "badge-info",
-    reason: "workersReadinessReasonConnectionUnverified",
+    conclusion: "workersStoryLaunchUnverifiedInherit",
     next: "workersReadinessNextSmoke",
+    route: "workersNetworkCardInherit",
   });
-  assert.equal(presentation({
+  const blocked = story({
     state: "blocked",
     reason: "authentication-missing",
     nextAction: "configure-authentication",
-  }).reason, "workersReadinessReasonAuthenticationMissing");
+  }, "inherit");
+  assert.equal(blocked.conclusion, "workersStoryBlockedAuth");
+  assert.equal(blocked.next, "workersReadinessNextAuth");
   assert.ok(src.includes("workerReadinessFor(prof.id)"));
   assert.ok(src.includes("readiness.checks"));
   for (const phrase of [
     "Can start; connection check recommended",
-    "Local setup is ready, but this Provider connection has not been checked yet.",
     "可以开始，建议先检查连接",
-    "本地配置已经齐全，但还没有检查这个 Provider 的真实连接。",
+    "hasn't been checked yet. This Worker follows ForkLight's current network.",
+    "还没有检查真实连接。此 Worker 跟随 ForkLight 当前的网络。",
   ]) {
     assert.ok(i18n.includes(phrase), phrase);
   }
@@ -789,8 +797,10 @@ test("Hub Worker editor exposes network route fields and truthful card copy", as
   assert.ok(block.includes("profile.networkPolicy = { mode: \"custom-proxy\", httpProxy"), "custom proxy is collected on save");
   assert.ok(block.includes("profile.networkPolicy = { mode: \"direct\" }"), "direct is collected on save");
   assert.ok(block.includes("workersNetworkProxyRequired"), "missing proxy URL is rejected with a fixed message");
-  assert.ok(block.includes("networkPolicySummary(prof.networkPolicy)"), "card shows the chosen route");
-  assert.ok(block.includes("workersNetworkCardNotProof"), "card says configuration is not proof of reachability");
+  assert.ok(block.includes("workerConnectionStory(readiness"), "card composes one connection story from readiness + mode");
+  assert.ok(block.includes("t(\"workersNetworkCardNotProof\")"), "route truth remains under the technical disclosure");
+  assert.ok(!block.includes("networkPolicySummary(prof.networkPolicy)"),
+    "the default story no longer repeats a standalone route line");
 
   const summary = new Function("t", `
     ${extractFunctionSource(src, "networkPolicySummary")}
@@ -842,6 +852,159 @@ test("Hub i18n carries network route copy in both languages", async () => {
   assert.ok(!zhNet.includes("Provider"), "Chinese network copy avoids Provider vocabulary");
   assert.ok(enNet.includes("not proof the connection works"), "English separates configured route from proof");
   assert.ok(zhNet.includes("并不代表连接一定可用"), "Chinese separates configured route from proof");
+});
+
+test("Hub Worker card connection story is one privacy-safe conclusion per state", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const storySource = extractFunctionSource(src, "workerConnectionStory");
+  // Privacy-safe: the pure helper only reads the frozen network mode, never the
+  // proxy URL fields or credentials.
+  assert.ok(!storySource.includes("httpProxy"), "story helper never reads the proxy URL");
+  assert.ok(!storySource.includes("httpsProxy"), "story helper never reads the HTTPS proxy URL");
+  assert.ok(!storySource.includes("noProxy"), "story helper never reads the no-proxy list");
+
+  const story = new Function("t", `
+    ${extractFunctionSource(src, "networkPolicySummary")}
+    ${storySource}
+    return workerConnectionStory;
+  `)((key: string) => key) as (
+    readiness: { state: string; reason: string; nextAction: string },
+    mode?: string,
+  ) => {
+    label: string; tone: string; conclusion: string; next: string | null; route: string;
+  };
+
+  // Ready + custom proxy: the recent check passed and the configured local
+  // proxy form ONE conclusion; no redundant no-action line, no generic caveat.
+  const ready = story({ state: "ready", reason: "ready", nextAction: "none" }, "custom-proxy");
+  assert.deepEqual(ready, {
+    label: "workersReadinessReady",
+    tone: "badge-ok",
+    conclusion: "workersStoryReadyCustom",
+    next: null,
+    route: "workersNetworkCardCustom",
+  });
+
+  // Launchable + stale inherited connection: both facts in one conclusion and
+  // the bounded smoke-check next action exactly once.
+  const stale = story(
+    { state: "launchable", reason: "connection-stale", nextAction: "run-smoke-check" },
+    "inherit",
+  );
+  assert.deepEqual(stale, {
+    label: "workersReadinessLaunchable",
+    tone: "badge-info",
+    conclusion: "workersStoryLaunchStaleInherit",
+    next: "workersReadinessNextSmoke",
+    route: "workersNetworkCardInherit",
+  });
+
+  // Blocked: the primary conclusion names what prevents launch and the recovery
+  // action; the route mode never changes or overstates the story.
+  const blockedAuth = story(
+    { state: "blocked", reason: "authentication-missing", nextAction: "configure-authentication" },
+    "custom-proxy",
+  );
+  assert.equal(blockedAuth.conclusion, "workersStoryBlockedAuth");
+  assert.equal(blockedAuth.next, "workersReadinessNextAuth");
+  assert.equal(blockedAuth.tone, "badge-warn");
+  const blockedAuthDirect = story(
+    { state: "blocked", reason: "authentication-missing", nextAction: "configure-authentication" },
+    "direct",
+  );
+  assert.equal(blockedAuthDirect.conclusion, "workersStoryBlockedAuth", "route mode does not change the blocked story");
+  const blockedRuntime = story(
+    { state: "blocked", reason: "runtime-unavailable", nextAction: "fix-runtime" },
+    "inherit",
+  );
+  assert.equal(blockedRuntime.conclusion, "workersStoryBlockedRuntime");
+  assert.equal(blockedRuntime.next, "workersReadinessNextRuntime");
+});
+
+test("Hub Worker card leads with a connection conclusion and keeps execution facts under disclosure", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+
+  // Stable markers for the connection story and the execution-details disclosure.
+  assert.ok(block.includes("worker-connection"), "connection story has a stable data-fl-role marker");
+  assert.ok(block.includes("worker-execution-details"), "execution details have a stable data-fl-role marker");
+  assert.ok(block.includes("workerConnectionStory(readiness"), "card composes one connection story");
+  assert.ok(block.indexOf("worker-connection") < block.indexOf("worker-execution-details"),
+    "connection conclusion leads before the execution disclosure");
+
+  // The generic route caveat no longer repeats on the default story surface; it
+  // stays available exactly once inside the technical disclosure.
+  const storyStart = block.indexOf('var story = h("div", "profile-story")');
+  const storyEnd = block.indexOf("cardEl.appendChild(story);", storyStart);
+  const storySlice = block.slice(storyStart, storyEnd);
+  assert.ok(!storySlice.includes("workersNetworkCardNotProof"), "no repeated route caveat on the default story");
+  assert.ok(block.includes("t(\"workersNetworkCardNotProof\")"), "route truth remains under the technical disclosure");
+
+  // All prior execution, policy, readiness-check, identity, pricing, and action
+  // fact builders remain consumed by the card.
+  for (const key of [
+    "workersCardDefaultPurpose",
+    "workersCardExecutionIdentity",
+    "workersCardExecutionBehavior",
+    "workersCardBudgetUnlimited",
+    "workersCardBudgetInherited",
+    "workersCardBudgetLimited",
+    "workersCardEffort",
+    "workersCardNoEffectiveProgressLimited",
+    "workersCardNoEffectiveProgressInherited",
+    "workersCardNoEffectiveProgressUnlimited",
+    "workersCardAttempts",
+    "workersCardAttemptsNoExtra",
+    "workersCardAttemptsInherited",
+    "workersCardAdaptationOff",
+    "workersCardAdaptationOn",
+    "workersCardAdaptationInherited",
+    "workersQualitySummaryOn",
+    "workersQualitySummaryOff",
+    "workersCardTechnicalDetails",
+    "workersReadinessTechnical",
+    "workersReadinessCheckConnection",
+    "workersPricingRouteCardLabel",
+  ]) {
+    assert.ok(block.includes(`"${key}"`), `card consumes ${key}`);
+  }
+
+  // The connection conclusion is bilingual and the default-surface copy avoids
+  // internal Provider/Daemon vocabulary.
+  for (const phrase of ["workersStoryReadyCustom:", "workersStoryLaunchStaleInherit:", "workersStoryBlockedAuth:"]) {
+    assert.ok(i18n.indexOf(phrase) !== i18n.lastIndexOf(phrase), `connection story key is bilingual: ${phrase}`);
+  }
+  assert.ok(i18n.includes("uses the configured local proxy"), "en ready+custom conclusion");
+  assert.ok(i18n.includes("使用已配置的本地代理"), "zh ready+custom conclusion");
+  assert.ok(i18n.includes("previous connection check is stale"), "en stale conclusion");
+  assert.ok(i18n.includes("之前的连接检查已经过期"), "zh stale conclusion");
+
+  const parts = splitI18n(i18n);
+  const enStoryStart = parts.enSection.indexOf("workersCardExecutionBehavior");
+  const enStoryEnd = parts.enSection.indexOf("workersCardTechnicalDetails", enStoryStart);
+  const enStory = parts.enSection.slice(enStoryStart, enStoryEnd > 0 ? enStoryEnd : parts.enSection.length);
+  const zhStoryStart = parts.zhSection.indexOf("workersCardExecutionBehavior");
+  const zhStoryEnd = parts.zhSection.indexOf("workersCardTechnicalDetails", zhStoryStart);
+  const zhStory = parts.zhSection.slice(zhStoryStart, zhStoryEnd > 0 ? zhStoryEnd : parts.zhSection.length);
+  assert.ok(!enStory.includes("Provider"), "en default card story avoids Provider vocabulary");
+  assert.ok(!enStory.includes("Daemon"), "en default card story avoids Daemon vocabulary");
+  assert.ok(!zhStory.includes("Provider"), "zh default card story avoids Provider vocabulary");
+  assert.ok(!zhStory.includes("Daemon"), "zh default card story avoids Daemon vocabulary");
+
+  // The next-action copy shown on the default surface also avoids Provider.
+  assert.ok(i18n.includes("Configure the API key or supported local sign-in."), "en auth next action avoids Provider");
+  assert.ok(i18n.includes("配置 API Key 或支持的本地登录。"), "zh auth next action avoids Provider");
+  assert.ok(i18n.includes("Check the connection settings before spending Tokens on another task."),
+    "en connection next action avoids Provider");
+  assert.ok(i18n.includes("先检查连接设置，再为新任务花费 Token。"), "zh connection next action avoids Provider");
+
+  assert.ok(css.includes(".profile-story-connection"), "connection story has a wrapped layout");
+  assert.ok(css.includes(".profile-story-conclusion"), "conclusion has its own reading block");
+  assert.ok(css.includes("flex-wrap"), "connection block wraps on narrow viewports");
 });
 
 test("Hub model-routing unsaved state compares semantic values", async () => {
@@ -4553,7 +4716,8 @@ test("Hub primary Worker, Main, and verification summaries explain meaning befor
   const workerEnd = src.indexOf("function rLimits()", workerStart);
   const workerBlock = src.slice(workerStart, workerEnd);
   assert.ok(workerBlock.includes("workersCardDefaultPurpose"), "Worker card explains when it is used");
-  assert.ok(workerBlock.includes("workersCardRunsWith"), "Worker card explains model and runtime as a sentence");
+  assert.ok(workerBlock.includes("workersCardExecutionIdentity"), "Worker card explains model, runtime, and mode in one line");
+  assert.ok(workerBlock.includes("workersCardExecutionBehavior"), "execution facts stay under one behavior disclosure");
   assert.ok(workerBlock.includes("workersCardNoEffectiveProgressLimited"), "Worker card explains no-effective-progress stop");
   assert.ok(workerBlock.includes("workersCardAttempts"), "Worker card explains correction attempts");
   assert.ok(workerBlock.includes("workersCardAttemptsNoExtra"), "zero correction attempts are phrased as behavior, not 0 jargon");
@@ -7520,7 +7684,7 @@ test("Hub explains execution preference bilingually without forcing protocol voc
   assert.ok(src.includes("function executionPreferenceLabel("), "Worker cards label the preference");
   assert.ok(src.includes("function resolvedExecutionModeText("), "resolved mode is projected in plain words");
   assert.ok(src.includes("executionPreferenceUnsupported"), "forced unsupported native Goal has a clear signal");
-  assert.ok(src.includes("workersReadinessReasonNativeGoalUnsupported"), "readiness reason key is consumed");
+  assert.ok(src.includes("workersStoryBlockedExecution"), "blocked native-Goal readiness reason is projected in plain words");
   assert.ok(src.includes("workersReadinessNextExecutionMode"), "readiness next action key is consumed");
   assert.ok(src.includes("fl-wp-execution"), "the Worker editor has an execution preference control");
   for (const phrase of [

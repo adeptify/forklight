@@ -5888,6 +5888,84 @@ test("list_history_page is registered as read-only", () => {
   assert.equal(requiresMatchingBuildIdentity("list_history_page"), false);
 });
 
+test("work_hierarchy is registered as read-only", () => {
+  assert.equal(requiresMatchingBuildIdentity("work_hierarchy"), false);
+});
+
+test("daemon work_hierarchy returns schemaVersion 1 and rejects invalid filters", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-daemon-work-hierarchy-"));
+  let taskId = "";
+  {
+    const store = new StateStore(home);
+    // Seed one one-off Task so the projection is non-empty.
+    const task = registerTaskFromSpec(
+      store,
+      {
+        version: 1,
+        name: "hierarchy-seed",
+        project: "/tmp/hierarchy-proj",
+        goal: "seed",
+        constraints: [],
+        provider: { name: "deepseek", model: "v4", keychainService: "t" },
+        runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
+        workspace: { exclude: [] },
+        worker: { allowEdits: false, allowedCommands: [], focusPaths: [] },
+        acceptance: { commands: ["true"] },
+      },
+      "forklight://test/hierarchy-seed",
+    );
+    taskId = task.id;
+    store.setTaskStatus(task.id, "queued", {});
+    store.close();
+  }
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const first = await daemonRequest<{
+      schemaVersion: number;
+      columns: Array<{ code: string }>;
+      goals: unknown[];
+      independentPlans: unknown[];
+      oneOffTasks?: { kind: string };
+      filter: { applied: Record<string, unknown> };
+    }>("work_hierarchy", {}, home);
+    const second = await daemonRequest<typeof first>("work_hierarchy", {}, home);
+    assert.deepEqual(second, first);
+    assert.equal(first.schemaVersion, 1);
+    assert.equal(first.columns.length, 7);
+    assert.deepEqual(
+      first.columns.map((c) => c.code),
+      [
+        "not-started",
+        "ready",
+        "running",
+        "waiting-verification",
+        "waiting-user-decision",
+        "completed",
+        "stopped-failed",
+      ],
+    );
+    assert.ok(first.oneOffTasks);
+    assert.equal(first.oneOffTasks!.kind, "one-off");
+    // Real secret markers only — bare `sk-` false-positives on substrings in ids/names.
+    assert.doesNotMatch(JSON.stringify(first), /resultText|sk-private|sk-live|PRIVATE/);
+
+    await assert.rejects(
+      () => daemonRequest("work_hierarchy", { column: "queued" }, home),
+      /Work hierarchy filter is invalid/,
+    );
+  } finally {
+    await daemon.close();
+  }
+  // Read must not mutate Task lifecycle
+  const verify = new StateStore(home);
+  try {
+    assert.equal(verify.getTask(taskId).status, "queued");
+  } finally {
+    verify.close();
+  }
+});
+
 test("daemon list_history_page rejects malformed optional fields instead of treating them as absent", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "fl-history-page-boundary-"));
   const daemon = new ForkLightDaemon(home, 0);

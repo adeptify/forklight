@@ -131,6 +131,13 @@ Passing the active milestone alone does not complete the Goal.
    declare paths such as `dist/**` in `workspace.generatedPaths`; generated
    artifacts remain reviewable evidence but do not consume product file/line
    limits or obscure the actual delivery boundary.
+14. **One work hierarchy, not three competing object lists.** The primary work
+   surface is one status-column Kanban whose hierarchy is `Goal -> Plan ->
+   Task`. Columns describe execution state; swimlanes describe ownership and
+   decomposition. Goal, Plan, and Task may keep deep links, but they do not
+   remain three peer dashboards. A drag gesture may request only a real,
+   authorized transition; it never rewrites machine status or bypasses a
+   dependency, Main review, verification, or Integration gate.
 
 ## Milestone roadmap
 
@@ -238,17 +245,9 @@ Passing the active milestone alone does not complete the Goal.
   recommendation.
 - M4 direct-Main paired evidence: 2 low-confidence samples across 2 classes and
   2 Profiles; not enough for a general savings claim.
-- Latest accepted full-suite evidence: build plus **2459/2459** tests,
-  JavaScript UI checks, the bounded Impeccable detector, browser interaction
-  checks, and `git diff --check` passed after FL-107 Integration.
-  The first full
-  run also exposed a pre-existing slow-start test cleanup leak; Main made the
-  fixture release and join its fake Runtime on every exit, then the complete
-  suite passed without a stranded process.
-  Prior accepted checkpoints were 2359/2359 for handled-failure delivery and
-  2339/2339 after FL-104 Integration. The earlier 23-file FL-104 scope exceeded
-  the old 20-file Integration limit; Main raised the configurable development
-  limit to 50 rather than rewriting a coherent delivery solely for file gates.
+- Latest accepted full-suite evidence is **2479/2479** after FL-109A
+  Integration, including build, old Board/Goal/Task surfaces, the new hierarchy,
+  all Runtime paths, Hub bridges, and `git diff --check`.
 - FL-104 is **implemented and integrated**, not pending implementation.
   Candidate Task `7ba94774-0289-482a-a23a-8224d1e97fa9` was freshly reverified
   after protocol repairs, Main-accepted, and integrated by operation
@@ -256,6 +255,27 @@ Passing the active milestone alone does not complete the Goal.
   activation, and activation checks all passed). The real model-backed
   native-Goal smoke passes. FL-004 has now closed the real Daemon
   restart/resume and second-Profile graduation gaps.
+- FL-108A is **implemented, integrated, and independently reviewed**. DeepSeek
+  Task `0d8996ed-7fd4-422a-8a89-b99142730e8f` produced Candidate
+  `80a8bdf4-d022-4aff-9a23-f2c79340baac`; Main accepted the exact digest and
+  Integration `5b30015a-2fdc-444f-a34e-105f8926e8bf` passed source apply,
+  verification, build, activation, and activation checks. Grok read-only Task
+  `bcad11fd-3b7d-4bbf-8fea-5b5fa58824a8` then returned ACCEPT with no blocking
+  findings and zero Diff.
+- FL-107B is **implemented, integrated, and live-dogfooded**. Review Graph,
+  Worker-Profile Competition, and cross-Worker handoff now freeze the selected
+  destination Worker's network policy; normal, Plan, Goal, registration, and
+  adaptation paths preserve their existing snapshot. With the Daemon started
+  under zero proxy environment, Grok judge Task
+  `d21aeac2-7c33-49a2-a9d2-f809b1c576e0` froze `custom-proxy`, completed, and
+  proposed accept without exposing proxy values in public events. The prior
+  failed judge remains infrastructure evidence, not model-quality evidence.
+- FL-109A is **implemented, integrated, and independently reviewed**. The
+  selected Grok Candidate exposes one closed Goal -> Plan -> Task hierarchy,
+  seven dependency-aware columns, standalone lanes, narrative summaries,
+  ancestor-preserving filters, and one read-only Daemon/Hub endpoint. Main
+  rejected a smaller DeepSeek alternative for contract and privacy omissions;
+  DeepSeek then independently accepted the selected exact revision.
 - The long-term Codex Goal is active with the exact `Long-term Goal` objective.
   FL-001 and FL-002 are complete; FL-002 used a recorded `workers-unavailable`
   Main-direct recovery only after both selected Worker paths ended before a
@@ -267,6 +287,83 @@ Passing the active milestone alone does not complete the Goal.
 - Repository worktree is intentionally dirty with active ForkLight source,
   tests, contracts, examples, and this documentation consolidation. Preserve
   unrelated work; no commit or push has been authorized.
+
+## Unified hierarchical workbench contract (FL-109)
+
+### User outcome and data relationship
+
+- A user sees one board with seven columns: **Not started, Ready, Running,
+  Waiting for verification, Waiting for your decision, Completed, and
+  Stopped/failed**. A column is a Task execution state, never an object type.
+- A Goal is a cross-column swimlane containing its Plan; it leads with the
+  plain-language outcome, what was completed, current blocker, next action,
+  and any decision needed. Percentage is supporting evidence, not the story.
+- A Plan is the Goal's child swimlane. Today the durable model is one Goal to
+  one Plan, one Plan to many Tasks, and a Task to at most one Plan item. The UI
+  read model uses `plans[]` so a future storage migration can support multiple
+  Plans without replacing the interaction model.
+- A Plan without a Goal is shown under **Independent plans**, preserving its
+  Plan -> Task hierarchy. A Task without a Plan is shown under the single
+  **One-off tasks** swimlane; no blank Goal or Plan placeholders are invented.
+- `plan_dependencies` remains authoritative. An unsatisfied dependency keeps a
+  Task in Not started; a queued Task enters Ready only when every dependency is
+  satisfied. Reverse edges explain what finishing the Task will unlock.
+- Goal milestone gates remain authoritative for Goal progress and Main
+  decisions. Plan and Goal summaries are derived from Task, dependency,
+  verification, Main-review, delivery, and stop evidence rather than copied
+  percentages.
+
+### Module boundaries
+
+| Module | Consumes | Produces | Boundary |
+| --- | --- | --- | --- |
+| Core hierarchical board projection | Store Tasks, Plan items/dependencies, Goals/milestones, delivery and board placement | One privacy-safe `WorkHierarchyView` with swimlanes, seven columns, breadcrumbs, blockers, completed facts and next actions | Read-only; does not infer a delivery or mutate lifecycle state |
+| Transition policy | Task/Goal state plus existing resume, review, Integration, stop and dependency authority | Allowed drop targets, action meaning, confirmation text and rejection reason | A drop invokes an existing authorized command; it never sets status directly |
+| Daemon + Hub bridge | Canonical Core projection and bounded filters | One versioned endpoint shared by Hub/CLI/MCP consumers | No client-side joining of contradictory Goal, Plan and Task truth |
+| Hierarchical Kanban renderer | WorkHierarchyView, project/status/Worker filters, collapse state | Goal and Plan swimlanes with Task cards in status columns | Filtering preserves ancestor lanes and never flattens matches |
+| Task detail drawer | Exact Task hierarchy plus existing journey projection | `Goal > Plan > Task` breadcrumb; input, process, output, failure, verification and next action | Technical IDs, Tokens and raw logs stay in progressive disclosure |
+| Outcome intake | User outcome and optional `auto/task/plan/goal` preference | A Main-authored preview choosing one-off Task, Plan or durable Goal, then existing confirmed creation operations | Hub does not replace Main with a heuristic and does not create work before confirmation |
+
+### Interaction acceptance
+
+1. All seven columns render in a stable order; Task cards alone occupy columns.
+2. Goal and Plan lanes expand/collapse, retain state across refresh, and remain
+   keyboard operable. A Goal summary says what finished, where work is blocked,
+   and what happens next even when its percentage is unchanged.
+3. Dependency fixtures prove an unready Task cannot appear in Ready, and each
+   blocked card names the prerequisite and the work it will unlock.
+4. Project, status, and Worker filters retain the complete matching
+   Goal -> Plan -> Task path. Empty ancestors are hidden; matches never become
+   a flat list.
+5. Standalone Tasks appear only in One-off tasks. Independent Plans never gain
+   a fake Goal.
+6. Clicking a Task opens the right drawer with its breadcrumb and the ordered
+   story: ask, work, output, failure/cause, verification, delivery and next.
+7. Dragging exposes only legal target columns, works by keyboard as well as
+   pointer, explains invalid drops, and requires the same confirmation and
+   authority as the underlying operation.
+8. The default surface uses plain English and Chinese. IDs, event codes,
+   Tokens, raw logs and scoring math are closed by default but remain available.
+9. Desktop and narrow-width browser fixtures preserve column scanning,
+   hierarchy, focus, drawer access and horizontal-scroll containment.
+
+### Implementation order
+
+1. **FL-109A — canonical read model.** Freeze the seven-column mapping,
+   hierarchy projection, derived Goal/Plan story, standalone classification,
+   dependency invariants, filter semantics and fixtures in Core; expose one
+   versioned Daemon/Hub read endpoint.
+2. **FL-109B — read-only unified workbench.** Replace the peer default views
+   with the hierarchical board, collapse state, preserved filters and Task
+   drawer breadcrumb. Keep old routes only as temporary deep-link redirects.
+3. **FL-109C — truthful action layer.** Add the transition policy and
+   pointer/keyboard drag requests for transitions already supported by durable
+   ForkLight commands; invalid drops remain explanatory no-ops.
+4. **FL-109D — outcome-first creation.** Add one outcome composer, Main shape
+   proposal and confirmation preview; retain advanced manual shape selection.
+5. **FL-109E — migration exit.** Complete bilingual desktop/mobile audits,
+   remove obsolete peer-list navigation, verify restart/history/filter
+   continuity, and make the hierarchical workbench the only default work view.
 
 ### Current delivery slices
 
@@ -284,6 +381,9 @@ in ForkLight Store and the evidence registry.
 | FL-106 | Runtime liveness and effective progress use separate clocks; one cannot indefinitely defeat the configurable no-progress stop. | Grok Task `f5f0fd47-59cc-41ad-a6e3-d02a78227faa`; Candidate `9aaf6e49-3a61-4933-a106-f5f1129c5462`; Main-direct `c17676e3-1fe6-4dda-b2ff-7efc497abcd0`. |
 | FL-004 | Codex native Goal survives an intentional Daemon restart using the exact prior Task, workspace, session and Thread; a second effort Profile also passed. | Main-direct `aa89bfcc-7334-43bf-9147-a87330e19740`; restart Task `28e167d7-164c-4df4-aaea-75e774054448`; low-effort Task `78096848-c881-41bc-9f25-acebbf181f30`. |
 | FL-107 | Each Worker can freeze `inherit`, `direct`, or credential-free `custom-proxy` routing. Claude, Grok and both Codex paths apply it; events expose only the mode; Hub advanced settings load and switch it bilingually. | DeepSeek Task `b064f658-88fb-4dbb-9ad8-7e5046260da3`; Candidate `28f133fd-72cf-4c91-9bf7-026df9608577`; Grok judge `8e231382-71a0-4643-a0c3-cf3cd88ef204`; Integration `cc146c23-81e9-4286-84c7-c5e458bc8d27`; zero-Diff Grok smoke `0be3aa84-14b5-41bf-82ea-8df74034f296`. |
+| FL-107B | Every Task derived from a selected Worker now keeps that Worker's exact network route; legacy inherit clears stale source routing, and public evidence still exposes only the mode. | DeepSeek Task `609e5f2c-a692-4746-8061-8fcb0984b16c`; Candidate `5cbfdd16-d2b1-420c-81bd-3c5f60f5e332`, digest `02cf145a00de5afd7fd85b22df9aaefc79d766c0ab0b302317c07ca40c2a76a5`; Integration `ab4959c8-2071-4572-9cfe-20a42ada7979`; zero-proxy Grok Review Graph `ee4a5d3c-e084-4311-ae12-d8686156d5d6`; full suite **2467/2467**. |
+| FL-108A | Worker cards now lead with one plain-language connection conclusion and an actual next action; execution limits and technical evidence remain progressively available. | DeepSeek Task `0d8996ed-7fd4-422a-8a89-b99142730e8f`; Candidate `80a8bdf4-d022-4aff-9a23-f2c79340baac`; Integration `5b30015a-2fdc-444f-a34e-105f8926e8bf`; Grok ACCEPT `bcad11fd-3b7d-4bbf-8fea-5b5fa58824a8`; bilingual browser and full-suite pass. |
+| FL-109A | Core now provides the single versioned Goal -> Plan -> Task hierarchy that the unified workbench can render without rebuilding lifecycle truth in JavaScript. | Grok Task `feb5fd84-8163-403e-8cf8-51000f547722`; accepted revision `905a8088-0af8-492e-acca-2d66f5191874`, digest `06fd44659c73a58425ff04b3cfb18f3620b6a9d545d0750e1aab601969ae0531`; DeepSeek Review Graph `1ece2e75-b6bb-4435-93ff-ee342ec60638`; Integration `d4a41c40-3962-41a6-aac4-10063575a251`; **2479/2479**. |
 
 FL-107 also exposed one contract-authoring lesson: its first Task omitted
 `workspace.generatedPaths: ["dist/**"]`, so verifier build output inflated the
@@ -301,13 +401,16 @@ ForkLight-only work that does not touch those paths may continue.
 
 ## Action items
 
-Every action must close a named milestone gap. `Now` is intentionally short;
-finishing a Task does not automatically add another Task.
+Every action must close a named milestone gap. `Now` is intentionally short.
+Each iteration plan ends with the already-selected next Task and automatically
+starts it after the current checkpoint; pause only for a real user decision,
+new authority, or a safety/coordination boundary.
 
 ### Now
 
-No implementation slice is in flight. Main selects the next item with 一骏
-before dispatch; completing FL-107 does not silently start another feature.
+| ID | Owner | State | Action | Done when |
+| --- | --- | --- | --- | --- |
+| FL-109B | Main + DeepSeek + Grok | Implementing (`5f89af15-a396-4320-a8cb-d19a0d75d442`) | Replace peer Goal/Plan/Task work views with one read-only hierarchical swimlane Kanban using the FL-109A endpoint, preserved filters, collapse state, and an explanatory Task drawer breadcrumb. | Desktop/mobile and bilingual browser journeys prove that users can understand Goal -> Plan -> Task progress, blockers, inputs/outputs and next action without technical vocabulary; continue automatically to FL-109C. |
 
 ### Next
 
@@ -315,7 +418,8 @@ before dispatch; completing FL-107 does not silently start another feature.
 | --- | --- | --- | --- |
 | FL-101 | M3 | Accumulate natural same-scope evidence and form the first fair comparable cohort; improve recommendations only where the cohort supports it. | At least one comparable exact-class or family cohort; plain-language recommendation and override path verified. |
 | FL-102 | M1 | Run the clean-user protocol on a new macOS account, disposable VM, or new Mac with an unfamiliar user. | Complete worksheet, timing, interventions, comprehension, reviewed delivery, and restart evidence. |
-| FL-108 | M3/UX | Recompose Hub information around “发生了什么、结果是什么、下一步做什么” without deleting evidence. Start by combining configured connection routing and latest real connection evidence into one human sentence instead of repeating a technical caveat on every Worker card. | Main-approved information architecture; bilingual browser audit; default cards are calmer while Task inputs, outputs, process, failure, retained work, cost and technical evidence remain progressively available. |
+| FL-108 | M3/UX | Continue recomposing Hub information around “发生了什么、结果是什么、下一步做什么” without deleting evidence. FL-108A handles Worker cards; later slices must use FL-109's single work hierarchy rather than polishing obsolete peer lists. | Main-approved information architecture; bilingual browser audit; default surfaces are calmer while inputs, outputs, process, failure, retained work, cost and technical evidence remain progressively available. |
+| FL-110 | M2/M3 | Generalize exact Candidate retained-partial handoff from Goal/Competition to an ordinary Task so a replacement Worker can consume safe reusable paths without rebuilding the whole Candidate. | A failed ordinary Task hands one immutable revision and bounded gaps to another Profile; destination verification proves only the remainder was redone and source history stays immutable. |
 
 ### Later
 
@@ -355,6 +459,7 @@ in ForkLight Store or Git history.
 | FL-107 durable Worker networking is integrated | DeepSeek Task `b064f658-88fb-4dbb-9ad8-7e5046260da3`; Candidate `28f133fd-72cf-4c91-9bf7-026df9608577`, digest `89f91ab1c99a556c549441a5c26298f56af7ef552404862e2f2043c4e2ffe689`; Grok Review Graph `192f6c77-34fb-4473-b587-3e33e98c6e9a`; Integration `cc146c23-81e9-4286-84c7-c5e458bc8d27`; full suite **2459/2459** |
 | Grok succeeds without Daemon proxy inheritance | Daemon proxy environment count `0`; saved Profile `local-grok-builder` uses `custom-proxy`; Task `0be3aa84-14b5-41bf-82ea-8df74034f296` returned `FORKLIGHT_GROK_SAVED_PROXY_OK`, zero Diff, 2/2 verification; public event exposed only the mode |
 | Grok proxy failures are infrastructure, not model quality | Preceding Grok pre-Candidate failures were connectivity/transport; repaired path and attention-resolved historical failure are not model-quality, Token savings, or delivery-success evidence |
+| FL-108A Worker-card story is integrated and independently accepted | Candidate `80a8bdf4-d022-4aff-9a23-f2c79340baac`, digest `d1e255f481e5d4d7d05982685e674be6bc3a585d4c3254dd22d80623d6d2b9e0`; Integration `5b30015a-2fdc-444f-a34e-105f8926e8bf`; Grok read-only ACCEPT `bcad11fd-3b7d-4bbf-8fea-5b5fa58824a8`; Review Graph failure `bb160cd6-6de2-4b72-ad14-a7134531ca84` retained as FL-107B infrastructure evidence |
 | FL-106 dual-clock delivery is verified | Grok Task `f5f0fd47-59cc-41ad-a6e3-d02a78227faa`; retained revision `9aaf6e49-3a61-4933-a106-f5f1129c5462`, digest `dded4b57b794fe02cc45e29bd21a9f960e5ec65a8a05d3b695dfe5c6caa30d08`; Main-direct `c17676e3-1fe6-4dda-b2ff-7efc497abcd0`; fresh Grok runtime smoke `fd1679cb-79c1-4253-a77f-ee24acb2f66b`; build + focused checks + **2400/2400** + JavaScript syntax + `git diff --check` |
 | M3 coverage | `routing_evidence_coverage` from the build-matched Daemon: 394/280/159/82; two task-family-scoped multi decisions are not yet reviewed fair outcome cohorts; M3 not complete |
 | M4 paired evidence is insufficient | `dc-cli-20260723-001` for Task `fe894ff7...`; `smp-27cf...` for Task `8de01a79...`; both sample-size one |
@@ -379,7 +484,9 @@ in ForkLight Store or Git history.
    - action state and next action;
    - one compact evidence anchor for a claim that needs auditability.
 5. Move completed actions out of `Now`; do not retain chronological prose.
-   Git and Store preserve history.
+   Git and Store preserve history. Keep the next selected Task as the final plan
+   step and start it automatically after the checkpoint unless a user decision,
+   authority expansion, or safety/coordination boundary requires a pause.
 6. A Worker or automated process may propose an update, but Main verifies the
    source facts and owns the edit to this file.
 7. If this file grows beyond roughly 500 lines, compress it. Do not solve

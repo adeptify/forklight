@@ -30,6 +30,7 @@ import {
   type RuntimeDisplayMetadata,
 } from "../setup/doctor.js";
 import type { DaemonMethod } from "../daemon/protocol.js";
+import { WORK_HIERARCHY_INVALID_FILTER_REASON } from "../core/work-hierarchy.js";
 import {
   providerDefinition,
   providerLabel,
@@ -2855,6 +2856,40 @@ export class HubServer {
       if (opsRoute === "/board" || opsRoute === "/plans") {
         const boards = await this.daemonCall<unknown[]>("plan_board_overview", { limit: 50 });
         this.sendJson(req, res, 200, Array.isArray(boards) ? boards : []);
+        return;
+      }
+      if (opsRoute === "/work-hierarchy") {
+        // Read-only bridge to daemon work_hierarchy. Forwards bounded filters
+        // only — no Hub-side lifecycle joins, no mutation, no auto-start change.
+        const url = new URL(req.url ?? "/", `http://${LOOPBACK}`);
+        const daemonParams: Record<string, unknown> = {};
+        const projectParam = url.searchParams.get("project");
+        if (projectParam !== null) daemonParams.project = projectParam;
+        const workerParam = url.searchParams.get("workerProfileId");
+        if (workerParam !== null) daemonParams.workerProfileId = workerParam;
+        // Support repeated ?column= and single comma-separated ?column=.
+        const columnParams = url.searchParams.getAll("column");
+        if (columnParams.length > 0) {
+          daemonParams.column = columnParams.length === 1
+            ? columnParams[0]
+            : columnParams;
+        }
+        try {
+          const hierarchy = await this.daemonCall<Record<string, unknown>>(
+            "work_hierarchy",
+            daemonParams,
+          );
+          this.sendJson(req, res, 200, hierarchy);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          // Core's fixed invalid-filter reason is privacy-safe; surface it.
+          // Any other daemon failure uses a bounded message.
+          this.sendJson(req, res, msg === WORK_HIERARCHY_INVALID_FILTER_REASON ? 400 : 503, {
+            error: msg === WORK_HIERARCHY_INVALID_FILTER_REASON
+              ? msg
+              : "Work hierarchy is unavailable right now; try again.",
+          });
+        }
         return;
       }
       if (opsRoute === "/goals") {
