@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { buildTaskRecord } from "../src/core/runner.js";
 import { parseTaskSpec } from "../src/core/task.js";
@@ -16,6 +17,8 @@ import {
   type SafeTaskSummary,
 } from "../src/core/task-summary.js";
 import type {
+  CandidateHandoffOrigin,
+  CandidateHandoffRecord,
   DecisionStage,
   DependencyRecord,
   GoalMilestoneRecord,
@@ -687,6 +690,216 @@ test("schema exposes plans as arrays on Goal lanes", async () => {
     const view = projectWorkHierarchy(store, (x) => summaryFor(x, "queued"));
     assert.ok(Array.isArray(view.goals[0]!.plans));
     assert.equal(view.goals[0]!.plans.length, 1);
+  } finally {
+    store.close();
+  }
+});
+
+function handoffRecord(
+  id: string,
+  origin: CandidateHandoffOrigin,
+  sourceTaskId: string,
+  successorTaskId: string,
+): CandidateHandoffRecord {
+  return {
+    schemaVersion: 1,
+    id,
+    status: "prepared",
+    origin,
+    sourceTaskId,
+    sourceCandidateRevisionId: `rev-${id}`,
+    sourcePatchDigest: "a".repeat(64),
+    gapContractDigest: "b".repeat(64),
+    reusablePathCount: 0,
+    remainingGapCount: 0,
+    reusablePaths: [],
+    remainingGaps: [],
+    destinationWorkerProfileId: "grok-builder",
+    destinationIdentity: {
+      provider: "openai",
+      model: "gpt-5.4",
+      runtime: "codex-cli",
+      effort: "medium",
+      workerProfileId: "grok-builder",
+    },
+    successorTaskId,
+    reason: "Handoff ownership regression",
+    createdAt: TS,
+    updatedAt: TS,
+    nextAction: "wait-for-successor",
+  };
+}
+
+test("legacy handoffs without origin load safely and never claim one-off Tasks", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-legacy-handoff-"));
+  const store = new StateStore(home);
+  try {
+    const legacySource = taskRecord("legacy-src", { status: "queued", name: "Legacy source" });
+    const legacySuccessor = taskRecord("legacy-succ", { status: "queued", name: "Legacy successor" });
+    const goalSource = taskRecord("goal-src", { status: "queued", name: "Goal source" });
+    const goalSuccessor = taskRecord("goal-succ", { status: "queued", name: "Goal successor" });
+    const compSource = taskRecord("comp-src", { status: "queued", name: "Competition source" });
+    const compSuccessor = taskRecord("comp-succ", { status: "queued", name: "Competition successor" });
+
+    for (const task of [legacySource, legacySuccessor, goalSource, compSource]) {
+      store.createTask(task);
+    }
+
+    // Current goal-task origin: source and successor stay claimed by the Goal lineage.
+    store.createCandidateHandoff({
+      record: handoffRecord(
+        "goal-handoff",
+        { kind: "goal-task", goalId: "goal-1", itemId: "item-1" },
+        goalSource.id,
+        goalSuccessor.id,
+      ),
+      task: goalSuccessor,
+      authorizationEvent: { summary: "Goal handoff authorized", payload: {} },
+    });
+
+    // Current non-goal (competition) origin: never claimed by the Goal lineage.
+    store.createCandidateHandoff({
+      record: handoffRecord(
+        "comp-handoff",
+        { kind: "competition", competitionId: "comp-1", sourceCandidateId: "cand-1" },
+        compSource.id,
+        compSuccessor.id,
+      ),
+      task: compSuccessor,
+      authorizationEvent: { summary: "Competition handoff authorized", payload: {} },
+    });
+
+    // Legacy durable row predates `origin`: persist a current-format record with
+    // the field stripped so the Store genuinely holds an origin-less handoff.
+    const legacyRecord = handoffRecord(
+      "legacy-handoff",
+      { kind: "goal-task", goalId: "legacy-goal", itemId: "legacy-item" },
+      legacySource.id,
+      legacySuccessor.id,
+    );
+    const legacyJson = JSON.stringify(legacyRecord, (key, value) =>
+      key === "origin" ? undefined : value,
+    );
+    const legacy = new DatabaseSync(store.databasePath);
+    try {
+      legacy.prepare(
+        `INSERT INTO candidate_handoffs
+         (id, source_revision_id, source_task_id, successor_task_id, competition_id,
+          status, record_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        legacyRecord.id,
+        legacyRecord.sourceCandidateRevisionId,
+        legacyRecord.sourceTaskId,
+        legacyRecord.successorTaskId,
+        "",
+        legacyRecord.status,
+        legacyJson,
+        legacyRecord.createdAt,
+        legacyRecord.updatedAt,
+      );
+    } finally {
+      legacy.close();
+    }
+
+    // Prove the Store really reads an origin-less durable handoff (not vacuous).
+    const durable = store.listCandidateHandoffs();
+    assert.equal(durable.length, 3);
+    assert.equal(durable.find((h) => h.id === "legacy-handoff")?.origin, undefined);
+
+    // Projection must not throw and must keep the current ownership split.
+    const view = projectWorkHierarchy(store, (task) => summaryFor(task));
+    const oneOffIds = new Set<string>();
+    if (view.oneOffTasks !== undefined) {
+      for (const code of WORK_HIERARCHY_COLUMNS) {
+        for (const card of view.oneOffTasks.columns[code]) oneOffIds.add(card.taskId);
+      }
+    }
+
+    // Legacy handoff cannot break the board or hide unrelated one-off Tasks.
+    assert.ok(oneOffIds.has("legacy-src"), "legacy source stays one-off");
+    assert.ok(oneOffIds.has("legacy-succ"), "legacy successor stays one-off");
+
+    // Current goal-task handoff keeps claiming source and successor.
+    assert.ok(!oneOffIds.has("goal-src"), "goal source stays owned");
+    assert.ok(!oneOffIds.has("goal-succ"), "goal successor stays owned");
+
+    // Current non-goal handoff is never claimed by the Goal lineage.
+    assert.ok(oneOffIds.has("comp-src"), "competition source stays one-off");
+    assert.ok(oneOffIds.has("comp-succ"), "competition successor stays one-off");
+  } finally {
+    store.close();
+  }
+});
+
+test("every Task card carries a Core-owned action policy covering all seven destinations", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-action-policy-"));
+  const store = new StateStore(home);
+  try {
+    const blocker = taskRecord("policy-blocker", { status: "running", name: "Blocker" });
+    const depHeld = taskRecord("policy-dep", { status: "queued", name: "Dep held" });
+    const delivered = taskRecord("policy-delivered", { status: "succeeded", name: "Delivered" });
+    store.createTask(blocker);
+    store.createTask(depHeld);
+    store.createTask(delivered);
+    const plan: PlanRecord = {
+      id: "policy-plan",
+      name: "Policy Plan",
+      objective: "Policy",
+      planFile: "/tmp/p.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    store.createPlanGraph(
+      plan,
+      [
+        { id: "blocker-item", planId: plan.id, taskId: blocker.id, itemIndex: 0, taskFile: blocker.taskFile },
+        { id: "dep-item", planId: plan.id, taskId: depHeld.id, itemIndex: 1, taskFile: depHeld.taskFile },
+      ],
+      [{ planId: plan.id, itemId: "dep-item", dependsOnItemId: "blocker-item" }],
+    );
+
+    const view = projectWorkHierarchy(store, (task) =>
+      task.id === delivered.id ? summaryFor(task, "delivered") : summaryFor(task, "queued"));
+
+    const cards = flatAllCards(view);
+    assert.equal(cards.length, 3);
+    for (const card of cards) {
+      assert.ok(card.actionPolicy, `card ${card.taskId} carries an actionPolicy`);
+      assert.equal(card.actionPolicy.schemaVersion, 1);
+      const destinations = card.actionPolicy.destinations;
+      for (const code of WORK_HIERARCHY_COLUMNS) {
+        const entry = destinations[code];
+        assert.ok(entry, `destination ${code} present on ${card.taskId}`);
+        assert.equal(entry.column, code);
+      }
+    }
+
+    // Dependency-held Task cannot be made Ready by a manual request.
+    const depCard = findCard(view, "policy-dep")!;
+    assert.equal(depCard.column, "not-started");
+    assert.equal(depCard.placementReason, "dependency-unsatisfied");
+    const depReady = depCard.actionPolicy.destinations.ready;
+    assert.equal(depReady.disposition, "automatic-only");
+    assert.equal(depReady.reason, "dependency-held");
+    assert.equal(depReady.operation, undefined);
+
+    // Delivered Task cannot move backward.
+    const deliveredCard = findCard(view, "policy-delivered")!;
+    assert.equal(deliveredCard.column, "completed");
+    assert.equal(deliveredCard.actionPolicy.destinations.completed.reason, "already-delivered");
+    for (const code of ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "stopped-failed"] as const) {
+      const entry = deliveredCard.actionPolicy.destinations[code];
+      assert.equal(entry.disposition, "no-op", code);
+      assert.equal(entry.operation, undefined, code);
+    }
+
+    // The policy projection is deterministic and privacy-safe.
+    const again = projectWorkHierarchy(store, (task) =>
+      task.id === delivered.id ? summaryFor(task, "delivered") : summaryFor(task, "queued"));
+    assert.deepEqual(again, view);
+    const serialized = JSON.stringify(view);
+    assert.doesNotMatch(serialized, /SECRET_PROMPT|PRIVATE_LOG|sk-private-key|proxy:\/\/evil|resultText/);
   } finally {
     store.close();
   }

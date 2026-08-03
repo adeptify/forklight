@@ -18,6 +18,10 @@ import {
   type BoardScope,
   type SafeTaskSummary,
 } from "./task-summary.js";
+import {
+  projectTaskActionPolicy,
+  type TaskActionPolicy,
+} from "./task-action-policy.js";
 import type {
   DecisionStage,
   DependencyRecord,
@@ -146,6 +150,8 @@ export interface WorkHierarchyTaskCard {
   blockers: WorkHierarchyBlocker[];
   whatCompleted: string;
   nextAction: string;
+  /** Core-owned truthful action policy (FL-109C1). Read-only; Hub never recomputes. */
+  actionPolicy: TaskActionPolicy;
   updatedAt: string;
 }
 
@@ -622,6 +628,18 @@ function whatCompletedForCard(
   return "Nothing completed yet.";
 }
 
+/** True only when the summary carries durable delivered/activated/
+ *  repaired-delivered outcome evidence. Used to fail closed on backward moves. */
+function hasDeliveredSummary(summary: SafeTaskSummary): boolean {
+  return summary.remediationDisposition?.status === "verified-repaired-delivered"
+    || summary.decisionStage === "delivered"
+    || summary.decisionStage === "activated"
+    || (summary.boardScope === "history"
+        && (summary.boardReason === "delivered"
+          || summary.boardReason === "activated"
+          || summary.boardReason === "repaired-delivered"));
+}
+
 // ---------------------------------------------------------------------------
 // Plan projection internals
 // ---------------------------------------------------------------------------
@@ -847,6 +865,20 @@ function projectPlanLane(
       dependenciesSatisfied: depInfo.satisfied,
     });
 
+    // FL-109C1: Core-owned truthful action policy fed only by authoritative
+    // Store evidence. Read-only; the Hub forwards it unchanged.
+    const actionPolicy = projectTaskActionPolicy(store, {
+      taskId: effectiveTaskId,
+      status: summary.status,
+      ...(summary.decisionStage === undefined ? {} : { decisionStage: summary.decisionStage }),
+      ...(summary.boardScope === undefined ? {} : { boardScope: summary.boardScope }),
+      ...(summary.boardReason === undefined ? {} : { boardReason: summary.boardReason }),
+      dependenciesSatisfied: depInfo.satisfied,
+      delivered: hasDeliveredSummary(summary),
+      resolutionState: summary.attentionResolution ?? { status: "none" },
+      currentColumn: placement.column,
+    });
+
     const safeName = sanitiseName(summary.name) ?? sanitiseName(effectiveTask.name) ?? "Task";
     const blockers = buildCardBlockers(namedDependencies, summary.status, safeName);
     const planName = sanitiseName(ctx.plan.name);
@@ -887,6 +919,7 @@ function projectPlanLane(
       blockers,
       whatCompleted: whatCompletedForCard(placement.column, safeName),
       nextAction: nextActionForCard(placement.column, blockers),
+      actionPolicy,
       updatedAt: summary.updatedAt,
     });
   }
@@ -925,6 +958,7 @@ function buildFallbackSummary(task: TaskRecord): SafeTaskSummary {
 }
 
 function projectOneOffCard(
+  store: StateStore,
   task: TaskRecord,
   summary: SafeTaskSummary,
 ): WorkHierarchyTaskCard {
@@ -934,6 +968,17 @@ function projectOneOffCard(
     ...(summary.boardScope === undefined ? {} : { boardScope: summary.boardScope }),
     ...(summary.boardReason === undefined ? {} : { boardReason: summary.boardReason }),
     dependenciesSatisfied: true,
+  });
+  const actionPolicy = projectTaskActionPolicy(store, {
+    taskId: task.id,
+    status: summary.status,
+    ...(summary.decisionStage === undefined ? {} : { decisionStage: summary.decisionStage }),
+    ...(summary.boardScope === undefined ? {} : { boardScope: summary.boardScope }),
+    ...(summary.boardReason === undefined ? {} : { boardReason: summary.boardReason }),
+    dependenciesSatisfied: true,
+    delivered: hasDeliveredSummary(summary),
+    resolutionState: summary.attentionResolution ?? { status: "none" },
+    currentColumn: placement.column,
   });
   const safeName = sanitiseName(summary.name) ?? sanitiseName(task.name) ?? "Task";
   const blockers = buildCardBlockers([], summary.status, safeName);
@@ -961,6 +1006,7 @@ function projectOneOffCard(
     blockers,
     whatCompleted: whatCompletedForCard(placement.column, safeName),
     nextAction: nextActionForCard(placement.column, blockers),
+    actionPolicy,
     updatedAt: summary.updatedAt,
   };
 }
@@ -992,8 +1038,10 @@ export function projectWorkHierarchy(
 
   const claimedTaskIds = new Set<string>();
   // Pre-claim Goal-Task handoff successors so they never become one-off cards.
+  // Legacy durable handoffs written before `origin` existed read as unknown:
+  // fail closed and claim nothing instead of hiding unrelated Tasks.
   for (const handoff of store.listCandidateHandoffs()) {
-    if (handoff.origin.kind === "goal-task") {
+    if (handoff.origin?.kind === "goal-task") {
       claimedTaskIds.add(handoff.sourceTaskId);
       claimedTaskIds.add(handoff.successorTaskId);
     }
@@ -1114,7 +1162,7 @@ export function projectWorkHierarchy(
     // Goal-task handoff successor already claimed; competition successors without
     // plan membership remain honest one-off work.
     const summary = summaries.get(task.id) ?? buildFallbackSummary(task);
-    const card = projectOneOffCard(task, summary);
+    const card = projectOneOffCard(store, task, summary);
     if (!cardMatchesFilter(card, filter)) continue;
     oneOffCards.push(card);
   }

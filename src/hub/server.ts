@@ -32,6 +32,15 @@ import {
 import type { DaemonMethod } from "../daemon/protocol.js";
 import { WORK_HIERARCHY_INVALID_FILTER_REASON } from "../core/work-hierarchy.js";
 import {
+  contractsInvolvedForShape,
+  normalizeOutcomeIntakeCreate,
+  OUTCOME_INTAKE_CONFIRM_IN_PROGRESS_REASON,
+  OUTCOME_INTAKE_NO_PROPOSAL_REASON,
+  OUTCOME_INTAKE_STALE_ARTIFACT_REASON,
+  STALE_OUTCOME_INTAKE_CONFIRM_REASON,
+  type OutcomeIntakeCreateInput,
+} from "../core/outcome-intake.js";
+import {
   providerDefinition,
   providerLabel,
   providerNames,
@@ -2726,6 +2735,28 @@ export class HubServer {
   }
 
   /**
+   * Enrich one canonical outcome-intake view with the same fixed contract
+   * vocabulary D1 derives for the selected shape. The browser never re-derives
+   * projection facts; an unknown or absent proposal passes through unchanged.
+   * No lifecycle state is invented and no private field is exposed.
+   */
+  private projectIntakeView(intake: Record<string, unknown>): Record<string, unknown> {
+    const proposal = intake.proposal;
+    if (proposal === null || typeof proposal !== "object" || Array.isArray(proposal)) {
+      return intake;
+    }
+    const shape = (proposal as { shape?: unknown }).shape;
+    if (shape !== "task" && shape !== "plan" && shape !== "goal") return intake;
+    return {
+      ...intake,
+      proposal: {
+        ...(proposal as Record<string, unknown>),
+        contractsInvolved: contractsInvolvedForShape(shape),
+      },
+    };
+  }
+
+  /**
    * Compact privacy-safe Task allowlist shared by the recent Tasks route and
    * the durable History route so a new field cannot silently appear in only
    * one of them. Forwards the canonical Core board placement only when
@@ -2892,6 +2923,71 @@ export class HubServer {
         }
         return;
       }
+      if (opsRoute === "/intakes") {
+        // Read-only bounded outcome-intake list. Forwards only the optional
+        // closed status and limit filters; never exposes a proposal mutation,
+        // never starts a Worker, and never invents lifecycle state. Each
+        // canonical view is enriched with the same contract vocabulary D1 uses
+        // so the browser never re-derives projection facts.
+        const url = new URL(req.url ?? "/", `http://${LOOPBACK}`);
+        const daemonParams: Record<string, unknown> = {};
+        const statusParam = url.searchParams.get("status");
+        if (statusParam !== null) {
+          if (statusParam !== "pending" && statusParam !== "proposed" && statusParam !== "created") {
+            this.sendJson(req, res, 422, { error: "status must be pending, proposed, or created" });
+            return;
+          }
+          daemonParams.status = statusParam;
+        }
+        const limitParam = url.searchParams.get("limit");
+        if (limitParam !== null) {
+          const parsed = Number(limitParam);
+          if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100) {
+            this.sendJson(req, res, 422, { error: "limit must be an integer from 1 to 100" });
+            return;
+          }
+          daemonParams.limit = parsed;
+        }
+        try {
+          const intakes = await this.daemonCall<Array<Record<string, unknown>>>(
+            "outcome_intake_list",
+            daemonParams,
+          );
+          const views = (Array.isArray(intakes) ? intakes : [])
+            .filter((item): item is Record<string, unknown> =>
+              item !== null && typeof item === "object" && !Array.isArray(item),
+            )
+            .map((item) => this.projectIntakeView(item));
+          this.sendJson(req, res, 200, views);
+        } catch (error) {
+          this.sendJson(req, res, 503, {
+            error: "Outcome intakes are unavailable right now; try again.",
+          });
+        }
+        return;
+      }
+
+      const intakeDetail = opsRoute.match(/^\/intakes\/([^/]+)$/);
+      if (intakeDetail) {
+        const intakeId = decodeURIComponent(intakeDetail[1]!);
+        if (intakeId.length === 0 || intakeId.length > 128) {
+          this.sendJson(req, res, 422, { error: "intakeId is invalid" });
+          return;
+        }
+        try {
+          const intake = await this.daemonCall<Record<string, unknown>>(
+            "outcome_intake_get",
+            { intakeId },
+          );
+          this.sendJson(req, res, 200, this.projectIntakeView(intake));
+        } catch (error) {
+          this.sendJson(req, res, 503, {
+            error: "Outcome intake is unavailable right now; try again.",
+          });
+        }
+        return;
+      }
+
       if (opsRoute === "/goals") {
         const goals = await this.daemonCall<unknown[]>("goal_list", { limit: 50 });
         // Privacy-safe Goal projections from the daemon; never re-enrich with private content.
@@ -3312,6 +3408,109 @@ export class HubServer {
   ): Promise<void> {
     const body = (await this.readBody(req)) ?? {};
     try {
+      // POST /api/ops/intakes — record one pending outcome intake.
+      // Validates strictly through the canonical D1 create normalizer (single
+      // source of truth), then forwards the closed field set to the daemon.
+      // Never proposes, confirms, or creates Task/Plan/Goal work: the browser
+      // has no proposal mutation and no confirmation endpoint.
+      if (opsRoute === "/intakes") {
+        let normalized: OutcomeIntakeCreateInput;
+        try {
+          normalized = normalizeOutcomeIntakeCreate(body);
+        } catch (error) {
+          this.sendJson(req, res, 422, {
+            error: error instanceof Error ? error.message : "Invalid outcome intake",
+          });
+          return;
+        }
+        try {
+          // Forward only the closed normalized create fields. Building the
+          // params object explicitly keeps the Record boundary type-safe
+          // without an assertion and without weakening the validation above.
+          const params: Record<string, unknown> = {
+            outcome: normalized.outcome,
+            requestedShape: normalized.requestedShape,
+            ...(normalized.project === undefined ? {} : { project: normalized.project }),
+            ...(normalized.context === undefined ? {} : { context: normalized.context }),
+          };
+          const intake = await this.daemonCall<Record<string, unknown>>(
+            "outcome_intake_create",
+            params,
+          );
+          this.sendJson(req, res, 200, {
+            ok: true,
+            action: "outcome_intake_create",
+            intake,
+          });
+        } catch (error) {
+          this.sendJson(req, res, 503, {
+            error: "Outcome intake could not be recorded; nothing was created.",
+          });
+        }
+        return;
+      }
+
+      // POST /api/ops/intakes/:id/confirm
+      // One closed explicit confirmation bridge to the canonical D3A
+      // outcome_intake_confirm authority. The path supplies a bounded intake
+      // id; the body contains only expectedRevision and the literal
+      // confirm:true. The Hub never sees the private artifact path, never
+      // chooses a shape, never creates work locally, never inserts an
+      // optimistic card, and never retries automatically.
+      const intakeConfirm = opsRoute.match(/^\/intakes\/([^/]+)\/confirm$/);
+      if (intakeConfirm) {
+        const intakeId = decodeURIComponent(intakeConfirm[1]!);
+        if (intakeId.length === 0 || intakeId.length > 128) {
+          this.sendJson(req, res, 422, { error: "intakeId is invalid" });
+          return;
+        }
+        if (!exactOwnKeys(body, new Set(["expectedRevision", "confirm"])) || body.confirm !== true) {
+          this.sendJson(req, res, 422, {
+            error: "outcome intake confirmation requires confirm: true and expectedRevision only",
+          });
+          return;
+        }
+        const expectedRevision = body.expectedRevision;
+        if (typeof expectedRevision !== "number" || !Number.isSafeInteger(expectedRevision)
+          || expectedRevision < 1) {
+          this.sendJson(req, res, 422, { error: "expectedRevision must be a positive integer" });
+          return;
+        }
+        try {
+          const result = await this.daemonCall<{
+            intake?: Record<string, unknown> | null;
+            receipt?: Record<string, unknown> | null;
+          }>("outcome_intake_confirm", { intakeId, expectedRevision, confirm: true });
+          const intake = result && result.intake;
+          const receipt = result && result.receipt;
+          if (!intake || !receipt) {
+            this.sendJson(req, res, 503, {
+              error: "Outcome intake confirmation returned no receipt; re-read the intake.",
+            });
+            return;
+          }
+          this.sendJson(req, res, 200, {
+            ok: true,
+            action: "outcome_intake_confirm",
+            intake: this.projectIntakeView(intake),
+            receipt,
+          });
+        } catch (error) {
+          // The daemon's fixed privacy-safe reasons become bounded codes the
+          // browser owns as plain-language copy. Any other failure is the
+          // uncertain-network story: never claim nothing happened.
+          const msg = error instanceof Error ? error.message : String(error);
+          let code: string;
+          if (msg === STALE_OUTCOME_INTAKE_CONFIRM_REASON) code = "stale-revision";
+          else if (msg === OUTCOME_INTAKE_STALE_ARTIFACT_REASON) code = "stale-artifact";
+          else if (msg === OUTCOME_INTAKE_CONFIRM_IN_PROGRESS_REASON) code = "in-progress";
+          else if (msg === OUTCOME_INTAKE_NO_PROPOSAL_REASON) code = "no-proposal";
+          else code = "network";
+          this.sendJson(req, res, code === "network" ? 503 : 422, { error: code });
+        }
+        return;
+      }
+
       // POST /api/ops/tasks/:id/resume
       const resume = opsRoute.match(/^\/tasks\/([^/]+)\/resume$/);
       if (resume) {

@@ -632,6 +632,107 @@ async function makeOpsHub(options: { guidedSample?: boolean } = {}) {
           lineageId: "lineage-1",
         } as T;
       }
+      if (method === "outcome_intake_create") {
+        return {
+          schemaVersion: 1,
+          id: "intake-1",
+          status: "pending",
+          outcome: String(params.outcome ?? ""),
+          ...(typeof params.project === "string" ? { project: params.project } : {}),
+          ...(typeof params.context === "string" ? { context: params.context } : {}),
+          requestedShape: typeof params.requestedShape === "string" ? params.requestedShape : "auto",
+          revision: 1,
+          createdAt: "2026-08-03T00:00:00.000Z",
+          updatedAt: "2026-08-03T00:00:00.000Z",
+        } as T;
+      }
+      if (method === "outcome_intake_list") {
+        return [{
+          schemaVersion: 1,
+          id: "intake-1",
+          status: "pending",
+          outcome: "Deliver a bounded result",
+          requestedShape: "auto",
+          revision: 1,
+          createdAt: "2026-08-03T00:00:00.000Z",
+          updatedAt: "2026-08-03T00:00:00.000Z",
+        }] as T;
+      }
+      if (method === "outcome_intake_get") {
+        return {
+          schemaVersion: 1,
+          id: String(params.intakeId),
+          status: "proposed",
+          outcome: "Deliver a bounded result",
+          requestedShape: "plan",
+          revision: 2,
+          createdAt: "2026-08-03T00:00:00.000Z",
+          updatedAt: "2026-08-03T00:00:01.000Z",
+          proposal: {
+            shape: "task",
+            reason: "One bounded Task fits this outcome",
+            artifactKind: "task-contract",
+            artifactDigestPrefix: "a".repeat(16),
+            displayName: "Bounded outcome task",
+            objective: "Produce one bounded, independently verifiable result for this intake",
+            taskCount: 1,
+            proposedAt: "2026-08-03T00:00:01.000Z",
+          },
+        } as T;
+      }
+      if (method === "outcome_intake_confirm") {
+        if (params.confirm !== true) {
+          throw new Error("outcome intake confirmation requires confirm: true");
+        }
+        if (params.intakeId !== "intake-1") throw new Error("Unknown ForkLight intake");
+        if (typeof params.expectedRevision !== "number" || !Number.isSafeInteger(params.expectedRevision)
+          || params.expectedRevision < 1) {
+          throw new Error("expectedRevision must be a positive integer");
+        }
+        if (params.expectedRevision !== 2) {
+          throw new Error("Outcome intake revision is out of date; re-read the intake before confirming.");
+        }
+        return {
+          intake: {
+            schemaVersion: 1,
+            id: "intake-1",
+            status: "created",
+            outcome: "Deliver a bounded result",
+            requestedShape: "plan",
+            revision: 3,
+            createdAt: "2026-08-03T00:00:00.000Z",
+            updatedAt: "2026-08-03T00:00:02.000Z",
+            proposal: {
+              shape: "task",
+              reason: "One bounded Task fits this outcome",
+              artifactKind: "task-contract",
+              artifactDigestPrefix: "a".repeat(16),
+              displayName: "Bounded outcome task",
+              objective: "Produce one bounded, independently verifiable result for this intake",
+              taskCount: 1,
+              proposedAt: "2026-08-03T00:00:01.000Z",
+            },
+            confirmation: {
+              receiptId: "receipt-1",
+              intakeId: "intake-1",
+              proposalRevision: 2,
+              artifactDigestPrefix: "a".repeat(16),
+              shape: "task",
+              taskIds: ["task-created-1"],
+              confirmedAt: "2026-08-03T00:00:02.000Z",
+            },
+          },
+          receipt: {
+            receiptId: "receipt-1",
+            intakeId: "intake-1",
+            proposalRevision: 2,
+            artifactDigestPrefix: "a".repeat(16),
+            shape: "task",
+            taskIds: ["task-created-1"],
+            confirmedAt: "2026-08-03T00:00:02.000Z",
+          },
+        } as T;
+      }
       throw new Error(`unexpected method ${method}`);
     },
   });
@@ -2792,5 +2893,396 @@ test("Task Detail without decision stage falls back gracefully", async () => {
   } finally {
     await server.stop();
     store.close();
+  }
+});
+
+// --- FL-109D2 outcome intake Hub bridge ---
+
+test("POST /api/ops/intakes records a pending intake with zero work side effects", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const res = await doHttp(`${ctx.base}/api/ops/intakes`, "POST", ctx.token, {
+      outcome: "Recalculate checkout totals correctly",
+      project: "/tmp/proj",
+      context: "Existing behavior is known",
+      requestedShape: "plan",
+    });
+    assert.equal(res.status, 200);
+    const body = res.body as { ok: boolean; action: string; intake: Record<string, unknown> };
+    assert.equal(body.ok, true);
+    assert.equal(body.action, "outcome_intake_create");
+    assert.equal(body.intake.id, "intake-1");
+    assert.equal(body.intake.status, "pending");
+    assert.equal(body.intake.outcome, "Recalculate checkout totals correctly");
+    assert.equal(body.intake.requestedShape, "plan");
+    assert.equal(body.intake.project, "/tmp/proj");
+    const call = ctx.calls.find((c) => c.method === "outcome_intake_create");
+    assert.ok(call, "outcome_intake_create called");
+    assert.deepEqual(call!.params, {
+      outcome: "Recalculate checkout totals correctly",
+      project: "/tmp/proj",
+      context: "Existing behavior is known",
+      requestedShape: "plan",
+    });
+    const mutating = [
+      "outcome_intake_propose", "submit_file", "plan_submit_file", "goal_submit_file",
+      "goal_submit", "plan_submit", "resume", "main_review",
+    ];
+    for (const method of mutating) {
+      assert.ok(!ctx.calls.some((c) => c.method === method), `${method} must not be called by create`);
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("POST /api/ops/intakes validates the closed field set before any daemon call", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const before = ctx.calls.length;
+    const missing = await doHttp(`${ctx.base}/api/ops/intakes`, "POST", ctx.token, {});
+    assert.equal(missing.status, 422);
+    const blank = await doHttp(`${ctx.base}/api/ops/intakes`, "POST", ctx.token, { outcome: "   " });
+    assert.equal(blank.status, 422);
+    const badShape = await doHttp(`${ctx.base}/api/ops/intakes`, "POST", ctx.token, {
+      outcome: "ok", requestedShape: "bogus",
+    });
+    assert.equal(badShape.status, 422);
+    const extra = await doHttp(`${ctx.base}/api/ops/intakes`, "POST", ctx.token, {
+      outcome: "ok", confirm: true,
+    });
+    assert.equal(extra.status, 422);
+    const overlong = await doHttp(`${ctx.base}/api/ops/intakes`, "POST", ctx.token, {
+      outcome: "x".repeat(2001),
+    });
+    assert.equal(overlong.status, 422);
+    assert.equal(ctx.calls.length, before, "no daemon call on any validation failure");
+    const json = JSON.stringify(missing.body);
+    assert.ok(!json.includes("\n    at "), "no raw stack in validation errors");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("GET /api/ops/intakes returns a bounded canonical list and forwards filters read-only", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const res = await doHttp(`${ctx.base}/api/ops/intakes?status=pending&limit=5`, "GET", ctx.token);
+    assert.equal(res.status, 200);
+    const list = res.body as Array<Record<string, unknown>>;
+    assert.equal(list.length, 1);
+    assert.equal(list[0]!.id, "intake-1");
+    assert.equal(list[0]!.status, "pending");
+    const call = ctx.calls.find((c) => c.method === "outcome_intake_list");
+    assert.ok(call, "outcome_intake_list called");
+    assert.deepEqual(call!.params, { status: "pending", limit: 5 });
+    const mutating = [
+      "outcome_intake_propose", "submit_file", "plan_submit_file", "goal_submit_file",
+      "submit", "resume", "goal_advance",
+    ];
+    for (const method of mutating) {
+      assert.ok(!ctx.calls.some((c) => c.method === method), `${method} must not be called by list`);
+    }
+
+    const badStatus = await doHttp(`${ctx.base}/api/ops/intakes?status=running`, "GET", ctx.token);
+    assert.equal(badStatus.status, 422);
+    const badLimit = await doHttp(`${ctx.base}/api/ops/intakes?limit=0`, "GET", ctx.token);
+    assert.equal(badLimit.status, 422);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("GET /api/ops/intakes/:id returns a canonical proposed view with contract vocabulary", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const res = await doHttp(`${ctx.base}/api/ops/intakes/intake-1`, "GET", ctx.token);
+    assert.equal(res.status, 200);
+    const body = res.body as Record<string, unknown>;
+    assert.equal(body.id, "intake-1");
+    assert.equal(body.status, "proposed");
+    assert.equal(body.requestedShape, "plan");
+    const proposal = body.proposal as Record<string, unknown>;
+    assert.equal(proposal.shape, "task");
+    assert.equal(proposal.reason, "One bounded Task fits this outcome");
+    assert.equal(proposal.artifactDigestPrefix, "a".repeat(16));
+    assert.deepEqual(proposal.contractsInvolved, ["task-contract-v2"]);
+    const json = JSON.stringify(body);
+    assert.ok(!json.includes("artifactPath"), "artifact path must never be projected");
+    assert.ok(!json.includes("proposal.artifactPath"), "private field name must not leak");
+    const call = ctx.calls.find((c) => c.method === "outcome_intake_get");
+    assert.ok(call, "outcome_intake_get called");
+    assert.deepEqual(call!.params, { intakeId: "intake-1" });
+    assert.ok(!ctx.calls.some((c) => c.method === "outcome_intake_propose"));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("outcome intake routes are authenticated and reject bad ids without daemon calls", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const before = ctx.calls.length;
+    const unauthorized = await doHttp(`${ctx.base}/api/ops/intakes`, "GET");
+    assert.equal(unauthorized.status, 401);
+    assert.equal(ctx.calls.length, before, "no daemon call without token");
+
+    const createUnauthorized = await doHttp(`${ctx.base}/api/ops/intakes`, "POST", undefined, {
+      outcome: "nope",
+    });
+    assert.equal(createUnauthorized.status, 401);
+    assert.equal(ctx.calls.length, before);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("outcome intake list failure returns a bounded message and never echoes daemon text", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-intake-err-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, _params: Record<string, unknown> = {}) => {
+      if (method === "outcome_intake_list") {
+        throw new Error("outcome_intake_list unavailable - /private/intakes.json - secretValue");
+      }
+      return {} as T;
+    },
+  });
+  const port = await server.start();
+  try {
+    const res = await doHttp(`http://127.0.0.1:${port}/api/ops/intakes`, "GET", server.getToken());
+    assert.equal(res.status, 503);
+    const body = res.body as { error?: string };
+    assert.ok(typeof body.error === "string" && body.error.includes("Outcome intakes"));
+    const json = JSON.stringify(body);
+    assert.ok(!json.includes("secretValue"), "no raw secret");
+    assert.ok(!json.includes("/private/intakes.json"), "no raw path");
+    assert.ok(!json.includes("outcome_intake_list unavailable"), "no raw daemon text");
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+// --- FL-109D3B explicit Hub confirmation bridge ---
+
+test("POST /api/ops/intakes/:id/confirm forwards only the closed fields and returns canonical created truth", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const res = await doHttp(
+      `${ctx.base}/api/ops/intakes/intake-1/confirm`,
+      "POST",
+      ctx.token,
+      { expectedRevision: 2, confirm: true },
+    );
+    assert.equal(res.status, 200);
+    const body = res.body as {
+      ok: boolean;
+      action: string;
+      intake: Record<string, unknown>;
+      receipt: Record<string, unknown>;
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.action, "outcome_intake_confirm");
+    assert.equal(body.intake.id, "intake-1");
+    assert.equal(body.intake.status, "created");
+    assert.equal(body.intake.revision, 3);
+    assert.equal(body.receipt.receiptId, "receipt-1");
+    assert.equal(body.receipt.shape, "task");
+    assert.deepEqual(body.receipt.taskIds, ["task-created-1"]);
+    // The confirmation projection is enriched with the same contract vocabulary.
+    const proposal = body.intake.proposal as Record<string, unknown>;
+    assert.deepEqual(proposal.contractsInvolved, ["task-contract-v2"]);
+    const call = ctx.calls.find((c) => c.method === "outcome_intake_confirm");
+    assert.ok(call, "outcome_intake_confirm called");
+    assert.deepEqual(call!.params, { intakeId: "intake-1", expectedRevision: 2, confirm: true });
+    const json = JSON.stringify(body);
+    assert.ok(!json.includes("artifactPath"), "artifact path is never forwarded or projected");
+    assert.ok(!json.includes("context"), "context is never forwarded");
+    assert.ok(!json.includes('"context"'), "no context field in the projection");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("POST /api/ops/intakes/:id/confirm validates the closed body before any daemon call", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const before = ctx.calls.length;
+    const unauthorized = await doHttp(
+      `${ctx.base}/api/ops/intakes/intake-1/confirm`,
+      "POST",
+      undefined,
+      { expectedRevision: 2, confirm: true },
+    );
+    assert.equal(unauthorized.status, 401);
+    assert.equal(ctx.calls.length, before, "no daemon call without token");
+
+    const noConfirm = await doHttp(
+      `${ctx.base}/api/ops/intakes/intake-1/confirm`,
+      "POST",
+      ctx.token,
+      { expectedRevision: 2 },
+    );
+    assert.equal(noConfirm.status, 422);
+    const missingRev = await doHttp(
+      `${ctx.base}/api/ops/intakes/intake-1/confirm`,
+      "POST",
+      ctx.token,
+      { confirm: true },
+    );
+    assert.equal(missingRev.status, 422);
+    const badRev = await doHttp(
+      `${ctx.base}/api/ops/intakes/intake-1/confirm`,
+      "POST",
+      ctx.token,
+      { expectedRevision: 0, confirm: true },
+    );
+    assert.equal(badRev.status, 422);
+    const extraField = await doHttp(
+      `${ctx.base}/api/ops/intakes/intake-1/confirm`,
+      "POST",
+      ctx.token,
+      { expectedRevision: 2, confirm: true, artifactPath: "/tmp/private.yaml" },
+    );
+    assert.equal(extraField.status, 422);
+    const json = JSON.stringify(extraField.body);
+    assert.ok(!json.includes("/tmp/private.yaml"), "rejected extra field is never echoed");
+    const emptyId = await doHttp(
+      `${ctx.base}/api/ops/intakes//confirm`,
+      "POST",
+      ctx.token,
+      { expectedRevision: 2, confirm: true },
+    );
+    assert.equal(emptyId.status, 404, "an empty intake id has no route");
+    assert.equal(ctx.calls.length, before, "no daemon call on any validation failure");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("POST /api/ops/intakes/:id/confirm maps bounded daemon failures to plain-language codes", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-hub-confirm-err-"));
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const keychain = new MemoryKeychain();
+  const setup = new SetupService(settings, keychain, inspector());
+  const staticDir = path.join(home, "static");
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const failures = new Map<string, string>([
+    ["fail-stale-revision", "Outcome intake revision is out of date; re-read the intake before confirming."],
+    ["fail-stale-artifact", "Outcome intake artifact graph changed after proposal; re-read the intake before confirming."],
+    ["fail-in-progress", "Outcome intake confirmation is already in progress; re-read the intake before confirming."],
+    ["fail-no-proposal", "Outcome intake has no Main proposal to confirm."],
+    ["fail-network", "the socket died mid-flight"],
+  ]);
+  const server = new HubServer({
+    settings,
+    setup,
+    keychain,
+    staticRoot: staticDir,
+    account: () => "hub-ops-user",
+    port: 0,
+    ensureDaemon: async () => ({ ok: true, pid: 99 }),
+    probeDaemon: async () => ({ running: true, health: { ok: true, pid: 99 } }),
+    daemonRequest: async <T>(method: string, params: Record<string, unknown> = {}) => {
+      calls.push({ method, params });
+      if (method !== "outcome_intake_confirm") throw new Error(`unexpected ${method}`);
+      const cause = failures.get(String(params.intakeId));
+      if (cause !== undefined) throw new Error(cause);
+      return {} as T;
+    },
+  });
+  const port = await server.start();
+  try {
+    const expected = [
+      ["fail-stale-revision", "stale-revision", 422],
+      ["fail-stale-artifact", "stale-artifact", 422],
+      ["fail-in-progress", "in-progress", 422],
+      ["fail-no-proposal", "no-proposal", 422],
+      ["fail-network", "network", 503],
+    ] as const;
+    for (const [id, code, status] of expected) {
+      const res = await doHttp(
+        `http://127.0.0.1:${port}/api/ops/intakes/${id}/confirm`,
+        "POST",
+        server.getToken(),
+        { expectedRevision: 2, confirm: true },
+      );
+      assert.equal(res.status, status, `${id} status`);
+      assert.deepEqual(res.body, { error: code }, `${id} code`);
+    }
+    assert.equal(calls.filter((c) => c.method === "outcome_intake_confirm").length, 5,
+      "exactly one daemon confirm per failure case");
+    // The daemon fixed reasons are never echoed back; only the closed code is.
+    const serialized = JSON.stringify(calls);
+    assert.ok(!serialized.includes("/private/intakes.json"));
+  } finally {
+    await server.stop();
+    store.close();
+  }
+});
+
+test("GET /api/ops/intakes accepts the canonical created status filter", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const res = await doHttp(`${ctx.base}/api/ops/intakes?status=created`, "GET", ctx.token);
+    assert.equal(res.status, 200);
+    const list = res.body as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(list));
+    const call = ctx.calls.find((c) => c.method === "outcome_intake_list");
+    assert.ok(call, "outcome_intake_list called");
+    assert.deepEqual(call!.params, { status: "created" });
+    const badStatus = await doHttp(`${ctx.base}/api/ops/intakes?status=running`, "GET", ctx.token);
+    assert.equal(badStatus.status, 422);
+    assert.equal((badStatus.body as { error: string }).error, "status must be pending, proposed, or created");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("idempotent confirm returns the same canonical receipt on identical requests", async () => {
+  const ctx = await makeOpsHub();
+  try {
+    const first = await doHttp(
+      `${ctx.base}/api/ops/intakes/intake-1/confirm`,
+      "POST",
+      ctx.token,
+      { expectedRevision: 2, confirm: true },
+    );
+    const second = await doHttp(
+      `${ctx.base}/api/ops/intakes/intake-1/confirm`,
+      "POST",
+      ctx.token,
+      { expectedRevision: 2, confirm: true },
+    );
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    const firstBody = first.body as { receipt: Record<string, unknown> };
+    const secondBody = second.body as { receipt: Record<string, unknown> };
+    assert.equal(firstBody.receipt.receiptId, "receipt-1");
+    assert.equal(secondBody.receipt.receiptId, "receipt-1");
+    assert.deepEqual(secondBody.receipt.taskIds, firstBody.receipt.taskIds);
+    assert.equal(ctx.calls.filter((c) => c.method === "outcome_intake_confirm").length, 2,
+      "each explicit request is forwarded; the daemon authority deduplicates");
+  } finally {
+    await ctx.cleanup();
   }
 });

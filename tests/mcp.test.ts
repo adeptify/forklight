@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -112,6 +112,11 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_main_failure_attribution",
         "forklight_main_review",
         "forklight_model_routing",
+        "forklight_outcome_intake_confirm",
+        "forklight_outcome_intake_create",
+        "forklight_outcome_intake_get",
+        "forklight_outcome_intake_list",
+        "forklight_outcome_intake_propose",
         "forklight_plan_board",
         "forklight_plan_inspect",
         "forklight_plan_submit",
@@ -154,6 +159,275 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
     await client.close();
     await server.close();
     await daemon.close();
+  }
+});
+
+test("MCP outcome intake records, proposes, reads, and lists without creating work", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-outcome-"));
+  const project = path.join(home, "project");
+  await mkdir(project, { recursive: true });
+  const taskFile = path.join(home, "task.json");
+  await writeFile(
+    taskFile,
+    JSON.stringify(
+      {
+        version: 2,
+        name: "MCP outcome task",
+        project: "./project",
+        contract: {
+          outcome: "Produce one bounded, independently verifiable result for this intake",
+          context: ["Existing behavior is known and documented"],
+          inScope: ["Make the smallest coherent change that satisfies the outcome"],
+          outOfScope: ["Do not touch unrelated areas or external systems"],
+          executionSteps: ["Inspect the relevant code paths", "Apply the smallest coherent change"],
+          deliverables: ["Updated behavior with the acceptance command passing"],
+          modules: [
+            {
+              name: "bounded result",
+              responsibility: "Produce the one bounded result while preserving existing behavior",
+              consumes: ["declared inputs"],
+              produces: ["a validated result"],
+              boundaries: ["no undeclared mutation"],
+            },
+          ],
+          callChain: [
+            "The caller provides declared inputs",
+            "The Worker produces the validated result",
+            "The acceptance command verifies the result",
+          ],
+          scenarios: [
+            {
+              name: "nominal",
+              given: "declared inputs are valid",
+              when: "the task runs",
+              then: "the result is produced and verified",
+            },
+            {
+              name: "boundary",
+              given: "an edge input is supplied",
+              when: "the task runs",
+              then: "behavior stays bounded and safe",
+            },
+          ],
+          risks: ["Behavior drift from an over-broad change"],
+          changeBudget: { maxFiles: 4, maxDiffLines: 200 },
+        },
+        provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.mcp.outcome-intake.test" },
+        runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: null },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+        acceptance: { criteria: ["The outcome is satisfied"], commands: ["true"] },
+      },
+      null,
+      2,
+    ),
+  );
+
+  const daemon = new ForkLightDaemon(home, 1);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const created = await client.callTool({
+      name: "forklight_outcome_intake_create",
+      arguments: { outcome: "A bounded MCP outcome", requestedShape: "auto" },
+    });
+    assert.equal(created.isError, undefined);
+    const createdData = created.structuredContent as {
+      id?: string;
+      status?: string;
+      revision?: number;
+    };
+    assert.equal(createdData.status, "pending");
+    assert.equal(createdData.revision, 1);
+    const intakeId = createdData.id as string;
+
+    const proposed = await client.callTool({
+      name: "forklight_outcome_intake_propose",
+      arguments: {
+        intakeId,
+        expectedRevision: 1,
+        shape: "task",
+        reason: "One Task fits this bounded outcome",
+        artifactPath: taskFile,
+      },
+    });
+    assert.equal(proposed.isError, undefined);
+    const proposedData = proposed.structuredContent as {
+      intake?: Record<string, unknown>;
+      preview?: Record<string, unknown>;
+    };
+    assert.equal(proposedData.preview?.selectedShape, "task");
+    assert.equal(proposedData.preview?.taskCount, 1);
+    assert.equal(proposedData.preview?.confirmationHappened, false);
+    assert.equal(proposedData.preview?.workCreated, 0);
+    assert.equal(proposedData.intake?.revision, 2);
+
+    const got = await client.callTool({
+      name: "forklight_outcome_intake_get",
+      arguments: { intakeId },
+    });
+    assert.equal(got.isError, undefined);
+    const gotData = got.structuredContent as {
+      status?: string;
+      revision?: number;
+      proposal?: Record<string, unknown>;
+    };
+    assert.equal(gotData.status, "proposed");
+    assert.equal(gotData.revision, 2);
+    assert.equal(gotData.proposal?.shape, "task");
+    assert.equal(gotData.proposal?.artifactPath, undefined, "artifact path must never be projected");
+
+    const listed = await client.callTool({
+      name: "forklight_outcome_intake_list",
+      arguments: { status: "proposed", limit: 1 },
+    });
+    assert.equal(listed.isError, undefined);
+    const listedData = listed.structuredContent as { intakes?: Array<{ id?: string }> };
+    assert.equal(listedData.intakes?.length, 1);
+    assert.equal(listedData.intakes?.[0]?.id, intakeId);
+
+    const limited = await client.callTool({
+      name: "forklight_outcome_intake_list",
+      arguments: { limit: 1 },
+    });
+    assert.equal(limited.isError, undefined);
+    const limitedData = limited.structuredContent as { intakes?: Array<{ id?: string }> };
+    assert.equal(limitedData.intakes?.length, 1);
+    assert.equal(limitedData.intakes?.[0]?.id, intakeId);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("MCP confirms an outcome intake once and retries return the same receipt without duplicate work", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-outcome-confirm-"));
+  const project = path.join(home, "project");
+  await mkdir(project, { recursive: true });
+  const taskFile = path.join(home, "task.json");
+  await writeFile(
+    taskFile,
+    JSON.stringify(
+      {
+        version: 2,
+        name: "MCP confirm task",
+        project: "./project",
+        contract: {
+          outcome: "Produce one bounded, independently verifiable result for this intake",
+          context: ["Existing behavior is known and documented"],
+          inScope: ["Make the smallest coherent change that satisfies the outcome"],
+          outOfScope: ["Do not touch unrelated areas or external systems"],
+          executionSteps: ["Inspect the relevant code paths", "Apply the smallest coherent change"],
+          deliverables: ["Updated behavior with the acceptance command passing"],
+          modules: [
+            {
+              name: "bounded result",
+              responsibility: "Produce the one bounded result while preserving existing behavior",
+              consumes: ["declared inputs"],
+              produces: ["a validated result"],
+              boundaries: ["no undeclared mutation"],
+            },
+          ],
+          callChain: [
+            "The caller provides declared inputs",
+            "The Worker produces the validated result",
+            "The acceptance command verifies the result",
+          ],
+          scenarios: [
+            {
+              name: "nominal",
+              given: "declared inputs are valid",
+              when: "the task runs",
+              then: "the result is produced and verified",
+            },
+            {
+              name: "boundary",
+              given: "an edge input is supplied",
+              when: "the task runs",
+              then: "behavior stays bounded and safe",
+            },
+          ],
+          risks: ["Behavior drift from an over-broad change"],
+          changeBudget: { maxFiles: 4, maxDiffLines: 200 },
+        },
+        provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.mcp.outcome-confirm.test" },
+        runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: null },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+        acceptance: { criteria: ["The outcome is satisfied"], commands: ["true"] },
+      },
+      null,
+      2,
+    ),
+  );
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const created = await client.callTool({
+      name: "forklight_outcome_intake_create",
+      arguments: { outcome: "A confirmed MCP outcome", requestedShape: "auto" },
+    });
+    const intakeId = (created.structuredContent as { id?: string }).id as string;
+
+    await client.callTool({
+      name: "forklight_outcome_intake_propose",
+      arguments: {
+        intakeId,
+        expectedRevision: 1,
+        shape: "task",
+        reason: "One Task fits this bounded outcome",
+        artifactPath: taskFile,
+      },
+    });
+
+    const confirmed = await client.callTool({
+      name: "forklight_outcome_intake_confirm",
+      arguments: { intakeId, expectedRevision: 2, confirm: true },
+    });
+    assert.equal(confirmed.isError, undefined);
+    const confirmedData = confirmed.structuredContent as {
+      intake?: Record<string, unknown>;
+      receipt?: Record<string, unknown>;
+    };
+    assert.equal(confirmedData.intake?.status, "created");
+    assert.equal(confirmedData.receipt?.shape, "task");
+    const taskIds = confirmedData.receipt?.taskIds as unknown[] | undefined;
+    assert.equal(taskIds?.length, 1);
+
+    const retry = await client.callTool({
+      name: "forklight_outcome_intake_confirm",
+      arguments: { intakeId, expectedRevision: 2, confirm: true },
+    });
+    assert.equal(retry.isError, undefined);
+    const retryData = retry.structuredContent as { receipt?: Record<string, unknown> };
+    assert.equal(retryData.receipt?.receiptId, confirmedData.receipt?.receiptId);
+    assert.deepEqual(retryData.receipt?.taskIds, confirmedData.receipt?.taskIds);
+
+    const got = await client.callTool({
+      name: "forklight_outcome_intake_get",
+      arguments: { intakeId },
+    });
+    const gotData = got.structuredContent as { status?: string; confirmation?: Record<string, unknown> };
+    assert.equal(gotData.status, "created");
+    assert.equal(gotData.confirmation?.receiptId, confirmedData.receipt?.receiptId);
+    assert.ok(!JSON.stringify(gotData).includes(taskFile), "MCP view must not expose the artifact path");
+    assert.ok(!JSON.stringify(gotData).includes("artifactPath"), "MCP view must not name the private field");
+
+    const tasks = await daemonRequest<unknown[]>("list", {}, home);
+    assert.equal(tasks.length, 1, "MCP confirmation created exactly one Task");
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+    await rm(home, { recursive: true, force: true });
   }
 });
 

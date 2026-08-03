@@ -25,7 +25,7 @@ test("Hub public assets exist with configure + operate chrome", async () => {
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   assert.ok(html.includes("<!DOCTYPE html>"));
-  assert.ok(html.includes('data-tab="model"') && html.includes('data-tab="tasks"'));
+  assert.ok(html.includes('data-tab="model"') && html.includes('data-tab="work"'));
   assert.ok(html.includes('id="fl-detail"'));
   assert.ok(js.includes("X-ForkLight-Hub-Token"));
   assert.ok(js.includes("function kanbanCard"));
@@ -138,7 +138,9 @@ test("Hub explains durable Goal supervision with bilingual next actions", async 
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
-  assert.ok(html.includes('data-tab="goals"'));
+  assert.ok(html.includes('data-tab="work"'), "Work is the single operate surface entry");
+  assert.ok(!html.includes('data-tab="goals"') && !html.includes('data-tab="plans"') && !html.includes('data-tab="tasks"'),
+    "peer Board/Plans/Goals navigation is folded into Work");
   assert.ok(src.includes("function rGoals("));
   assert.ok(src.includes("function showGoalDetail("));
   assert.ok(src.includes('data-fl-role", "goal-detail"'));
@@ -640,8 +642,9 @@ test("Hub app.js security and decision-drawer invariants", async () => {
   ) ?? [];
   assert.ok(sessionStorageCalls.length >= 3, "tab session supports token get/set/remove");
   assert.ok(
-    sessionStorageCalls.every((call) => call.includes("HUB_TOKEN_SESSION_KEY")),
-    "sessionStorage is limited to the dedicated Hub token key",
+    sessionStorageCalls.every((call) =>
+      call.includes("HUB_TOKEN_SESSION_KEY") || call.includes("fl-work-collapse")),
+    "sessionStorage is limited to the Hub token and the Work collapse preference",
   );
   assert.ok(src.includes("isValidHubToken"));
   assert.ok(src.includes("clearHubToken"));
@@ -4250,8 +4253,10 @@ test("Hub Task story executes the shared fixture as an ordered input-process-out
   assert.ok(css.includes(".task-report-card"), "open report cards ship");
   assert.ok(css.includes(".task-tab-bar"), "tab bar styles ship");
   assert.ok(css.includes(".task-tab.is-active"), "active tab styles ship");
-  assert.ok(css.includes("left: var(--sidebar)"), "detail spans the workspace beside the nav");
+  assert.ok(css.includes("width: min(820px, 94vw)"), "detail is a right-side drawer on wide screens");
+  assert.ok(css.includes("right: 0"), "drawer anchors to the right edge");
   assert.match(css, /@media\s*\(max-width:\s*768px\)[\s\S]*?\.task-story-step/);
+  assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?#fl-detail[\s\S]*?width: 100vw/, "drawer becomes a full-width sheet on narrow screens");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   for (const key of [
     "storyTitle", "storyInputTitle", "storyWorkerProcessTitle", "storyWorkerOutputTitle",
@@ -4962,6 +4967,7 @@ test("Hub top-level pages lead with purpose and share an input-process-output-ne
   // Overview intentionally drops the page-story block in favor of operations-first layout.
   const pageBindings: Array<{ page: string; renderer: string; denseMarker: string; hasPageStory: boolean }> = [
     { page: "overview", renderer: "rOverview", denseMarker: "renderCompactReadiness", hasPageStory: false },
+    { page: "work", renderer: "rWork", denseMarker: "work-board", hasPageStory: true },
     { page: "board", renderer: "rTasks", denseMarker: "taskSubmitTitle", hasPageStory: true },
     { page: "plans", renderer: "rPlans", denseMarker: "noPlans", hasPageStory: true },
     { page: "goals", renderer: "rGoals", denseMarker: "noGoals", hasPageStory: true },
@@ -5002,7 +5008,7 @@ test("Hub top-level pages lead with purpose and share an input-process-output-ne
     assert.ok(enSection.includes(key), `en ${key}`);
     assert.ok(zhSection.includes(key), `zh ${key}`);
   }
-  const pages = ["Overview", "Board", "Plans", "Goals", "Compete", "Insights", "Models", "Workers", "Main"];
+  const pages = ["Overview", "Work", "Board", "Plans", "Goals", "Compete", "Insights", "Models", "Workers", "Main"];
   const slots = ["Purpose", "Input", "Process", "Output", "Next"];
   for (const page of pages) {
     for (const slot of slots) {
@@ -7495,11 +7501,18 @@ test("Hub page-to-data dependency map covers every top-level tab", async () => {
   assert.ok(src.includes("var PAGE_DEPS ="), "PAGE_DEPS constant exists");
   assert.ok(src.includes("function requestPlan("), "requestPlan helper exists");
   // Every top-level tab in the render dispatcher must appear in PAGE_DEPS.
-  var tabs = ["overview", "tasks", "plans", "goals", "competitions", "stats",
+  var tabs = ["overview", "work", "tasks", "plans", "goals", "competitions", "stats",
               "model", "worker", "limits", "mains", "delivery"];
   tabs.forEach(function(tab){
     assert.ok(src.includes('"' + tab + '"'), "PAGE_DEPS includes " + tab);
   });
+  // Work is the single operate surface: it depends on the hierarchy board plus
+  // the bounded outcome-intake list (FL-109D2), nothing else.
+  var workDepStart = src.indexOf("var PAGE_DEPS = {");
+  var workDepEnd = src.indexOf("};", workDepStart) + 2;
+  var workDepBlock = src.slice(workDepStart, workDepEnd);
+  assert.ok(/work\s*:\s*\{\s*workHierarchy\s*:\s*true,\s*intakes\s*:\s*true\s*\}/.test(workDepBlock),
+    "work page depends on the workHierarchy slice plus the bounded intakes slice");
   // requestPlan is pure; no DOM, fetch, or S mutation.
   var rpSrc = extractFunctionSource(src, "requestPlan");
   assert.ok(rpSrc.includes("PAGE_DEPS"), "requestPlan reads PAGE_DEPS");
@@ -7700,4 +7713,1090 @@ test("Hub explains execution preference bilingually without forcing protocol voc
   // Plain language first: technical ids live under disclosure, never the
   // primary explanation.
   assert.ok(!i18n.includes("app-server"), "beginner copy avoids the app-server transport name");
+});
+
+// --- FL-109B unified hierarchical workbench ---
+
+test("Hub Work surface renders one hierarchy with seven exact columns and never peer cards", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes('case "work": rWork(); break;'), "render dispatcher routes Work");
+  assert.ok(src.includes("function rWork("), "Work renderer exists");
+  assert.ok(src.includes("function renderWorkGoalLane("), "Goal lane renderer exists");
+  assert.ok(src.includes("function renderWorkPlanLane("), "Plan lane renderer exists");
+  assert.ok(src.includes("function renderWorkColumns("), "column grid renderer exists");
+  assert.ok(src.includes('data-lane-kind", "goal"'), "Goal is a lane, not a card");
+  assert.ok(src.includes('data-lane-kind", "plan"'), "Plan is a lane, not a card");
+  assert.ok(src.includes('data-lane-kind", "one-off"'), "one-off lane kind exists");
+  assert.ok(src.includes('data-fl-role", "work-card"'), "Task cards carry the card role");
+  // The seven columns in the frozen order, exactly once, no extra column.
+  const wcc = extractFunctionSource(src, "workColumnLabel");
+  const orderIdx = src.indexOf("var WORK_COLUMN_CODES = [");
+  const orderBlock = src.slice(orderIdx, src.indexOf("];", orderIdx) + 2);
+  const codes = ["not-started", "ready", "running", "waiting-verification",
+    "waiting-user-decision", "completed", "stopped-failed"];
+  codes.forEach((c) => assert.ok(orderBlock.includes(`"${c}"`), `column ${c} in frozen order`));
+  const matches = orderBlock.match(/"(not-started|ready|running|waiting-verification|waiting-user-decision|completed|stopped-failed)"/g) ?? [];
+  assert.equal(matches.length, 7, "exactly seven column codes");
+  assert.ok(wcc.includes("workColumnStopped"), "stopped/failed column is a plain label");
+});
+
+test("Hub Plan lanes lead with completed, blocker, and next action like Goals", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const plan = extractFunctionSource(src, "renderWorkPlanLane");
+  assert.ok(plan.includes("summary.whatCompleted"), "Plan header shows what was completed");
+  assert.ok(plan.includes("summary.blocker"), "Plan header shows the current blocker");
+  assert.ok(plan.includes("summary.nextAction"), "Plan header shows the next action");
+  assert.ok(plan.includes("workGoalBlocker"), "blocker uses a plain-language label");
+  assert.ok(plan.includes("workGoalNext"), "next action uses a plain-language label");
+  assert.ok(plan.includes("workProgressCompact"), "percentage is secondary supporting evidence");
+  // Goal and Plan headers are flat bands; the Task card is the only card object.
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const laneToggle = css.slice(css.indexOf(".work-lane-toggle {"), css.indexOf(".work-lane-toggle:hover"));
+  assert.ok(!laneToggle.includes("var(--shadow-soft)"), "lane headers are flat bands, not shadowed cards");
+  assert.match(laneToggle, /border-bottom:\s*1px solid var\(--line\)/, "lane headers use quiet rules");
+});
+
+test("Hub Work adapter consumes only schemaVersion 1 and fails visibly otherwise", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const adapter = extractFunctionSource(src, "normalizeWorkHierarchy");
+  assert.ok(adapter.includes("schemaVersion !== 1"), "rejects unsupported schema");
+  assert.ok(adapter.includes("WORK_COLUMN_CODES"), "validates against the frozen column list");
+  assert.ok(adapter.includes("columns invalid"), "rejects a missing/extra column set");
+  assert.ok(adapter.includes("column order invalid"), "rejects a reordered column set");
+  // rWork renders an honest error box when the adapter rejects the projection.
+  const rw = extractFunctionSource(src, "rWork");
+  assert.ok(rw.includes("normalizeWorkHierarchy"), "rWork validates through the adapter");
+  assert.ok(rw.includes('data-fl-role", "work-hierarchy-error"'), "unsupported projection fails visibly");
+});
+
+test("Hub Work filters request the Core-filtered endpoint and never flatten ancestry", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const query = extractFunctionSource(src, "workHierarchyQuery");
+  assert.ok(query.includes("S.workFilter"), "query reads the applied filter only");
+  assert.ok(query.includes("encodeURIComponent(S.workFilter.project)"), "project filter is sent");
+  assert.ok(query.includes("workerProfileId="), "Worker filter is sent");
+  assert.ok(query.includes("column="), "status column filter is sent");
+  const apply = extractFunctionSource(src, "workApplyFilter");
+  assert.ok(apply.includes("S.workFilterDraft"), "form draft is kept for re-render");
+  assert.ok(apply.includes("S.workFilter = f"), "applied filter is stored");
+  assert.ok(apply.includes("refresh()"), "Apply triggers one server request, not per keystroke");
+  const reset = extractFunctionSource(src, "workResetFilter");
+  assert.ok(reset.includes("S.workFilter = {}"), "Reset restores the complete hierarchy");
+  assert.ok(reset.includes("refresh()"), "Reset re-requests the unfiltered hierarchy");
+  // SLICE_MAP binds the hierarchy slice to the endpoint with the query builder.
+  assert.ok(/workHierarchy\s*:\s*\{\s*endpoint:\s*"\/api\/ops\/work-hierarchy"/.test(src), "hierarchy slice bound");
+  assert.ok(src.includes("buildQuery: workHierarchyQuery"), "slice uses the query builder");
+  // The renderer keeps Goal and Plan lanes even when only one Task matches.
+  assert.ok(src.includes('workRefreshFilterOptions'), "filter options are refreshed from unfiltered projections");
+});
+
+test("Hub legacy peer pages redirect to the single Work surface", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
+  assert.ok(src.includes("LEGACY_TAB_REDIRECT"), "legacy redirect map exists");
+  for (const legacy of ["board", "tasks", "plans", "goals"]) {
+    assert.ok(src.includes(`${legacy}: "work"`), `${legacy} redirects to work`);
+  }
+  const st = extractFunctionSource(src, "switchTab");
+  assert.ok(st.includes("LEGACY_TAB_REDIRECT[name]"), "switchTab consults the redirect map");
+  assert.ok(st.includes("render()"), "switchTab renders immediately");
+  assert.ok(st.includes("refresh()"), "switchTab fetches the new page");
+  assert.ok(html.includes('data-tab="work"'), "one Work nav entry");
+  assert.ok(!html.includes('data-tab="tasks"') && !html.includes('data-tab="plans"') && !html.includes('data-tab="goals"'),
+    "peer Board/Plans/Goals nav is gone");
+  // Legacy detail APIs and the legacy submission page remain functional.
+  assert.ok(src.includes("function showPlanBoard("), "Plan detail deep link remains");
+  assert.ok(src.includes("function showGoalDetail("), "Goal detail deep link remains");
+  assert.ok(src.includes('switchTab("tasks", { legacy: true })'), "legacy submission opens behind the Advanced action");
+});
+
+test("Hub Task drawer breadcrumb is truthful about ancestry", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("function renderTaskBreadcrumb("), "breadcrumb renderer exists");
+  const crumb = extractFunctionSource(src, "renderTaskBreadcrumb");
+  assert.ok(crumb.includes("crumb.goalName"), "Goal segment requires a real Goal name");
+  assert.ok(crumb.includes("crumb.planName"), "Plan segment requires a real Plan name");
+  assert.ok(crumb.includes('taskReportBreadcrumb'), "no parent renders the plain Task report label");
+  assert.ok(crumb.includes("task-breadcrumb"), "breadcrumb container class");
+  assert.ok(crumb.includes("showGoalDetail"), "Goal segment opens the existing Goal detail");
+  assert.ok(crumb.includes("showPlanBoard"), "Plan segment opens the existing Plan detail");
+  // showTask accepts the clicked card's breadcrumb and retains it for reloads.
+  const st = extractFunctionSource(src, "showTask");
+  assert.ok(st.includes("function showTask(id, crumb)"), "showTask accepts a breadcrumb");
+  assert.ok(st.includes("resolveTaskBreadcrumb"), "showTask resolves the retained breadcrumb");
+  assert.ok(st.includes("renderTaskBreadcrumb(S.taskCrumb)"), "showTask renders the resolved breadcrumb");
+});
+
+test("Hub same-task reload keeps its bounded breadcrumb and other Tasks never inherit stale ancestry", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("function resolveTaskBreadcrumb("), "breadcrumb resolver exists");
+  const fn = extractFunctionSource(src, "resolveTaskBreadcrumb");
+  const resolve = new Function(`return (${fn});`)() as (
+    prev: Record<string, unknown> | null,
+    id: string,
+    crumb?: Record<string, unknown>,
+  ) => Record<string, unknown> | null;
+  const crumb = { goalId: "g1", goalName: "Goal one", planId: "p1", planName: "Plan one", taskName: "Task A" };
+  const first = resolve(null, "task-a", crumb);
+  assert.equal(first?.goalName, "Goal one", "a clicked card stores its ancestry");
+  assert.equal(first?.taskId, "task-a", "stored breadcrumb is keyed by task id");
+  const sameReload = resolve(first, "task-a", undefined);
+  assert.equal(sameReload?.goalName, "Goal one", "same-task reload keeps the original breadcrumb");
+  assert.equal(resolve(first, "task-b", undefined), null, "a different Task never inherits stale parents");
+  assert.equal(resolve(null, "task-a", undefined), null, "a direct link without ancestry shows Task only");
+  const parentless = resolve(null, "task-a", { taskName: "Task A" });
+  assert.equal(parentless?.goalName, undefined, "a parentless card stores no Goal segment");
+  assert.equal(parentless?.planName, undefined, "a parentless card stores no Plan segment");
+});
+
+test("Hub Work cards show only decision evidence and never technical ids", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const card = extractFunctionSource(src, "renderWorkCard");
+  assert.ok(card.includes("work-card-name"), "card leads with the Task name");
+  assert.ok(card.includes("workPlacementLabel"), "card explains why it is in this column");
+  assert.ok(card.includes("workCardBlocker"), "card names prerequisites in plain language");
+  assert.ok(card.includes("workCardUnlocks"), "card names what it unlocks");
+  assert.ok(card.includes("workCardNext"), "card states the next action");
+  assert.ok(card.includes("workWorkerLabel"), "Worker label is resolved before display");
+  // No raw id, token, command, endpoint, or result text becomes card copy.
+  assert.ok(!card.includes("card.resultText") && !card.includes("card.error")
+    && !card.includes("card.logs") && !card.includes("card.commands")
+    && !card.includes("card.endpoint") && !card.includes("card.proxy"),
+    "card never reads raw private fields");
+  assert.ok(!card.includes("mono"), "card avoids technical mono ids");
+  const wl = extractFunctionSource(src, "workWorkerLabel");
+  assert.ok(wl.includes('return ""'), "missing profile label renders no Worker text");
+  assert.ok(wl.includes("profiles[i].label"), "Worker label uses the profile label");
+});
+
+test("Hub Work lanes are keyboard-operable disclosures with bounded local collapse", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const goal = extractFunctionSource(src, "renderWorkGoalLane");
+  assert.ok(goal.includes('aria-expanded'), "Goal lane exposes expanded state");
+  assert.ok(goal.includes('aria-controls'), "Goal lane binds its body");
+  assert.ok(goal.includes("workToggleLane"), "Goal lane wires the disclosure toggle");
+  assert.ok(goal.includes("workGoalDefaultExpanded"), "Goal uses smart default expansion");
+  const plan = extractFunctionSource(src, "renderWorkPlanLane");
+  assert.ok(plan.includes('aria-expanded'), "Plan lane exposes expanded state");
+  assert.ok(plan.includes('aria-controls'), "Plan lane binds its body");
+  assert.ok(plan.includes("workPlanDefaultExpanded"), "Plan uses smart default expansion");
+  const toggle = extractFunctionSource(src, "workToggleLane");
+  assert.ok(toggle.includes("workCollapseSave"), "toggle saves bounded state");
+  assert.ok(toggle.includes("aria-expanded"), "toggle updates aria-expanded");
+  assert.ok(toggle.includes("collapse[key] = next"), "toggle stores an explicit boolean preference");
+  const load = extractFunctionSource(src, "workCollapseLoad");
+  assert.ok(load.includes("fl-work-collapse"), "collapse state uses one storage key");
+  assert.ok(load.includes("sessionStorage"), "collapse state persists in the tab session, not localStorage");
+  const expanded = extractFunctionSource(src, "workLaneExpanded");
+  assert.ok(expanded.includes("hasOwnProperty"), "missing preference is distinct from false");
+  assert.ok(expanded.includes("defaultExpanded"), "explicit preference wins over the smart default");
+});
+
+test("Hub Work default disclosure separates terminal history from current work", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const liveCodesStart = src.indexOf("var WORK_LIVE_COLUMN_CODES = [");
+  assert.ok(liveCodesStart >= 0, "live column list ships");
+  const liveCodes = src.slice(liveCodesStart, src.indexOf("];", liveCodesStart) + 2);
+  const helpers = [
+    "workLaneIsTerminalHistory",
+    "workGoalDefaultExpanded",
+    "workPlanDefaultExpanded",
+    "workOneOffDefaultExpanded",
+    "workLaneExpanded",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const factory = new Function(`${liveCodes}\n${helpers}; return {
+    workLaneIsTerminalHistory,
+    workGoalDefaultExpanded,
+    workPlanDefaultExpanded,
+    workOneOffDefaultExpanded,
+    workLaneExpanded,
+  };`);
+  const api = factory() as {
+    workLaneIsTerminalHistory: (columns: Record<string, unknown[]> | null) => boolean;
+    workGoalDefaultExpanded: (goal: Record<string, unknown>) => boolean;
+    workPlanDefaultExpanded: (plan: Record<string, unknown>) => boolean;
+    workOneOffDefaultExpanded: (lane: Record<string, unknown>) => boolean;
+    workLaneExpanded: (
+      collapse: Record<string, boolean>,
+      kind: string,
+      id: string,
+      defaultExpanded: boolean,
+    ) => boolean;
+  };
+  const emptyCols = {
+    "not-started": [], ready: [], running: [],
+    "waiting-verification": [], "waiting-user-decision": [],
+    completed: [], "stopped-failed": [],
+  };
+  const terminalCols = {
+    ...emptyCols,
+    completed: [{ taskId: "t1" }],
+    "stopped-failed": [{ taskId: "t2" }],
+  };
+  const liveCols = {
+    ...emptyCols,
+    running: [{ taskId: "t3" }],
+  };
+  assert.equal(api.workLaneIsTerminalHistory(terminalCols), true, "completed/stopped is terminal history");
+  assert.equal(api.workLaneIsTerminalHistory(liveCols), false, "running is not terminal history");
+  assert.equal(api.workGoalDefaultExpanded({
+    status: "completed",
+    plans: [{ columns: terminalCols }],
+  }), false, "completed historical Goals start collapsed");
+  assert.equal(api.workGoalDefaultExpanded({
+    status: "stopped",
+    plans: [{ columns: terminalCols }],
+  }), false, "stopped historical Goals start collapsed");
+  assert.equal(api.workGoalDefaultExpanded({
+    status: "completed",
+    plans: [{ columns: liveCols }],
+  }), false, "terminal Goal authority keeps stale child work collapsed by default");
+  assert.equal(api.workGoalDefaultExpanded({
+    status: "running",
+    plans: [{ columns: emptyCols }],
+  }), true, "non-terminal Goals stay discoverable");
+  assert.equal(api.workPlanDefaultExpanded({ columns: terminalCols }), false,
+    "terminal Plan history starts collapsed");
+  assert.equal(api.workPlanDefaultExpanded({ columns: liveCols }), true,
+    "Plans with running work start open");
+  assert.equal(api.workOneOffDefaultExpanded({ columns: terminalCols }), false,
+    "historical one-off bulk starts collapsed");
+  assert.equal(api.workOneOffDefaultExpanded({ columns: liveCols }), true,
+    "one-off with live work starts open");
+  assert.equal(api.workOneOffDefaultExpanded({
+    columns: { ...emptyCols, "waiting-user-decision": [{ taskId: "t4" }] },
+  }), false, "decision backlog stays summarized instead of flooding the initial page");
+  assert.equal(api.workOneOffDefaultExpanded({
+    columns: { ...emptyCols, "not-started": [{ taskId: "t5" }] },
+  }), false, "queued backlog stays summarized instead of flooding the initial page");
+
+  // Explicit tab-local preference always wins over the smart default.
+  assert.equal(api.workLaneExpanded({}, "goal", "g1", false), false, "missing pref uses default collapsed");
+  assert.equal(api.workLaneExpanded({}, "goal", "g1", true), true, "missing pref uses default open");
+  assert.equal(api.workLaneExpanded({ "goal:g1": true }, "goal", "g1", false), true,
+    "user expand overrides default collapsed");
+  assert.equal(api.workLaneExpanded({ "goal:g1": false }, "goal", "g1", true), false,
+    "user collapse overrides default open");
+
+  const saved: string[] = [];
+  const sessionStorage = {
+    setItem(_k: string, v: string) { saved.push(v); },
+  };
+  // Bind workCollapseSave through a thin eval that uses this sessionStorage.
+  const toggleSrc = extractFunctionSource(src, "workToggleLane");
+  const expandedSrc = extractFunctionSource(src, "workLaneExpanded");
+  const idSrc = extractFunctionSource(src, "workLaneId");
+  const toggleFactory = new Function("sessionStorage", "document", `
+    function workCollapseSave(collapse){
+      try { sessionStorage.setItem("fl-work-collapse", JSON.stringify(collapse)); } catch(_){}
+    }
+    ${expandedSrc}
+    ${idSrc}
+    ${toggleSrc}
+    return { workToggleLane, workLaneExpanded };
+  `);
+  const doc = { getElementById() { return { hidden: true }; } };
+  const tog = toggleFactory(sessionStorage, doc) as {
+    workToggleLane: (
+      collapse: Record<string, boolean>,
+      kind: string,
+      id: string,
+      btn: { setAttribute: (k: string, v: string) => void },
+      defaultExpanded: boolean,
+    ) => boolean;
+    workLaneExpanded: (
+      collapse: Record<string, boolean>,
+      kind: string,
+      id: string,
+      defaultExpanded: boolean,
+    ) => boolean;
+  };
+  const collapse: Record<string, boolean> = {};
+  const attrs: Record<string, string> = {};
+  const btn = { setAttribute(k: string, v: string) { attrs[k] = v; } };
+  // Expand a default-collapsed historical lane; preference must persist as true.
+  const next = tog.workToggleLane(collapse, "goal", "hist", btn, false);
+  assert.equal(next, true, "toggle expands a default-collapsed lane");
+  assert.equal(collapse["goal:hist"], true, "explicit expand is stored as true");
+  assert.equal(attrs["aria-expanded"], "true");
+  assert.equal(tog.workLaneExpanded(collapse, "goal", "hist", false), true,
+    "refresh in the same tab keeps the expanded preference");
+});
+
+test("Hub One-off Tasks lane is an accessible disclosure with a calm historical default", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const oneOff = extractFunctionSource(src, "renderWorkOneOffLane");
+  assert.ok(oneOff.includes('h("button"'), "one-off toggle is a native button");
+  assert.ok(oneOff.includes("aria-expanded"), "one-off exposes expanded state");
+  assert.ok(oneOff.includes("aria-controls"), "one-off binds its body");
+  assert.ok(oneOff.includes("workOneOffDefaultExpanded"), "one-off uses the calm historical default");
+  assert.ok(oneOff.includes("workOneOffCount"), "one-off summary shows the task count");
+  assert.ok(oneOff.includes("ensureOneOffBody"), "complete card grid is deferred until expand");
+  assert.ok(oneOff.includes("if(expanded) ensureOneOffBody()"), "open default still reveals the full set");
+  assert.ok(oneOff.includes('workToggleLane(workCollapse, "one-off", "tasks"'),
+    "one-off collapse preference is tab-local under one stable key");
+  const rw = extractFunctionSource(src, "rWork");
+  assert.ok(!rw.includes('h("div", "work-group-title", t("workOneOffTasks"))'),
+    "one-off title lives on the disclosure, not a separate non-interactive heading");
+});
+
+test("Hub Project filter offers human labels and hides internal workspaces", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const helpers = [
+    "workIsInternalProjectPath",
+    "workProjectBaseName",
+    "workProjectHumanLabel",
+    "workPresentProjectOptions",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const api = new Function(`${helpers}; return {
+    workIsInternalProjectPath,
+    workProjectBaseName,
+    workProjectHumanLabel,
+    workPresentProjectOptions,
+  };`)() as {
+    workIsInternalProjectPath: (p: string) => boolean;
+    workProjectBaseName: (p: string) => string;
+    workProjectHumanLabel: (p: string, siblings?: string[]) => string;
+    workPresentProjectOptions: (paths: string[]) => {
+      options: Array<{ value: string; label: string }>;
+      omittedInternalCount: number;
+    };
+  };
+
+  assert.equal(api.workIsInternalProjectPath("/Users/me/code/my-app"), false);
+  assert.equal(api.workIsInternalProjectPath("/tmp/proj"), true, "/tmp is internal");
+  assert.equal(api.workIsInternalProjectPath("/private/tmp/run"), true);
+  assert.equal(api.workIsInternalProjectPath(
+    "/Users/me/Library/Application Support/ForkLight/runs/abc/workspace"), true,
+    "ForkLight run workspaces are internal");
+  assert.equal(api.workIsInternalProjectPath(
+    "/Users/me/.forklight/review-projects/graph-1/a1"), true,
+    "review-projects are internal");
+  assert.equal(api.workIsInternalProjectPath(
+    "/Users/me/.forklight/samples/sample-1"), true,
+    "onboarding samples are internal");
+  assert.equal(api.workIsInternalProjectPath(
+    "/repo/fixtures/checkout"), true,
+    "test fixtures are internal");
+
+  assert.equal(api.workProjectHumanLabel("/Users/me/code/my-app"), "my-app");
+  assert.equal(api.workProjectHumanLabel("/Users/me/code/my-app", [
+    "/Users/me/code/my-app",
+    "/Users/other/work/my-app",
+  ]), "code/my-app", "colliding basenames keep a short parent/base label");
+
+  const presented = api.workPresentProjectOptions([
+    "/Users/me/code/my-app",
+    "/tmp/fixture-run",
+    "/Users/me/Library/Application Support/ForkLight/runs/r1/workspace",
+    "/Users/me/.forklight/review-projects/g1/a1",
+    "/Users/me/code/other-app",
+    "/Users/me/code/my-app",
+  ]);
+  assert.equal(presented.omittedInternalCount, 3, "internal paths are counted, not listed");
+  assert.deepEqual(presented.options.map((o) => o.value).sort(), [
+    "/Users/me/code/my-app",
+    "/Users/me/code/other-app",
+  ].sort(), "exact path remains the option value for the server request");
+  assert.deepEqual(presented.options.map((o) => o.label).sort(), ["my-app", "other-app"].sort(),
+    "visible labels are human project names");
+  assert.ok(presented.options.every((o) => !o.label.startsWith("/") && !o.label.includes("/Users/") && !o.label.includes("/tmp")),
+    "visible option text never shows raw absolute internal or user home paths");
+
+  const filters = extractFunctionSource(src, "renderWorkFilters");
+  assert.ok(filters.includes("workProjectHumanLabel"), "filter renders human labels");
+  assert.ok(filters.includes("workFilterInternalProjectsOmitted"), "filter explains omitted internals");
+  assert.ok(filters.includes('data-fl-role", "work-filter-internal-note"'),
+    "omitted-internal explanation has a stable role");
+  assert.ok(!filters.includes("workOption(p, p)"), "filter no longer uses the raw path as visible text");
+  // Tasks stay on the unfiltered board: presentation only touches option lists.
+  assert.ok(src.includes("workPresentProjectOptions"), "presentation helper exists");
+  assert.ok(extractFunctionSource(src, "workRefreshFilterOptions").includes("workPresentProjectOptions"),
+    "filter options refresh uses the presentation helper");
+  assert.ok(!extractFunctionSource(src, "workCollectCards").includes("workIsInternalProjectPath"),
+    "internal filter never removes Tasks from the board walk");
+});
+
+test("Hub Work copy is bilingual, explanation-first, and internal-vocabulary-free", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.ok(src.includes('renderPageStory("work")'), "Work page leads with a purpose story");
+  const enKeys = [
+    "workFilterApply", "workFilterReset", "workColumnWaitingDecision",
+    "workCardBlocker", "workCardNext", "workGoalDecision",
+    "workIndependentPlans", "workOneOffTasks", "workUnsupportedHierarchy",
+    "workFilterInternalProjectsOmitted", "workOneOffCount",
+  ];
+  for (const key of enKeys) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.ok(i18n.includes("Waiting for your decision"), "en column label is plain");
+  assert.ok(i18n.includes("等待你的决定"), "zh column label is plain");
+  assert.ok(i18n.includes("One-off tasks"), "en one-off lane is plain");
+  assert.ok(i18n.includes("一次性任务"), "zh one-off lane is plain");
+  assert.ok(i18n.includes("Hiding {count} internal ForkLight workspaces"),
+    "en explains omitted internal project choices");
+  assert.ok(i18n.includes("已从列表中隐藏 {count} 个 ForkLight 内部工作区"),
+    "zh explains omitted internal project choices");
+  assert.ok(i18n.includes("{count} tasks"), "en one-off count is plain");
+  assert.ok(i18n.includes("{count} 个任务"), "zh one-off count is plain");
+  // No raw status or dependency codes as primary Work copy.
+  assert.ok(!i18n.includes("plan_dependencies"), "Work copy avoids the dependency code");
+  assert.ok(!i18n.includes("work_hierarchy"), "Work copy avoids the internal method name");
+  assert.ok(!src.includes('data-fl-role", "work-card"') || src.includes("card.breadcrumb"),
+    "cards carry the hierarchy breadcrumb for the drawer");
+});
+
+// --- FL-109C2A truthful drag + keyboard action handoff ---
+
+test("FL-109C2A cards are pointer-draggable only on Core actionability and never reparent", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const card = extractFunctionSource(src, "renderWorkCard");
+  assert.ok(card.includes("workCardIsActionable(card)"), "dragability is gated by the policy helper");
+  assert.ok(card.includes("workCardHasPolicy(card)"), "the chooser is gated by policy presence");
+  assert.ok(card.includes('el.setAttribute("draggable", "true")'), "actionable cards are draggable");
+  assert.ok(card.includes("workDragSuppressClick"), "dragend suppresses the follow-up click");
+  assert.ok(card.includes("renderWorkMoveActControl(card)"), "policy-bearing cards get the Move/Act control");
+  // The card keeps its canonical click-to-open Task Detail behavior.
+  assert.ok(card.includes("showTask(card.taskId, card.breadcrumb)"), "click still opens Task Detail");
+  assert.ok(card.includes('e.target !== el'), "the Move/Act control never steals card Enter/Space");
+
+  const start = extractFunctionSource(src, "workCardDragStart");
+  assert.ok(start.includes('e.dataTransfer.effectAllowed = "copy"'), "drag copies intent, never moves");
+  assert.ok(!/effectAllowed\s*=\s*"move"/.test(start), "drag never declares a move effect");
+  assert.ok(!start.includes("insertBefore") && !start.includes("parentNode"),
+    "drag start never reparents the canonical card");
+  assert.ok(start.includes("workCardIsActionable(card)"), "drag start fails closed on non-actionable cards");
+
+  const isActionable = extractFunctionSource(src, "workCardIsActionable");
+  assert.ok(isActionable.includes('disposition === "requestable"'), "requestable destinations count");
+  assert.ok(isActionable.includes('disposition === "needs-input"'), "needs-input destinations count");
+  assert.ok(isActionable.includes("actionPolicy"), "eligibility comes only from the Core policy");
+  assert.ok(isActionable.includes("if(!dests) return false"), "missing policy fails closed");
+  assert.ok(!isActionable.includes("card.status"), "eligibility never reads browser status");
+  assert.ok(!isActionable.includes("card.column"), "eligibility never infers from the current column");
+});
+
+test("FL-109C2A seven-column drop feedback reads only card.actionPolicy and never mutates", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const over = extractFunctionSource(src, "workBoardDragOver");
+  assert.ok(over.includes('e.target.closest(".work-cell")'), "drop targets are the column cells");
+  assert.ok(over.includes("workDrag.policy"), "feedback reads the dragged card's policy");
+  assert.ok(over.includes("workDestinationMode(entry)"), "mode is derived from the policy entry");
+  assert.ok(over.includes("work-cell-drop-valid"), "valid targets get affirmative feedback");
+  assert.ok(over.includes("work-cell-drop-invalid"), "invalid targets get explained feedback");
+  assert.ok(over.includes("work-cell-drop-auto"), "automatic-only targets get their own feedback");
+  assert.ok(!over.includes("card.status") && !over.includes("card.column"),
+    "drop feedback never infers from status or column");
+
+  const drop = extractFunctionSource(src, "workBoardDrop");
+  assert.ok(drop.includes('disposition === "requestable"'), "actionable drops create a handoff");
+  assert.ok(drop.includes("workOpenActionsHandoff"), "actionable drop hands off to the drawer");
+  assert.ok(drop.includes("workAnnounce"), "invalid drops announce the explanation");
+  assert.ok(!drop.includes("postJSON") && !drop.includes("taskAction") && !drop.includes("fetch("),
+    "drop never calls a mutation endpoint");
+  assert.ok(!drop.includes("parentNode") && !drop.includes("insertBefore"),
+    "drop never reparents the card");
+
+  const renderer = extractFunctionSource(src, "renderWorkColumns");
+  assert.ok(renderer.includes('cell.setAttribute("data-column", code)'), "each cell carries its column code");
+  const rw = extractFunctionSource(src, "rWork");
+  assert.ok(rw.includes("board.addEventListener(\"dragover\", workBoardDragOver)"),
+    "the board delegates drag over every lane");
+});
+
+test("FL-109C2A Move/Act chooser is keyboard-operable and keeps every destination focusable", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const toggle = extractFunctionSource(src, "workActionChooserToggle");
+  assert.ok(toggle.includes("workOpenChooserForCard"), "toggle opens the chooser for a card");
+  assert.ok(toggle.includes("workChooserTaskId"), "toggle tracks the origin task id");
+  assert.ok(toggle.includes("workActionChooserClose"), "toggle closes an existing chooser");
+
+  const open = extractFunctionSource(src, "workOpenChooserForCard");
+  assert.ok(open.includes("WORK_COLUMN_CODES.forEach"), "all seven destinations are listed");
+  assert.ok(open.includes('role", "listbox"'), "chooser is a listbox");
+  assert.ok(open.includes('e.key === "Escape"'), "Escape closes");
+  assert.ok(open.includes('e.key === "Tab"'), "Tab navigates");
+  assert.ok(open.includes('e.key === "ArrowDown"'), "arrow keys navigate");
+  assert.ok(open.includes("nextFocus"), "focus movement helper exists");
+  assert.ok(open.includes('workChooserTaskId = String(card.taskId)'), "origin is stored by task id");
+  assert.ok(open.includes('btn.setAttribute("aria-expanded", "true")'), "origin reports expanded state");
+
+  const item = extractFunctionSource(src, "workActionChooserItem");
+  assert.ok(item.includes('role", "option"'), "each destination is a focusable option");
+  assert.ok(item.includes("workDestinationSummary"), "each destination shows an explanation");
+  assert.ok(item.includes("workActionPickValid"), "actionable targets say they can be chosen");
+  assert.ok(item.includes("workActionChooserClose(btn)"), "an actionable choice closes the chooser");
+  assert.ok(item.includes("workDestinationExplanation"), "an invalid choice explains instead of mutating");
+  assert.ok(!item.includes("taskAction") && !item.includes("postJSON"),
+    "chooser selection never calls a mutation endpoint");
+
+  const close = extractFunctionSource(src, "workActionChooserClose");
+  assert.ok(close.includes("workActionFindOriginBtn"), "a detached origin falls back to the replacement control");
+  assert.ok(close.includes("origin.focus"), "focus returns to the originating Move/Act control");
+  assert.ok(close.includes('workChooserTaskId = null'), "close clears the origin tracking");
+});
+
+test("FL-109C2A pending-action handoff is bilingual, truthful, and submits nothing", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const banner = extractFunctionSource(src, "renderPendingActionHandoff");
+  assert.ok(banner.includes("workActionHandoffTitle"), "banner has a pending-action title");
+  assert.ok(banner.includes("workActionHandoffOperation"), "banner names the exact operation");
+  assert.ok(banner.includes("workActionHandoffIntent"), "banner names the fixed intent");
+  assert.ok(banner.includes("workActionHandoffRequires"), "banner lists required input");
+  assert.ok(banner.includes("workActionHandoffPath"), "banner shows the ordered path");
+  assert.ok(banner.includes("workActionHandoffTruth"), "banner states nothing has changed yet");
+  assert.ok(!banner.includes("postJSON") && !banner.includes("taskAction") && !banner.includes("fetch("),
+    "banner never calls a mutation endpoint");
+
+  const open = extractFunctionSource(src, "workOpenActionsHandoff");
+  assert.ok(open.includes('taskDetailActiveTab = "actions"'), "handoff opens the existing Actions tab");
+  assert.ok(open.includes("showTask"), "handoff reuses the existing Task detail drawer");
+  assert.ok(!open.includes("postJSON") && !open.includes("taskAction") && !open.includes("/resume")
+    && !open.includes("/correct") && !open.includes("/revise"),
+    "handoff never calls a mutation endpoint");
+
+  const showTask = extractFunctionSource(src, "showTask");
+  assert.ok(showTask.includes("renderPendingActionHandoff(pending)"), "the drawer renders the banner");
+  assert.ok(showTask.includes('pending.taskId === task.id'), "the banner is scoped to the chosen Task");
+
+  const { enSection, zhSection } = splitI18n(i18n);
+  for (const key of [
+    "workActionOpen", "workActionChooserTitle", "workActionHandoffTitle",
+    "workActionHandoffTruth", "workReasonDependencyHeld", "workReasonRequiresPreflightThenApply",
+    "workOpResume", "workOpIntegrationPreflight", "workIntentAccept",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.ok(i18n.includes("Pending action — not yet executed"), "en handoff title is plain");
+  assert.ok(i18n.includes("待执行操作——尚未执行"), "zh handoff title is plain");
+  assert.ok(i18n.includes("This card has not moved and no status changed"), "en truth line is explicit");
+  assert.ok(i18n.includes("此卡片没有移动，状态也没有改变"), "zh truth line is explicit");
+  assert.ok(!i18n.includes("Token savings from handoff"), "no unearned savings claim");
+});
+
+test("FL-109C2A every policy-bearing card exposes the chooser while only actionable cards drag", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const hasPolicy = extractFunctionSource(src, "workCardHasPolicy");
+  assert.ok(hasPolicy.includes("schemaVersion === 1"), "chooser requires a versioned Core policy");
+  assert.ok(hasPolicy.includes("policy.destinations"), "chooser requires a destinations record");
+  assert.ok(hasPolicy.includes('typeof policy.destinations === "object"'), "destinations must be a record");
+
+  const card = extractFunctionSource(src, "renderWorkCard");
+  const draggableAt = card.indexOf('el.setAttribute("draggable", "true")');
+  const moveAt = card.indexOf("renderWorkMoveActControl(card)");
+  assert.ok(draggableAt > 0 && moveAt > 0, "both gating points exist");
+  assert.ok(card.indexOf("if(actionable)") < draggableAt, "drag stays inside the actionable branch");
+  assert.ok(card.indexOf("if(hasPolicy)") < moveAt, "chooser is gated by policy presence, not actionability");
+  assert.ok(!card.includes("if(actionable) el.appendChild(renderWorkMoveActControl(card))"),
+    "the chooser is no longer limited to actionable cards");
+});
+
+test("FL-109C2A translated reasons render only localized copy, never the English Core fallback", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const explanation = extractFunctionSource(src, "workDestinationExplanation");
+  assert.ok(explanation.includes("if(r) return r;"), "a translated reason is returned on its own");
+  assert.ok(!explanation.includes('r + " · "'), "no English Core explanation is appended to a translation");
+
+  const summary = extractFunctionSource(src, "workDestinationSummary");
+  assert.ok(!summary.includes('rr + " · "'), "summary never appends the Core fallback to a translation");
+
+  const reason = extractFunctionSource(src, "workReasonLabel");
+  assert.ok(reason.includes('"dependency-held": "workReasonDependencyHeld"'),
+    "known reason codes map to bounded i18n keys");
+
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.ok(enSection.includes("Held by unsatisfied prerequisites."), "en dependency-held copy is localized");
+  assert.ok(zhSection.includes("前置条件未满足。"), "zh dependency-held copy is localized");
+  assert.ok(enSection.includes("Run preflight, then apply with confirmation."), "en preflight copy is localized");
+  assert.ok(zhSection.includes("先运行预检，再带确认应用。"), "zh preflight copy is localized");
+});
+
+test("FL-109C2A chooser origin survives re-render and closes on page or language change", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("var workChooserTaskId = null"), "origin task-id state ships");
+  assert.ok(src.includes("var workChooserBtn = null"), "best-effort origin button state ships");
+
+  const find = extractFunctionSource(src, "workActionFindOriginBtn");
+  assert.ok(find.includes('querySelectorAll(".work-action-btn")'), "finds controls in the current DOM");
+  assert.ok(find.includes('getAttribute("data-task-id")'), "matches by task id");
+  assert.ok(find.includes('closest(".work-card")'), "scopes to the owning card");
+
+  const rebind = extractFunctionSource(src, "workActionRebindChooser");
+  assert.ok(rebind.includes("workActionFindOriginBtn"), "rebind locates the replacement control");
+  assert.ok(rebind.includes('origin.setAttribute("aria-expanded", "true")'), "rebind marks the replacement open");
+  assert.ok(rebind.includes("panel.remove()"), "rebind closes safely when the origin card is gone");
+
+  const rw = extractFunctionSource(src, "rWork");
+  assert.ok(rw.includes("workActionRebindChooser()"), "Work re-render rebinds the open chooser");
+
+  const st = extractFunctionSource(src, "switchTab");
+  assert.ok(st.includes("workActionChooserReset()"), "tab switch closes the chooser");
+  assert.ok(st.includes("workPendingHandoffReset()"), "tab switch closes the pending-action handoff");
+
+  const langIdx = src.indexOf("window.onForklightLangChange = function()");
+  assert.ok(langIdx > 0, "language change handler exists");
+  const langBlock = src.slice(langIdx, langIdx + 400);
+  assert.ok(langBlock.includes("workActionChooserReset()"), "language change closes the chooser");
+  assert.ok(langBlock.includes("workPendingHandoffReset()"), "language change closes the pending-action handoff");
+});
+
+// --- FL-109C2B connect board intent to exact durable Task controls ---
+
+test("FL-109C2B every Core operation maps to one exact durable submit control", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const showTask = extractFunctionSource(src, "showTask");
+  for (const op of [
+    "resume", "revise", "correct", "main_review",
+    "integration_preflight", "integration_apply",
+  ]) {
+    assert.ok(showTask.includes(`data-fl-op-submit", "${op}"`), `showTask tags ${op}`);
+  }
+  assert.ok(showTask.includes('data-fl-op-input", "feedback"'), "feedback input is a stable target");
+  assert.ok(showTask.includes('data-fl-op-input", "reason"'), "review reason is a stable target");
+  assert.ok(showTask.includes('data-fl-op-input", "receiptId"'), "integration receipt is a stable target");
+
+  const attention = extractFunctionSource(src, "renderAttentionResolutionControls");
+  assert.ok(attention.includes('data-fl-op-submit", "task_resolve"'), "resolve submit is a stable target");
+  assert.ok(attention.includes('data-fl-op-submit", "task_reopen"'), "reopen submit is a stable target");
+  assert.ok(attention.includes('data-fl-op-target", "task_resolve"'), "resolve section owns its target");
+  assert.ok(attention.includes('data-fl-op-target", "task_reopen"'), "reopen section owns its target");
+  assert.ok(attention.includes('data-fl-op-input", "evidence"'), "resolve evidence is a stable target");
+
+  const submit = extractFunctionSource(src, "workPendingSubmit");
+  assert.ok(submit.includes(`querySelector('[data-fl-op-submit="' + op + '"]')`),
+    "router finds the submit by its stable attribute, never by label text");
+  assert.ok(!submit.includes("textContent"), "no text matching in the submit lookup");
+
+  const opRead = extractFunctionSource(src, "workPendingOperation");
+  assert.ok(opRead.includes("pending.entry.operation"), "the operation comes from the Core-owned entry");
+  assert.ok(opRead.includes("pending.operation"), "a guided step override is honored after preflight");
+
+  // No generic status mutation endpoint is invented anywhere in the Hub UI.
+  assert.ok(!src.includes("/set-status") && !src.includes("set_status"),
+    "no generic status setter appears in the Hub UI");
+  assert.ok(!src.includes('encodeURIComponent(task.id) + "/status"'),
+    "no generic per-task status endpoint");
+});
+
+test("FL-109C2B pending Continue guides to the first missing input or the exact submit", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const cont = extractFunctionSource(src, "workPendingContinue");
+  assert.ok(cont.includes("workPendingSubmit(op)"), "Continue resolves the exact submit control");
+  assert.ok(cont.includes(`section.querySelector('[data-fl-op-input="' + field + '"]')`),
+    "Continue finds the required input scoped to the operation section");
+  assert.ok(cont.includes("!input.value.trim()"), "a missing input is detected by emptiness");
+  assert.ok(cont.includes("workPendingFocusControl(input)"), "the missing input receives focus");
+  assert.ok(cont.includes("workPendingFocusControl(submit)"), "the confirm gate receives focus when no input is missing");
+  assert.ok(cont.includes("workPendingHandoffReset()"), "a control that is gone closes the pending handoff safely");
+
+  const focus = extractFunctionSource(src, "workPendingFocusControl");
+  assert.ok(focus.includes("scrollIntoView"), "Continue scrolls to the control");
+  assert.ok(focus.includes(".focus("), "Continue focuses the control");
+  assert.ok(focus.includes("workAnnounce"), "focus move announces a readable confirmation");
+
+  const guide = extractFunctionSource(src, "workPendingGuideText");
+  assert.ok(guide.includes("workActionHandoffStepPreflight"), "integration names the preflight step");
+  assert.ok(guide.includes("workActionHandoffStepApply"), "integration names the apply step");
+  assert.ok(guide.includes("workActionHandoffStepNext"), "a required input is named next");
+  assert.ok(guide.includes("workActionHandoffStepConfirm"), "the confirm gate is named when no input is missing");
+});
+
+test("FL-109C2B Main review fixed intent is preselected and locked only for the pending path", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const showTask = extractFunctionSource(src, "showTask");
+  assert.ok(showTask.includes('workPendingOperation(pendingReview) === "main_review"'), "lock is scoped to main_review");
+  assert.ok(showTask.includes("pendingReview.entry.intent"), "the fixed intent comes from the Core entry");
+  assert.ok(showTask.includes("revSel.value = fixedIntent"), "fixed intent is preselected");
+  assert.ok(showTask.includes('"accept" || fixedIntent === "revise" || fixedIntent === "reject"'),
+    "only Core's known review intents can be locked");
+  assert.ok(showTask.includes("revSel.disabled = true"), "fixed intent is locked for the active handoff");
+  assert.ok(showTask.includes('data-fl-role", "main-review-lock-hint"'), "a lock hint names the fixed intent");
+  assert.ok(showTask.includes('data-fl-op-submit", "main_review"'), "the review submit is a stable target");
+  assert.ok(showTask.includes(`taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/main-review"`),
+    "main review goes through the canonical durable bridge");
+
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.ok(enSection.includes("workActionHandoffLockedIntent"), "en locked-intent copy");
+  assert.ok(zhSection.includes("workActionHandoffLockedIntent"), "zh locked-intent copy");
+  assert.ok(enSection.includes("Fixed intent for this step:"), "en locked-intent copy is plain");
+  assert.ok(zhSection.includes("此步骤的固定意图："), "zh locked-intent copy is plain");
+});
+
+test("FL-109C2B Integration stays two-step preflight then receipt-bound apply", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const showTask = extractFunctionSource(src, "showTask");
+  assert.ok(showTask.includes('data-fl-op-submit", "integration_preflight"'), "preflight submit is a stable target");
+  assert.ok(showTask.includes('data-fl-op-submit", "integration_apply"'), "apply submit is a stable target");
+  assert.ok(showTask.includes('data-fl-op-input", "receiptId"'), "receipt input is a stable target");
+  assert.ok(showTask.includes("workPendingAdvanceToApply(task.id)"), "preflight success advances to apply");
+  assert.ok(showTask.includes(`taskOperationSuccess(task.id, null, function(){ showIntegration(task.id); })`),
+    "apply success clears pending and refreshes the detail view");
+
+  const advance = extractFunctionSource(src, "workPendingAdvanceToApply");
+  assert.ok(advance.includes('p.operation = "integration_apply"'), "advance switches the step to apply");
+  assert.ok(advance.includes("workReplacePendingBanner()"), "advance re-renders the guided banner");
+  assert.ok(advance.includes('workPendingOperation(p) !== "integration_preflight"'), "advance only follows a real preflight");
+
+  const success = extractFunctionSource(src, "taskOperationSuccess");
+  assert.ok(success.includes("workRefreshHierarchyAfterOperation()"), "apply success refetches the hierarchy");
+
+  const { enSection, zhSection } = splitI18n(i18n);
+  for (const key of ["workActionHandoffStepPreflight", "workActionHandoffStepApply"]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.ok(enSection.includes("Step 1 of 2: run integration preflight"), "en preflight step is plain");
+  assert.ok(zhSection.includes("第 1/2 步：先运行合入预检"), "zh preflight step is plain");
+});
+
+test("FL-109C2B success clears pending intent and refreshes detail plus canonical hierarchy", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const success = extractFunctionSource(src, "taskOperationSuccess");
+  assert.ok(success.includes("S.pendingActionHandoff = null"), "success clears the matching pending intent");
+  assert.ok(success.includes("p.taskId === taskId"), "only the matching task's pending intent clears");
+  assert.ok(success.includes("showTask(taskId)"), "success reloads the Task detail");
+  assert.ok(success.includes("workRefreshHierarchyAfterOperation()"), "success immediately refetches the hierarchy");
+  assert.ok(!success.includes("insertBefore") && !success.includes("parentNode"),
+    "the completion bridge never moves or reparents a card");
+
+  const refresh = extractFunctionSource(src, "workRefreshHierarchyAfterOperation");
+  assert.ok(refresh.includes('fetchSlice("workHierarchy")'), "hierarchy comes from the canonical Core slice");
+  assert.ok(refresh.includes("render()"), "the Work board re-renders from retained evidence");
+  assert.ok(!refresh.includes("postJSON") && !refresh.includes("taskAction"),
+    "the refresh path performs no mutation");
+});
+
+test("FL-109C2B failure keeps pending context with entered data intact and never retries", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const durable = extractFunctionSource(src, "taskDurableAction");
+  assert.ok(durable.includes("workPendingFailure(taskId, msg)"), "failure is retained in the pending context");
+
+  const failure = extractFunctionSource(src, "workPendingFailure");
+  assert.ok(failure.includes("p.failure = msg"), "the failure message is recorded on the pending handoff");
+  assert.ok(failure.includes("note.hidden = false"), "the banner reveals the failure note in place");
+  assert.ok(failure.includes("boundedDiagnostic(p.failure)"), "the failure message stays bounded");
+  assert.ok(!failure.includes("taskAction(") && !failure.includes("postJSON"),
+    "failure handling never resubmits automatically");
+
+  const banner = extractFunctionSource(src, "renderPendingActionHandoff");
+  assert.ok(banner.includes("workActionHandoffFailureBody"), "the banner explains nothing changed");
+
+  const action = extractFunctionSource(src, "taskAction");
+  assert.ok(!action.includes("setTimeout"), "no automatic retry timer is scheduled");
+  assert.ok(action.includes(".finally"), "the submit control is re-enabled for a finite manual retry");
+
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.ok(enSection.includes("workActionHandoffFailureTitle"), "en failure title");
+  assert.ok(zhSection.includes("workActionHandoffFailureTitle"), "zh failure title");
+  assert.ok(enSection.includes("Nothing was changed and no card moved"), "en failure truth is explicit");
+  assert.ok(zhSection.includes("没有任何改变，也没有移动卡片"), "zh failure truth is explicit");
+});
+
+test("FL-109C2B stale pending intent closes safely on task, page, or language change", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const stale = extractFunctionSource(src, "workClearStaleHandoff");
+  assert.ok(stale.includes("p.taskId !== task.id"), "a different task clears the pending intent");
+  assert.ok(stale.includes("S.pendingActionHandoff = null"), "stale intent is cleared");
+  assert.ok(stale.includes('workCollectCards(S.workHierarchy'), "staleness reads the current Core hierarchy");
+  assert.ok(stale.includes("schemaVersion === 1"), "staleness requires a versioned Core policy");
+  assert.ok(stale.includes('disposition === "requestable"') && stale.includes('disposition === "needs-input"'),
+    "staleness requires an actionable destination");
+  assert.ok(stale.includes("entry.operation === op"), "staleness requires the matching operation");
+  assert.ok(stale.includes("entry.intent === p.entry.intent"), "staleness requires the matching fixed intent");
+  assert.ok(!stale.includes("known[op]"), "no local operation-name allowlist decides staleness");
+  assert.ok(!stale.includes("task.status") && !stale.includes("card.column"),
+    "staleness never infers from Task status or column");
+
+  const st = extractFunctionSource(src, "switchTab");
+  assert.ok(st.includes("workPendingHandoffReset()"), "page change closes the pending intent");
+
+  const langIdx = src.indexOf("window.onForklightLangChange = function()");
+  const langBlock = src.slice(langIdx, langIdx + 400);
+  assert.ok(langBlock.includes("workPendingHandoffReset()"), "language change closes the pending intent");
+
+  const reset = extractFunctionSource(src, "workPendingHandoffReset");
+  assert.ok(reset.includes("S.pendingActionHandoff = null"), "reset clears the pending intent");
+});
+
+test("FL-109C2B pending resolve starts with no chosen reason and blocks empty submit", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const attention = extractFunctionSource(src, "renderAttentionResolutionControls");
+  assert.ok(attention.includes('placeholder.value = ""'), "the reason select begins with an unselected placeholder");
+  assert.ok(attention.includes("attentionResolveReasonPh"), "the placeholder copy is localized");
+  assert.ok(attention.includes("!reasonSel.value.trim()"), "submit blocks while the reason is empty");
+  const emptyCheck = attention.indexOf("!reasonSel.value.trim()");
+  const confirmGate = attention.indexOf("window.confirm(t(\"attentionResolveConfirm\")");
+  assert.ok(emptyCheck > 0 && confirmGate > 0 && emptyCheck < confirmGate,
+    "the empty-reason check runs before the confirmation gate");
+
+  const cont = extractFunctionSource(src, "workPendingContinue");
+  assert.ok(cont.includes("!input.value.trim()"), "an unselected reason is treated as missing and focused");
+
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.ok(enSection.includes("attentionResolveReasonPh"), "en resolve reason placeholder");
+  assert.ok(zhSection.includes("attentionResolveReasonPh"), "zh resolve reason placeholder");
+  assert.ok(enSection.includes("attentionResolveReasonRequired"), "en empty-reason copy");
+  assert.ok(zhSection.includes("attentionResolveReasonRequired"), "zh empty-reason copy");
+  assert.ok(enSection.includes("Choose a reason"), "en placeholder is plain");
+  assert.ok(zhSection.includes("请选择原因"), "zh placeholder is plain");
+});
+
+test("FL-109C2B stale handoff is cleared when current Core policy no longer matches", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const stale = extractFunctionSource(src, "workClearStaleHandoff");
+  // The card must exist in the current hierarchy projection and carry a
+  // versioned destination entry with an actionable disposition.
+  assert.ok(stale.includes("workCollectCards(S.workHierarchy"), "lookup walks the current Core projection");
+  assert.ok(stale.includes("card.taskId === p.taskId"), "the exact task card is located by id");
+  assert.ok(stale.includes("!found || !entry || !actionable || !opMatches || !intentMatches"),
+    "missing or mismatched Core evidence clears the pending handoff");
+
+  const pathOp = extractFunctionSource(src, "workPathHasOperation");
+  assert.ok(pathOp.includes("path[i].operation === op"), "path-step operations are honored");
+  assert.ok(pathOp.includes("Array.isArray(path)"), "the path check fails closed on non-arrays");
+});
+
+test("FL-109C2B guided handoff copy is bilingual and calm in English and Chinese", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  for (const key of [
+    "workActionHandoffContinue", "workActionHandoffStepNext", "workActionHandoffStepConfirm",
+    "workActionHandoffStepPreflight", "workActionHandoffStepApply", "workActionHandoffFocused",
+    "workActionHandoffFailureTitle", "workActionHandoffFailureBody", "workActionHandoffTargetMissing",
+    "workReqEvidence", "workReqNote",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.ok(enSection.includes("Continue to the exact control"), "en Continue is plain");
+  assert.ok(zhSection.includes("前往对应控件继续"), "zh Continue is plain");
+  assert.ok(enSection.includes("No input is missing"), "en confirm gate is plain");
+  assert.ok(zhSection.includes("没有缺失的输入"), "zh confirm gate is plain");
+  assert.ok(!enSection.includes("Token savings from handoff"), "no unearned savings claim");
+});
+
+// --- FL-109D2 outcome composer + intake story interaction contract ---
+
+test("FL-109D2 outcome composer records once, preserves failed input, and never proposes in the browser", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  // Composer wires one authenticated create bridge, not a proposal mutation.
+  assert.ok(src.includes("function outcomeSubmit("), "submit handler ships");
+  const submit = extractFunctionSource(src, "outcomeSubmit");
+  assert.ok(submit.includes('postJSON("/api/ops/intakes", body)'), "submit calls the authenticated create bridge");
+  assert.ok(submit.includes("if(S.outcomeSubmitting) return"), "submit is single-flight");
+  assert.ok(!submit.includes("outcome_intake_propose"), "browser submit never proposes");
+  assert.ok(!submit.includes("plan_submit_file") && !submit.includes("goal_submit_file") && !submit.includes("submit_file"),
+    "browser submit never creates work");
+  assert.ok(!submit.includes("setTimeout"), "no automatic retry timer is scheduled");
+
+  // Failed input is preserved: the renderer repopulates every field from the draft.
+  const composer = extractFunctionSource(src, "renderOutcomeComposer");
+  assert.ok(composer.includes('S.outcomeDraft.outcome'), "outcome text preserves the draft");
+  assert.ok(composer.includes('S.outcomeDraft.project'), "project preserves the draft");
+  assert.ok(composer.includes('S.outcomeDraft.context'), "context preserves the draft");
+  assert.ok(composer.includes('S.outcomeDraft.requestedShape'), "shape preserves the draft");
+  assert.ok(composer.includes("outcome-form-active") || composer.includes("outcomeFormActive"),
+    "active-form guard prevents poll re-render from wiping input");
+
+  // Pending story repeats the nothing-started truth near status and next action.
+  const pending = extractFunctionSource(src, "renderPendingStory");
+  assert.ok(pending.includes("outcomePendingStatus"), "pending header names the recorded state");
+  assert.ok(pending.includes("outcomePendingIntro"), "nothing-started truth is explicit");
+  assert.ok(pending.includes("outcomePendingNoAuto"), "nothing-started truth repeats near next action");
+  assert.ok(pending.includes("renderIntakeHandoff(intake)"), "pending card offers the Main handoff");
+
+  // Proposed preview keeps user preference and Main selection distinct.
+  const proposed = extractFunctionSource(src, "renderProposedPreview");
+  assert.ok(proposed.includes("outcomePreferenceDiff"), "preference difference is explained");
+  assert.ok(proposed.includes("outcomeNotConfirmed"), "nothing-created truth is explicit");
+  assert.ok(!proposed.includes("outcomeHandoffCopy"), "proposed preview has no create/handoff control");
+  assert.ok(!proposed.includes("window.confirm"), "proposed preview has no confirmation control");
+
+  // Main handoff copies only the opaque id plus a fixed instruction.
+  const handoff = extractFunctionSource(src, "renderIntakeHandoff");
+  assert.ok(handoff.includes("outcomeHandoffText"), "handoff text is a fixed localized string");
+  const handoffText = extractFunctionSource(src, "outcomeHandoffText");
+  assert.ok(handoffText.includes("{ id: String(intakeId) }"), "handoff text embeds only the id");
+  const enHandoff = enSection.match(/outcomeHandoffText:\s*"([^"]*)"/);
+  assert.ok(enHandoff, "en handoff copy present");
+  assert.ok(!(enHandoff![1] ?? "").includes("{outcome}") && !(enHandoff![1] ?? "").includes("{context}"),
+    "handoff never contains the outcome or context");
+
+  // Bilingual plain-language copy ships for every story state.
+  for (const key of [
+    "outcomeTitle", "outcomeLabel", "outcomeAdvanced", "outcomeSubmit",
+    "outcomePendingStatus", "outcomePendingNext", "outcomePendingContinue",
+    "outcomeProposedStatus", "outcomeNotConfirmed", "outcomeHandoffTitle",
+    "outcomeEmpty", "outcomeLoading", "outcomeUnavailable",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  assert.ok(enSection.includes("nothing has started"), "en pending truth is explicit");
+  assert.ok(zhSection.includes("尚未开始任何工作"), "zh pending truth is explicit");
+  assert.ok(enSection.includes("not confirmed"), "en nothing-created truth is explicit");
+  assert.ok(zhSection.includes("尚未确认"), "zh nothing-created truth is explicit");
+});
+
+test("FL-109D2 intake story renders canonical pending/proposed states without browser inference", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  // The story consumes only the canonical list from the normal Work refresh.
+  const story = extractFunctionSource(src, "renderIntakeStory");
+  assert.ok(story.includes("S.intakes"), "story reads the canonical intake list");
+  assert.ok(story.includes("outcome-story-unavailable"), "first-fetch failure has its own state");
+  assert.ok(story.includes("outcomeEmpty"), "naturally-empty has its own state");
+  assert.ok(story.includes("outcomeLoading"), "loading has its own state");
+  // A missing or stale selected intake falls back to the plain canonical list.
+  assert.ok(story.includes("S.selectedIntakeId"), "selected intake is a browser-only focus aid");
+  assert.ok(!story.includes("intake.status = "), "story never rewrites canonical status");
+  assert.ok(!story.includes("status = \"proposed\""), "story never infers proposed state");
+  // The intake list slice is part of the normal Work refresh path.
+  const smStart = src.indexOf("var SLICE_MAP = {");
+  const smEnd = src.indexOf("};", smStart) + 2;
+  const smBlock = src.slice(smStart, smEnd);
+  assert.ok(smBlock.includes('intakes:'), "intakes slice key ships in SLICE_MAP");
+  assert.ok(smBlock.includes('"/api/ops/intakes"'), "intakes slice maps to the read-only Hub bridge");
+  const pdStart = src.indexOf("var PAGE_DEPS = {");
+  const pdEnd = src.indexOf("};", pdStart) + 2;
+  const pdBlock = src.slice(pdStart, pdEnd);
+  assert.ok(pdBlock.includes('intakes: true'), "Work refresh path fetches the bounded intake list");
+});
+
+// --- FL-109D3B explicit Hub confirmation + created story ---
+
+test("FL-109D3B proposed confirmation is explicit, single-flight, and never optimistic", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+
+  // The proposed preview offers exactly one clear primary confirm action that
+  // opens a contained step; it never uses a native confirm dialog.
+  const proposed = extractFunctionSource(src, "renderProposedPreview");
+  assert.ok(proposed.includes('data-fl-role", "outcome-confirm-open"'), "proposed preview exposes one confirm control");
+  assert.ok(proposed.includes("outcomeConfirmAction"), "confirm control label ships");
+  assert.ok(proposed.includes("renderOutcomeConfirmStep(intake)"), "choosing confirm opens the contained step");
+  assert.ok(!proposed.includes("window.confirm"), "no native confirm dialog");
+  assert.ok(!proposed.includes("outcomeConfirmSubmit("), "the preview itself never submits");
+
+  // The contained step repeats exactly what Main proposed.
+  const step = extractFunctionSource(src, "renderOutcomeConfirmStep");
+  assert.ok(step.includes("outcomeConfirmTitle"), "step has an explicit title");
+  assert.ok(step.includes("outcomeConfirmShape"), "step repeats the selected shape");
+  assert.ok(step.includes("outcomeConfirmDisplay"), "step repeats the display name");
+  assert.ok(step.includes("outcomeConfirmScope"), "step repeats the scope count");
+  assert.ok(step.includes("outcomeConfirmTruth"), "step states that confirming creates and queues work");
+  assert.ok(step.includes('data-fl-role", "outcome-confirm-cancel"'), "step offers a cancel/back control");
+  assert.ok(step.includes('data-fl-role", "outcome-confirm-submit"'), "step offers the one submit control");
+  assert.ok(step.includes("outcomeConfirmPendingId"), "submit state is single-flight");
+
+  // The submit handler forwards only intakeId + expectedRevision + confirm:true.
+  const submit = extractFunctionSource(src, "outcomeConfirmSubmit");
+  assert.ok(submit.includes('postJSON("/api/ops/intakes/" + encodeURIComponent(intake.id) + "/confirm",'),
+    "submit posts to the one authenticated confirm bridge");
+  assert.ok(submit.includes("expectedRevision: intake.revision"), "submit sends the current proposal revision");
+  assert.ok(submit.includes("confirm: true"), "submit sends the literal confirm");
+  assert.ok(submit.includes("if(S.outcomeConfirmPendingId) return"), "submit is single-flight");
+  assert.ok(!submit.includes("artifactPath") && !submit.includes("intake.outcome"),
+    "submit never sends an artifact path or outcome text");
+  assert.ok(!submit.includes("setTimeout"), "no automatic retry timer is scheduled");
+  assert.ok(!submit.includes("workHierarchy"), "submit never mutates the hierarchy slice optimistically");
+  assert.ok(!submit.includes("renderWorkCard"), "submit never invents a Task card");
+  assert.ok(submit.includes("refresh()"), "success performs one ordinary Work refresh");
+  assert.ok(!submit.includes("window.confirm"), "submit never uses a native confirm dialog");
+
+  // Failure preserves the proposal and maps bounded codes to plain copy.
+  const errKey = extractFunctionSource(src, "outcomeConfirmErrorKey");
+  assert.ok(errKey.includes("outcomeConfirmErrorStaleRevision"), "stale revision has its own message");
+  assert.ok(errKey.includes("outcomeConfirmErrorStaleArtifact"), "changed artifact has its own message");
+  assert.ok(errKey.includes("outcomeConfirmErrorInProgress"), "already-running has its own message");
+  assert.ok(errKey.includes("outcomeConfirmErrorNoProposal"), "no-proposal has its own message");
+  assert.ok(errKey.includes("outcomeConfirmErrorNetwork"), "uncertain network has its own message");
+  // On failure the proposal is preserved: the confirming state and canonical
+  // intake list are touched only by the canonical-success branch, and the
+  // failure handler maps the bounded code to plain-language copy.
+  assert.ok(submit.includes("S.outcomeConfirmError = outcomeConfirmErrorKey(msg)"),
+    "failure maps the bounded code to plain-language copy");
+  const confirmClearCount = (submit.match(/S\.outcomeConfirmingId = null/g) || []).length;
+  assert.equal(confirmClearCount, 1, "the confirming state is cleared only on canonical success");
+  const listReplaceCount = (submit.match(/S\.intakes = /g) || []).length;
+  assert.equal(listReplaceCount, 1, "the canonical intake list is replaced only on success");
+  assert.ok(submit.includes("outcomeConfirmErrorNetwork"), "uncertain network has its own copy");
+
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  for (const key of [
+    "outcomeStatusCreated", "outcomeCreatedStatus", "outcomeCreatedWhat",
+    "outcomeCreatedExecution", "outcomeCreatedNext", "outcomeConfirmAction",
+    "outcomeConfirmTitle", "outcomeConfirmTruth", "outcomeConfirmSubmit",
+    "outcomeConfirmErrorStaleRevision", "outcomeConfirmErrorNetwork",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+});
+
+test("FL-109D3B created story is plain-language and progressively disclosed", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+
+  // The intake detail renders the canonical created state distinctly.
+  const detail = extractFunctionSource(src, "renderIntakeDetail");
+  assert.ok(detail.includes('intake.status === "created"'), "created is a first-class canonical state");
+  assert.ok(detail.includes("renderCreatedStory(intake)"), "created detail renders the durable result story");
+
+  const created = extractFunctionSource(src, "renderCreatedStory");
+  assert.ok(created.includes("outcomeCreatedWhat"), "story answers what was created");
+  assert.ok(created.includes("outcomeCreatedExecution"), "story answers what happened to execution");
+  assert.ok(created.includes("outcomeCreatedNext"), "story answers what to do next");
+  assert.ok(created.includes("outcomeCreatedOpenTask"), "story offers opening the created Task");
+  assert.ok(created.includes("showTask(taskIds[0])"), "opening the created Task uses the ordinary detail path");
+  assert.ok(created.includes("renderIntakeTechDetails(intake)"), "ids and receipt evidence stay under Technical details");
+  assert.ok(!created.includes("outcomeHandoffCopy"), "created story has no handoff control");
+
+  // The list badge renders pending/proposed/created from the canonical status.
+  const row = extractFunctionSource(src, "renderIntakeRow");
+  assert.ok(row.includes("outcomeStatusCreated"), "created list badge ships");
+
+  // Technical details disclose the durable receipt evidence under disclosure.
+  const tech = extractFunctionSource(src, "renderIntakeTechDetails");
+  assert.ok(tech.includes("outcomeTechReceipt"), "receipt id is progressive evidence");
+  assert.ok(tech.includes("outcomeTechTaskIds"), "created Task ids are progressive evidence");
+  assert.ok(tech.includes('journeyDisclosure(t("outcomeTechnical"), rows)'), "evidence stays under disclosure");
+});
+
+test("FL-109D3B created story keys are bilingual plain language", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  for (const key of [
+    "outcomeStatusCreated", "outcomeCreatedStatus", "outcomeCreatedWhat",
+    "outcomeCreatedWhatBody", "outcomeCreatedExecution", "outcomeCreatedExecutionBody",
+    "outcomeCreatedNext", "outcomeCreatedNextBody", "outcomeCreatedOpenTask",
+    "outcomeConfirmAction", "outcomeConfirmTitle", "outcomeConfirmIntro",
+    "outcomeConfirmShape", "outcomeConfirmDisplay", "outcomeConfirmScope",
+    "outcomeConfirmTruth", "outcomeConfirmCancel", "outcomeConfirmSubmit",
+    "outcomeConfirmPending", "outcomeConfirmAnnounce", "outcomeConfirmCreatedAnnounce",
+    "outcomeConfirmErrorStaleRevision", "outcomeConfirmErrorStaleArtifact",
+    "outcomeConfirmErrorInProgress", "outcomeConfirmErrorNoProposal",
+    "outcomeConfirmErrorNetwork", "outcomeTechReceipt", "outcomeTechTaskIds",
+    "outcomeTechPlanId", "outcomeTechGoalId", "outcomeTechConfirmedAt",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  // Plain-language truth: creation really happens, and uncertainty never
+  // claims nothing happened.
+  assert.ok(enSection.includes("work created"), "en created story states the durable result");
+  assert.ok(zhSection.includes("工作已创建"), "zh created story states the durable result");
+  assert.ok(enSection.includes("could not confirm whether"), "en network failure stays uncertain");
+  assert.ok(zhSection.includes("无法确认工作是否已创建"), "zh network failure stays uncertain");
 });

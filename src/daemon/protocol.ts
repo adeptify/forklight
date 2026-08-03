@@ -77,6 +77,11 @@ export type DaemonMethod =
   | "self_upgrade_evidence"
   | "task_plan_context"
   | "work_hierarchy"
+  | "outcome_intake_create"
+  | "outcome_intake_list"
+  | "outcome_intake_get"
+  | "outcome_intake_propose"
+  | "outcome_intake_confirm"
   | "shutdown";
 
 export interface DaemonRequest {
@@ -135,6 +140,8 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "self_upgrade_evidence",
   "task_plan_context",
   "work_hierarchy",
+  "outcome_intake_list",
+  "outcome_intake_get",
 ]);
 
 function isMutatingDaemonMethod(method: DaemonMethod): boolean {

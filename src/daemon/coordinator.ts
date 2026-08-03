@@ -17,6 +17,8 @@ import type {
   CheckpointRequest,
   DependencyRecord,
   EffectivePolicySnapshot,
+  GoalMilestoneRecord,
+  GoalRecord,
   IntegrationResultRecord,
   IntegrationOperationView,
   IntegrationStageEvidence,
@@ -122,6 +124,30 @@ import {
   type GoalTaskHandoffRequest,
 } from "../core/candidate-handoff.js";
 import { loadTaskSpec, parseTaskSpec } from "../core/task.js";
+import {
+  buildCreatedOutcomeIntake,
+  buildOutcomeIntakeConfirmationPreview,
+  buildOutcomeIntakeConfirmationReceipt,
+  buildProposedOutcomeIntake,
+  createOutcomeIntakeRecord,
+  normalizeOutcomeIntakeConfirm,
+  normalizeOutcomeIntakeCreate,
+  normalizeOutcomeIntakeListLimit,
+  normalizeOutcomeIntakePropose,
+  outcomeIntakeArtifactGraphDigest,
+  projectOutcomeIntake,
+  projectOutcomeIntakeConfirmation,
+  OUTCOME_INTAKE_CONFIRM_IN_PROGRESS_REASON,
+  OUTCOME_INTAKE_NO_PROPOSAL_REASON,
+  OUTCOME_INTAKE_STALE_ARTIFACT_REASON,
+  STALE_OUTCOME_INTAKE_CONFIRM_REASON,
+  STALE_OUTCOME_INTAKE_REASON,
+  type OutcomeIntakeArtifactLoad,
+  type OutcomeIntakeConfirmationPreview,
+  type OutcomeIntakeConfirmationView,
+  type OutcomeIntakeView,
+  type ProposedShape,
+} from "../core/outcome-intake.js";
 import { isoTimestamp as timestamp, sleepMs as sleep } from "../core/time.js";
 import { providerReadiness } from "../core/providers.js";
 import { listWorkerAdapters } from "../workers/registry.js";
@@ -274,6 +300,34 @@ export interface PlanRegistrationResult {
 
 export type { GoalRegistrationResult, GoalView, GoalAdvanceResult };
 
+/** The exact validated artifact graph bound to an outcome-intake proposal.
+ *  Created from the same load used for digest identity so confirmation never
+ *  validates one byte set and registers a later independent read. */
+type OutcomeIntakeArtifactRegistration =
+  | { kind: "task"; spec: TaskSpec; taskFile: string }
+  | { kind: "plan"; plan: WorkPlan }
+  | { kind: "goal"; goal: LoadedGoal };
+
+/** A validated artifact plus its complete registration source. Extends the
+ *  public facts/digest load so proposal previews stay unchanged while
+ *  confirmation can reuse the identical load for the existing registrations. */
+interface LoadedOutcomeIntakeArtifact extends OutcomeIntakeArtifactLoad {
+  registration: OutcomeIntakeArtifactRegistration;
+}
+
+/** Staged outcome-intake confirmation registration result. */
+interface OutcomeIntakeRegistrationResult {
+  taskIds: string[];
+  registrations: StagedTaskRegistration[];
+  planRecord?: PlanRecord;
+  items?: PlanItemRecord[];
+  dependencies?: DependencyRecord[];
+  goal?: GoalRecord;
+  milestones?: GoalMilestoneRecord[];
+  planId?: string;
+  goalId?: string;
+}
+
 /**
  * One bounded stale-preview reason shared by the daemon and Hub. A bound
  * submit_file fails closed with exactly this message when the supplied preview
@@ -416,6 +470,10 @@ export class DaemonCoordinator {
    *  A second in-progress write to the same Task Contract is rejected so a
    *  stale confirmation can never overwrite a concurrent first result. */
   private readonly classReuseInFlight = new Set<string>();
+  /** One per-intake confirmation gate. A second explicit confirmation for the
+   *  same outcome intake is rejected while the first is running; the caller
+   *  retries and then receives the already-stored receipt. */
+  private readonly outcomeIntakeConfirmInFlight = new Set<string>();
   private closing = false;
   /** Process-local complete snapshot of expensive Keychain/Runtime inspection. */
   private readonly healthEnvironment: HealthEnvironmentCache;
@@ -986,8 +1044,29 @@ export class DaemonCoordinator {
   }
 
   submitPlan(plan: WorkPlan): PlanRegistrationResult {
-    const planId = plan.planFile;
     const createdAt = timestamp();
+    const { registrations, items, dependencies, planRecord, taskIdsByItemId } =
+      this.preparePlanRegistration(plan, createdAt);
+    this.store.createPlanExecution(registrations, planRecord, items, dependencies);
+    for (const taskId of Object.values(taskIdsByItemId)) this.queueTask(taskId);
+    return { planId: planRecord.id, taskIdsByItemId };
+  }
+
+  /** Build the exact existing Plan registration graph from one validated load.
+   *  Shared by ordinary Plan submission and confirmed outcome-intake creation so
+   *  both paths produce identical Task records, events, items, and dependency
+   *  rows. Never mutates or queues by itself. */
+  private preparePlanRegistration(
+    plan: WorkPlan,
+    createdAt: string,
+  ): {
+    registrations: StagedTaskRegistration[];
+    items: PlanItemRecord[];
+    dependencies: DependencyRecord[];
+    planRecord: PlanRecord;
+    taskIdsByItemId: Record<string, string>;
+  } {
+    const planId = plan.planFile;
     const home = path.dirname(this.store.databasePath);
     const taskIdsByItemId: Record<string, string> = {};
     const registrations: StagedTaskRegistration[] = [];
@@ -1033,7 +1112,7 @@ export class DaemonCoordinator {
         dependsOnItemId,
       })),
     );
-    const record: PlanRecord = {
+    const planRecord: PlanRecord = {
       id: planId,
       name: plan.name,
       objective: plan.objective,
@@ -1041,10 +1120,7 @@ export class DaemonCoordinator {
       createdAt,
       updatedAt: createdAt,
     };
-
-    this.store.createPlanExecution(registrations, record, items, dependencies);
-    for (const taskId of Object.values(taskIdsByItemId)) this.queueTask(taskId);
-    return { planId, taskIdsByItemId };
+    return { registrations, items, dependencies, planRecord, taskIdsByItemId };
   }
 
   async submitPlanFile(planFile: string): Promise<PlanRegistrationResult> {
@@ -1058,9 +1134,44 @@ export class DaemonCoordinator {
    * only dependency-ready work through the ordinary Plan scheduler.
    */
   submitGoal(loaded: LoadedGoal): GoalRegistrationResult {
+    const createdAt = timestamp();
+    const prepared = this.prepareGoalRegistration(loaded, createdAt);
+    this.store.createPlanExecutionWithGoal(
+      prepared.registrations,
+      prepared.planRecord,
+      prepared.items,
+      prepared.dependencies,
+      prepared.goal,
+      prepared.milestones,
+    );
+    // Queue only after durable registration; Goal gates apply on admission.
+    for (const taskId of Object.values(prepared.taskIdsByItemId)) this.queueTask(taskId);
+    this.reconcileGoal(prepared.goal.id);
+    return {
+      goalId: prepared.goal.id,
+      planId: prepared.planRecord.id,
+      taskIdsByItemId: prepared.taskIdsByItemId,
+    };
+  }
+
+  /** Build the exact existing Goal registration graph (Plan Tasks, dependencies,
+   *  Goal, and milestones) from one validated load. Shared by ordinary Goal
+   *  submission and confirmed outcome-intake creation so both paths produce
+   *  identical records. Never mutates or queues by itself. */
+  private prepareGoalRegistration(
+    loaded: LoadedGoal,
+    createdAt: string,
+  ): {
+    registrations: StagedTaskRegistration[];
+    items: PlanItemRecord[];
+    dependencies: DependencyRecord[];
+    planRecord: PlanRecord;
+    goal: GoalRecord;
+    milestones: GoalMilestoneRecord[];
+    taskIdsByItemId: Record<string, string>;
+  } {
     const plan = loaded.plan;
     const planId = plan.planFile;
-    const createdAt = timestamp();
     const home = path.dirname(this.store.databasePath);
     const taskIdsByItemId: Record<string, string> = {};
     const registrations: StagedTaskRegistration[] = [];
@@ -1121,19 +1232,39 @@ export class DaemonCoordinator {
       taskIdsByItemId,
       createdAt,
     });
+    return { registrations, items, dependencies, planRecord, goal, milestones, taskIdsByItemId };
+  }
 
-    this.store.createPlanExecutionWithGoal(
-      registrations,
-      planRecord,
-      items,
-      dependencies,
-      goal,
-      milestones,
-    );
-    // Queue only after durable registration; Goal gates apply on admission.
-    for (const taskId of Object.values(taskIdsByItemId)) this.queueTask(taskId);
-    this.reconcileGoal(goal.id);
-    return { goalId: goal.id, planId, taskIdsByItemId };
+  /** Build one exact staged Task registration from a validated Task load. */
+  private prepareTaskRegistration(
+    spec: TaskSpec,
+    taskFile: string,
+    createdAt: string,
+  ): { taskId: string; task: TaskRecord; creationEvent: StagedTaskRegistration["creationEvent"] } {
+    const taskId = randomUUID();
+    const effectivePolicy = this.resolveEffectivePolicy(spec);
+    const task = buildTaskRecord({
+      spec,
+      taskFile,
+      home: path.dirname(this.store.databasePath),
+      id: taskId,
+      sessionId: randomUUID(),
+      createdAt,
+      ...(effectivePolicy === undefined ? {} : { effectivePolicy }),
+    });
+    return {
+      taskId,
+      task,
+      creationEvent: {
+        summary: `Task created: ${spec.name}`,
+        payload: {
+          provider: spec.provider.name,
+          model: spec.provider.model,
+          runtime: spec.runtime.name,
+          sourcePath: spec.project,
+        },
+      },
+    };
   }
 
   async submitGoalFile(goalFile: string): Promise<GoalRegistrationResult> {
@@ -3723,5 +3854,292 @@ export class DaemonCoordinator {
     return selectMainDirectRecentEntries(
       this.store.listRecentMainDirectDecisions(limit ?? MAIN_DIRECT_RECENT_LIMIT),
     );
+  }
+
+  // --- Outcome intake (FL-109D1) ---
+
+  /** Create a pending outcome intake. Records what the user wants to achieve
+   *  without deciding the shape and without creating any Task, Plan, Goal,
+   *  Worker, or Provider action. */
+  createOutcomeIntake(input: unknown): OutcomeIntakeView {
+    const normalized = normalizeOutcomeIntakeCreate(input);
+    const record = createOutcomeIntakeRecord(normalized, randomUUID());
+    this.store.createOutcomeIntake(record);
+    return projectOutcomeIntake(record);
+  }
+
+  /** Read one outcome intake as a privacy-safe view. Read-only. */
+  outcomeIntake(intakeId: string): OutcomeIntakeView {
+    return projectOutcomeIntake(this.store.getOutcomeIntake(intakeId));
+  }
+
+  /** List pending/current outcome intakes as privacy-safe views. Optional
+   *  closed status filter and validated list limit; invalid values fail
+   *  closed. Read-only. */
+  listOutcomeIntakes(status?: unknown, limit?: unknown): OutcomeIntakeView[] {
+    let statuses: Array<"pending" | "proposed" | "created"> | undefined;
+    if (status !== undefined) {
+      if (status !== "pending" && status !== "proposed" && status !== "created") {
+        throw new Error("status must be pending, proposed, or created");
+      }
+      statuses = [status as "pending" | "proposed" | "created"];
+    }
+    const safeLimit = normalizeOutcomeIntakeListLimit(limit);
+    return this.store.listOutcomeIntakes(statuses, safeLimit).map(projectOutcomeIntake);
+  }
+
+  /** Attach or replace one explicit Main proposal. Validates the bound
+   *  artifact through the existing Task/Work Plan/Goal loader and quality gate,
+   *  then persists validated facts (never raw contract content) with an
+   *  optimistic revision match. Returns the privacy-safe intake view plus the
+   *  confirmation preview. Never submits the artifact and never creates work. */
+  async proposeOutcomeIntake(input: unknown): Promise<{
+    intake: OutcomeIntakeView;
+    preview: OutcomeIntakeConfirmationPreview;
+  }> {
+    const proposal = normalizeOutcomeIntakePropose(input);
+    const current = this.store.getOutcomeIntake(proposal.intakeId);
+    if (current.status === "created") {
+      throw new Error("Created outcome intake cannot be re-proposed; create a new intake for new work.");
+    }
+    if (current.revision !== proposal.expectedRevision) {
+      throw new Error(STALE_OUTCOME_INTAKE_REASON);
+    }
+    const artifact = await this.loadOutcomeIntakeArtifact(proposal.shape, proposal.artifactPath);
+    const updated = buildProposedOutcomeIntake(current, proposal, artifact);
+    // Atomic optimistic revision check; a concurrent replacement fails closed.
+    this.store.updateOutcomeIntake(updated);
+    return {
+      intake: projectOutcomeIntake(updated),
+      preview: buildOutcomeIntakeConfirmationPreview(updated),
+    };
+  }
+
+  /** Validate one artifact through the existing contract loader for the
+   *  selected shape. Reuses the current quality gate; never reimplements it
+   *  and never submits the artifact. The returned load carries the full
+   *  registration source from the SAME validated bytes that produced the
+   *  digest identity, so confirmation can prove digest equality and then
+   *  create from the identical load — never a second independent read. */
+  private async loadOutcomeIntakeArtifact(
+    shape: ProposedShape,
+    artifactPath: string,
+  ): Promise<LoadedOutcomeIntakeArtifact> {
+    const policy = taskPolicy(this.settings.get());
+    if (shape === "task") {
+      const loaded = await loadTaskSpec(artifactPath, policy);
+      if (loaded.spec.version !== 2) {
+        throw new Error("Task proposal requires a version-2 Task Contract");
+      }
+      return {
+        facts: {
+          shape,
+          displayName: loaded.spec.name,
+          objective: loaded.spec.contract.outcome,
+          taskCount: 1,
+        },
+        artifactDigest: loaded.taskFileDigest,
+        registration: { kind: "task", spec: loaded.spec, taskFile: loaded.taskFile },
+      };
+    }
+    if (shape === "plan") {
+      const report = await assertWorkPlan(artifactPath, policy);
+      return {
+        facts: {
+          shape,
+          displayName: report.plan.name,
+          objective: report.plan.objective,
+          taskCount: report.plan.items.length,
+          dependencyWaves: report.plan.waves,
+        },
+        artifactDigest: await outcomeIntakeArtifactGraphDigest(
+          artifactPath,
+          report.plan.items.map((item) => item.taskFile),
+        ),
+        registration: { kind: "plan", plan: report.plan },
+      };
+    }
+    const loadedGoal = await assertGoal(artifactPath, policy);
+    return {
+      facts: {
+        shape,
+        displayName: loadedGoal.name,
+        objective: loadedGoal.objective,
+        taskCount: loadedGoal.plan.items.length,
+        dependencyWaves: loadedGoal.plan.waves,
+      },
+      artifactDigest: await outcomeIntakeArtifactGraphDigest(
+        artifactPath,
+        [
+          loadedGoal.planFile,
+          ...loadedGoal.plan.items.map((item) => item.taskFile),
+        ],
+      ),
+      registration: { kind: "goal", goal: loadedGoal },
+    };
+  }
+
+  /** Prepare the exact existing Task/Plan/Goal registration graph from the same
+   *  validated load that produced the artifact digest. Never validates one byte
+   *  set and registers a later independent read. */
+  private prepareOutcomeIntakeRegistration(
+    shape: ProposedShape,
+    artifact: LoadedOutcomeIntakeArtifact,
+    createdAt: string,
+  ): OutcomeIntakeRegistrationResult {
+    if (shape === "task") {
+      if (artifact.registration.kind !== "task") {
+        throw new Error("Outcome intake proposal shape mismatch");
+      }
+      const { taskId, task, creationEvent } = this.prepareTaskRegistration(
+        artifact.registration.spec,
+        artifact.registration.taskFile,
+        createdAt,
+      );
+      return {
+        taskIds: [taskId],
+        registrations: [{ task, creationEvent }],
+      };
+    }
+    if (shape === "plan") {
+      if (artifact.registration.kind !== "plan") {
+        throw new Error("Outcome intake proposal shape mismatch");
+      }
+      const prepared = this.preparePlanRegistration(artifact.registration.plan, createdAt);
+      return {
+        taskIds: Object.values(prepared.taskIdsByItemId),
+        registrations: prepared.registrations,
+        planRecord: prepared.planRecord,
+        items: prepared.items,
+        dependencies: prepared.dependencies,
+        planId: prepared.planRecord.id,
+      };
+    }
+    if (artifact.registration.kind !== "goal") {
+      throw new Error("Outcome intake proposal shape mismatch");
+    }
+    const prepared = this.prepareGoalRegistration(artifact.registration.goal, createdAt);
+    return {
+      taskIds: Object.values(prepared.taskIdsByItemId),
+      registrations: prepared.registrations,
+      planRecord: prepared.planRecord,
+      items: prepared.items,
+      dependencies: prepared.dependencies,
+      goal: prepared.goal,
+      milestones: prepared.milestones,
+      planId: prepared.planRecord.id,
+      goalId: prepared.goal.id,
+    };
+  }
+
+  /**
+   * Explicit Main confirmation authority. One proposed intake is revalidated in
+   * full (complete artifact graph digest equality) and, only when unchanged,
+   * the existing Task/Plan/Goal registration graph plus the intake's durable
+   * receipt commit in one database transaction. Work is queued only after the
+   * commit. Retries for the same intake and proposal revision return the stored
+   * receipt and canonical ids without inserting or queueing anything.
+   */
+  async confirmOutcomeIntake(input: unknown): Promise<{
+    intake: OutcomeIntakeView;
+    receipt: OutcomeIntakeConfirmationView;
+  }> {
+    const normalized = normalizeOutcomeIntakeConfirm(input);
+    const intakeId = normalized.intakeId;
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    if (this.outcomeIntakeConfirmInFlight.has(intakeId)) {
+      throw new Error(OUTCOME_INTAKE_CONFIRM_IN_PROGRESS_REASON);
+    }
+    this.outcomeIntakeConfirmInFlight.add(intakeId);
+    try {
+      const current = this.store.getOutcomeIntake(intakeId);
+      // Exactly-once retry: the same proposal revision already confirmed. The
+      // created record revision advanced by one, so idempotency is bound to the
+      // durable receipt's proposalRevision — never the created record revision.
+      if (current.status === "created") {
+        if (current.confirmation === undefined) {
+          throw new Error("Outcome intake has no confirmation receipt");
+        }
+        if (current.confirmation.proposalRevision !== normalized.expectedRevision) {
+          throw new Error(STALE_OUTCOME_INTAKE_CONFIRM_REASON);
+        }
+        return {
+          intake: projectOutcomeIntake(current),
+          receipt: projectOutcomeIntakeConfirmation(current.confirmation),
+        };
+      }
+      if (current.status !== "proposed" || current.proposal === undefined) {
+        throw new Error(OUTCOME_INTAKE_NO_PROPOSAL_REASON);
+      }
+      if (current.revision !== normalized.expectedRevision) {
+        throw new Error(STALE_OUTCOME_INTAKE_CONFIRM_REASON);
+      }
+      // Re-read and re-validate the complete proposed artifact graph through
+      // the existing loaders. Any changed root or referenced contract fails
+      // before any mutation or intake change.
+      const artifact = await this.loadOutcomeIntakeArtifact(
+        current.proposal.shape,
+        current.proposal.artifactPath,
+      );
+      if (artifact.artifactDigest !== current.proposal.artifactDigest) {
+        throw new Error(OUTCOME_INTAKE_STALE_ARTIFACT_REASON);
+      }
+      const confirmedAt = timestamp();
+      const registration = this.prepareOutcomeIntakeRegistration(
+        current.proposal.shape,
+        artifact,
+        confirmedAt,
+      );
+      const receipt = buildOutcomeIntakeConfirmationReceipt({
+        intakeId,
+        proposalRevision: current.revision,
+        artifactDigest: current.proposal.artifactDigest,
+        shape: current.proposal.shape,
+        taskIds: registration.taskIds,
+        ...(registration.planId === undefined ? {} : { planId: registration.planId }),
+        ...(registration.goalId === undefined ? {} : { goalId: registration.goalId }),
+        confirmedAt,
+      });
+      const updated = buildCreatedOutcomeIntake(current, receipt, confirmedAt);
+      // One SQLite transaction: complete work graph + intake receipt, or none.
+      this.store.createOutcomeIntakeConfirmation({
+        intakeId,
+        expectedRevision: current.revision,
+        updatedIntake: updated,
+        registrations: registration.registrations,
+        ...(registration.planRecord === undefined ? {} : { plan: registration.planRecord }),
+        ...(registration.items === undefined ? {} : { items: registration.items }),
+        ...(registration.dependencies === undefined
+          ? {}
+          : { dependencies: registration.dependencies }),
+        ...(registration.goal === undefined ? {} : { goal: registration.goal }),
+        ...(registration.milestones === undefined
+          ? {}
+          : { milestones: registration.milestones }),
+      });
+      // Queue only committed Task ids; restart recovery re-queues if the process
+      // ends between the commit and this in-memory admission.
+      for (const taskId of registration.taskIds) {
+        try {
+          this.enqueue({ taskId, resuming: false });
+        } catch {
+          this.store.addEvent(
+            taskId,
+            undefined,
+            "task.ready",
+            "Confirmed work persisted and will be recovered from the durable queue",
+          );
+        }
+      }
+      if (registration.goalId !== undefined) {
+        this.reconcileGoal(registration.goalId);
+      }
+      return {
+        intake: projectOutcomeIntake(updated),
+        receipt: projectOutcomeIntakeConfirmation(receipt),
+      };
+    } finally {
+      this.outcomeIntakeConfirmInFlight.delete(intakeId);
+    }
   }
 }

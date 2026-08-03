@@ -35,6 +35,15 @@ import { normalizeDirectCodexSampleReview, type DirectCodexSampleReview } from "
 import { SELF_UPGRADE_DELIVERY_PROFILE_ID } from "../core/self-upgrade-evidence.js";
 import { normalizeDirectCodexCalibrationRecord, normalizeOrchestrationExchangeReceipt, type DirectCodexCalibrationRecord, type OrchestrationExchangeReceipt } from "../core/token-efficiency.js";
 import { isoTimestamp as now } from "../core/time.js";
+import {
+  OUTCOME_INTAKE_LIST_DEFAULT_LIMIT,
+  OUTCOME_INTAKE_LIST_MAX_LIMIT,
+  OUTCOME_INTAKE_NO_PROPOSAL_REASON,
+  STALE_OUTCOME_INTAKE_CONFIRM_REASON,
+  STALE_OUTCOME_INTAKE_REASON,
+  type OutcomeIntakeRecord,
+  type OutcomeIntakeStatus,
+} from "../core/outcome-intake.js";
 
 type TaskRecordPatch = Omit<Partial<TaskRecord>, "effectivePolicy" | "error" | "finishedAt" | "workerPid" | "currentAttemptId" | "startedAt"> & {
   error?: string | null;
@@ -384,6 +393,15 @@ export class StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_main_direct_decisions_closed
         ON main_direct_decisions(status, started_at DESC);
+      CREATE TABLE IF NOT EXISTS outcome_intakes (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        record_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_outcome_intakes_status
+        ON outcome_intakes(status, updated_at DESC);
     `);
   }
 
@@ -700,7 +718,10 @@ export class StateStore {
     this.transact(() => this.insertPlanGraph(plan, items, dependencies));
   }
 
-  createPlanExecution(
+  /** Shared validation for every staged Task/Plan registration graph. Reused by
+   *  ordinary Plan submission and by confirmed outcome-intake creation so both
+   *  paths enforce the exact same one-unique-task-per-item contract. */
+  private validatePlanExecution(
     registrations: StagedTaskRegistration[],
     plan: PlanRecord,
     items: PlanItemRecord[],
@@ -716,26 +737,10 @@ export class StateStore {
     ) {
       throw new Error("Plan execution requires one unique staged task for every plan item");
     }
-    this.transact(() => {
-      for (const { task, creationEvent } of registrations) {
-        this.insertTask(task);
-        this.insertEvent(
-          task.id,
-          undefined,
-          "task.created",
-          creationEvent.summary,
-          creationEvent.payload,
-        );
-      }
-      this.insertPlanGraph(plan, items, dependencies);
-    });
   }
 
-  /**
-   * Atomically register Plan Tasks, dependencies, Goal, and milestones before
-   * any in-memory queue action. Validation must already be complete.
-   */
-  createPlanExecutionWithGoal(
+  /** Shared validation for a staged Goal registration graph. */
+  private validateGoalExecution(
     registrations: StagedTaskRegistration[],
     plan: PlanRecord,
     items: PlanItemRecord[],
@@ -743,16 +748,7 @@ export class StateStore {
     goal: GoalRecord,
     milestones: GoalMilestoneRecord[],
   ): void {
-    this.validatePlanGraph(plan, items, dependencies);
-    const taskIds = new Set(registrations.map(({ task }) => task.id));
-    const itemTaskIds = items.map((item) => item.taskId);
-    if (
-      taskIds.size !== registrations.length
-      || itemTaskIds.length !== registrations.length
-      || itemTaskIds.some((taskId) => taskId === undefined || !taskIds.has(taskId))
-    ) {
-      throw new Error("Plan execution requires one unique staged task for every plan item");
-    }
+    this.validatePlanExecution(registrations, plan, items, dependencies);
     if (goal.planId !== plan.id) {
       throw new Error("Goal planId must match the registered plan");
     }
@@ -767,8 +763,178 @@ export class StateStore {
         throw new Error(`Milestone ${milestone.itemId} must link the registered plan Task`);
       }
     }
+  }
+
+  /** Shared insert body for a staged Task/Plan graph. */
+  private insertPlanExecution(
+    registrations: StagedTaskRegistration[],
+    plan: PlanRecord,
+    items: PlanItemRecord[],
+    dependencies: DependencyRecord[],
+  ): void {
+    for (const { task, creationEvent } of registrations) {
+      this.insertTask(task);
+      this.insertEvent(
+        task.id,
+        undefined,
+        "task.created",
+        creationEvent.summary,
+        creationEvent.payload,
+      );
+    }
+    this.insertPlanGraph(plan, items, dependencies);
+  }
+
+  /** Shared insert body for a staged Goal graph. */
+  private insertPlanExecutionWithGoal(
+    registrations: StagedTaskRegistration[],
+    plan: PlanRecord,
+    items: PlanItemRecord[],
+    dependencies: DependencyRecord[],
+    goal: GoalRecord,
+    milestones: GoalMilestoneRecord[],
+  ): void {
+    this.insertPlanExecution(registrations, plan, items, dependencies);
+    this.insertGoal(goal, milestones);
+  }
+
+  createPlanExecution(
+    registrations: StagedTaskRegistration[],
+    plan: PlanRecord,
+    items: PlanItemRecord[],
+    dependencies: DependencyRecord[],
+  ): void {
+    this.validatePlanExecution(registrations, plan, items, dependencies);
+    this.transact(() => this.insertPlanExecution(registrations, plan, items, dependencies));
+  }
+
+  /**
+   * Atomically register Plan Tasks, dependencies, Goal, and milestones before
+   * any in-memory queue action. Validation must already be complete.
+   */
+  createPlanExecutionWithGoal(
+    registrations: StagedTaskRegistration[],
+    plan: PlanRecord,
+    items: PlanItemRecord[],
+    dependencies: DependencyRecord[],
+    goal: GoalRecord,
+    milestones: GoalMilestoneRecord[],
+  ): void {
+    this.validateGoalExecution(registrations, plan, items, dependencies, goal, milestones);
+    this.transact(() =>
+      this.insertPlanExecutionWithGoal(registrations, plan, items, dependencies, goal, milestones),
+    );
+  }
+
+  /**
+   * Atomically confirm one explicit Main outcome intake: commit the complete
+   * existing Task/Plan/Goal registration graph AND advance the intake to the
+   * terminal created state with one durable receipt as a single SQLite unit.
+   * The current intake row is re-read inside the transaction; a stale or
+   * non-proposed intake fails closed with the fixed privacy-safe reasons and no
+   * Task/event/Plan/dependency/Goal/milestone row is written. This is the
+   * exactly-once authority — every insert and the intake update commit or none
+   * do, so a retry can never create a second graph.
+   */
+  createOutcomeIntakeConfirmation(params: {
+    intakeId: string;
+    expectedRevision: number;
+    updatedIntake: OutcomeIntakeRecord;
+    registrations: StagedTaskRegistration[];
+    plan?: PlanRecord;
+    items?: PlanItemRecord[];
+    dependencies?: DependencyRecord[];
+    goal?: GoalRecord;
+    milestones?: GoalMilestoneRecord[];
+  }): void {
     this.transact(() => {
-      for (const { task, creationEvent } of registrations) {
+      const row = this.db
+        .prepare("SELECT status, revision FROM outcome_intakes WHERE id = ?")
+        .get(params.intakeId) as { status: OutcomeIntakeStatus; revision: number } | undefined;
+      if (!row) throw new Error("Unknown outcome intake");
+      if (row.revision !== params.expectedRevision) {
+        throw new Error(STALE_OUTCOME_INTAKE_CONFIRM_REASON);
+      }
+      if (row.status !== "proposed") {
+        throw new Error(OUTCOME_INTAKE_NO_PROPOSAL_REASON);
+      }
+      // Internal confirmation-graph invariants fail closed BEFORE any insert:
+      // the updated intake identity/status/revision/receipt and the staged
+      // Task/Plan/Goal ids must match the confirmed proposal exactly.
+      if (params.updatedIntake.id !== params.intakeId) {
+        throw new Error("Confirmation intake identity mismatch");
+      }
+      if (params.updatedIntake.status !== "created") {
+        throw new Error("Confirmation intake must be terminal created");
+      }
+      if (params.updatedIntake.revision !== params.expectedRevision + 1) {
+        throw new Error("Confirmation intake revision mismatch");
+      }
+      const receipt = params.updatedIntake.confirmation;
+      if (
+        receipt === undefined
+        || receipt.intakeId !== params.intakeId
+        || receipt.proposalRevision !== params.expectedRevision
+      ) {
+        throw new Error("Confirmation receipt does not match the intake revision");
+      }
+      const stagedTaskIds = params.registrations.map(({ task }) => task.id);
+      if (
+        receipt.taskIds.length !== stagedTaskIds.length
+        || receipt.taskIds.some((taskId, index) => taskId !== stagedTaskIds[index])
+      ) {
+        throw new Error("Confirmation receipt does not match the staged work graph");
+      }
+      if (params.plan === undefined) {
+        if (receipt.planId !== undefined) {
+          throw new Error("Confirmation receipt plan does not match the staged plan");
+        }
+      } else if (receipt.planId !== params.plan.id) {
+        throw new Error("Confirmation receipt plan does not match the staged plan");
+      }
+      if (params.goal === undefined) {
+        if (receipt.goalId !== undefined) {
+          throw new Error("Confirmation receipt goal does not match the staged goal");
+        }
+      } else if (receipt.goalId !== params.goal.id) {
+        throw new Error("Confirmation receipt goal does not match the staged goal");
+      }
+      if (params.goal !== undefined) {
+        if (
+          params.plan === undefined
+          || params.items === undefined
+          || params.dependencies === undefined
+          || params.milestones === undefined
+        ) {
+          throw new Error("Goal confirmation requires a complete plan graph");
+        }
+        this.validateGoalExecution(
+          params.registrations,
+          params.plan,
+          params.items,
+          params.dependencies,
+          params.goal,
+          params.milestones,
+        );
+        this.insertPlanExecutionWithGoal(
+          params.registrations,
+          params.plan,
+          params.items,
+          params.dependencies,
+          params.goal,
+          params.milestones,
+        );
+      } else if (params.plan !== undefined) {
+        if (params.items === undefined || params.dependencies === undefined) {
+          throw new Error("Plan confirmation requires a complete item graph");
+        }
+        this.validatePlanExecution(params.registrations, params.plan, params.items, params.dependencies);
+        this.insertPlanExecution(params.registrations, params.plan, params.items, params.dependencies);
+      } else {
+        if (params.registrations.length !== 1) {
+          throw new Error("Task confirmation requires exactly one staged task");
+        }
+        const { task, creationEvent } = params.registrations[0]!;
         this.insertTask(task);
         this.insertEvent(
           task.id,
@@ -778,8 +944,23 @@ export class StateStore {
           creationEvent.payload,
         );
       }
-      this.insertPlanGraph(plan, items, dependencies);
-      this.insertGoal(goal, milestones);
+      const result = this.db
+        .prepare(
+          `UPDATE outcome_intakes
+           SET status = ?, revision = ?, updated_at = ?, record_json = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(
+          params.updatedIntake.status,
+          params.updatedIntake.revision,
+          params.updatedIntake.updatedAt,
+          JSON.stringify(params.updatedIntake),
+          params.intakeId,
+          params.expectedRevision,
+        );
+      if (result.changes !== 1) {
+        throw new Error(STALE_OUTCOME_INTAKE_CONFIRM_REASON);
+      }
     });
   }
 
@@ -2498,5 +2679,79 @@ export class StateStore {
     return rows.map((row) =>
       parseRecord<MainDirectDecisionRecord>(row.record_json, "main-direct decision"),
     );
+  }
+
+  // --- Outcome intake (FL-109D1) ---
+
+  /** Persist one pending/proposed outcome intake. Does not touch Task, Plan,
+   *  Goal, Attempt, Worker, or Provider lifecycle tables. */
+  createOutcomeIntake(record: OutcomeIntakeRecord): void {
+    this.db
+      .prepare(
+        "INSERT INTO outcome_intakes (id, status, revision, updated_at, record_json) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(record.id, record.status, record.revision, record.updatedAt, JSON.stringify(record));
+  }
+
+  getOutcomeIntake(intakeId: string): OutcomeIntakeRecord {
+    const row = this.db.prepare("SELECT record_json FROM outcome_intakes WHERE id = ?").get(intakeId) as
+      | { record_json: string }
+      | undefined;
+    if (!row) throw new Error("Unknown outcome intake");
+    return parseRecord<OutcomeIntakeRecord>(row.record_json, "outcome intake");
+  }
+
+  /** Read-only bounded list. The limit is defensively clamped to the validated
+   *  [1, 100] range so every caller returns at most the requested amount. */
+  listOutcomeIntakes(statuses?: OutcomeIntakeStatus[], limit?: number): OutcomeIntakeRecord[] {
+    const safeLimit = Math.max(
+      1,
+      Math.min(
+        typeof limit === "number" && Number.isSafeInteger(limit)
+          ? limit
+          : OUTCOME_INTAKE_LIST_DEFAULT_LIMIT,
+        OUTCOME_INTAKE_LIST_MAX_LIMIT,
+      ),
+    );
+    const rows = statuses !== undefined && statuses.length > 0
+      ? this.db
+          .prepare(
+            `SELECT record_json FROM outcome_intakes
+             WHERE status IN (${statuses.map(() => "?").join(", ")})
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(...statuses, safeLimit)
+      : this.db
+          .prepare(
+            `SELECT record_json FROM outcome_intakes
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(safeLimit);
+    return (rows as unknown as Array<{ record_json: string }>).map((row) =>
+      parseRecord<OutcomeIntakeRecord>(row.record_json, "outcome intake"),
+    );
+  }
+
+  /** Optimistic revision-safe replacement. `record.revision` must equal the
+   *  stored revision plus one, otherwise the write fails closed with the fixed
+   *  stale-revision reason and the prior record stays unchanged. A created
+   *  intake is terminal in this slice and can never be replaced by a proposal:
+   *  the WHERE guard rejects any write over a created row so stale proposals
+   *  cannot overwrite created truth even if a caller bypasses the coordinator. */
+  updateOutcomeIntake(record: OutcomeIntakeRecord): OutcomeIntakeRecord {
+    const expected = record.revision - 1;
+    const result = this.db
+      .prepare(
+        `UPDATE outcome_intakes
+         SET status = ?, revision = ?, updated_at = ?, record_json = ?
+         WHERE id = ? AND revision = ? AND status <> 'created'`,
+      )
+      .run(record.status, record.revision, record.updatedAt, JSON.stringify(record), record.id, expected);
+    if (result.changes !== 1) {
+      throw new Error(STALE_OUTCOME_INTAKE_REASON);
+    }
+    return record;
   }
 }

@@ -430,6 +430,17 @@ function applyChromeI18n(){
 var S = {
   settings: null, health: null, boards: null, tasks: null, competitions: null, stats: null,
   goals: null,
+  workHierarchy: null,
+  workHierarchyError: null,
+  /* Work bench filter state. workFilterDraft holds form values; workFilter is
+   * the applied filter sent to /api/ops/work-hierarchy. workFilterOptions is
+   * derived from the last unfiltered projection so the selects keep their full
+   * choice set while a Core-filtered view is showing. */
+  workFilterDraft: { project: "", columns: "", workerProfileId: "" },
+  workFilter: {},
+  /* projects holds exact project path values for the filter request; presentation
+   * labels and omitted-internal count are derived at render time. */
+  workFilterOptions: { projects: [], workers: [], omittedInternalProjects: 0 },
   economics: null,
   economicsError: null,
   routingCoverage: null,
@@ -446,13 +457,34 @@ var S = {
   hub: null,
   lastOk: 0, connected: false, hadOk: false, tab: "overview",
   detail: null, detailReturnFocus: null, timer: null, token: null,
+  taskCrumb: null,
+  /* FL-109C2A: bounded presentation-only handoff chosen by drag or the
+   * Move/Act chooser. Never submitted here; existing controls execute it. */
+  pendingActionHandoff: null,
   batchInFlight: false, pendingRefresh: false,
   workerEditId: null, workerPreviewTimer: null, workerFormActive: false,
   mrResult: null, mrDirty: false, mrEvaluating: false, mrDraft: null,
   mrTaskClass: "", mrTaskFamily: "", mrCompIntent: "", mrCompTriggers: "",
   mrCandidates: [],
   deliveryDraft: null, deliveryDirty: false, deliveryEditId: null, deliverySaving: false,
-  deliveryErrors: []
+  deliveryErrors: [],
+  /* FL-109D2: outcome-first intake. outcomeDraft preserves every entered field
+   * across renders; on validation/network/Daemon failure nothing is cleared.
+   * outcomeSubmitting is single-flight; the page never auto-retries. */
+  outcomeDraft: { outcome: "", project: "", context: "", requestedShape: "auto" },
+  outcomeSubmitting: false,
+  outcomeCreateError: null,
+  outcomeFormActive: false,
+  intakes: null,
+  intakesError: null,
+  selectedIntakeId: null,
+  /* FL-109D3B: explicit Hub confirmation. outcomeConfirmingId marks the intake
+   * whose contained confirmation step is open; outcomeConfirmPendingId is
+   * single-flight for the active create request; outcomeConfirmError preserves
+   * the last bounded failure key so the proposed preview stays readable. */
+  outcomeConfirmingId: null,
+  outcomeConfirmPendingId: null,
+  outcomeConfirmError: null
 };
 var viewEl, detailEl, statusEl, footerEl, titleEl, subEl, topMetaEl, scrimEl;
 /* Model-routing weight field identifiers shared by editor and result renderer. */
@@ -799,6 +831,7 @@ function metric(label, value, hint){
  * everything else is per-page. */
 var PAGE_DEPS = {
   overview:      { tasks: true, boards: true, competitions: true, goals: true, sample: true, selfUpgradeEvidence: true },
+  work:          { workHierarchy: true, intakes: true },
   tasks:         { tasks: true },
   plans:         { boards: true },
   goals:         { goals: true },
@@ -826,7 +859,9 @@ var SLICE_MAP = {
   routingCoverage:     { endpoint: "/api/ops/routing-evidence-coverage",   field: "routingCoverage",     errorField: "routingCoverageError" },
   mainDirectAggregate: { endpoint: "/api/ops/main-direct-aggregate",       field: "mainDirectAggregate", errorField: "mainDirectAggregateError" },
   mainDirectRecent:    { endpoint: "/api/ops/main-direct-recent",          field: "mainDirectRecent",    errorField: "mainDirectRecentError" },
-  selfUpgradeEvidence: { endpoint: "/api/ops/self-upgrade-evidence",       field: "selfUpgradeEvidence", errorField: "selfUpgradeEvidenceError" }
+  selfUpgradeEvidence: { endpoint: "/api/ops/self-upgrade-evidence",       field: "selfUpgradeEvidence", errorField: "selfUpgradeEvidenceError" },
+  workHierarchy:       { endpoint: "/api/ops/work-hierarchy",              field: "workHierarchy",       errorField: "workHierarchyError", buildQuery: workHierarchyQuery },
+  intakes:             { endpoint: "/api/ops/intakes",                     field: "intakes",             errorField: "intakesError" }
 };
 /** Pure: given a closed Hub tab code, return the slice keys its renderer
  *  consumes (shared hub + health are always added by the caller).  Tests
@@ -839,7 +874,12 @@ function requestPlan(tab){
 function fetchSlice(key){
   var slice = SLICE_MAP[key];
   if(!slice) return Promise.resolve();
-  return fetchJSON(slice.endpoint).then(function(data){
+  var endpoint = slice.endpoint;
+  if(typeof slice.buildQuery === "function"){
+    var q = slice.buildQuery();
+    if(q) endpoint += "?" + q;
+  }
+  return fetchJSON(endpoint).then(function(data){
     S[slice.field] = data;
     S[slice.errorField] = null;
   }, function(e){
@@ -1031,7 +1071,7 @@ function refresh(){
     // Connected state follows the current health read, not retained data.
     if(!S.healthError) { S.lastOk = Date.now(); S.connected = true; S.hadOk = true; }
     else { S.connected = false; }
-    if(S.tab === "worker" && S.workerFormActive){
+    if((S.tab === "worker" && S.workerFormActive) || (S.tab === "work" && S.outcomeFormActive)){
       updStatus();
       setPageChrome();
     } else {
@@ -1040,7 +1080,7 @@ function refresh(){
   }).catch(function(){
     if(!S.token){ showUnauthenticated(); return; }
     S.connected = false;
-    if(S.tab === "worker" && S.workerFormActive){
+    if((S.tab === "worker" && S.workerFormActive) || (S.tab === "work" && S.outcomeFormActive)){
       updStatus();
       setPageChrome();
     } else {
@@ -3560,6 +3600,1934 @@ function rGoals(){
     ]));
   });
   viewEl.appendChild(grid);
+}
+
+/* --- Outcome composer + intake story (FL-109D2) --- */
+/* One calm place to describe the desired result first. The composer collects
+ * user text and optional advanced fields, submits once through the
+ * authenticated Hub create bridge, and never decides a shape or creates work.
+ * The intake story renders canonical pending/proposed/created D1/D3A truth
+ * from the normal Work refresh path; the browser never invents lifecycle
+ * state, never confirms implicitly, and never auto-retries a submission. */
+
+var OUTCOME_SHAPE_KEYS = {
+  auto: "outcomeShapeAuto",
+  task: "outcomeShapeTask",
+  plan: "outcomeShapePlan",
+  goal: "outcomeShapeGoal"
+};
+function outcomeShapeLabel(shape){
+  var key = OUTCOME_SHAPE_KEYS[shape] || "outcomeShapeAuto";
+  return t(key);
+}
+function outcomeShapeOptions(){
+  return ["auto", "task", "plan", "goal"];
+}
+function outcomeHasControlCharacters(value){
+  for(var i = 0; i < value.length; i += 1){
+    var code = value.charCodeAt(i);
+    if(code === 127 || code < 32) return true;
+  }
+  return false;
+}
+function outcomeValidateDraft(){
+  var outcome = String(S.outcomeDraft.outcome || "").trim();
+  if(!outcome) return "outcomeErrorRequired";
+  if(outcome.length > 2000) return "outcomeErrorTooLong";
+  if(outcomeHasControlCharacters(outcome)) return "outcomeErrorControl";
+  return null;
+}
+/* Polite live announcement: screen readers hear state changes without focus
+ * being stolen. The region is re-created on every Work render. */
+function outcomeAnnounce(message){
+  var el = document.getElementById("fl-outcome-live");
+  if(!el) return;
+  el.textContent = "";
+  if(message) el.textContent = String(message);
+}
+function outcomeSubmit(){
+  if(S.outcomeSubmitting) return; // single-flight; never auto-retry
+  var validation = outcomeValidateDraft();
+  if(validation){
+    S.outcomeCreateError = validation;
+    render();
+    return;
+  }
+  var draft = S.outcomeDraft;
+  var body = {
+    outcome: String(draft.outcome || "").trim(),
+    requestedShape: draft.requestedShape || "auto"
+  };
+  if(typeof draft.project === "string" && draft.project.trim()) body.project = draft.project.trim();
+  if(typeof draft.context === "string" && draft.context.trim()) body.context = draft.context.trim();
+  S.outcomeSubmitting = true;
+  S.outcomeCreateError = null;
+  render();
+  postJSON("/api/ops/intakes", body).then(function(data){
+    S.outcomeSubmitting = false;
+    S.outcomeFormActive = false;
+    var intake = data && data.intake;
+    if(intake && intake.id){
+      var list = Array.isArray(S.intakes) ? S.intakes.slice() : [];
+      list = [intake].concat(list.filter(function(item){
+        return item && item.id !== intake.id;
+      }));
+      S.intakes = list.slice(0, 20);
+      S.selectedIntakeId = intake.id;
+      S.outcomeDraft = { outcome: "", project: "", context: "", requestedShape: "auto" };
+    }
+    render();
+    outcomeAnnounce(t("outcomeAnnounceRecorded"));
+    if(intake && intake.id) outcomeFocusIntake(intake.id);
+  }, function(){
+    S.outcomeSubmitting = false;
+    S.outcomeCreateError = "outcomeCreateError";
+    render();
+    outcomeAnnounce(t("outcomeCreateError"));
+  });
+}
+function renderOutcomeSection(){
+  var wrap = h("div", "outcome-section");
+  wrap.setAttribute("data-fl-role", "outcome-section");
+  wrap.appendChild(renderOutcomeComposer());
+  wrap.appendChild(renderIntakeStory());
+  return wrap;
+}
+function renderOutcomeComposer(){
+  var card = h("div", "outcome-composer");
+  card.setAttribute("data-fl-role", "outcome-composer");
+  card.appendChild(h("div", "outcome-composer-title", t("outcomeTitle")));
+  card.appendChild(h("div", "outcome-composer-hint", t("outcomeHint")));
+
+  var form = document.createElement("form");
+  form.className = "outcome-form";
+  form.setAttribute("data-fl-role", "outcome-form");
+  form.setAttribute("aria-label", t("outcomeTitle"));
+
+  var field = h("label", "outcome-field", "");
+  field.appendChild(h("span", "outcome-label", t("outcomeLabel")));
+  var textarea = document.createElement("textarea");
+  textarea.className = "outcome-textarea";
+  textarea.setAttribute("data-fl-role", "outcome-text");
+  textarea.rows = 3;
+  textarea.placeholder = t("outcomePlaceholder");
+  textarea.value = String(S.outcomeDraft.outcome || "");
+  textarea.addEventListener("input", function(){
+    S.outcomeDraft.outcome = textarea.value;
+    S.outcomeFormActive = true;
+  });
+  field.appendChild(textarea);
+  form.appendChild(field);
+
+  var details = document.createElement("details");
+  details.className = "outcome-advanced";
+  details.setAttribute("data-fl-role", "outcome-advanced");
+  var summary = document.createElement("summary");
+  summary.textContent = t("outcomeAdvanced");
+  details.appendChild(summary);
+  var advBody = h("div", "outcome-advanced-body");
+
+  var projWrap = h("label", "outcome-field", "");
+  projWrap.appendChild(h("span", "outcome-label", t("outcomeProjectLabel")));
+  var projInput = document.createElement("input");
+  projInput.type = "text";
+  projInput.className = "outcome-input";
+  projInput.setAttribute("data-fl-role", "outcome-project");
+  projInput.placeholder = t("outcomeProjectPlaceholder");
+  projInput.value = String(S.outcomeDraft.project || "");
+  projInput.addEventListener("input", function(){
+    S.outcomeDraft.project = projInput.value;
+    S.outcomeFormActive = true;
+  });
+  projWrap.appendChild(projInput);
+  advBody.appendChild(projWrap);
+
+  var ctxWrap = h("label", "outcome-field", "");
+  ctxWrap.appendChild(h("span", "outcome-label", t("outcomeContextLabel")));
+  var ctxText = document.createElement("textarea");
+  ctxText.className = "outcome-textarea";
+  ctxText.setAttribute("data-fl-role", "outcome-context");
+  ctxText.rows = 2;
+  ctxText.placeholder = t("outcomeContextPlaceholder");
+  ctxText.value = String(S.outcomeDraft.context || "");
+  ctxText.addEventListener("input", function(){
+    S.outcomeDraft.context = ctxText.value;
+    S.outcomeFormActive = true;
+  });
+  ctxWrap.appendChild(ctxText);
+  advBody.appendChild(ctxWrap);
+
+  var shapeWrap = h("label", "outcome-field", "");
+  shapeWrap.appendChild(h("span", "outcome-label", t("outcomeShapeLabel")));
+  var shapeSel = document.createElement("select");
+  shapeSel.className = "outcome-select";
+  shapeSel.setAttribute("data-fl-role", "outcome-shape");
+  outcomeShapeOptions().forEach(function(shape){
+    var opt = document.createElement("option");
+    opt.value = shape;
+    opt.textContent = outcomeShapeLabel(shape);
+    shapeSel.appendChild(opt);
+  });
+  shapeSel.value = S.outcomeDraft.requestedShape || "auto";
+  shapeSel.addEventListener("change", function(){
+    S.outcomeDraft.requestedShape = shapeSel.value;
+    S.outcomeFormActive = true;
+  });
+  shapeWrap.appendChild(shapeSel);
+  advBody.appendChild(shapeWrap);
+  advBody.appendChild(h("div", "outcome-field-hint", t("outcomeShapeHint")));
+  details.appendChild(advBody);
+  form.appendChild(details);
+
+  var actions = h("div", "outcome-actions");
+  var submitBtn = h("button", "btn primary outcome-submit",
+    S.outcomeSubmitting ? t("outcomeSubmitPending") : t("outcomeSubmit"));
+  submitBtn.type = "submit";
+  submitBtn.setAttribute("data-fl-role", "outcome-submit");
+  if(S.outcomeSubmitting) submitBtn.disabled = true;
+  actions.appendChild(submitBtn);
+  form.appendChild(actions);
+
+  form.addEventListener("submit", function(e){
+    e.preventDefault();
+    outcomeSubmit();
+  });
+
+  card.appendChild(form);
+
+  if(S.outcomeCreateError){
+    var errBox = h("div", "outcome-error");
+    errBox.setAttribute("role", "alert");
+    errBox.setAttribute("data-fl-role", "outcome-create-error");
+    errBox.appendChild(h("div", "outcome-error-title", t(S.outcomeCreateError)));
+    errBox.appendChild(h("div", "outcome-error-retry", t("outcomeCreateErrorRetry")));
+    card.appendChild(errBox);
+  }
+
+  return card;
+}
+function renderIntakeStory(){
+  var wrap = h("div", "outcome-story");
+  wrap.setAttribute("data-fl-role", "outcome-story");
+  var live = h("div", "sr-only");
+  live.id = "fl-outcome-live";
+  live.setAttribute("aria-live", "polite");
+  wrap.appendChild(live);
+
+  var intakes = S.intakes;
+  if(intakes === null){
+    if(S.intakesError){
+      var fail = h("div", "outcome-story-note");
+      fail.setAttribute("data-fl-role", "outcome-story-unavailable");
+      fail.appendChild(h("div", "outcome-story-note-title", t("outcomeUnavailable")));
+      fail.appendChild(h("div", "outcome-story-note-body dim", t("outcomeUnavailableBody")));
+      wrap.appendChild(fail);
+    } else {
+      wrap.appendChild(h("div", "outcome-story-note", t("outcomeLoading")));
+    }
+    return wrap;
+  }
+  if(!intakes.length){
+    wrap.appendChild(h("div", "outcome-story-note dim", t("outcomeEmpty")));
+    return wrap;
+  }
+
+  /* A missing or stale selected intake falls back to the canonical list
+   * without inventing completion: the detail simply does not render. */
+  var selected = null;
+  var rest = [];
+  intakes.forEach(function(item){
+    if(S.selectedIntakeId && item && item.id === S.selectedIntakeId) selected = item;
+    else rest.push(item);
+  });
+
+  wrap.appendChild(h("div", "outcome-list-title", t("outcomeListTitle")));
+
+  if(selected) wrap.appendChild(renderIntakeDetail(selected));
+
+  if(rest.length){
+    var list = h("div", "outcome-intake-list");
+    list.setAttribute("data-fl-role", "outcome-intake-list");
+    rest.forEach(function(item){
+      list.appendChild(renderIntakeRow(item));
+    });
+    wrap.appendChild(list);
+  }
+  return wrap;
+}
+function outcomeOutcomePreview(value){
+  var text = String(value || "");
+  return text.length > 120 ? text.slice(0, 117) + "..." : text;
+}
+function renderIntakeRow(intake){
+  var row = h("button", "outcome-intake-row");
+  row.type = "button";
+  row.setAttribute("data-fl-role", "outcome-intake-row");
+  row.setAttribute("data-intake-id", intake.id);
+  row.addEventListener("click", function(){
+    S.selectedIntakeId = intake.id;
+    render();
+    outcomeFocusIntake(intake.id);
+  });
+  var badgeState = intake.status === "proposed" ? "proposed"
+    : (intake.status === "created" ? "created" : "pending");
+  var badgeKey = intake.status === "proposed" ? "outcomeStatusProposed"
+    : (intake.status === "created" ? "outcomeStatusCreated" : "outcomeStatusPending");
+  var badge = h("span", "outcome-status-badge " + badgeState, t(badgeKey));
+  row.appendChild(badge);
+  row.appendChild(h("span", "outcome-intake-row-text", outcomeOutcomePreview(intake.outcome)));
+  return row;
+}
+function outcomeFocusIntake(id){
+  var el = document.querySelector('[data-fl-role="outcome-intake-detail"][data-intake-id="' + id + '"]');
+  if(el && typeof el.focus === "function"){
+    el.focus();
+  }
+}
+function renderIntakeDetail(intake){
+  var card = h("div", "outcome-intake-detail");
+  card.setAttribute("data-fl-role", "outcome-intake-detail");
+  card.setAttribute("data-intake-id", intake.id);
+  card.setAttribute("tabindex", "-1");
+  if(intake.status === "proposed"){
+    card.appendChild(renderProposedPreview(intake));
+  } else if(intake.status === "created"){
+    card.appendChild(renderCreatedStory(intake));
+  } else {
+    card.appendChild(renderPendingStory(intake));
+  }
+  return card;
+}
+function outcomeFact(labelKey, value){
+  var wrap = h("div", "outcome-fact");
+  wrap.appendChild(h("div", "outcome-fact-label", t(labelKey)));
+  wrap.appendChild(h("div", "outcome-fact-value", String(value)));
+  return wrap;
+}
+function renderPendingStory(intake){
+  var card = h("div", "outcome-pending");
+  card.setAttribute("data-fl-role", "outcome-pending");
+
+  var head = h("div", "outcome-state-head");
+  head.appendChild(h("span", "outcome-state-badge pending", t("outcomeStatusPending")));
+  head.appendChild(h("span", "outcome-state-title", t("outcomePendingStatus")));
+  card.appendChild(head);
+
+  card.appendChild(h("div", "outcome-fact-label", t("outcomePendingRecorded")));
+  card.appendChild(h("div", "outcome-outcome-text", String(intake.outcome || "")));
+
+  var truth = h("div", "outcome-truth");
+  truth.setAttribute("data-fl-role", "outcome-pending-truth");
+  truth.appendChild(h("div", "outcome-truth-line", t("outcomePendingIntro")));
+  card.appendChild(truth);
+
+  card.appendChild(h("div", "outcome-next-label", t("outcomePendingNext")));
+  card.appendChild(h("div", "outcome-next-body", t("outcomePendingNextBody")));
+
+  card.appendChild(h("div", "outcome-next-label", t("outcomePendingContinue")));
+  card.appendChild(h("div", "outcome-next-body", t("outcomePendingContinueBody")));
+
+  /* Repeat the nothing-started truth near the status and the next action so a
+   * pending intake is never mistaken for executing work. */
+  card.appendChild(h("div", "outcome-truth-line dim", t("outcomePendingNoAuto")));
+
+  card.appendChild(renderIntakeHandoff(intake));
+
+  card.appendChild(renderIntakeTechDetails(intake));
+  return card;
+}
+function renderProposedPreview(intake){
+  var card = h("div", "outcome-proposed");
+  card.setAttribute("data-fl-role", "outcome-proposed");
+  var proposal = intake.proposal || {};
+
+  var head = h("div", "outcome-state-head");
+  head.appendChild(h("span", "outcome-state-badge proposed", t("outcomeStatusProposed")));
+  head.appendChild(h("span", "outcome-state-title", t("outcomeProposedStatus")));
+  card.appendChild(head);
+
+  card.appendChild(h("div", "outcome-fact-label", t("outcomePendingRecorded")));
+  card.appendChild(h("div", "outcome-outcome-text", String(intake.outcome || "")));
+
+  card.appendChild(outcomeFact("outcomeProposedShape", outcomeShapeLabel(proposal.shape)));
+  if(proposal.reason) card.appendChild(outcomeFact("outcomeProposedReason", String(proposal.reason)));
+  if(proposal.displayName) card.appendChild(outcomeFact("outcomeProposedDisplay", String(proposal.displayName)));
+  if(proposal.objective) card.appendChild(outcomeFact("outcomeProposedObjective", String(proposal.objective)));
+  card.appendChild(outcomeFact("outcomeProposedTaskCount", String(proposal.taskCount)));
+
+  if(Array.isArray(proposal.dependencyWaves) && proposal.dependencyWaves.length){
+    card.appendChild(outcomeFact("outcomeProposedWaves", String(proposal.dependencyWaves.length)));
+    proposal.dependencyWaves.forEach(function(wave, idx){
+      card.appendChild(h("div", "outcome-wave", t("outcomeProposedWave", {
+        n: String(idx + 1),
+        tasks: Array.isArray(wave) ? wave.join(", ") : String(wave)
+      })));
+    });
+  }
+
+  /* When the user's requested shape differs from Main's selection, explain the
+   * difference neutrally and change neither fact. */
+  if(intake.requestedShape && intake.requestedShape !== "auto" && intake.requestedShape !== proposal.shape){
+    var diff = h("div", "outcome-preference-diff");
+    diff.setAttribute("data-fl-role", "outcome-preference-diff");
+    diff.textContent = t("outcomePreferenceDiff", {
+      requested: outcomeShapeLabel(intake.requestedShape),
+      selected: outcomeShapeLabel(proposal.shape)
+    });
+    card.appendChild(diff);
+  }
+
+  var truth = h("div", "outcome-truth");
+  truth.setAttribute("data-fl-role", "outcome-not-confirmed");
+  truth.appendChild(h("div", "outcome-truth-line", t("outcomeNotConfirmed")));
+  card.appendChild(truth);
+
+  /* One clear primary confirmation action, only for a canonical proposed
+   * intake. Choosing it opens a contained explicit step that repeats exactly
+   * what Main proposed; it never submits, decides a shape, or invents work. */
+  if(S.outcomeConfirmingId === intake.id){
+    card.appendChild(renderOutcomeConfirmStep(intake));
+  } else {
+    var confirmBtn = h("button", "btn primary outcome-confirm-open", t("outcomeConfirmAction"));
+    confirmBtn.type = "button";
+    confirmBtn.setAttribute("data-fl-role", "outcome-confirm-open");
+    confirmBtn.addEventListener("click", function(){
+      S.outcomeConfirmingId = intake.id;
+      S.outcomeConfirmError = null;
+      render();
+      outcomeFocusConfirmStep(intake.id);
+    });
+    card.appendChild(confirmBtn);
+  }
+
+  card.appendChild(renderIntakeTechDetails(intake));
+  return card;
+}
+function outcomeFocusConfirmStep(id){
+  var el = document.querySelector('[data-fl-role="outcome-confirm-step"][data-intake-id="' + id + '"]');
+  if(el && typeof el.focus === "function") el.focus();
+}
+/* Contained explicit confirmation step. Repeats Main's selected shape, display
+ * name, and scope count, then states plainly that confirming creates and queues
+ * work under the normal rules. Nothing is sent until Confirm creation is chosen
+ * and the single-flight request is issued; failure preserves this step. */
+function renderOutcomeConfirmStep(intake){
+  var proposal = intake.proposal || {};
+  var card = h("div", "outcome-confirm");
+  card.setAttribute("data-fl-role", "outcome-confirm-step");
+  card.setAttribute("data-intake-id", intake.id);
+  card.setAttribute("tabindex", "-1");
+  card.appendChild(h("div", "outcome-confirm-title", t("outcomeConfirmTitle")));
+  card.appendChild(h("div", "outcome-confirm-intro", t("outcomeConfirmIntro")));
+
+  card.appendChild(outcomeFact("outcomeConfirmShape", outcomeShapeLabel(proposal.shape)));
+  if(proposal.displayName) card.appendChild(outcomeFact("outcomeConfirmDisplay", String(proposal.displayName)));
+  card.appendChild(outcomeFact("outcomeConfirmScope", String(proposal.taskCount)));
+
+  var truth = h("div", "outcome-truth");
+  truth.setAttribute("data-fl-role", "outcome-confirm-truth");
+  truth.appendChild(h("div", "outcome-truth-line",
+    t("outcomeConfirmTruth", { shape: outcomeShapeLabel(proposal.shape) })));
+  card.appendChild(truth);
+
+  if(S.outcomeConfirmError){
+    var err = h("div", "outcome-error");
+    err.setAttribute("role", "alert");
+    err.setAttribute("data-fl-role", "outcome-confirm-error");
+    err.appendChild(h("div", "outcome-error-title", t(S.outcomeConfirmError)));
+    card.appendChild(err);
+  }
+
+  var actions = h("div", "outcome-actions outcome-confirm-actions");
+  var cancelBtn = h("button", "btn outcome-confirm-cancel", t("outcomeConfirmCancel"));
+  cancelBtn.type = "button";
+  cancelBtn.setAttribute("data-fl-role", "outcome-confirm-cancel");
+  cancelBtn.addEventListener("click", function(){
+    S.outcomeConfirmingId = null;
+    S.outcomeConfirmError = null;
+    render();
+  });
+  actions.appendChild(cancelBtn);
+
+  var pending = S.outcomeConfirmPendingId === intake.id;
+  var submitBtn = h("button", "btn primary outcome-confirm-submit",
+    pending ? t("outcomeConfirmPending") : t("outcomeConfirmSubmit"));
+  submitBtn.type = "button";
+  submitBtn.setAttribute("data-fl-role", "outcome-confirm-submit");
+  if(pending) submitBtn.disabled = true;
+  submitBtn.addEventListener("click", function(){ outcomeConfirmSubmit(intake); });
+  actions.appendChild(submitBtn);
+  card.appendChild(actions);
+  return card;
+}
+function outcomeConfirmErrorKey(msg){
+  if(msg === "stale-revision") return "outcomeConfirmErrorStaleRevision";
+  if(msg === "stale-artifact") return "outcomeConfirmErrorStaleArtifact";
+  if(msg === "in-progress") return "outcomeConfirmErrorInProgress";
+  if(msg === "no-proposal") return "outcomeConfirmErrorNoProposal";
+  return "outcomeConfirmErrorNetwork";
+}
+/* One single-flight confirmation request. Sends only the intake id (in the
+ * path), the current proposal revision, and the literal confirm:true to the
+ * D3A authority. Never sends an artifact path, shape, outcome text, context,
+ * or full digest. Never optimistically inserts, moves, or marks a Task card.
+ * On canonical success the created receipt is rendered first, then one ordinary
+ * Work refresh reads the actual hierarchy and intake truth. */
+function outcomeConfirmSubmit(intake){
+  if(S.outcomeConfirmPendingId) return; // single-flight; never auto-retry
+  if(!intake || typeof intake.revision !== "number" || !intake.proposal) return;
+  S.outcomeConfirmPendingId = intake.id;
+  S.outcomeConfirmError = null;
+  render();
+  outcomeAnnounce(t("outcomeConfirmAnnounce"));
+  postJSON("/api/ops/intakes/" + encodeURIComponent(intake.id) + "/confirm", {
+    expectedRevision: intake.revision,
+    confirm: true
+  }).then(function(data){
+    var created = data && (data.intake || data);
+    if(!created || !created.id){
+      S.outcomeConfirmPendingId = null;
+      S.outcomeConfirmError = "outcomeConfirmErrorNetwork";
+      render();
+      outcomeAnnounce(t("outcomeConfirmErrorNetwork"));
+      return;
+    }
+    /* Replace the canonical intake with the daemon's durable created truth and
+     * render the created story first, then refresh the existing Work slices. */
+    var list = Array.isArray(S.intakes) ? S.intakes.slice() : [];
+    list = [created].concat(list.filter(function(item){ return item && item.id !== created.id; }));
+    S.intakes = list.slice(0, 20);
+    S.selectedIntakeId = created.id;
+    S.outcomeConfirmingId = null;
+    S.outcomeConfirmPendingId = null;
+    S.outcomeConfirmError = null;
+    render();
+    outcomeAnnounce(t("outcomeConfirmCreatedAnnounce"));
+    outcomeFocusIntake(created.id);
+    refresh();
+  }, function(e){
+    S.outcomeConfirmPendingId = null;
+    var msg = e && e.message ? String(e.message) : "";
+    S.outcomeConfirmError = outcomeConfirmErrorKey(msg);
+    render();
+    outcomeAnnounce(t(S.outcomeConfirmError));
+  });
+}
+/* Durable created result story. Answers what was created, what happened to
+ * execution, and what to do next. Ids and receipt evidence stay under
+ * Technical details; no optimistic card and no guessed execution status. */
+function renderCreatedStory(intake){
+  var card = h("div", "outcome-created");
+  card.setAttribute("data-fl-role", "outcome-created");
+  card.setAttribute("tabindex", "-1");
+  var proposal = intake.proposal || {};
+  var confirmation = intake.confirmation || {};
+
+  var head = h("div", "outcome-state-head");
+  head.appendChild(h("span", "outcome-state-badge created", t("outcomeStatusCreated")));
+  head.appendChild(h("span", "outcome-state-title", t("outcomeCreatedStatus")));
+  card.appendChild(head);
+
+  var shape = proposal.shape || confirmation.shape || "task";
+  var taskCount = Array.isArray(confirmation.taskIds) ? confirmation.taskIds.length
+    : (typeof proposal.taskCount === "number" ? proposal.taskCount : 1);
+
+  card.appendChild(h("div", "outcome-fact-label", t("outcomeCreatedWhat")));
+  card.appendChild(h("div", "outcome-next-body", t("outcomeCreatedWhatBody", {
+    shape: outcomeShapeLabel(shape),
+    count: String(taskCount)
+  })));
+
+  card.appendChild(h("div", "outcome-next-label", t("outcomeCreatedExecution")));
+  card.appendChild(h("div", "outcome-next-body", t("outcomeCreatedExecutionBody")));
+
+  card.appendChild(h("div", "outcome-next-label", t("outcomeCreatedNext")));
+  card.appendChild(h("div", "outcome-next-body", t("outcomeCreatedNextBody")));
+
+  var taskIds = Array.isArray(confirmation.taskIds)
+    ? confirmation.taskIds.filter(function(id){ return typeof id === "string"; })
+    : [];
+  if(taskIds.length > 0){
+    var openBtn = h("button", "btn outcome-created-open", t("outcomeCreatedOpenTask"));
+    openBtn.type = "button";
+    openBtn.setAttribute("data-fl-role", "outcome-created-open-task");
+    openBtn.addEventListener("click", function(){ showTask(taskIds[0]); });
+    card.appendChild(openBtn);
+  }
+
+  card.appendChild(renderIntakeTechDetails(intake));
+  return card;
+}
+function outcomeHandoffText(intakeId){
+  return t("outcomeHandoffText", { id: String(intakeId) });
+}
+function legacyCopyText(text){
+  var ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.className = "outcome-copy-seam";
+  document.body.appendChild(ta);
+  ta.select();
+  var ok = false;
+  try { ok = document.execCommand("copy"); } catch(_) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+function copyTextToClipboard(text){
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(text).then(function(){
+      return true;
+    }, function(){
+      return legacyCopyText(text);
+    });
+  }
+  return Promise.resolve(legacyCopyText(text));
+}
+function renderIntakeHandoff(intake){
+  var wrap = h("div", "outcome-handoff");
+  wrap.setAttribute("data-fl-role", "outcome-handoff");
+  wrap.appendChild(h("div", "outcome-handoff-title", t("outcomeHandoffTitle")));
+  wrap.appendChild(h("div", "outcome-handoff-hint", t("outcomeHandoffHint")));
+
+  var idRow = h("label", "outcome-handoff-id-row", "");
+  idRow.appendChild(h("span", "outcome-label", t("outcomeHandoffIdLabel")));
+  var idInput = document.createElement("input");
+  idInput.type = "text";
+  idInput.className = "outcome-handoff-id";
+  idInput.setAttribute("data-fl-role", "outcome-handoff-id");
+  idInput.setAttribute("readonly", "");
+  idInput.value = String(intake.id);
+  idRow.appendChild(idInput);
+  wrap.appendChild(idRow);
+
+  var feedback = h("div", "outcome-handoff-feedback dim");
+  feedback.setAttribute("data-fl-role", "outcome-handoff-feedback");
+  wrap.appendChild(feedback);
+
+  var copyBtn = h("button", "btn sm outcome-handoff-copy", t("outcomeHandoffCopy"));
+  copyBtn.type = "button";
+  copyBtn.setAttribute("data-fl-role", "outcome-handoff-copy");
+  copyBtn.addEventListener("click", function(){
+    copyTextToClipboard(outcomeHandoffText(intake.id)).then(function(ok){
+      if(ok){
+        feedback.textContent = t("outcomeHandoffCopied");
+        outcomeAnnounce(t("outcomeHandoffCopied"));
+        copyBtn.textContent = t("outcomeHandoffCopiedShort");
+        setTimeout(function(){
+          if(copyBtn.textContent === t("outcomeHandoffCopiedShort")){
+            copyBtn.textContent = t("outcomeHandoffCopy");
+          }
+        }, 2500);
+      } else {
+        feedback.textContent = t("outcomeHandoffFailed");
+        outcomeAnnounce(t("outcomeHandoffFailed"));
+      }
+    });
+  });
+  wrap.appendChild(copyBtn);
+  return wrap;
+}
+function outcomeTechRow(labelKey, value){
+  var row = h("div", "outcome-tech-row");
+  row.appendChild(h("span", "outcome-tech-row-label", t(labelKey)));
+  row.appendChild(h("span", "outcome-tech-row-value mono fs11", value));
+  return row;
+}
+function renderIntakeTechDetails(intake){
+  var rows = h("div", "outcome-tech-rows");
+  var proposal = intake.proposal || {};
+  var confirmation = intake.confirmation || {};
+  var isCreated = intake.status === "created";
+  rows.appendChild(outcomeTechRow("outcomeTechId", String(intake.id)));
+  rows.appendChild(outcomeTechRow("outcomeTechRevision", String(intake.revision)));
+  if(!isCreated && proposal.artifactDigestPrefix){
+    rows.appendChild(outcomeTechRow("outcomeTechDigest", String(proposal.artifactDigestPrefix)));
+  }
+  if(proposal.artifactKind){
+    rows.appendChild(outcomeTechRow("outcomeTechKind", String(proposal.artifactKind)));
+  }
+  if(Array.isArray(proposal.contractsInvolved) && proposal.contractsInvolved.length){
+    rows.appendChild(outcomeTechRow("outcomeTechContracts", proposal.contractsInvolved.join(", ")));
+  }
+  if(confirmation.receiptId){
+    rows.appendChild(outcomeTechRow("outcomeTechReceipt", String(confirmation.receiptId)));
+  }
+  if(confirmation.shape){
+    rows.appendChild(outcomeTechRow("outcomeTechShape", outcomeShapeLabel(confirmation.shape)));
+  }
+  if(Array.isArray(confirmation.taskIds) && confirmation.taskIds.length){
+    rows.appendChild(outcomeTechRow("outcomeTechTaskIds", confirmation.taskIds.join(", ")));
+  }
+  if(typeof confirmation.planId === "string" && confirmation.planId){
+    rows.appendChild(outcomeTechRow("outcomeTechPlanId", confirmation.planId));
+  }
+  if(typeof confirmation.goalId === "string" && confirmation.goalId){
+    rows.appendChild(outcomeTechRow("outcomeTechGoalId", confirmation.goalId));
+  }
+  if(confirmation.artifactDigestPrefix){
+    rows.appendChild(outcomeTechRow("outcomeTechDigest", String(confirmation.artifactDigestPrefix)));
+  }
+  if(confirmation.confirmedAt){
+    rows.appendChild(outcomeTechRow("outcomeTechConfirmedAt", String(confirmation.confirmedAt)));
+  }
+  return journeyDisclosure(t("outcomeTechnical"), rows);
+}
+
+/* --- Unified hierarchical workbench (FL-109B) --- */
+/* Frozen seven-column order. Mirrors src/core/work-hierarchy.ts and is used
+ * only for layout; the adapter rejects any projection whose column codes or
+ * order differ, so this list can never silently diverge from the server. */
+var WORK_COLUMN_CODES = [
+  "not-started",
+  "ready",
+  "running",
+  "waiting-verification",
+  "waiting-user-decision",
+  "completed",
+  "stopped-failed"
+];
+function workColumnLabel(code){
+  var keys = {
+    "not-started": "workColumnNotStarted",
+    "ready": "workColumnReady",
+    "running": "workColumnRunning",
+    "waiting-verification": "workColumnWaitingVerification",
+    "waiting-user-decision": "workColumnWaitingDecision",
+    "completed": "workColumnCompleted",
+    "stopped-failed": "workColumnStopped"
+  };
+  return keys[code] ? t(keys[code]) : t("workColumnUnknown");
+}
+function workPlacementLabel(reason){
+  var keys = {
+    "dependency-unsatisfied": "workPlacementDependency",
+    "queued-ready": "workPlacementReady",
+    "lifecycle-running": "workPlacementRunning",
+    "lifecycle-verifying": "workPlacementVerifying",
+    "awaiting-main-decision": "workPlacementDecision",
+    "delivered-outcome": "workPlacementDelivered",
+    "stopped-or-failed": "workPlacementStopped",
+    "unrecognized-evidence": "workPlacementUnknown"
+  };
+  return keys[reason] ? t(keys[reason]) : t("workPlacementUnknown");
+}
+/* Build the query string for the Core-filtered hierarchy endpoint from the
+ * applied filter only. Never sends a mutation; the endpoint is read-only. */
+function workHierarchyQuery(){
+  var parts = [];
+  if(S.workFilter && S.workFilter.project) parts.push("project=" + encodeURIComponent(S.workFilter.project));
+  if(S.workFilter && S.workFilter.columns && S.workFilter.columns.length){
+    parts.push("column=" + encodeURIComponent(S.workFilter.columns.join(",")));
+  }
+  if(S.workFilter && S.workFilter.workerProfileId) parts.push("workerProfileId=" + encodeURIComponent(S.workFilter.workerProfileId));
+  return parts.join("&");
+}
+/* Walk every Task card in the projection. The renderer consumes only these
+ * cards; Goal and Plan are context lanes, never cards. */
+function workCollectCards(view, fn){
+  (view.goals || []).forEach(function(goal){
+    (goal.plans || []).forEach(function(plan){
+      WORK_COLUMN_CODES.forEach(function(code){
+        ((plan.columns && plan.columns[code]) || []).forEach(function(card){ fn(card); });
+      });
+    });
+  });
+  (view.independentPlans || []).forEach(function(plan){
+    WORK_COLUMN_CODES.forEach(function(code){
+      ((plan.columns && plan.columns[code]) || []).forEach(function(card){ fn(card); });
+    });
+  });
+  if(view.oneOffTasks){
+    WORK_COLUMN_CODES.forEach(function(code){
+      ((view.oneOffTasks.columns && view.oneOffTasks.columns[code]) || []).forEach(function(card){ fn(card); });
+    });
+  }
+}
+/* Derive project/Worker filter choices only from an unfiltered projection so a
+ * filtered view never shrinks the available options. Project presentation
+ * omits internal workspaces from the select while Tasks remain on the board. */
+function workRefreshFilterOptions(view){
+  var applied = view.filter && view.filter.applied;
+  if(applied && (applied.project || applied.columns || applied.workerProfileId)) return;
+  var projects = [], workers = [];
+  var seenP = {}, seenW = {};
+  workCollectCards(view, function(card){
+    if(card.project && !seenP[card.project]){ seenP[card.project] = 1; projects.push(card.project); }
+    if(card.workerProfileId && !seenW[card.workerProfileId]){ seenW[card.workerProfileId] = 1; workers.push(card.workerProfileId); }
+  });
+  projects.sort();
+  workers.sort();
+  var presented = workPresentProjectOptions(projects);
+  S.workFilterOptions = {
+    projects: presented.options.map(function(o){ return o.value; }),
+    workers: workers,
+    omittedInternalProjects: presented.omittedInternalCount
+  };
+}
+function workProjectOptionsFromView(){
+  var out = [], seen = {};
+  workCollectCards(S.workHierarchy, function(card){
+    if(card.project && !seen[card.project]){ seen[card.project] = 1; out.push(card.project); }
+  });
+  out.sort();
+  return workPresentProjectOptions(out);
+}
+function workWorkerOptionsFromView(){
+  var out = [], seen = {};
+  workCollectCards(S.workHierarchy, function(card){
+    if(card.workerProfileId && !seen[card.workerProfileId]){ seen[card.workerProfileId] = 1; out.push(card.workerProfileId); }
+  });
+  out.sort();
+  return out;
+}
+function workWorkerLabel(id){
+  if(!id) return "";
+  var profiles = (S.hub && S.hub.workerProfiles && S.hub.workerProfiles.profiles) || [];
+  for(var i = 0; i < profiles.length; i++){
+    if(profiles[i].id === id && profiles[i].label) return String(profiles[i].label);
+  }
+  return "";
+}
+function workWorkerOptionLabel(id){
+  return workWorkerLabel(id) || id;
+}
+function workOption(value, label){
+  var o = document.createElement("option");
+  o.value = value;
+  o.textContent = label;
+  return o;
+}
+/* Pure presentation: detect ForkLight-internal temporary/review/run/sample/
+ * test-fixture project paths so the Project filter can hide them without
+ * removing their Tasks from the board. */
+function workIsInternalProjectPath(project){
+  if(typeof project !== "string" || !project) return true;
+  var n = project.replace(/\\/g, "/");
+  var lower = n.toLowerCase();
+  if(lower === "/tmp" || lower.indexOf("/tmp/") === 0) return true;
+  if(lower.indexOf("/private/tmp/") === 0) return true;
+  if(lower.indexOf("/var/folders/") === 0) return true;
+  if(/\/review-projects(\/|$)/i.test(n)) return true;
+  if(/\/forklight\/runs(\/|$)/i.test(n)) return true;
+  if(/\/forklight\/samples(\/|$)/i.test(n)) return true;
+  if(/\/samples\/[a-z0-9_-]+$/i.test(n) && /forklight/i.test(n)) return true;
+  if(/\/fixtures(\/|$)/i.test(n)) return true;
+  if(/\/fixture(\/|$)/i.test(n)) return true;
+  if(/\/\.forklight(\/|$)/i.test(n)) return true;
+  return false;
+}
+/* Pure presentation: last stable path segment as the human project name. */
+function workProjectBaseName(project){
+  var n = String(project || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  if(!n) return "";
+  var parts = n.split("/");
+  return parts[parts.length - 1] || n;
+}
+/* Pure presentation: parent/base when basenames collide, else base alone.
+ * Exact path is never the visible label. */
+function workProjectHumanLabel(project, siblingPaths){
+  var base = workProjectBaseName(project);
+  if(!base) return String(project || "");
+  var siblings = siblingPaths || [];
+  var collisions = 0;
+  for(var i = 0; i < siblings.length; i++){
+    if(siblings[i] !== project && workProjectBaseName(siblings[i]) === base) collisions++;
+  }
+  if(collisions === 0) return base;
+  var n = String(project || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  var parts = n.split("/").filter(Boolean);
+  if(parts.length >= 2) return parts[parts.length - 2] + "/" + parts[parts.length - 1];
+  return base;
+}
+/* Pure presentation: stable user-project filter choices with human labels,
+ * exact values for the server request, and an omitted-internal count. */
+function workPresentProjectOptions(projectPaths){
+  var user = [];
+  var omitted = 0;
+  var seen = {};
+  (projectPaths || []).forEach(function(p){
+    if(typeof p !== "string" || !p || seen[p]) return;
+    seen[p] = 1;
+    if(workIsInternalProjectPath(p)){ omitted++; return; }
+    user.push(p);
+  });
+  user.sort();
+  return {
+    options: user.map(function(value){
+      return { value: value, label: workProjectHumanLabel(value, user) };
+    }),
+    omittedInternalCount: omitted
+  };
+}
+/* Strict versioned adapter. Consumes only WorkHierarchyView schemaVersion 1;
+ * unsupported schema or column codes fail visibly instead of rendering a
+ * guessed board. This is the only place the browser trusts the server shape. */
+function normalizeWorkHierarchy(data){
+  if(!data || typeof data !== "object") throw new Error("work-hierarchy missing");
+  if(data.schemaVersion !== 1) throw new Error("work-hierarchy schema unsupported");
+  var columns = Array.isArray(data.columns) ? data.columns : null;
+  if(!columns || columns.length !== WORK_COLUMN_CODES.length){
+    throw new Error("work-hierarchy columns invalid");
+  }
+  for(var i = 0; i < WORK_COLUMN_CODES.length; i++){
+    var def = columns[i];
+    if(!def || def.code !== WORK_COLUMN_CODES[i] || def.order !== i){
+      throw new Error("work-hierarchy column order invalid");
+    }
+  }
+  if(!Array.isArray(data.goals) || !Array.isArray(data.independentPlans)){
+    throw new Error("work-hierarchy lanes invalid");
+  }
+  return data;
+}
+/* Collapse state is tab-local and bounded: boolean entries keyed by technical
+ * id live only in sessionStorage (localStorage stays reserved for the theme).
+ * Missing key = smart default; explicit true/false always wins over the default.
+ * No server mutation and no technical id is shown as visible copy. */
+var workCollapse = null;
+function workCollapseLoad(){
+  try {
+    var raw = sessionStorage.getItem("fl-work-collapse");
+    if(!raw) return {};
+    var parsed = JSON.parse(raw);
+    if(parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch(_){}
+  return {};
+}
+function workCollapseSave(collapse){
+  try { sessionStorage.setItem("fl-work-collapse", JSON.stringify(collapse)); } catch(_){}
+}
+/* Columns that mean live or upcoming work rather than pure terminal history. */
+var WORK_LIVE_COLUMN_CODES = [
+  "not-started",
+  "ready",
+  "running",
+  "waiting-verification",
+  "waiting-user-decision"
+];
+/* Pure: a lane body is terminal history when it has no live/upcoming cards. */
+function workLaneIsTerminalHistory(columns){
+  if(!columns) return true;
+  for(var i = 0; i < WORK_LIVE_COLUMN_CODES.length; i++){
+    if((columns[WORK_LIVE_COLUMN_CODES[i]] || []).length > 0) return false;
+  }
+  return true;
+}
+/* Pure: terminal Goal authority wins over stale child placement. Its summary
+ * remains visible, while the historical body starts collapsed. */
+function workGoalDefaultExpanded(goal){
+  var st = goal && goal.status;
+  if(st === "completed" || st === "stopped" || st === "failed") return false;
+  var plans = (goal && goal.plans) || [];
+  for(var i = 0; i < plans.length; i++){
+    if(!workLaneIsTerminalHistory(plans[i] && plans[i].columns)) return true;
+  }
+  return true;
+}
+/* Pure: Plan opens only when it still has live or upcoming work. */
+function workPlanDefaultExpanded(plan){
+  return !workLaneIsTerminalHistory(plan && plan.columns);
+}
+/* Pure: one-off bulk opens only for work Main can act on immediately without a
+ * prior decision: ready, running, or waiting for verification. Queued backlog,
+ * decision backlog, and terminal history remain summarized behind disclosure. */
+function workOneOffDefaultExpanded(lane){
+  var columns = lane && lane.columns;
+  if(!columns) return false;
+  return (columns.ready || []).length > 0
+    || (columns.running || []).length > 0
+    || (columns["waiting-verification"] || []).length > 0;
+}
+/* Explicit tab-local preference wins; missing preference uses the smart default.
+ * Distinguishes missing from false so a user collapse is never lost. */
+function workLaneExpanded(collapse, kind, id, defaultExpanded){
+  var key = kind + ":" + id;
+  if(collapse && Object.prototype.hasOwnProperty.call(collapse, key)){
+    return collapse[key] !== false;
+  }
+  return !!defaultExpanded;
+}
+function workLaneId(kind, id){
+  return "fl-work-lane-" + kind + "-" + String(id || "x").replace(/[^A-Za-z0-9_-]/g, "_");
+}
+function workToggleLane(collapse, kind, id, btn, defaultExpanded){
+  var key = kind + ":" + id;
+  var next = !workLaneExpanded(collapse, kind, id, defaultExpanded);
+  collapse[key] = next;
+  workCollapseSave(collapse);
+  btn.setAttribute("aria-expanded", next ? "true" : "false");
+  var body = document.getElementById(workLaneId(kind, id));
+  if(body){ body.hidden = !next; }
+  return next;
+}
+function workGoalDecisionCount(goal){
+  var count = 0;
+  (goal.plans || []).forEach(function(plan){
+    var col = plan.columns && plan.columns["waiting-user-decision"];
+    count += col ? col.length : 0;
+  });
+  return count;
+}
+function workOneOffCardCount(view){
+  var count = 0;
+  if(!view.oneOffTasks) return count;
+  WORK_COLUMN_CODES.forEach(function(code){
+    count += ((view.oneOffTasks.columns && view.oneOffTasks.columns[code]) || []).length;
+  });
+  return count;
+}
+function workColumnsCardCount(columns){
+  var count = 0;
+  WORK_COLUMN_CODES.forEach(function(code){
+    count += ((columns && columns[code]) || []).length;
+  });
+  return count;
+}
+/* ---------------------------------------------------------------------------
+ * FL-109C2A: truthful drag + keyboard action handoff.
+ *
+ * One small interaction controller consumes only the immutable per-card
+ * actionPolicy (Core-owned, schemaVersion 1) and coordinates four things:
+ *   - pointer drag affordance and seven-column drop feedback;
+ *   - a keyboard-first Move/Act chooser that keeps every destination
+ *     focusable and explanatory;
+ *   - focus return and a bounded pending-action handoff;
+ *   - opening the existing Task Detail drawer on the Actions tab with the
+ *     exact intent visible.
+ *
+ * Boundaries: it never changes local status, never reparents a card, and
+ * never calls a mutation endpoint. Existing Task Action controls remain the
+ * only way a durable operation is later submitted (FL-109C2B).
+ * ------------------------------------------------------------------------ */
+var workDrag = null;
+var workDragSuppressClick = false;
+/* The open chooser's origin is tracked by taskId so a poll re-render can find
+ * the replacement Move/Act control and keep aria state + focus return intact. */
+var workChooserTaskId = null;
+var workChooserBtn = null;
+
+/* Pure: a card is pointer-draggable only when its Core policy names at least
+ * one requestable or needs-input destination. Never infers eligibility from
+ * the browser-visible status or column. */
+function workCardIsActionable(card){
+  var policy = card && card.actionPolicy;
+  var dests = policy && policy.destinations;
+  if(!dests) return false;
+  for(var i = 0; i < WORK_COLUMN_CODES.length; i++){
+    var entry = dests[WORK_COLUMN_CODES[i]];
+    if(entry && (entry.disposition === "requestable" || entry.disposition === "needs-input")) return true;
+  }
+  return false;
+}
+/* Pure: a card exposes the keyboard/touch chooser whenever it carries a
+ * versioned Core actionPolicy, even when every destination is a no-op or
+ * automatic-only. Pointer drag stays limited to actionable cards. */
+function workCardHasPolicy(card){
+  var policy = card && card.actionPolicy;
+  return !!(policy && policy.schemaVersion === 1
+    && policy.destinations && typeof policy.destinations === "object");
+}
+/* Pure: drop/chooser mode for one destination policy entry. */
+function workDestinationMode(entry){
+  if(!entry || typeof entry !== "object") return "invalid";
+  if(entry.disposition === "requestable" || entry.disposition === "needs-input") return "valid";
+  if(entry.disposition === "automatic-only") return "auto";
+  return "invalid";
+}
+/* Bounded reason-code translation. Empty means "use the Core explanation". */
+function workReasonLabel(reason){
+  var keys = {
+    "already-there": "workReasonAlreadyThere",
+    "already-delivered": "workReasonAlreadyDelivered",
+    "delivered-backward-blocked": "workReasonDeliveredBackwardBlocked",
+    "dependency-held": "workReasonDependencyHeld",
+    "automatic-progression": "workReasonAutomaticProgression",
+    "no-operation": "workReasonNoOperation",
+    "requires-reopen-first": "workReasonRequiresReopenFirst",
+    "requires-main-accept": "workReasonRequiresMainAccept",
+    "requires-verification": "workReasonRequiresVerification",
+    "requires-reason-confirm": "workReasonRequiresReasonConfirm",
+    "requires-feedback": "workReasonRequiresFeedback",
+    "requires-preflight-then-apply": "workReasonRequiresPreflightThenApply",
+    "requires-receipt-confirm": "workReasonRequiresReceiptConfirm",
+    "resume-returns-to-ready": "workReasonResumeReturnsToReady",
+    "correct-reuses-candidate": "workReasonCorrectReusesCandidate",
+    "reopen-returns-now": "workReasonReopenReturnsNow",
+    "resolve-closes-failure": "workReasonResolveClosesFailure",
+    "allowance-exhausted": "workReasonAllowanceExhausted",
+    "already-past": "workReasonAlreadyPast",
+    "not-eligible": "workReasonNotEligible",
+    "unknown-evidence": "workReasonUnknownEvidence"
+  };
+  var key = keys[reason];
+  return key ? t(key) : "";
+}
+function workOperationLabel(op){
+  var keys = {
+    resume: "workOpResume",
+    correct: "workOpCorrect",
+    revise: "workOpRevise",
+    main_review: "workOpMainReview",
+    integration_preflight: "workOpIntegrationPreflight",
+    integration_apply: "workOpIntegrationApply",
+    task_resolve: "workOpTaskResolve",
+    task_reopen: "workOpTaskReopen"
+  };
+  var key = keys[op];
+  return key ? t(key) : (op || "");
+}
+function workIntentLabel(intent){
+  var keys = { accept: "workIntentAccept", revise: "workIntentRevise", reject: "workIntentReject" };
+  var key = keys[intent];
+  return key ? t(key) : (intent || "");
+}
+function workDispositionLabel(entry){
+  if(!entry || !entry.disposition) return "";
+  var keys = {
+    requestable: "workDispositionRequestable",
+    "needs-input": "workDispositionNeedsInput",
+    "automatic-only": "workDispositionAutomatic",
+    "no-op": "workDispositionNoop"
+  };
+  var key = keys[entry.disposition];
+  return key ? t(key) : entry.disposition;
+}
+function workRequiresLabel(fields){
+  var labels = {
+    feedback: "workReqFeedback",
+    confirm: "workReqConfirm",
+    reason: "workReqReason",
+    receiptId: "workReqReceiptId",
+    evidence: "workReqEvidence",
+    note: "workReqNote"
+  };
+  return (fields || []).map(function(f){
+    var key = labels[f];
+    return key ? t(key) : String(f);
+  }).join(", ") || "-";
+}
+function workPathLabel(path){
+  return (path || []).map(function(step){
+    return workOperationLabel(step && step.operation)
+      + (step && step.requires && step.requires.length
+        ? " (" + workRequiresLabel(step.requires) + ")" : "");
+  }).join(" → ");
+}
+/* Full bilingual explanation for one destination. Reason-code translations are
+ * primary; the Core explanation string is the authoritative fallback. */
+function workDestinationExplanation(code, entry){
+  if(!entry || typeof entry !== "object"){
+    return t("workReasonUnknownEvidence");
+  }
+  if(entry.disposition === "requestable" || entry.disposition === "needs-input"){
+    var parts = [];
+    parts.push(t("workDestActionable", {
+      operation: workOperationLabel(entry.operation),
+      column: workColumnLabel(code)
+    }));
+    if(entry.intent) parts.push(t("workDestIntent", { intent: workIntentLabel(entry.intent) }));
+    if(entry.requires && entry.requires.length){
+      parts.push(t("workDestRequires", { fields: workRequiresLabel(entry.requires) }));
+    }
+    if(entry.path && entry.path.length){
+      parts.push(t("workDestPath", { path: workPathLabel(entry.path) }));
+    }
+    var reason = workReasonLabel(entry.reason);
+    parts.push(reason ? reason : entry.explanation);
+    return parts.join(" ");
+  }
+  var r = workReasonLabel(entry.reason);
+  if(r) return r;
+  return entry.explanation;
+}
+/* Compact one-line summary for a chooser row. */
+function workDestinationSummary(code, entry){
+  if(!entry || typeof entry !== "object") return t("workReasonUnknownEvidence");
+  if(entry.disposition === "requestable" || entry.disposition === "needs-input"){
+    var parts = [t("workDestActionableShort", {
+      operation: workOperationLabel(entry.operation),
+      column: workColumnLabel(code)
+    })];
+    if(entry.requires && entry.requires.length){
+      parts.push(t("workDestRequiresShort", { fields: workRequiresLabel(entry.requires) }));
+    }
+    var r = workReasonLabel(entry.reason);
+    if(r) parts.push(r);
+    return parts.join(" · ");
+  }
+  var rr = workReasonLabel(entry.reason);
+  return rr ? rr : entry.explanation;
+}
+function workAnnounce(text){
+  toast(text);
+  var live = document.getElementById("fl-work-announce");
+  if(live) live.textContent = text || "";
+}
+/* Open the existing Task Detail drawer on Actions with a bounded handoff.
+ * Presentation only: no status patch, no reparent, no mutation endpoint. */
+function workOpenActionsHandoff(payload){
+  workActionChooserClose(null);
+  S.pendingActionHandoff = {
+    taskId: payload.taskId,
+    taskName: payload.taskName,
+    column: payload.column,
+    entry: payload.entry
+  };
+  taskDetailActiveTab = "actions";
+  showTask(payload.taskId, payload.breadcrumb);
+}
+function workClearDropHighlights(board){
+  if(!board) return;
+  var cells = board.querySelectorAll(".work-cell");
+  for(var i = 0; i < cells.length; i++){
+    cells[i].classList.remove("work-cell-drop-valid", "work-cell-drop-auto", "work-cell-drop-invalid");
+    cells[i].removeAttribute("aria-dropeffect");
+  }
+}
+function workCardDragStart(card, el, e){
+  if(!workCardIsActionable(card)){ e.preventDefault(); return; }
+  workDrag = {
+    taskId: card.taskId,
+    taskName: card.name,
+    breadcrumb: card.breadcrumb,
+    policy: (card.actionPolicy && card.actionPolicy.destinations) || {},
+    sourceColumn: card.column
+  };
+  el.classList.add("work-card-dragging");
+  if(e.dataTransfer){
+    /* copy intent, never move the canonical card in the DOM */
+    e.dataTransfer.effectAllowed = "copy";
+    try { e.dataTransfer.setData("text/plain", String(card.taskId || "")); } catch(_){}
+  }
+}
+function workCardDragEnd(el){
+  if(el) el.classList.remove("work-card-dragging");
+  workDrag = null;
+  workDragSuppressClick = true;
+  var boardEl = document.querySelector(".work-board");
+  if(boardEl) workClearDropHighlights(boardEl);
+  setTimeout(function(){ workDragSuppressClick = false; }, 0);
+}
+function workBoardDragOver(e){
+  if(!workDrag) return;
+  var cell = e.target && e.target.closest ? e.target.closest(".work-cell") : null;
+  if(!cell){ workClearDropHighlights(e.currentTarget); return; }
+  e.preventDefault();
+  var code = cell.getAttribute("data-column");
+  var entry = workDrag.policy && workDrag.policy[code];
+  var mode = workDestinationMode(entry);
+  workClearDropHighlights(e.currentTarget);
+  if(e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+  cell.classList.add(mode === "valid"
+    ? "work-cell-drop-valid"
+    : (mode === "auto" ? "work-cell-drop-auto" : "work-cell-drop-invalid"));
+  cell.setAttribute("aria-dropeffect", mode === "valid" ? "copy" : "none");
+}
+function workBoardDrop(e){
+  if(!workDrag) return;
+  var cell = e.target && e.target.closest ? e.target.closest(".work-cell") : null;
+  e.preventDefault();
+  workClearDropHighlights(e.currentTarget);
+  var drag = workDrag;
+  workDrag = null;
+  workDragSuppressClick = true;
+  setTimeout(function(){ workDragSuppressClick = false; }, 0);
+  if(!cell || !drag) return;
+  var code = cell.getAttribute("data-column");
+  var entry = drag.policy && drag.policy[code];
+  if(!entry) return;
+  if(entry.disposition === "requestable" || entry.disposition === "needs-input"){
+    workOpenActionsHandoff({
+      taskId: drag.taskId,
+      taskName: drag.taskName,
+      breadcrumb: drag.breadcrumb,
+      column: code,
+      entry: entry
+    });
+  } else {
+    /* invalid or automatic-only: explain, never hand off, card stays put */
+    workAnnounce(workDestinationSummary(code, entry));
+  }
+}
+/* Distinct keyboard/touch Move/Act control on an actionable card. */
+function renderWorkMoveActControl(card){
+  var row = h("div", "work-action-row");
+  row.setAttribute("data-fl-role", "work-action-move");
+  var btn = h("button", "work-action-btn");
+  btn.type = "button";
+  btn.setAttribute("aria-haspopup", "dialog");
+  btn.setAttribute("aria-expanded", "false");
+  btn.setAttribute("aria-label", t("workActionOpenAria"));
+  btn.textContent = t("workActionOpen");
+  btn.addEventListener("click", function(e){
+    e.stopPropagation();
+    workActionChooserToggle(card, btn);
+  });
+  btn.addEventListener("keydown", function(e){ e.stopPropagation(); });
+  row.appendChild(btn);
+  return row;
+}
+function workActionChooserToggle(card, btn){
+  var existing = document.getElementById("fl-work-action-chooser");
+  if(existing){
+    /* Same Task toggles closed; a different Task replaces the chooser. */
+    if(workChooserTaskId === String(card.taskId)){
+      workActionChooserClose(btn);
+    } else {
+      workActionChooserClose(null);
+      workOpenChooserForCard(card, btn);
+    }
+    return;
+  }
+  workOpenChooserForCard(card, btn);
+}
+function workOpenChooserForCard(card, btn){
+  var panel = h("div", "work-action-chooser");
+  panel.id = "fl-work-action-chooser";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-label", t("workActionChooserTitle"));
+  panel.setAttribute("data-fl-role", "work-action-chooser");
+
+  panel.appendChild(h("div", "work-action-chooser-head", t("workActionChooserTitle")));
+  panel.appendChild(h("div", "work-action-chooser-task", card.name || t("taskUntitled")));
+
+  var list = h("div", "work-action-chooser-list");
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", t("workActionChooserDestinations"));
+  list.id = "fl-work-action-chooser-list";
+
+  var items = [];
+  WORK_COLUMN_CODES.forEach(function(code){
+    var entry = (card.actionPolicy && card.actionPolicy.destinations && card.actionPolicy.destinations[code]) || null;
+    var item = workActionChooserItem(card, btn, code, entry);
+    list.appendChild(item);
+    items.push(item);
+  });
+  panel.appendChild(list);
+
+  var hint = h("div", "work-action-chooser-hint", t("workActionChooserHint"));
+  hint.id = "fl-work-action-chooser-hint";
+  hint.setAttribute("aria-live", "polite");
+  panel.appendChild(hint);
+
+  var closeBtn = h("button", "btn sm work-action-chooser-close", t("workActionChooserClose"));
+  closeBtn.type = "button";
+  closeBtn.setAttribute("data-fl-role", "work-action-chooser-close");
+  closeBtn.addEventListener("click", function(){ workActionChooserClose(btn); });
+  panel.appendChild(closeBtn);
+
+  document.body.appendChild(panel);
+  workChooserTaskId = String(card.taskId);
+  workChooserBtn = btn;
+  btn.setAttribute("aria-expanded", "true");
+  btn.classList.add("is-open");
+
+  var focusables = items.concat([closeBtn]);
+  function nextFocus(dir){
+    var idx = focusables.indexOf(document.activeElement);
+    var next = focusables[(idx + dir + focusables.length) % focusables.length];
+    next.focus();
+  }
+  panel.addEventListener("keydown", function(e){
+    if(e.key === "Escape"){ e.preventDefault(); workActionChooserClose(btn); return; }
+    if(e.key === "Tab"){ e.preventDefault(); nextFocus(e.shiftKey ? -1 : 1); return; }
+    if(e.key === "ArrowDown" || e.key === "ArrowRight"){ e.preventDefault(); nextFocus(1); return; }
+    if(e.key === "ArrowUp" || e.key === "ArrowLeft"){ e.preventDefault(); nextFocus(-1); return; }
+  });
+
+  var first = null;
+  for(var i = 0; i < items.length; i++){
+    if(items[i]._actionable){ first = items[i]; break; }
+  }
+  (first || items[0] || closeBtn).focus();
+}
+/* Find the current Move/Act control for a task id after a re-render. */
+function workActionFindOriginBtn(taskId){
+  if(!taskId) return null;
+  var btns = document.querySelectorAll(".work-action-btn");
+  for(var i = 0; i < btns.length; i++){
+    var cardEl = btns[i].closest ? btns[i].closest(".work-card") : null;
+    if(cardEl && cardEl.getAttribute("data-task-id") === String(taskId)) return btns[i];
+  }
+  return null;
+}
+/* Close the chooser and restore focus to the origin control, falling back to
+ * the replacement control when polling re-rendered the board. */
+function workActionChooserClose(btn){
+  var panel = document.getElementById("fl-work-action-chooser");
+  if(panel) panel.remove();
+  var taskId = workChooserTaskId;
+  workChooserTaskId = null;
+  var origin = btn || workChooserBtn;
+  workChooserBtn = null;
+  if(!origin || !document.contains(origin)){
+    origin = workActionFindOriginBtn(taskId);
+  }
+  if(origin){
+    origin.setAttribute("aria-expanded", "false");
+    origin.classList.remove("is-open");
+    if(document.contains(origin) && typeof origin.focus === "function") origin.focus();
+  }
+}
+/* Close the chooser with no focus side effects (page/language changes). */
+function workActionChooserReset(){
+  workActionChooserClose(null);
+}
+/* After a Work re-render, keep the open chooser truthful: mark the replacement
+ * control as open, or close safely when the origin card is gone. */
+function workActionRebindChooser(){
+  if(!workChooserTaskId) return;
+  var panel = document.getElementById("fl-work-action-chooser");
+  var origin = workActionFindOriginBtn(workChooserTaskId);
+  if(origin){
+    workChooserBtn = origin;
+    if(panel){
+      origin.setAttribute("aria-expanded", "true");
+      origin.classList.add("is-open");
+    } else {
+      workChooserTaskId = null;
+      workChooserBtn = null;
+    }
+  } else if(panel){
+    panel.remove();
+    workChooserTaskId = null;
+    workChooserBtn = null;
+  }
+}
+function workActionChooserItem(card, btn, code, entry){
+  var actionable = !!(entry && (entry.disposition === "requestable" || entry.disposition === "needs-input"));
+  var mode = workDestinationMode(entry);
+  var row = h("button", "work-action-dest is-explain-" + (mode === "valid" ? "actionable" : (mode === "auto" ? "auto" : "invalid")));
+  if(actionable) row.classList.add("is-actionable");
+  row.type = "button";
+  row.setAttribute("role", "option");
+  row.setAttribute("aria-selected", "false");
+  row.setAttribute("data-fl-role", "work-action-dest");
+  row.setAttribute("data-column", code);
+  row._actionable = actionable;
+
+  var headEl = h("div", "work-action-dest-head");
+  headEl.appendChild(h("span", "work-action-dest-name", workColumnLabel(code)));
+  var badgeClass = actionable ? "badge-ok" : (mode === "auto" ? "badge-info" : "badge-dim");
+  headEl.appendChild(h("span", "badge " + badgeClass, workDispositionLabel(entry)));
+  row.appendChild(headEl);
+  row.appendChild(h("div", "work-action-dest-text", workDestinationSummary(code, entry)));
+  if(actionable){
+    row.appendChild(h("div", "work-action-dest-act", t("workActionPickValid")));
+  }
+
+  row.addEventListener("click", function(){
+    if(actionable){
+      workActionChooserClose(btn);
+      workOpenActionsHandoff({
+        taskId: card.taskId,
+        taskName: card.name,
+        breadcrumb: card.breadcrumb,
+        column: code,
+        entry: entry
+      });
+    } else {
+      var hint = document.getElementById("fl-work-action-chooser-hint");
+      var text = workDestinationExplanation(code, entry);
+      if(hint) hint.textContent = text;
+      workAnnounce(text);
+    }
+  });
+  return row;
+}
+function renderWorkCard(card){
+  var el = h("div", "work-card");
+  el.setAttribute("data-fl-role", "work-card");
+  el.setAttribute("data-task-id", card.taskId || "");
+  el.setAttribute("tabindex", "0");
+  el.setAttribute("role", "button");
+  el.setAttribute("aria-label", card.name || t("taskUntitled"));
+
+  /* Pointer drag is offered only when the Core policy names a requestable or
+   * needs-input destination. The card stays in its canonical column; drag only
+   * copies intent (effectAllowed "copy"), never moves the node. */
+  var hasPolicy = workCardHasPolicy(card);
+  var actionable = workCardIsActionable(card);
+  if(actionable){
+    el.classList.add("is-actionable");
+    el.setAttribute("draggable", "true");
+    el.addEventListener("dragstart", function(e){ workCardDragStart(card, el, e); });
+    el.addEventListener("dragend", function(){ workCardDragEnd(el); });
+  }
+
+  /* Normal card activation still opens Task Detail. The distinct Move/Act
+   * control stops propagation so the two behaviors never conflict; a drag
+   * also suppresses the click that would otherwise follow dragend. */
+  el.addEventListener("click", function(){
+    if(workDragSuppressClick) return;
+    showTask(card.taskId, card.breadcrumb);
+  });
+  el.addEventListener("keydown", function(e){
+    if(e.target !== el) return;
+    if(e.key === "Enter" || e.key === " "){ e.preventDefault(); showTask(card.taskId, card.breadcrumb); }
+  });
+
+  el.appendChild(h("div", "work-card-name", card.name || t("taskUntitled")));
+  el.appendChild(h("div", "work-card-reason", workPlacementLabel(card.placementReason)));
+  (card.blockers || []).slice(0, 3).forEach(function(b){
+    el.appendChild(h("div", "work-card-meta work-card-blocker", t("workCardBlocker", { text: b.label })));
+  });
+  // Unlock edges are named only when the destination Task has a real name;
+  // a bare item id is never shown as card copy.
+  (card.namedRequiredBy || []).slice(0, 2).forEach(function(nb){
+    if(nb.taskName) el.appendChild(h("div", "work-card-meta work-card-unlocks", t("workCardUnlocks", { text: nb.taskName })));
+  });
+  var workerLabel = workWorkerLabel(card.workerProfileId);
+  if(workerLabel) el.appendChild(h("div", "work-card-meta work-card-worker", t("workCardWorker", { worker: workerLabel })));
+  el.appendChild(h("div", "work-card-next", t("workCardNext", { text: card.nextAction || t("workNoNext") })));
+  if(hasPolicy) el.appendChild(renderWorkMoveActControl(card));
+  return el;
+}
+function renderWorkColumns(columns){
+  var grid = h("div", "work-col-grid work-lane-row");
+  grid.setAttribute("data-fl-role", "work-lane-row");
+  WORK_COLUMN_CODES.forEach(function(code){
+    var cell = h("div", "work-cell");
+    cell.setAttribute("data-column", code);
+    cell.appendChild(h("div", "work-cell-head", workColumnLabel(code)));
+    var cards = (columns && columns[code]) || [];
+    var list = h("div", "work-cell-cards");
+    list.setAttribute("data-fl-role", "work-cell-cards");
+    list.setAttribute("data-column", code);
+    if(cards.length === 0){
+      list.appendChild(h("div", "work-cell-empty", t("workColumnEmpty")));
+    } else {
+      cards.forEach(function(card){ list.appendChild(renderWorkCard(card)); });
+    }
+    cell.appendChild(list);
+    grid.appendChild(cell);
+  });
+  return grid;
+}
+function renderWorkPlanLane(plan, isIndependent){
+  var planId = plan.planId || "";
+  var defaultExpanded = workPlanDefaultExpanded(plan);
+  var expanded = workLaneExpanded(workCollapse, "plan", planId, defaultExpanded);
+  var lane = h("div", "work-lane work-plan-lane");
+  lane.setAttribute("data-lane-kind", "plan");
+  lane.setAttribute("data-fl-role", "work-plan-lane");
+  lane.setAttribute("data-plan-id", planId);
+  if(isIndependent) lane.setAttribute("data-independent", "true");
+
+  var bodyId = workLaneId("plan", planId);
+  var toggle = h("button", "work-lane-toggle work-plan-toggle");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  toggle.setAttribute("aria-controls", bodyId);
+  toggle.setAttribute("data-fl-role", "work-plan-toggle");
+  toggle.addEventListener("click", function(){
+    workToggleLane(workCollapse, "plan", planId, toggle, defaultExpanded);
+  });
+
+  var nameWrap = h("div", "work-lane-head");
+  if(isIndependent) nameWrap.appendChild(h("span", "work-lane-kind-badge", t("workIndependentPlanBadge")));
+  nameWrap.appendChild(h("span", "work-lane-name", plan.name || t("workUntitledPlan")));
+  toggle.appendChild(nameWrap);
+
+  var summary = plan.summary || {};
+  var pr = summary.progress || {};
+  var facts = h("div", "work-lane-facts");
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalOutcome", { text: summary.whatCompleted || t("workNoneYet") })));
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalBlocker", { text: summary.blocker || t("workNoBlocker") })));
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalNext", { text: summary.nextAction || t("workNoNext") })));
+  if(plan.objective) facts.appendChild(h("span", "work-lane-fact work-lane-objective", plan.objective));
+  facts.appendChild(h("span", "work-lane-fact work-lane-progress", t("workProgressCompact", {
+    completed: String(pr.completed || 0),
+    total: String(pr.total || 0),
+    percent: String(pr.percent || 0)
+  })));
+  toggle.appendChild(facts);
+
+  lane.appendChild(toggle);
+  var body = h("div", "work-lane-body");
+  body.id = bodyId;
+  body.hidden = !expanded;
+  body.appendChild(renderWorkColumns(plan.columns || {}));
+  lane.appendChild(body);
+  return lane;
+}
+function renderWorkGoalLane(goal){
+  var goalId = goal.goalId || "";
+  var defaultExpanded = workGoalDefaultExpanded(goal);
+  var expanded = workLaneExpanded(workCollapse, "goal", goalId, defaultExpanded);
+  var lane = h("div", "work-lane work-goal-lane");
+  lane.setAttribute("data-lane-kind", "goal");
+  lane.setAttribute("data-fl-role", "work-goal-lane");
+  lane.setAttribute("data-goal-id", goalId);
+
+  var bodyId = workLaneId("goal", goalId);
+  var toggle = h("button", "work-lane-toggle work-goal-toggle");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  toggle.setAttribute("aria-controls", bodyId);
+  toggle.setAttribute("data-fl-role", "work-goal-toggle");
+  toggle.addEventListener("click", function(){
+    workToggleLane(workCollapse, "goal", goalId, toggle, defaultExpanded);
+  });
+
+  var nameWrap = h("div", "work-lane-head");
+  nameWrap.appendChild(h("span", "work-lane-name", goal.name || t("workUntitledGoal")));
+  if(goal.status) nameWrap.appendChild(badge(goal.status));
+  toggle.appendChild(nameWrap);
+
+  var summary = goal.summary || {};
+  var pr = summary.progress || {};
+  var facts = h("div", "work-lane-facts");
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalOutcome", { text: summary.whatCompleted || t("workNoneYet") })));
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalBlocker", { text: summary.blocker || t("workNoBlocker") })));
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalNext", { text: summary.nextAction || t("workNoNext") })));
+  facts.appendChild(h("span", "work-lane-fact work-lane-progress", t("workProgressCompact", {
+    completed: String(pr.completed || 0),
+    total: String(pr.total || 0),
+    percent: String(pr.percent || 0)
+  })));
+  var decisionCount = workGoalDecisionCount(goal);
+  if(decisionCount > 0){
+    facts.appendChild(h("span", "work-lane-fact work-lane-decision", t("workGoalDecision", { count: String(decisionCount) })));
+  }
+  toggle.appendChild(facts);
+
+  lane.appendChild(toggle);
+  var body = h("div", "work-lane-body");
+  body.id = bodyId;
+  body.hidden = !expanded;
+  (goal.plans || []).forEach(function(plan){
+    body.appendChild(renderWorkPlanLane(plan, false));
+  });
+  lane.appendChild(body);
+  return lane;
+}
+function renderWorkOneOffLane(lane){
+  var defaultExpanded = workOneOffDefaultExpanded(lane);
+  var expanded = workLaneExpanded(workCollapse, "one-off", "tasks", defaultExpanded);
+  var wrap = h("div", "work-lane work-oneoff-lane");
+  wrap.setAttribute("data-lane-kind", "one-off");
+  wrap.setAttribute("data-fl-role", "work-oneoff-lane");
+  var summary = lane.summary || {};
+  var pr = summary.progress || {};
+  var cardCount = workColumnsCardCount(lane.columns || {});
+  var bodyId = workLaneId("one-off", "tasks");
+  var toggle = h("button", "work-lane-toggle work-oneoff-toggle");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  toggle.setAttribute("aria-controls", bodyId);
+  toggle.setAttribute("data-fl-role", "work-oneoff-toggle");
+
+  var nameWrap = h("div", "work-lane-head");
+  nameWrap.appendChild(h("span", "work-lane-name", t("workOneOffTasks")));
+  nameWrap.appendChild(h("span", "work-lane-count", t("workOneOffCount", { count: String(cardCount) })));
+  toggle.appendChild(nameWrap);
+
+  var facts = h("div", "work-lane-facts");
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalNext", { text: summary.nextAction || t("workNoNext") })));
+  facts.appendChild(h("span", "work-lane-fact work-lane-progress", t("workProgressCompact", {
+    completed: String(pr.completed || 0),
+    total: String(pr.total || 0),
+    percent: String(pr.percent || 0)
+  })));
+  toggle.appendChild(facts);
+
+  var body = h("div", "work-lane-body");
+  body.id = bodyId;
+  body.hidden = !expanded;
+  /* Defer the complete canonical card grid until the lane is expanded so a
+   * long-lived historical one-off set does not flood the initial page. */
+  var bodyFilled = false;
+  function ensureOneOffBody(){
+    if(bodyFilled) return;
+    bodyFilled = true;
+    body.appendChild(renderWorkColumns(lane.columns || {}));
+  }
+  if(expanded) ensureOneOffBody();
+  toggle.addEventListener("click", function(){
+    var next = workToggleLane(workCollapse, "one-off", "tasks", toggle, defaultExpanded);
+    if(next) ensureOneOffBody();
+  });
+
+  wrap.appendChild(toggle);
+  wrap.appendChild(body);
+  return wrap;
+}
+function renderWorkFilters(){
+  var bar = h("div", "work-filters");
+  bar.setAttribute("data-fl-role", "work-filters");
+  var form = document.createElement("form");
+  form.className = "work-filters-form";
+  form.setAttribute("data-fl-role", "work-filter-form");
+  form.setAttribute("aria-label", t("workFilterLabel"));
+
+  var draft = S.workFilterDraft || { project: "", columns: "", workerProfileId: "" };
+  var presented;
+  if(S.workFilterOptions.projects.length){
+    presented = {
+      options: S.workFilterOptions.projects.map(function(value){
+        return { value: value, label: workProjectHumanLabel(value, S.workFilterOptions.projects) };
+      }),
+      omittedInternalCount: S.workFilterOptions.omittedInternalProjects || 0
+    };
+  } else {
+    presented = workProjectOptionsFromView();
+  }
+
+  var projWrap = h("label", "work-filter-field", "");
+  projWrap.appendChild(h("span", "work-filter-label", t("workFilterProject")));
+  var projSel = document.createElement("select");
+  projSel.setAttribute("data-fl-role", "work-filter-project");
+  projSel.appendChild(workOption("", t("workFilterAllProjects")));
+  presented.options.forEach(function(opt){
+    projSel.appendChild(workOption(opt.value, opt.label));
+  });
+  projSel.value = draft.project;
+  // Draft-only updates on change: no request fires until Apply.
+  projSel.addEventListener("change", function(){ S.workFilterDraft.project = projSel.value; });
+  projWrap.appendChild(projSel);
+  if(presented.omittedInternalCount > 0){
+    var omitNote = h("div", "work-filter-note dim fs11", t("workFilterInternalProjectsOmitted", {
+      count: String(presented.omittedInternalCount)
+    }));
+    omitNote.setAttribute("data-fl-role", "work-filter-internal-note");
+    projWrap.appendChild(omitNote);
+  }
+
+  var colWrap = h("label", "work-filter-field", "");
+  colWrap.appendChild(h("span", "work-filter-label", t("workFilterColumn")));
+  var colSel = document.createElement("select");
+  colSel.setAttribute("data-fl-role", "work-filter-column");
+  colSel.appendChild(workOption("", t("workFilterAllColumns")));
+  WORK_COLUMN_CODES.forEach(function(code){ colSel.appendChild(workOption(code, workColumnLabel(code))); });
+  colSel.value = draft.columns;
+  colSel.addEventListener("change", function(){ S.workFilterDraft.columns = colSel.value; });
+  colWrap.appendChild(colSel);
+
+  var workerWrap = h("label", "work-filter-field", "");
+  workerWrap.appendChild(h("span", "work-filter-label", t("workFilterWorker")));
+  var workerSel = document.createElement("select");
+  workerSel.setAttribute("data-fl-role", "work-filter-worker");
+  workerSel.appendChild(workOption("", t("workFilterAllWorkers")));
+  var workerIds = S.workFilterOptions.workers.length ? S.workFilterOptions.workers : workWorkerOptionsFromView();
+  workerIds.forEach(function(wid){ workerSel.appendChild(workOption(wid, workWorkerOptionLabel(wid))); });
+  workerSel.value = draft.workerProfileId;
+  workerSel.addEventListener("change", function(){ S.workFilterDraft.workerProfileId = workerSel.value; });
+  workerWrap.appendChild(workerSel);
+
+  var actions = h("div", "work-filter-actions");
+  var applyBtn = h("button", "btn primary sm", t("workFilterApply"));
+  applyBtn.type = "submit";
+  applyBtn.setAttribute("data-fl-role", "work-filter-apply");
+  var resetBtn = h("button", "btn sm", t("workFilterReset"));
+  resetBtn.type = "button";
+  resetBtn.setAttribute("data-fl-role", "work-filter-reset");
+  resetBtn.addEventListener("click", function(){ workResetFilter(); });
+  actions.appendChild(applyBtn);
+  actions.appendChild(resetBtn);
+
+  form.addEventListener("submit", function(e){
+    e.preventDefault();
+    workApplyFilter(projSel.value, colSel.value, workerSel.value);
+  });
+
+  form.appendChild(projWrap);
+  form.appendChild(colWrap);
+  form.appendChild(workerWrap);
+  form.appendChild(actions);
+  bar.appendChild(form);
+  return bar;
+}
+function workApplyFilter(project, columns, workerProfileId){
+  S.workFilterDraft = { project: project, columns: columns, workerProfileId: workerProfileId };
+  var f = {};
+  if(project) f.project = project;
+  if(columns) f.columns = [columns];
+  if(workerProfileId) f.workerProfileId = workerProfileId;
+  S.workFilter = f;
+  refresh();
+}
+function workResetFilter(){
+  S.workFilterDraft = { project: "", columns: "", workerProfileId: "" };
+  S.workFilter = {};
+  refresh();
+}
+/* Legacy task-file submission stays reachable behind an explicit Advanced
+ * action; outcome-first creation arrives in FL-109D and replaces it as the
+ * primary intake path. */
+function renderWorkAdvanced(){
+  var details = document.createElement("details");
+  details.className = "work-advanced";
+  details.setAttribute("data-fl-role", "work-advanced");
+  var summary = document.createElement("summary");
+  summary.textContent = t("workAdvancedTitle");
+  details.appendChild(summary);
+  var body = h("div", "work-advanced-body");
+  body.appendChild(h("div", "summary-line dim mb-8", t("workAdvancedHint")));
+  var openLegacy = h("button", "btn sm", t("workAdvancedOpenSubmit"));
+  openLegacy.type = "button";
+  openLegacy.setAttribute("data-fl-role", "work-advanced-submit");
+  openLegacy.addEventListener("click", function(){ switchTab("tasks", { legacy: true }); });
+  body.appendChild(hd("div", "actions", [openLegacy]));
+  details.appendChild(body);
+  return details;
+}
+/* The single Work surface: Goal and Plan are context lanes, Task cards alone
+ * occupy the seven columns. Loading/failure/stale states are decided by
+ * pageEvidenceState; an unsupported projection fails visibly here. */
+function rWork(){
+  viewEl.textContent = "";
+  if(!S.hadOk){ showDisconnected(); return; }
+  viewEl.appendChild(renderPageStory("work"));
+  /* Outcome-first composer at the start of the Work page: describe the desired
+   * result first, then hand off to Main. The hierarchical board stays the
+   * owner of Task/Plan/Goal context below. */
+  viewEl.appendChild(renderOutcomeSection());
+  viewEl.appendChild(renderWorkFilters());
+
+  var view;
+  try {
+    view = normalizeWorkHierarchy(S.workHierarchy);
+  } catch(err){
+    var errBox = h("div", "error-box");
+    errBox.setAttribute("data-fl-role", "work-hierarchy-error");
+    errBox.appendChild(document.createTextNode(t("workUnsupportedHierarchy")));
+    viewEl.appendChild(errBox);
+    return;
+  }
+
+  if(workCollapse === null) workCollapse = workCollapseLoad();
+  workRefreshFilterOptions(view);
+
+  var applied = view.filter && view.filter.applied;
+  var activeFilter = !!(applied && (applied.project || applied.columns || applied.workerProfileId));
+
+  var oneOffCount = workOneOffCardCount(view);
+  var hasAny = (view.goals && view.goals.length)
+    || (view.independentPlans && view.independentPlans.length)
+    || oneOffCount > 0;
+
+  if(!hasAny){
+    viewEl.appendChild(stateMsg("empty", activeFilter ? t("workFilterNoMatches") : t("workEmpty")));
+    viewEl.appendChild(renderWorkAdvanced());
+    return;
+  }
+
+  var board = h("div", "work-board");
+  board.setAttribute("data-fl-role", "work-board");
+  /* Delegated drag handling: every .work-cell in every lane (including the
+   * header row) is an explicit drop target. Feedback and the handoff decision
+   * come only from the dragged card's Core actionPolicy. */
+  board.addEventListener("dragover", workBoardDragOver);
+  board.addEventListener("drop", workBoardDrop);
+  board.addEventListener("dragleave", function(){ workClearDropHighlights(board); });
+
+  var headRow = h("div", "work-col-grid work-col-head");
+  headRow.setAttribute("data-fl-role", "work-col-head");
+  WORK_COLUMN_CODES.forEach(function(code){
+    var cell = h("div", "work-cell work-cell-headcell");
+    cell.setAttribute("data-column", code);
+    cell.appendChild(h("span", "work-cell-title", workColumnLabel(code)));
+    headRow.appendChild(cell);
+  });
+  board.appendChild(headRow);
+
+  (view.goals || []).forEach(function(goal){
+    board.appendChild(renderWorkGoalLane(goal));
+  });
+
+  var independent = view.independentPlans || [];
+  if(independent.length){
+    var indepGroup = h("div", "work-independent-group");
+    indepGroup.setAttribute("data-fl-role", "work-independent-plans");
+    indepGroup.appendChild(h("div", "work-group-title", t("workIndependentPlans")));
+    independent.forEach(function(plan){
+      indepGroup.appendChild(renderWorkPlanLane(plan, true));
+    });
+    board.appendChild(indepGroup);
+  }
+
+  if(view.oneOffTasks && oneOffCount > 0){
+    var oneOffGroup = h("div", "work-oneoff-group");
+    oneOffGroup.setAttribute("data-fl-role", "work-oneoff-tasks");
+    /* Title lives on the accessible disclosure toggle so the lane summary,
+     * count, and expand control stay one keyboard-operable control. */
+    oneOffGroup.appendChild(renderWorkOneOffLane(view.oneOffTasks));
+    board.appendChild(oneOffGroup);
+  }
+
+  viewEl.appendChild(board);
+  viewEl.appendChild(renderWorkAdvanced());
+  /* A poll re-render replaced every Move/Act control; keep the open chooser's
+   * origin truthful and its focus return working against the new controls. */
+  workActionRebindChooser();
+}
+
+/* Task Detail breadcrumb. Renders only parents that actually exist in the
+ * clicked hierarchy card; a direct link without ancestry shows the plain
+ * "Task report" label and never invents a Goal or Plan. */
+/* Resolve the breadcrumb for an opened Task. A clicked hierarchy card stores
+ * its bounded ancestry keyed by task id; reloading the SAME task (an in-drawer
+ * action re-opens it) keeps that ancestry. A different task or a direct link
+ * without a crumb never inherits stale parents. */
+function resolveTaskBreadcrumb(prev, id, crumb){
+  if(crumb && typeof crumb === "object"){
+    return {
+      taskId: id,
+      goalId: crumb.goalId,
+      goalName: crumb.goalName,
+      planId: crumb.planId,
+      planName: crumb.planName,
+      taskName: crumb.taskName || crumb.name
+    };
+  }
+  if(prev && prev.taskId === id) return prev;
+  return null;
+}
+function renderTaskBreadcrumb(crumb){
+  if(!crumb || typeof crumb !== "object"){
+    return h("div", "dim fs12", t("taskReportBreadcrumb"));
+  }
+  var goalName = crumb.goalName || (crumb.goal && crumb.goal.name);
+  var planName = crumb.planName || (crumb.plan && crumb.plan.name);
+  var taskName = crumb.taskName || crumb.name || "";
+  if(!goalName && !planName){
+    return h("div", "dim fs12", t("taskReportBreadcrumb"));
+  }
+  var wrap = h("div", "task-breadcrumb");
+  wrap.setAttribute("data-fl-role", "task-breadcrumb");
+  var segs = [];
+  if(goalName){
+    var gb;
+    if(crumb.goalId){
+      gb = h("button", "task-breadcrumb-seg task-breadcrumb-link", String(goalName));
+      gb.type = "button";
+      gb.setAttribute("data-fl-role", "task-breadcrumb-goal");
+      gb.addEventListener("click", function(){ showGoalDetail(crumb.goalId); });
+    } else {
+      gb = h("span", "task-breadcrumb-seg", String(goalName));
+    }
+    segs.push(gb);
+  }
+  if(planName){
+    var pb;
+    if(crumb.planId){
+      pb = h("button", "task-breadcrumb-seg task-breadcrumb-link", String(planName));
+      pb.type = "button";
+      pb.setAttribute("data-fl-role", "task-breadcrumb-plan");
+      pb.addEventListener("click", function(){ showPlanBoard(crumb.planId); });
+    } else {
+      pb = h("span", "task-breadcrumb-seg", String(planName));
+    }
+    segs.push(pb);
+  }
+  segs.push(h("span", "task-breadcrumb-seg task-breadcrumb-current", taskName || t("taskUntitled")));
+  segs.forEach(function(s, i){
+    if(i > 0) wrap.appendChild(h("span", "task-breadcrumb-sep", "›"));
+    wrap.appendChild(s);
+  });
+  return wrap;
 }
 
 /* --- Competitions --- */
@@ -7009,13 +8977,34 @@ function rMains(){
   viewEl.appendChild(h("div", "summary-line mt-8", t("mainFooter")));
 }
 
-function switchTab(name){
+/* Legacy peer pages (Board/Plans/Goals) were folded into the single Work
+ * surface. Old saved state and internal links still name them; they redirect
+ * to Work so work is never fragmented across peer lists. */
+var LEGACY_TAB_REDIRECT = {
+  board: "work",
+  tasks: "work",
+  plans: "work",
+  goals: "work"
+};
+/* The legacy task-file submission page stays reachable behind the Work page's
+ * explicit Advanced action (not peer navigation). */
+function switchTab(name, opts){
+  var effective = (opts && opts.legacy && LEGACY_TAB_REDIRECT[name]) ? name
+    : (LEGACY_TAB_REDIRECT[name] || name);
   $$("#fl-tabs button").forEach(function(b){
-    b.classList.toggle("active", b.getAttribute("data-tab") === name);
+    var tab = b.getAttribute("data-tab");
+    var active = tab === effective
+      || (tab === "work" && effective !== "work" && LEGACY_TAB_REDIRECT[effective] === "work");
+    b.classList.toggle("active", active);
   });
-  S.tab = name;
+  S.tab = effective;
   if(S.tab !== "worker") S.workerFormActive = false;
+  if(S.tab !== "work") S.outcomeFormActive = false;
   hideDetail();
+  /* The Work board is being replaced; the open Move/Act chooser must not dangle
+   * and any pending-action handoff for the previous task must not survive. */
+  workActionChooserReset();
+  workPendingHandoffReset();
   // Render immediately with retained evidence (or loading if never fetched).
   render();
   // Immediately fetch this page's required data.
@@ -7835,6 +9824,8 @@ function hideDetail(){
   detailEl.textContent = "";
   if(scrimEl){ scrimEl.hidden = true; }
   S.detail = null;
+  /* Closing the drawer is an explicit close for any pending-action handoff. */
+  workPendingHandoffReset();
   var target = S.detailReturnFocus;
   S.detailReturnFocus = null;
   if(target && document.contains(target) && typeof target.focus === "function") target.focus();
@@ -8290,7 +10281,7 @@ function showGoalDetail(id){
   });
 }
 
-function taskAction(path, body, btn, onOk){
+function taskAction(path, body, btn, onOk, onFail){
   if(btn) btn.disabled = true;
   flashError("");
   postJSON(path, body || {})
@@ -8299,7 +10290,11 @@ function taskAction(path, body, btn, onOk){
       if(onOk) onOk(res);
       else refresh();
     })
-    .catch(function(e){ flashError(t("taskActionFailed"), e && e.message ? e.message : ""); })
+    .catch(function(e){
+      var failMsg = (e && e.message) ? String(e.message) : "";
+      flashError(t("taskActionFailed"), failMsg);
+      if(onFail) onFail(failMsg);
+    })
     .finally(function(){ if(btn) btn.disabled = false; });
 }
 
@@ -11034,6 +13029,268 @@ function renderTaskTabShell(tabs, activeId){
   return root;
 }
 
+/* FL-109C2B pending-action handoff banner for the Task Actions tab. It only
+ * explains the bounded intent that the user chose by drag or keyboard; the
+ * existing operation controls below remain the only path to a durable run.
+ * One Continue button scrolls to and focuses the exact existing control the
+ * Core policy named, so the user confirms through the existing gate. */
+function renderPendingActionHandoff(pending){
+  var entry = pending.entry || {};
+  var op = workPendingOperation(pending);
+  var box = h("div", "task-action-pending");
+  box.id = "fl-task-action-pending";
+  box.setAttribute("data-fl-role", "task-action-pending");
+  box.appendChild(h("div", "task-action-pending-title", t("workActionHandoffTitle")));
+  box.appendChild(h("div", "summary-line dim mb-8", t("workActionHandoffIntro", {
+    task: pending.taskName || t("taskUntitled")
+  })));
+
+  var rows = h("div", "task-action-pending-rows");
+  rows.appendChild(workHandoffRow(t("workActionHandoffColumn"), workColumnLabel(pending.column)));
+  if(op) rows.appendChild(workHandoffRow(t("workActionHandoffOperation"), workOperationLabel(op)));
+  if(entry.intent) rows.appendChild(workHandoffRow(t("workActionHandoffIntent"), workIntentLabel(entry.intent)));
+  var requires = workPendingRequires(pending);
+  if(requires && requires.length) rows.appendChild(workHandoffRow(t("workActionHandoffRequires"), workRequiresLabel(requires)));
+  if(entry.path && entry.path.length) rows.appendChild(workHandoffRow(t("workActionHandoffPath"), workPathLabel(entry.path)));
+  rows.appendChild(workHandoffRow(t("workActionHandoffWhy"), workDestinationExplanation(pending.column, entry)));
+  box.appendChild(rows);
+
+  var guide = h("div", "task-action-pending-guide", workPendingGuideText(pending));
+  guide.setAttribute("data-fl-role", "task-action-pending-guide");
+  box.appendChild(guide);
+
+  var truth = h("div", "task-action-pending-truth", t("workActionHandoffTruth"));
+  truth.setAttribute("data-fl-role", "task-action-pending-truth");
+  box.appendChild(truth);
+
+  if(pending.failure){
+    var failure = h("div", "task-action-pending-failure",
+      t("workActionHandoffFailureTitle") + " " + t("workActionHandoffFailureBody", {
+        message: boundedDiagnostic(pending.failure)
+      }));
+    failure.setAttribute("data-fl-role", "task-action-pending-failure");
+    box.appendChild(failure);
+  }
+
+  var actions = h("div", "task-action-pending-actions");
+  var cont = h("button", "btn sm primary task-action-pending-continue", t("workActionHandoffContinue"));
+  cont.type = "button";
+  cont.setAttribute("data-fl-role", "task-action-pending-continue");
+  cont.setAttribute("data-fl-op-continue", op || "");
+  cont.addEventListener("click", function(){ workPendingContinue(pending); });
+  actions.appendChild(cont);
+  var dismiss = h("button", "btn sm", t("workActionHandoffDismiss"));
+  dismiss.type = "button";
+  dismiss.setAttribute("data-fl-role", "task-action-pending-dismiss");
+  dismiss.addEventListener("click", function(){
+    workPendingHandoffReset();
+    var banner = document.getElementById("fl-task-action-pending");
+    if(banner) banner.remove();
+  });
+  actions.appendChild(dismiss);
+  box.appendChild(actions);
+  return box;
+}
+function workHandoffRow(label, value){
+  var row = h("div", "task-action-pending-row");
+  row.setAttribute("data-fl-role", "task-action-pending-row");
+  row.appendChild(h("div", "task-action-pending-row-label", label));
+  row.appendChild(h("div", "task-action-pending-row-value",
+    value === undefined || value === null ? "-" : String(value)));
+  return row;
+}
+function workFieldLabel(field){
+  var keys = { feedback: "workReqFeedback", confirm: "workReqConfirm", reason: "workReqReason",
+    receiptId: "workReqReceiptId", evidence: "workReqEvidence", note: "workReqNote" };
+  var key = keys[field];
+  return key ? t(key) : String(field);
+}
+/* One plain-language next step: the exact next required input, or the confirm
+ * gate when no input is missing. Integration names its current step. */
+function workPendingGuideText(pending){
+  var op = workPendingOperation(pending);
+  if(op === "integration_preflight") return t("workActionHandoffStepPreflight");
+  if(op === "integration_apply") return t("workActionHandoffStepApply");
+  var requires = workPendingRequires(pending);
+  for(var i = 0; i < requires.length; i++){
+    var field = requires[i];
+    if(field === "confirm") continue;
+    return t("workActionHandoffStepNext", { field: workFieldLabel(field) });
+  }
+  return t("workActionHandoffStepConfirm");
+}
+
+/* ---------------------------------------------------------------------------
+ * FL-109C2B: connect a chosen board destination to the exact durable Task
+ * control. The router never recomputes eligibility, builds a mutation payload,
+ * or submits automatically; it locates the one existing control the Core
+ * policy named and moves focus there so the user confirms through the
+ * existing gate. The canonical completion bridge clears matching pending
+ * intent only after success, reloads Task detail, and immediately refetches
+ * the Work hierarchy from Core. Failure keeps the pending context and entered
+ * data intact and never moves or reparents a card locally.
+ * ------------------------------------------------------------------------ */
+function workPendingHandoffReset(){
+  S.pendingActionHandoff = null;
+  /* The ordinary manual Main review form outside a pending path is flexible
+   * again; the fixed-intent lock and its hint belong only to the handoff. */
+  var reviewSel = document.querySelector('[data-fl-op-input="review-intent"]');
+  if(reviewSel) reviewSel.disabled = false;
+  var lockHint = document.querySelector('[data-fl-role="main-review-lock-hint"]');
+  if(lockHint) lockHint.remove();
+}
+function workPendingOperation(pending){
+  if(!pending) return null;
+  if(pending.operation) return pending.operation;
+  if(pending.entry && pending.entry.operation) return pending.entry.operation;
+  return null;
+}
+function workPendingRequires(pending){
+  var op = workPendingOperation(pending);
+  var path = (pending && pending.entry && pending.entry.path) || [];
+  for(var i = 0; i < path.length; i++){
+    if(path[i].operation === op && Array.isArray(path[i].requires)) return path[i].requires;
+  }
+  return (pending && pending.entry && pending.entry.requires) || [];
+}
+/* The one existing durable submit control for an operation; never matched by
+ * label text and never duplicated. */
+function workPendingSubmit(op){
+  return document.querySelector('[data-fl-op-submit="' + op + '"]');
+}
+function workPendingSection(op){
+  var submit = workPendingSubmit(op);
+  if(submit && submit.closest) return submit.closest(".card");
+  return null;
+}
+function workPendingFocusControl(el){
+  if(!el) return;
+  if(el.scrollIntoView){
+    try { el.scrollIntoView({ block: "center", behavior: "smooth" }); } catch(_) { el.scrollIntoView(true); }
+  }
+  if(typeof el.focus === "function"){
+    try { el.focus({ preventScroll: true }); } catch(_) { el.focus(); }
+  }
+  workAnnounce(t("workActionHandoffFocused"));
+}
+function workPendingContinue(pending){
+  var op = workPendingOperation(pending);
+  if(!op){ workPendingHandoffReset(); return; }
+  var submit = workPendingSubmit(op);
+  if(!submit){ workPendingHandoffReset(); flashError(t("workActionHandoffTargetMissing")); return; }
+  var requires = workPendingRequires(pending);
+  var section = workPendingSection(op);
+  for(var i = 0; i < requires.length; i++){
+    var field = requires[i];
+    if(field === "confirm") continue;
+    var input = section ? section.querySelector('[data-fl-op-input="' + field + '"]') : null;
+    if(input && !input.value.trim()){
+      workPendingFocusControl(input);
+      return;
+    }
+  }
+  workPendingFocusControl(submit);
+}
+function workPendingFailure(taskId, msg){
+  var p = S.pendingActionHandoff;
+  if(!p || p.taskId !== taskId) return;
+  p.failure = msg || t("taskActionFailed");
+  var banner = document.getElementById("fl-task-action-pending");
+  if(banner){
+    var note = banner.querySelector('[data-fl-role="task-action-pending-failure"]');
+    if(!note){
+      note = h("div", "task-action-pending-failure", "");
+      note.setAttribute("data-fl-role", "task-action-pending-failure");
+      banner.insertBefore(note, banner.querySelector(".task-action-pending-actions"));
+    }
+    note.hidden = false;
+    note.textContent = t("workActionHandoffFailureTitle") + " " + t("workActionHandoffFailureBody", {
+      message: boundedDiagnostic(p.failure)
+    });
+  }
+}
+/* Integration stays two-step: after preflight succeeds, the pending handoff
+ * advances to the receipt-bound apply step and the banner re-renders. */
+function workPendingAdvanceToApply(taskId){
+  var p = S.pendingActionHandoff;
+  if(!p || p.taskId !== taskId) return;
+  if(workPendingOperation(p) !== "integration_preflight") return;
+  p.operation = "integration_apply";
+  p.failure = null;
+  workReplacePendingBanner();
+}
+function workReplacePendingBanner(){
+  var pending = S.pendingActionHandoff;
+  var old = document.getElementById("fl-task-action-pending");
+  if(!pending || !old || !old.parentNode) return;
+  var next = renderPendingActionHandoff(pending);
+  old.parentNode.replaceChild(next, old);
+}
+/* Close stale pending intent safely. The pending entry is retained only when
+ * the current Core hierarchy card and its destination actionPolicy still name
+ * the same actionable operation and fixed intent. Missing or mismatched Core
+ * evidence clears it; Task status or column is never used to decide staleness.
+ * When the hierarchy is not loaded yet the pending is kept (a transient
+ * unloaded state must not discard user intent). */
+function workClearStaleHandoff(task){
+  var p = S.pendingActionHandoff;
+  if(!p) return;
+  if(p.taskId !== task.id){ S.pendingActionHandoff = null; return; }
+  var op = workPendingOperation(p);
+  if(!op || !S.workHierarchy || typeof S.workHierarchy !== "object") return;
+  var found = null;
+  workCollectCards(S.workHierarchy, function(card){
+    if(!found && card && card.taskId === p.taskId) found = card;
+  });
+  var policy = found && found.actionPolicy;
+  var entry = (policy && policy.schemaVersion === 1
+    && policy.destinations && policy.destinations[p.column]) || null;
+  var actionable = !!(entry && (entry.disposition === "requestable" || entry.disposition === "needs-input"));
+  var opMatches = !!(entry && (entry.operation === op || workPathHasOperation(entry, op)));
+  var intentMatches = !p.entry || !p.entry.intent || !!(entry && entry.intent === p.entry.intent);
+  if(!found || !entry || !actionable || !opMatches || !intentMatches){
+    S.pendingActionHandoff = null;
+  }
+}
+/* True when the destination's ordered path includes the operation. This keeps
+ * the Integration apply step valid after preflight advances the handoff. */
+function workPathHasOperation(entry, op){
+  var path = entry && entry.path;
+  if(!Array.isArray(path)) return false;
+  for(var i = 0; i < path.length; i++){
+    if(path[i] && path[i].operation === op) return true;
+  }
+  return false;
+}
+/* Immediate canonical hierarchy refetch after a durable Task operation. The
+ * board keeps showing retained evidence until Core returns the new truth. */
+function workRefreshHierarchyAfterOperation(){
+  fetchSlice("workHierarchy").then(function(){
+    if(S.token && S.tab === "work") render();
+  });
+}
+/* Canonical completion bridge: clear the matching pending intent only after
+ * success, reload the Task detail (or the caller's chosen detail view), and
+ * immediately refetch the Work hierarchy. Never moves a card locally. */
+function taskOperationSuccess(taskId, res, refreshView){
+  var p = S.pendingActionHandoff;
+  if(p && p.taskId === taskId) S.pendingActionHandoff = null;
+  if(refreshView) refreshView();
+  else if(taskId) showTask(taskId);
+  workRefreshHierarchyAfterOperation();
+}
+/* One confirmed durable Task operation request through the existing endpoint.
+ * Success routes to the canonical bridge; failure is retained in the pending
+ * context with entered data intact and no automatic retry. */
+function taskDurableAction(path, body, btn, taskId, onOk){
+  taskAction(path, body, btn, function(res){
+    if(onOk) onOk(res);
+    else taskOperationSuccess(taskId, res);
+  }, function(msg){
+    workPendingFailure(taskId, msg);
+  });
+}
+
 /* Four-section Task Overview: Main asked, Worker returned, Independent result, Final output. */
 function renderFourSectionOverview(task){
   var j = task.journey || {};
@@ -11631,6 +13888,7 @@ function renderAttentionResolutionControls(task){
   var card = h("div", "card form-card attention-resolution-controls");
   if(resolved){
     card.setAttribute("data-fl-role", "attention-resolved-controls");
+    card.setAttribute("data-fl-op-target", "task_reopen");
     card.appendChild(h("div", "card-title mb-4", t("attentionResolvedTitle")));
     card.appendChild(h("div", "summary-line dim mb-8", t("attentionResolvedHint")));
     card.appendChild(h("div", "summary-line", t("attentionResolvedReasonLabel", {
@@ -11649,28 +13907,35 @@ function renderAttentionResolutionControls(task){
     var reopenLab = h("label", "", t("attentionReopenNote"));
     var reopenIn = h("input", "");
     reopenIn.type = "text";
+    reopenIn.setAttribute("data-fl-op-input", "note");
     reopenIn.placeholder = t("attentionReopenNotePh");
     reopenLab.appendChild(reopenIn);
     card.appendChild(reopenLab);
     var reopenBtn = h("button", "btn sm", t("attentionReopenBtn"));
     reopenBtn.type = "button";
+    reopenBtn.setAttribute("data-fl-op-submit", "task_reopen");
     reopenBtn.addEventListener("click", function(){
       if(!window.confirm(t("attentionReopenConfirm"))) return;
       var reopenNote = reopenIn.value.trim();
       var body = { confirm: true };
       if(reopenNote) body.note = reopenNote;
-      taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/reopen", body, reopenBtn, function(){
-        showTask(task.id);
-      });
+      taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/reopen", body, reopenBtn, task.id);
     });
     card.appendChild(hd("div", "actions", [reopenBtn]));
     return card;
   }
   card.setAttribute("data-fl-role", "attention-resolve-controls");
+  card.setAttribute("data-fl-op-target", "task_resolve");
   card.appendChild(h("div", "card-title mb-4", t("attentionResolveTitle")));
   card.appendChild(h("div", "summary-line dim mb-8", t("attentionResolveHint")));
   var reasonLab = h("label", "", t("attentionResolveReasonLabel"));
   var reasonSel = h("select", "");
+  /* No handled-failure reason is preselected: the pending handoff must not
+   * silently accept a default. An explicit choice is required to resolve. */
+  var placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = t("attentionResolveReasonPh");
+  reasonSel.appendChild(placeholder);
   [
     ["environment-recovered", t("attentionResolvedReasonEnvironment")],
     ["superseded", t("attentionResolvedReasonSuperseded")],
@@ -11682,38 +13947,42 @@ function renderAttentionResolutionControls(task){
     o.textContent = pair[1];
     reasonSel.appendChild(o);
   });
+  reasonSel.setAttribute("data-fl-op-input", "reason");
   reasonLab.appendChild(reasonSel);
   card.appendChild(reasonLab);
   var noteLab = h("label", "", t("attentionResolveNote"));
   var noteIn = h("input", "");
   noteIn.type = "text";
+  noteIn.setAttribute("data-fl-op-input", "note");
   noteIn.placeholder = t("attentionResolveNotePh");
   noteLab.appendChild(noteIn);
   card.appendChild(noteLab);
   var evidenceLab = h("label", "", t("attentionResolveEvidence"));
   var evidenceIn = h("input", "");
   evidenceIn.type = "text";
+  evidenceIn.setAttribute("data-fl-op-input", "evidence");
   evidenceIn.placeholder = t("attentionResolveEvidencePh");
   evidenceLab.appendChild(evidenceIn);
   card.appendChild(evidenceLab);
   var resolveBtn = h("button", "btn sm", t("attentionResolveBtn"));
   resolveBtn.type = "button";
+  resolveBtn.setAttribute("data-fl-op-submit", "task_resolve");
   resolveBtn.addEventListener("click", function(){
+    if(!reasonSel.value.trim()){ flashError(t("attentionResolveReasonRequired")); return; }
     if(!window.confirm(t("attentionResolveConfirm"))) return;
     var resolveNote = noteIn.value.trim();
     var body = { reason: reasonSel.value, confirm: true };
     if(resolveNote) body.note = resolveNote;
     var evidence = evidenceIn.value.trim();
     if(evidence) body.evidenceTaskId = evidence;
-    taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/resolve", body, resolveBtn, function(){
-      showTask(task.id);
-    });
+    taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/resolve", body, resolveBtn, task.id);
   });
   card.appendChild(hd("div", "actions", [resolveBtn]));
   return card;
 }
 
-function showTask(id){
+function showTask(id, crumb){
+  S.taskCrumb = resolveTaskBreadcrumb(S.taskCrumb, id, crumb);
   loadingDetail(t("taskDetailLoading"));
   fetchJSON("/api/ops/tasks/" + encodeURIComponent(id)).then(function(task){
     var f = fr();
@@ -11722,11 +13991,22 @@ function showTask(id){
     var back = closeBtn();
     back.textContent = t("taskReportBack");
     top.appendChild(back);
-    top.appendChild(h("div", "dim fs12", t("taskReportBreadcrumb")));
+    top.appendChild(renderTaskBreadcrumb(S.taskCrumb));
     shell.appendChild(top);
 
     // Actions tab body is filled below, then passed into the tabbed workbench.
     var actionsBody = h("div", "task-tab-body task-manual-actions");
+    /* FL-109C2A/FL-109C2B: a bounded pending-action handoff lands at the top
+     * of the Actions tab. It explains the chosen destination, exact operation,
+     * fixed intent, required input, and ordered path in plain language, states
+     * plainly that nothing has changed yet, and never submits anything. Stale
+     * pending intent is closed first; a matching one drives the guided step. */
+    workClearStaleHandoff(task);
+    var pending = S.pendingActionHandoff;
+    if(pending && pending.taskId === task.id){
+      taskDetailActiveTab = "actions";
+      actionsBody.appendChild(renderPendingActionHandoff(pending));
+    }
     actionsBody.appendChild(h("div", "task-report-card-hint", t("taskTabActionsHint")));
     actionsBody.appendChild(h("div", "summary-line dim mb-8", t("taskManualActionsHint")));
     var manualActionsBody = actionsBody;
@@ -11746,6 +14026,7 @@ function showTask(id){
     var fbLab = h("label", "", t("taskFeedback"));
     var fbIn = h("input", "");
     fbIn.type = "text";
+    fbIn.setAttribute("data-fl-op-input", "feedback");
     fbIn.placeholder = t("taskFeedbackPh");
     fbLab.appendChild(fbIn);
     sup.appendChild(fbLab);
@@ -11761,21 +14042,21 @@ function showTask(id){
     var supAct = h("div", "actions");
     var resumeBtn = h("button", "btn sm primary", t("taskResume"));
     resumeBtn.type = "button";
+    resumeBtn.setAttribute("data-fl-op-submit", "resume");
     resumeBtn.addEventListener("click", function(){
       var body = {};
       if(fbIn.value.trim()) body.feedback = fbIn.value.trim();
-      taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/resume", body, resumeBtn, function(){
-        showTask(task.id);
-      });
+      taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/resume", body, resumeBtn, task.id);
     });
     supAct.appendChild(resumeBtn);
     var reviseBtn = h("button", "btn sm", t("taskRevise"));
     reviseBtn.type = "button";
+    reviseBtn.setAttribute("data-fl-op-submit", "revise");
     reviseBtn.addEventListener("click", function(){
       if(!fbIn.value.trim()){ flashError(t("taskFeedbackRequired")); return; }
-      taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/revise", {
+      taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/revise", {
         feedback: fbIn.value.trim()
-      }, reviseBtn, function(){ showTask(task.id); });
+      }, reviseBtn, task.id);
     });
     supAct.appendChild(reviseBtn);
     // Correction eligibility comes from the canonical core and is never duplicated in UI.
@@ -11858,6 +14139,7 @@ function showTask(id){
     var correctBtn = h("button", "btn sm", t("taskCorrect"));
     correctBtn.type = "button";
     correctBtn.title = t("taskCorrectHint");
+    correctBtn.setAttribute("data-fl-op-submit", "correct");
     if(!corrEligible) correctBtn.disabled = true;
     correctBtn.addEventListener("click", function(){
       if(!fbIn.value.trim()){ flashError(t("taskFeedbackRequired")); return; }
@@ -11892,9 +14174,7 @@ function showTask(id){
       });
       if(gaps.length !== gapContainers.length || gaps.length < 1) return;
       body.remainingGaps = gaps;
-      taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/correct", body, correctBtn, function(){
-        showTask(task.id);
-      });
+      taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/correct", body, correctBtn, task.id);
     });
     supAct.appendChild(correctBtn);
     sup.appendChild(supAct);
@@ -11929,13 +14209,14 @@ function showTask(id){
       }
     }
     if(!reverifyEligible) reverifyBtn.disabled = true;
+    reverifyBtn.setAttribute("data-fl-op-submit", "reverify");
     reverifyBtn.addEventListener("click", function(){
       if(!reverifyReasonIn.value.trim()){ flashError(t("taskReverifyReasonRequired")); return; }
       if(!window.confirm(t("taskReverifyConfirm") + "\n\n" + t("taskReverifyZeroWorker") + "\n" + t("taskReverifyNotFree"))) return;
-      taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/reverify", {
+      taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/reverify", {
         reason: reverifyReasonIn.value.trim(),
         confirm: true
-      }, reverifyBtn, function(){ showTask(task.id); });
+      }, reverifyBtn, task.id);
     });
     sup.appendChild(hd("div", "actions", [reverifyBtn]));
 
@@ -11946,27 +14227,45 @@ function showTask(id){
 
     var revLab = h("label", "", t("taskReviewDecision"));
     var revSel = h("select", "");
+    revSel.setAttribute("data-fl-op-input", "review-intent");
     [["accept", t("taskAccept")], ["revise", t("taskReviewRevise")], ["reject", t("taskReject")]].forEach(function(pair){
       var o = document.createElement("option"); o.value = pair[0]; o.textContent = pair[1]; revSel.appendChild(o);
     });
     revLab.appendChild(revSel);
     sup.appendChild(revLab);
+    /* FL-109C2B: for a pending Main review handoff, the Core-fixed intent is
+     * preselected and locked for this path so the guided step cannot silently
+     * change it before submission. The ordinary manual form stays flexible. */
+    var pendingReview = S.pendingActionHandoff;
+    var fixedIntent = pendingReview && pendingReview.entry ? pendingReview.entry.intent : null;
+    if(pendingReview && pendingReview.taskId === task.id
+       && workPendingOperation(pendingReview) === "main_review"
+       && (fixedIntent === "accept" || fixedIntent === "revise" || fixedIntent === "reject")){
+      revSel.value = fixedIntent;
+      revSel.disabled = true;
+      var lockHint = h("div", "summary-line dim task-action-pending-locked",
+        t("workActionHandoffLockedIntent", { intent: workIntentLabel(fixedIntent) }));
+      lockHint.setAttribute("data-fl-role", "main-review-lock-hint");
+      sup.appendChild(lockHint);
+    }
     var reasonLab = h("label", "", t("taskReviewReason"));
     var reasonIn = h("input", "");
     reasonIn.type = "text";
+    reasonIn.setAttribute("data-fl-op-input", "reason");
     reasonIn.placeholder = t("taskReviewReasonPh");
     reasonLab.appendChild(reasonIn);
     sup.appendChild(reasonLab);
     var reviewBtn = h("button", "btn sm", t("taskMainReview"));
     reviewBtn.type = "button";
+    reviewBtn.setAttribute("data-fl-op-submit", "main_review");
     reviewBtn.addEventListener("click", function(){
       if(!reasonIn.value.trim()){ flashError(t("taskReviewReasonRequired")); return; }
       if(!window.confirm(t("taskMainReviewConfirm"))) return;
-      taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/main-review", {
+      taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/main-review", {
         decision: revSel.value,
         reason: reasonIn.value.trim(),
         confirm: true
-      }, reviewBtn, function(){ showTask(task.id); });
+      }, reviewBtn, task.id);
     });
     sup.appendChild(hd("div", "actions", [reviewBtn]));
     manualActionsBody.appendChild(sup);
@@ -11989,8 +14288,9 @@ function showTask(id){
     var integAct = h("div", "actions");
     var preflightBtn = h("button", "btn sm", t("taskPreflight"));
     preflightBtn.type = "button";
+    preflightBtn.setAttribute("data-fl-op-submit", "integration_preflight");
     preflightBtn.addEventListener("click", function(){
-      taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/integration/preflight", {}, preflightBtn, function(res){
+      taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/integration/preflight", {}, preflightBtn, task.id, function(res){
         toast(t("taskPreflightOk"));
         if(res && res.result){
           var previous = integ.querySelector('[data-fl-role="preflight-result"]');
@@ -11998,6 +14298,10 @@ function showTask(id){
           integ.appendChild(renderPreflightResult(res.result));
           if(res.result.id && (!res.result.rejectionReasons || res.result.rejectionReasons.length === 0)){
             receiptIn.value = String(res.result.id);
+            /* Integration stays two-step: an accepted receipt advances the
+             * pending handoff to the apply step; apply still needs explicit
+             * confirm. A rejected preflight stays on the preflight step. */
+            workPendingAdvanceToApply(task.id);
           }
         }
       });
@@ -12011,18 +14315,22 @@ function showTask(id){
     var receiptLab = h("label", "", t("taskReceiptId"));
     var receiptIn = h("input", "");
     receiptIn.type = "text";
+    receiptIn.setAttribute("data-fl-op-input", "receiptId");
     receiptIn.placeholder = "receipt-...";
     receiptLab.appendChild(receiptIn);
     integ.appendChild(receiptLab);
     var applyBtn = h("button", "btn sm danger", t("taskApply"));
     applyBtn.type = "button";
+    applyBtn.setAttribute("data-fl-op-submit", "integration_apply");
     applyBtn.addEventListener("click", function(){
       if(!receiptIn.value.trim()){ flashError(t("taskReceiptRequired")); return; }
       if(!window.confirm(t("taskApplyConfirm"))) return;
-      taskAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/integration/apply", {
+      taskDurableAction("/api/ops/tasks/" + encodeURIComponent(task.id) + "/integration/apply", {
         receiptId: receiptIn.value.trim(),
         confirm: true
-      }, applyBtn, function(){ showIntegration(task.id); });
+      }, applyBtn, task.id, function(){
+        taskOperationSuccess(task.id, null, function(){ showIntegration(task.id); });
+      });
     });
     integ.appendChild(hd("div", "actions", [applyBtn]));
     manualActionsBody.appendChild(integ);
@@ -12666,6 +14974,7 @@ function render(){
   // while updStatus already indicates the stale dot in the status bar.
   switch(tab){
     case "overview": rOverview(); break;
+    case "work": rWork(); break;
     case "plans": rPlans(); break;
     case "goals": rGoals(); break;
     case "tasks": rTasks(); break;
@@ -12728,6 +15037,10 @@ function init(){
     });
   });
   window.onForklightLangChange = function(){
+    /* The open chooser carries stale-language copy; close it cleanly first and
+     * clear any pending-action handoff so a re-render cannot mislabel it. */
+    workActionChooserReset();
+    workPendingHandoffReset();
     applyChromeI18n();
     setPageChrome();
     if(S.token) render();

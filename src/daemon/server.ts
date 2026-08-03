@@ -1075,6 +1075,16 @@ export class ForkLightDaemon {
           ? params.limit : undefined;
         return this.coordinator.mainDirectRecent(limit);
       }
+      case "outcome_intake_create":
+        return this.coordinator.createOutcomeIntake(params);
+      case "outcome_intake_list":
+        return this.coordinator.listOutcomeIntakes(params.status, params.limit);
+      case "outcome_intake_get":
+        return this.coordinator.outcomeIntake(requiredString(params.intakeId, "intakeId"));
+      case "outcome_intake_propose":
+        return this.coordinator.proposeOutcomeIntake(params);
+      case "outcome_intake_confirm":
+        return this.coordinator.confirmOutcomeIntake(params);
       default:
         throw new Error(`Unknown daemon method: ${String(request.method)}`);
     }

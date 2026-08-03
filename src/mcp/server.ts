@@ -2440,6 +2440,180 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     },
   );
 
+  // --- Outcome intake (FL-109D1) ---
+  // Durable record of what the user wants to achieve, plus one explicit Main
+  // Task/Plan/Goal proposal with a privacy-safe confirmation preview. No
+  // Task, Plan, Goal, Worker, or Provider action happens here.
+
+  const outcomeIntakeShapePreferenceSchema = z.enum(["auto", "task", "plan", "goal"]);
+  const outcomeIntakeProposedShapeSchema = z.enum(["task", "plan", "goal"]);
+
+  server.registerTool(
+    "forklight_outcome_intake_create",
+    {
+      title: "Record a desired outcome without creating work",
+      description:
+        "Durably record what the user wants to achieve. The intake stays pending: no Task, Plan, Goal, Worker, or Provider action is created and no shape is decided. The user's optional shape preference (auto/task/plan/goal) is preserved for Main to review.",
+      inputSchema: z.object({
+        outcome: z.string().trim().min(1).max(2000).describe(
+          "What the user wants to achieve, in their own words",
+        ),
+        project: z.string().trim().min(1).max(500).optional().describe(
+          "Optional project or source context",
+        ),
+        context: z.string().trim().min(1).max(2000).optional().describe(
+          "Optional bounded background context",
+        ),
+        requestedShape: outcomeIntakeShapePreferenceSchema.default("auto").describe(
+          "Optional user shape preference; auto means the user has not decided",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input) => {
+      await ensureDaemon(home);
+      const intake = await daemonRequest<Record<string, unknown>>(
+        "outcome_intake_create",
+        input,
+        home,
+      );
+      return textAndData(
+        intake,
+        `Outcome intake ${String(intake.id)} recorded as ${String(intake.status)}. Nothing was created.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_outcome_intake_list",
+    {
+      title: "List pending and proposed outcome intakes",
+      description:
+        "Read-only list of outcome intakes (pending and proposed) with their current revision and optional Main proposal facts. Never creates work and never echoes private artifact paths.",
+      inputSchema: z.object({
+        status: z.enum(["pending", "proposed", "created"]).optional().describe(
+          "Optional filter: pending (no Main proposal yet), proposed (Main has proposed a shape), or created (confirmed work exists)",
+        ),
+        limit: z.number().int().min(1).max(100).default(20).describe(
+          "Maximum number of intakes to return (1-100)",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ status, limit }) => {
+      await ensureDaemon(home);
+      const params: Record<string, unknown> = { limit };
+      if (status !== undefined) params.status = status;
+      const intakes = await daemonRequest<Record<string, unknown>[]>(
+        "outcome_intake_list",
+        params,
+        home,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(intakes, null, 2) }],
+        structuredContent: { intakes },
+      };
+    },
+  );
+
+  server.registerTool(
+    "forklight_outcome_intake_get",
+    {
+      title: "Read one outcome intake",
+      description:
+        "Read one outcome intake by id with its current revision and optional Main proposal facts. Read-only; nothing is created.",
+      inputSchema: z.object({
+        intakeId: z.string().min(1).max(128),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ intakeId }) => {
+      await ensureDaemon(home);
+      const intake = await daemonRequest<Record<string, unknown>>(
+        "outcome_intake_get",
+        { intakeId },
+        home,
+      );
+      return textAndData(intake);
+    },
+  );
+
+  server.registerTool(
+    "forklight_outcome_intake_propose",
+    {
+      title: "Propose one Task, Plan, or Goal for an outcome intake",
+      description:
+        "Attach or replace one explicit Main proposal: choose task, plan, or goal, give a short plain-language reason, and bind one absolute artifact file. ForkLight validates the artifact through the existing Task/Work Plan/Goal loader and quality gate, then returns a privacy-safe confirmation preview stating what would be created and that nothing has been created yet. Requires the current intake revision (re-read the intake if the revision is stale). Never submits the artifact and never creates work.",
+      inputSchema: z.object({
+        intakeId: z.string().min(1).max(128),
+        expectedRevision: z.number().int().positive().describe(
+          "The intake revision returned by create/get/list; a stale value fails closed",
+        ),
+        shape: outcomeIntakeProposedShapeSchema,
+        reason: z.string().trim().min(1).max(1000).describe(
+          "Short plain-language reason this shape fits the outcome",
+        ),
+        artifactPath: z.string().trim().min(1).max(4096).describe(
+          "Absolute path to the validated Task, Work Plan, or Goal contract file",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ intakeId, expectedRevision, shape, reason, artifactPath }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "outcome_intake_propose",
+        { intakeId, expectedRevision, shape, reason, artifactPath },
+        home,
+      );
+      const preview = result.preview as Record<string, unknown> | undefined;
+      const taskCount = preview === undefined ? "?" : String(preview.taskCount);
+      return textAndData(
+        result,
+        `Proposed ${shape} for intake ${intakeId}: ${taskCount} Task(s) in the confirmation preview. ` +
+          "Not confirmed; nothing has been created.",
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_outcome_intake_confirm",
+    {
+      title: "Confirm an outcome intake and create its proposed work",
+      description:
+        "Explicit Main confirmation that creates exactly the proposed Task, Plan, or Goal. ForkLight re-reads and revalidates the complete proposed artifact graph through the existing loaders and recomputes its full digest; if any root or referenced contract changed, confirmation fails before anything is created. The validated work graph and one durable privacy-safe receipt commit in a single transaction, then only committed Task ids are queued. Requires the current intake revision and literal confirm: true. Identical retries return the same receipt and canonical ids without creating or queueing duplicate work. Never auto-confirms, never calls a Provider or Worker, and never exposes artifact paths or raw contracts.",
+      inputSchema: z.object({
+        intakeId: z.string().min(1).max(128),
+        expectedRevision: z.number().int().positive().describe(
+          "The intake revision returned by create/get/list; a stale value fails closed",
+        ),
+        confirm: z.literal(true).describe(
+          "Explicit Main confirmation that the proposed work should be created. Must be true.",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ intakeId, expectedRevision }) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<Record<string, unknown>>(
+        "outcome_intake_confirm",
+        { intakeId, expectedRevision, confirm: true },
+        home,
+      );
+      const receipt = result.receipt as Record<string, unknown> | undefined;
+      const shape = String(receipt?.shape ?? "unknown");
+      const taskCount = Array.isArray(receipt?.taskIds)
+        ? String((receipt?.taskIds as unknown[]).length)
+        : "?";
+      return textAndData(
+        result,
+        `Confirmed ${shape} for intake ${intakeId}: ${taskCount} Task(s) created. Receipt ${String(
+          receipt?.receiptId ?? "unknown",
+        )} links every canonical id. Nothing is queued twice; identical retries return this same receipt.`,
+      );
+    },
+  );
+
   return server;
 }
 
