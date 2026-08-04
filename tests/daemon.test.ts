@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -20,9 +21,15 @@ import type {
 } from "../src/core/types.js";
 import type { PlanBoard, PlanBoardSummary } from "../src/core/board.js";
 import {
+  ACTIVATION_OPERATION_ID_ENV,
+  ACTIVATION_RECEIPT_ID_ENV,
+  ACTIVATION_TASK_ID_ENV,
+} from "../src/activation/runner.js";
+import {
   DAEMON_STARTUP_CHILD_EXITED_MESSAGE,
   DAEMON_STARTUP_TIMEOUT_MESSAGE,
   DEFAULT_DAEMON_STARTUP_TIMEOUT_MS,
+  daemonChildEnvironment,
   daemonExchange,
   daemonLaunchArguments,
   daemonRequest,
@@ -534,20 +541,25 @@ function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-test("source-dev daemon launch uses tsx while dist launch uses compiled JavaScript", () => {
-  assert.deepEqual(
-    daemonLaunchArguments("file:///repo/src/daemon/client.ts"),
-    {
-      executable: process.execPath,
-      args: [
-        "--disable-warning=ExperimentalWarning",
-        "--import",
-        "tsx",
-        "/repo/src/daemon/main.ts",
-      ],
-      mode: "source-dev",
-    },
+test("source-dev daemon launch uses cwd-independent tsx while dist launch uses compiled JavaScript", () => {
+  const clientModulePath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "src",
+    "daemon",
+    "client.ts",
   );
+  const source = daemonLaunchArguments(pathToFileURL(clientModulePath).href);
+  assert.equal(source.mode, "source-dev");
+  assert.equal(source.executable, process.execPath);
+  assert.equal(source.args[0], "--disable-warning=ExperimentalWarning");
+  assert.equal(source.args[1], "--import");
+  // Bare "tsx" is cwd-dependent; isolated Integration source trees must use
+  // an absolute file URL resolved from the repository-installed package.
+  assert.match(source.args[2] ?? "", /^file:\/\//);
+  assert.match(source.args[2] ?? "", /tsx/);
+  assert.equal(source.args[3], path.join(path.dirname(clientModulePath), "main.ts"));
+
   assert.deepEqual(
     daemonLaunchArguments("file:///repo/dist/src/daemon/client.js"),
     {
@@ -5034,6 +5046,7 @@ test("unknown operation rejected and valid operation succeeds through daemon pro
     const result = response.result as Record<string, unknown>;
     assert.equal(result.stopping, true);
     assert.equal(result.handoffAuthorized, true);
+    assert.equal(result.intent, "restart");
     assert.equal(result.targetPid, process.pid);
 
     // Replay must fail.
@@ -5110,6 +5123,105 @@ test("ordinary stop still waits for the exact PID and does not accept endpoint-o
   } finally {
     await fixture.cleanup();
   }
+});
+
+test("valid handoff alone binds restart intent; invalid and replayed handoffs do not", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-intent-"));
+  const seedStore = new StateStore(home);
+  const seedSettings = new SettingsService(seedStore);
+  const seedCoord = new DaemonCoordinator(seedStore, seedSettings, 0);
+  const ids = await seededIntegrationOperation(seedStore, seedCoord, "intent");
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const unknown = await daemonExchange(
+      "activation_handoff_shutdown",
+      { operationId: "missing", taskId: ids.taskId, receiptId: ids.receiptId },
+      home,
+    );
+    assert.equal(unknown.ok, false);
+    assert.match(unknown.error ?? "", /Unknown Integration operation/);
+
+    const mismatch = await daemonExchange(
+      "activation_handoff_shutdown",
+      { operationId: ids.operationId, taskId: "wrong-task", receiptId: ids.receiptId },
+      home,
+    );
+    assert.equal(mismatch.ok, false);
+    assert.match(mismatch.error ?? "", /does not match/);
+
+    // After failures, ordinary stop intent must still be the default authority.
+    const ordinary = await daemonRequest<Record<string, unknown>>("shutdown", {}, home);
+    assert.equal(ordinary.stopping, true);
+    assert.equal(ordinary.intent, "stop");
+  } finally {
+    await daemon.close();
+    await seedCoord.shutdown();
+    seedStore.close();
+  }
+
+  const home2 = await mkdtemp(path.join(tmpdir(), "forklight-handoff-intent-ok-"));
+  const seedStore2 = new StateStore(home2);
+  const seedSettings2 = new SettingsService(seedStore2);
+  const seedCoord2 = new DaemonCoordinator(seedStore2, seedSettings2, 0);
+  const ids2 = await seededIntegrationOperation(seedStore2, seedCoord2, "intent-ok");
+  const daemon2 = new ForkLightDaemon(home2, 0);
+  await daemon2.start();
+  try {
+    const authorized = await daemonExchange(
+      "activation_handoff_shutdown",
+      { operationId: ids2.operationId, taskId: ids2.taskId, receiptId: ids2.receiptId },
+      home2,
+    );
+    assert.equal(authorized.ok, true);
+    const result = authorized.result as Record<string, unknown>;
+    assert.equal(result.stopping, true);
+    assert.equal(result.handoffAuthorized, true);
+    assert.equal(result.intent, "restart");
+    assert.equal(result.targetPid, process.pid);
+
+    const replay = await daemonExchange(
+      "activation_handoff_shutdown",
+      { operationId: ids2.operationId, taskId: ids2.taskId, receiptId: ids2.receiptId },
+      home2,
+    );
+    assert.equal(replay.ok, false);
+    assert.match(replay.error ?? "", /already authorized/);
+  } finally {
+    await daemon2.close();
+    await seedCoord2.shutdown();
+    seedStore2.close();
+  }
+});
+
+test("daemonChildEnvironment strips only the three consumed activation identity fields", () => {
+  const base: NodeJS.ProcessEnv = {
+    PATH: "/usr/bin:/bin",
+    HTTPS_PROXY: "http://proxy.example:8080",
+    HTTP_PROXY: "http://proxy.example:8080",
+    NO_PROXY: "localhost",
+    FORKLIGHT_HOME: "/old/home",
+    SOME_AUTH_TOKEN: "keep-me",
+    [ACTIVATION_OPERATION_ID_ENV]: "op-stale",
+    [ACTIVATION_TASK_ID_ENV]: "task-stale",
+    [ACTIVATION_RECEIPT_ID_ENV]: "receipt-stale",
+    FORKLIGHT_ACTIVATION_LOG: "keep-log-path",
+  };
+  const cleaned = daemonChildEnvironment("/exact/home", base);
+  assert.equal(cleaned.FORKLIGHT_HOME, "/exact/home");
+  assert.equal(cleaned.PATH, "/usr/bin:/bin");
+  assert.equal(cleaned.HTTPS_PROXY, "http://proxy.example:8080");
+  assert.equal(cleaned.HTTP_PROXY, "http://proxy.example:8080");
+  assert.equal(cleaned.NO_PROXY, "localhost");
+  assert.equal(cleaned.SOME_AUTH_TOKEN, "keep-me");
+  assert.equal(cleaned.FORKLIGHT_ACTIVATION_LOG, "keep-log-path");
+  assert.equal(cleaned[ACTIVATION_OPERATION_ID_ENV], undefined);
+  assert.equal(cleaned[ACTIVATION_TASK_ID_ENV], undefined);
+  assert.equal(cleaned[ACTIVATION_RECEIPT_ID_ENV], undefined);
+  // Input must not be mutated.
+  assert.equal(base[ACTIVATION_OPERATION_ID_ENV], "op-stale");
+  assert.equal(base.FORKLIGHT_HOME, "/old/home");
 });
 
 // --- Per-profile concurrency ---

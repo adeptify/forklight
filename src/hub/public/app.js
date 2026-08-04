@@ -455,7 +455,7 @@ var S = {
   healthError: null, tasksError: null, boardsError: null, competitionsError: null,
   goalsError: null, statsError: null, settingsError: null, sampleError: null,
   hub: null,
-  lastOk: 0, connected: false, hadOk: false, tab: "overview",
+  lastOk: 0, connected: false, hadOk: false, tab: "work",
   detail: null, detailReturnFocus: null, timer: null, token: null,
   taskCrumb: null,
   /* FL-109C2A: bounded presentation-only handoff chosen by drag or the
@@ -1055,7 +1055,7 @@ function refresh(){
   var healthP = fetchSlice("health");
 
   // --- Page-specific slices ---
-  var deps = requestPlan(S.tab || "overview");
+  var deps = requestPlan(S.tab || "work");
   var sliceKeys = Object.keys(deps);
   var slicePromises = [];
   for(var i = 0; i < sliceKeys.length; i++){
@@ -1111,7 +1111,7 @@ function updStatus(){
   // Health can be current while the active page is showing retained evidence
   // after one of its own endpoints failed.  Keep the shell connection truth,
   // but make that page-level staleness visible instead of claiming "live".
-  var pageStale = S.connected && pageEvidenceState(S.tab || "overview") === "stale";
+  var pageStale = S.connected && pageEvidenceState(S.tab || "work") === "stale";
   var st = (S.connected && !pageStale) ? "ok" : (S.hadOk ? "stale" : "disconnected");
   var dot = h("span", "status-dot " + st);
   statusEl.appendChild(dot);
@@ -1141,7 +1141,7 @@ function updStatus(){
   }) + " - ForkLight";
 }
 function setPageChrome(){
-  var p = pageMeta(S.tab || "overview");
+  var p = pageMeta(S.tab || "work");
   if(titleEl) titleEl.textContent = p.title;
   if(subEl) subEl.textContent = p.sub;
   applyChromeI18n();
@@ -1241,7 +1241,7 @@ function rReadiness(){
     [t("readyMain"), mains.some(function(m){
       return (m.plugin && m.plugin.installed) || (m.mcp && m.mcp.installed) || (m.skill && m.skill.installed);
     }), t("navMain"), "mains"],
-    [t("readyDaemon"), daemon.running === true || daemon.pid != null, t("ovDaemon"), "overview"]
+    [t("readyDaemon"), daemon.running === true || daemon.pid != null, t("ovDaemon"), "work"]
   ];
   var list = h("div", "pill-row mb-8");
   steps.forEach(function(s){
@@ -3828,7 +3828,9 @@ function renderIntakeStory(){
     return wrap;
   }
   if(!intakes.length){
-    wrap.appendChild(h("div", "outcome-story-note dim", t("outcomeEmpty")));
+    var emptyNote = h("div", "outcome-story-note outcome-story-note-empty dim", t("outcomeEmpty"));
+    emptyNote.setAttribute("data-fl-role", "outcome-story-empty");
+    wrap.appendChild(emptyNote);
     return wrap;
   }
 
@@ -4568,6 +4570,236 @@ function workGoalDecisionCount(goal){
   });
   return count;
 }
+/* Presentation-only: partition by canonical Goal status. Never infer from
+ * Task columns, progress, copy, or dates. */
+function workGoalIsTerminalStatus(status){
+  return status === "completed" || status === "stopped" || status === "failed";
+}
+/* FL-108C1: closed Core narrative codes → Hub i18n keys. Unknown codes are
+ * intentionally absent so workNarrativeText fails closed. Never keyed by
+ * English prose, regex, or sentence fragments. */
+var WORK_NARRATIVE_I18N_KEYS = {
+  "goal-what-completed": "workNarrGoalWhatCompleted",
+  "goal-what-main-stop": "workNarrGoalWhatMainStop",
+  "goal-what-correction-cap": "workNarrGoalWhatCorrectionCap",
+  "goal-what-review-cap": "workNarrGoalWhatReviewCap",
+  "goal-what-no-new-evidence-cap": "workNarrGoalWhatNoNewEvidenceCap",
+  "goal-what-duration-exceeded": "workNarrGoalWhatDurationExceeded",
+  "goal-what-no-progress": "workNarrGoalWhatNoProgress",
+  "goal-what-milestone-failed": "workNarrGoalWhatMilestoneFailed",
+  "goal-what-started": "workNarrGoalWhatStarted",
+  "goal-what-milestone-satisfied": "workNarrGoalWhatMilestoneSatisfied",
+  "goal-what-current": "workNarrGoalWhatCurrent",
+  "goal-wait-admission-blocked": "workNarrGoalWaitAdmissionBlocked",
+  "goal-wait-all-gates-satisfied": "workNarrGoalWaitAllGatesSatisfied",
+  "goal-wait-nothing": "workNarrGoalWaitNothing",
+  "goal-wait-machine": "workNarrGoalWaitMachine",
+  "goal-wait-main-accept": "workNarrGoalWaitMainAccept",
+  "goal-wait-integration": "workNarrGoalWaitIntegration",
+  "goal-wait-task": "workNarrGoalWaitTask",
+  "goal-wait-milestone-failed": "workNarrGoalWaitMilestoneFailed",
+  "goal-wait-main-stop": "workNarrGoalWaitMainStop",
+  "goal-wait-correction-cap": "workNarrGoalWaitCorrectionCap",
+  "goal-wait-review-cap": "workNarrGoalWaitReviewCap",
+  "goal-wait-no-new-evidence-cap": "workNarrGoalWaitNoNewEvidenceCap",
+  "goal-wait-duration-exceeded": "workNarrGoalWaitDurationExceeded",
+  "goal-wait-no-progress": "workNarrGoalWaitNoProgress",
+  "goal-wait-progressing": "workNarrGoalWaitProgressing",
+  "goal-next-wait-for-worker": "workNarrGoalNextWaitForWorker",
+  "goal-next-main-accept": "workNarrGoalNextMainAccept",
+  "goal-next-main-review": "workNarrGoalNextMainReview",
+  "goal-next-integrate": "workNarrGoalNextIntegrate",
+  "goal-next-correct-or-decide": "workNarrGoalNextCorrectOrDecide",
+  "goal-next-advance": "workNarrGoalNextAdvance",
+  "goal-next-stop-or-decide": "workNarrGoalNextStopOrDecide",
+  "goal-next-resume-task": "workNarrGoalNextResumeTask",
+  "goal-next-none": "workNarrGoalNextNone",
+  "card-what-delivered": "workNarrCardWhatDelivered",
+  "card-what-nothing": "workNarrCardWhatNothing",
+  "card-what-goal-gate-complete": "workNarrCardWhatGoalGateComplete",
+  "card-next-waiting-prerequisite": "workNarrCardNextWaitingPrerequisite",
+  "card-next-not-started": "workNarrCardNextNotStarted",
+  "card-next-ready": "workNarrCardNextReady",
+  "card-next-running": "workNarrCardNextRunning",
+  "card-next-waiting-verification": "workNarrCardNextWaitingVerification",
+  "card-next-waiting-main-decision": "workNarrCardNextWaitingMainDecision",
+  "card-next-no-further-action": "workNarrCardNextNoFurtherAction",
+  "card-next-needs-recovery": "workNarrCardNextNeedsRecovery",
+  "card-next-goal-gate-satisfied": "workNarrCardNextGoalGateSatisfied",
+  "lane-what-none-completed": "workNarrLaneWhatNoneCompleted",
+  "lane-what-completed-names": "workNarrLaneWhatCompletedNames",
+  "lane-what-completed-count": "workNarrLaneWhatCompletedCount",
+  "lane-blocker-blocked": "workNarrLaneBlockerBlocked",
+  "lane-blocker-waiting": "workNarrLaneBlockerWaiting",
+  "lane-blocker-none": "workNarrLaneBlockerNone",
+  "lane-next-no-step": "workNarrLaneNextNoStep"
+};
+/* Empty/non-fact blocker codes: never surface as a "Blocked" fact. */
+var WORK_NARRATIVE_EMPTY_BLOCKER_CODES = {
+  "lane-blocker-none": true,
+  "goal-wait-all-gates-satisfied": true,
+  "goal-wait-nothing": true
+};
+/* Bound and type-check narrative params before interpolation.
+ * Mirrors Core narrativeMessage limits: at most 8 own keys, strings sliced
+ * to 200 chars, safe nonnegative integers <= 1_000_000. Invalid or excess
+ * values are omitted without throwing. */
+function workSafeNarrativeParams(params){
+  var out = {};
+  if(!params || typeof params !== "object") return out;
+  var keys = Object.keys(params);
+  var count = 0;
+  for(var i = 0; i < keys.length; i++){
+    if(count >= 8) break;
+    var k = keys[i];
+    var v = params[k];
+    if(typeof v === "string"){
+      var sliced = v.slice(0, 200);
+      if(sliced.length === 0) continue;
+      out[k] = sliced;
+      count += 1;
+    } else if(
+      typeof v === "number"
+      && typeof Number.isSafeInteger === "function"
+      && Number.isSafeInteger(v)
+      && v >= 0
+      && v <= 1000000
+    ){
+      out[k] = v;
+      count += 1;
+    }
+    // Omit floats, negatives, oversize ints, NaN, objects, arrays, booleans.
+  }
+  return out;
+}
+/* One code-driven bilingual renderer. Known code → locale copy; absent
+ * message → legacy compatibility string; unrecognized code → neutral
+ * unavailable copy (never raw code, never guessed success). */
+function workNarrativeText(msg, legacyFallback){
+  if(!msg || typeof msg !== "object" || typeof msg.code !== "string" || !msg.code){
+    if(legacyFallback === undefined || legacyFallback === null) return "";
+    var legacy = String(legacyFallback).trim();
+    return legacy;
+  }
+  var key = WORK_NARRATIVE_I18N_KEYS[msg.code];
+  if(!key) return t("workNarrUnavailable");
+  var params = workSafeNarrativeParams(msg.params);
+  // Completed-name aggregation needs an optional extra-count template.
+  if(msg.code === "lane-what-completed-names"){
+    if(params.extraCount !== undefined && Number(params.extraCount) > 0){
+      return t("workNarrLaneWhatCompletedNamesExtra", {
+        names: params.names || "",
+        extraCount: String(params.extraCount)
+      });
+    }
+    return t("workNarrLaneWhatCompletedNames", { names: params.names || "" });
+  }
+  // Goal-gate satisfied next action: choose by gate / delivery basis.
+  if(msg.code === "card-next-goal-gate-satisfied"){
+    var gate = String(params.gate || "");
+    var basis = String(params.deliveryBasis || "");
+    if(gate === "machine") return t("workNarrCardNextGateMachine");
+    if(gate === "main-accept") return t("workNarrCardNextGateMainAccept");
+    if(gate === "integration"){
+      if(basis === "amended-acceptance") return t("workNarrCardNextGateIntegrationAmended");
+      if(basis === "original-acceptance") return t("workNarrCardNextGateIntegrationOriginal");
+      return t("workNarrCardNextGateIntegration");
+    }
+    return t("workNarrCardNextGoalGateSatisfied", { gate: gate || t("workNarrGateUnknown") });
+  }
+  // Coerce number params to strings for i18n placeholders.
+  var vars = {};
+  Object.keys(params).forEach(function(k){ vars[k] = String(params[k]); });
+  return t(key, vars);
+}
+/* Presentation-only: Core's explicit empty-blocker fallback is not a fact.
+ * Prefer coded blockerMessage when present; never parse arbitrary prose.
+ * Unrecognized future codes stay displayable so workNarrativeText can fail
+ * closed to localized unavailable copy (never hide, never show raw code). */
+function workLaneHasRealBlocker(blocker, blockerMessage){
+  if(blockerMessage && typeof blockerMessage === "object"
+    && typeof blockerMessage.code === "string" && blockerMessage.code){
+    if(WORK_NARRATIVE_EMPTY_BLOCKER_CODES[blockerMessage.code]) return false;
+    // Known real blockers and unrecognized non-empty codes are both displayable.
+    return true;
+  }
+  if(blocker === undefined || blocker === null) return false;
+  var text = String(blocker).trim();
+  if(!text) return false;
+  // Exact Core deriveLaneSummary empty fallback only - not arbitrary English.
+  if(text === "No current blocker.") return false;
+  return true;
+}
+/* Presentation-only next-action label. Prefers coded messages; completed
+ * Goals with no decision get a calm conclusion. Never matches English prose. */
+function workLaneNextActionText(summary, opts){
+  opts = opts || {};
+  var msg = summary && summary.nextActionMessage;
+  if(msg && typeof msg === "object" && typeof msg.code === "string" && msg.code){
+    if(opts.completedNoDecision){
+      if(msg.code === "goal-next-none" || msg.code === "lane-next-no-step"
+        || msg.code === "card-next-no-further-action" || msg.code === "goal-what-completed"){
+        return t("workNoFurtherAction");
+      }
+    }
+    return workNarrativeText(msg, summary && summary.nextAction);
+  }
+  var next = summary && summary.nextAction ? String(summary.nextAction).trim() : "";
+  var happened = summary && summary.whatCompleted ? String(summary.whatCompleted).trim() : "";
+  if(opts.completedNoDecision){
+    if(!next || (happened && next === happened)) return t("workNoFurtherAction");
+  }
+  return next || t("workNoNext");
+}
+/* Shared Goal/Plan lane narration: code-driven when present, legacy fallback
+ * otherwise. Real blockers only; never mutates summary fields. */
+function appendWorkLaneNarrative(facts, summary, opts){
+  opts = opts || {};
+  var what = workNarrativeText(
+    summary && summary.whatCompletedMessage,
+    (summary && summary.whatCompleted) || t("workNoneYet")
+  );
+  if(!what) what = t("workNoneYet");
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalOutcome", { text: what })));
+  var blocker = summary && summary.blocker;
+  var showBlocker = workLaneHasRealBlocker(blocker, summary && summary.blockerMessage);
+  // Completed Goals with no required decision: do not surface waiting-as-blocker.
+  if(opts.completedNoDecision) showBlocker = false;
+  if(showBlocker){
+    var blockerText = workNarrativeText(summary && summary.blockerMessage, blocker);
+    facts.appendChild(h("span", "work-lane-fact", t("workGoalBlocker", { text: blockerText })));
+  }
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalNext", {
+    text: workLaneNextActionText(summary, opts)
+  })));
+}
+/* Terminal Goals share one counted, collapsed, lazy disclosure so history
+ * stays reachable without dominating the first paint. */
+function renderWorkFinishedGoals(goals){
+  var details = document.createElement("details");
+  details.className = "work-finished-group";
+  details.setAttribute("data-fl-role", "work-finished-group");
+  var summary = document.createElement("summary");
+  summary.className = "work-finished-summary";
+  summary.setAttribute("data-fl-role", "work-finished-toggle");
+  summary.textContent = t("workFinishedWorkCount", { count: String(goals.length) });
+  details.appendChild(summary);
+  var body = h("div", "work-finished-body");
+  body.setAttribute("data-fl-role", "work-finished-body");
+  var filled = false;
+  function ensureFinishedBody(){
+    if(filled) return;
+    filled = true;
+    goals.forEach(function(goal){
+      body.appendChild(renderWorkGoalLane(goal));
+    });
+  }
+  details.addEventListener("toggle", function(){
+    if(details.open) ensureFinishedBody();
+  });
+  details.appendChild(body);
+  return details;
+}
 function workOneOffCardCount(view){
   var count = 0;
   if(!view.oneOffTasks) return count;
@@ -5080,7 +5312,9 @@ function renderWorkCard(card){
   });
   var workerLabel = workWorkerLabel(card.workerProfileId);
   if(workerLabel) el.appendChild(h("div", "work-card-meta work-card-worker", t("workCardWorker", { worker: workerLabel })));
-  el.appendChild(h("div", "work-card-next", t("workCardNext", { text: card.nextAction || t("workNoNext") })));
+  var cardNext = workNarrativeText(card.nextActionMessage, card.nextAction || t("workNoNext"));
+  if(!cardNext) cardNext = t("workNoNext");
+  el.appendChild(h("div", "work-card-next", t("workCardNext", { text: cardNext })));
   if(hasPolicy) el.appendChild(renderWorkMoveActControl(card));
   return el;
 }
@@ -5133,9 +5367,7 @@ function renderWorkPlanLane(plan, isIndependent){
   var summary = plan.summary || {};
   var pr = summary.progress || {};
   var facts = h("div", "work-lane-facts");
-  facts.appendChild(h("span", "work-lane-fact", t("workGoalOutcome", { text: summary.whatCompleted || t("workNoneYet") })));
-  facts.appendChild(h("span", "work-lane-fact", t("workGoalBlocker", { text: summary.blocker || t("workNoBlocker") })));
-  facts.appendChild(h("span", "work-lane-fact", t("workGoalNext", { text: summary.nextAction || t("workNoNext") })));
+  appendWorkLaneNarrative(facts, summary, {});
   if(plan.objective) facts.appendChild(h("span", "work-lane-fact work-lane-objective", plan.objective));
   facts.appendChild(h("span", "work-lane-fact work-lane-progress", t("workProgressCompact", {
     completed: String(pr.completed || 0),
@@ -5179,15 +5411,14 @@ function renderWorkGoalLane(goal){
   var summary = goal.summary || {};
   var pr = summary.progress || {};
   var facts = h("div", "work-lane-facts");
-  facts.appendChild(h("span", "work-lane-fact", t("workGoalOutcome", { text: summary.whatCompleted || t("workNoneYet") })));
-  facts.appendChild(h("span", "work-lane-fact", t("workGoalBlocker", { text: summary.blocker || t("workNoBlocker") })));
-  facts.appendChild(h("span", "work-lane-fact", t("workGoalNext", { text: summary.nextAction || t("workNoNext") })));
+  var decisionCount = workGoalDecisionCount(goal);
+  var completedNoDecision = goal.status === "completed" && decisionCount === 0;
+  appendWorkLaneNarrative(facts, summary, { completedNoDecision: completedNoDecision });
   facts.appendChild(h("span", "work-lane-fact work-lane-progress", t("workProgressCompact", {
     completed: String(pr.completed || 0),
     total: String(pr.total || 0),
     percent: String(pr.percent || 0)
   })));
-  var decisionCount = workGoalDecisionCount(goal);
   if(decisionCount > 0){
     facts.appendChild(h("span", "work-lane-fact work-lane-decision", t("workGoalDecision", { count: String(decisionCount) })));
   }
@@ -5225,7 +5456,9 @@ function renderWorkOneOffLane(lane){
   toggle.appendChild(nameWrap);
 
   var facts = h("div", "work-lane-facts");
-  facts.appendChild(h("span", "work-lane-fact", t("workGoalNext", { text: summary.nextAction || t("workNoNext") })));
+  var oneOffNext = workNarrativeText(summary.nextActionMessage, summary.nextAction || t("workNoNext"));
+  if(!oneOffNext) oneOffNext = t("workNoNext");
+  facts.appendChild(h("span", "work-lane-fact", t("workGoalNext", { text: oneOffNext })));
   facts.appendChild(h("span", "work-lane-fact work-lane-progress", t("workProgressCompact", {
     completed: String(pr.completed || 0),
     total: String(pr.total || 0),
@@ -5379,11 +5612,10 @@ function renderWorkAdvanced(){
 function rWork(){
   viewEl.textContent = "";
   if(!S.hadOk){ showDisconnected(); return; }
-  viewEl.appendChild(renderPageStory("work"));
-  /* Outcome-first composer at the start of the Work page: describe the desired
-   * result first, then hand off to Main. The hierarchical board stays the
-   * owner of Task/Plan/Goal context below. */
+  /* FL-108B composition: primary outcome action, compact help, filters, then
+   * the canonical board so real work is reachable early at a desktop viewport. */
   viewEl.appendChild(renderOutcomeSection());
+  viewEl.appendChild(renderPageStory("work"));
   viewEl.appendChild(renderWorkFilters());
 
   var view;
@@ -5433,9 +5665,20 @@ function rWork(){
   });
   board.appendChild(headRow);
 
+  /* Presentation partition only: already-filtered Goals keep canonical objects.
+   * Active/non-terminal lanes lead; terminal Goals share one lazy disclosure. */
+  var activeGoals = [];
+  var terminalGoals = [];
   (view.goals || []).forEach(function(goal){
+    if(workGoalIsTerminalStatus(goal && goal.status)) terminalGoals.push(goal);
+    else activeGoals.push(goal);
+  });
+  activeGoals.forEach(function(goal){
     board.appendChild(renderWorkGoalLane(goal));
   });
+  if(terminalGoals.length){
+    board.appendChild(renderWorkFinishedGoals(terminalGoals));
+  }
 
   var independent = view.independentPlans || [];
   if(independent.length){
@@ -6514,7 +6757,6 @@ function renderPageStory(page){
   purpose.setAttribute("data-fl-role", "page-story-purpose");
   purpose.appendChild(h("div", "page-story-purpose-label", t("pageStoryLabelPurpose")));
   purpose.appendChild(h("div", "page-story-purpose-body", t("pageStory" + pageKey + "Purpose")));
-  card.appendChild(purpose);
   var flow = h("div", "page-story-flow");
   [
     { slot: "input", label: "pageStoryLabelInput" },
@@ -6533,6 +6775,27 @@ function renderPageStory(page){
     row.appendChild(content);
     flow.appendChild(row);
   });
+  /* Work only: keep every purpose/input/process/output/next sentence, but put
+   * them behind a closed-by-default disclosure so the board is not pushed below
+   * the fold. Other pages keep the always-open page story. */
+  if(page === "work"){
+    card.className = "guide-card page-story page-story-work";
+    var details = document.createElement("details");
+    details.className = "page-story-disclosure";
+    details.setAttribute("data-fl-role", "page-story-disclosure");
+    var summary = document.createElement("summary");
+    summary.className = "page-story-disclosure-summary";
+    summary.setAttribute("data-fl-role", "page-story-disclosure-toggle");
+    summary.textContent = t("pageStoryWorkHow");
+    details.appendChild(summary);
+    var body = h("div", "page-story-disclosure-body");
+    body.appendChild(purpose);
+    body.appendChild(flow);
+    details.appendChild(body);
+    card.appendChild(details);
+    return card;
+  }
+  card.appendChild(purpose);
   card.appendChild(flow);
   return card;
 }
@@ -8977,10 +9240,12 @@ function rMains(){
   viewEl.appendChild(h("div", "summary-line mt-8", t("mainFooter")));
 }
 
-/* Legacy peer pages (Board/Plans/Goals) were folded into the single Work
- * surface. Old saved state and internal links still name them; they redirect
- * to Work so work is never fragmented across peer lists. */
+/* Legacy peer/default pages (Overview/Board/Plans/Goals) were folded into the
+ * single Work surface. Old saved state and internal links still name them; they
+ * redirect to Work so work is never fragmented across peer lists. Overview
+ * stays as bounded compatibility render code only - never a peer primary view. */
 var LEGACY_TAB_REDIRECT = {
+  overview: "work",
   board: "work",
   tasks: "work",
   plans: "work",
@@ -10320,6 +10585,9 @@ function readableVerificationCheckLabel(label){
   if(value.indexOf("hub-ui-assets.test") >= 0) return t("journeyCheckUiContract");
   if(value.indexOf("node --check") >= 0) return t("journeyCheckScriptLoads");
   if(value.indexOf("tsc") >= 0) return t("journeyCheckProjectCompiles");
+  /* Bounded presentation map: known build command → neutral noun phrase.
+   * Never infers pass/fail from the command string itself. */
+  if(value.indexOf("npm run build") >= 0) return t("journeyCheckProjectBuild");
   if(value.indexOf("git diff --check") >= 0) return t("journeyCheckPatchFormat");
   if(value.indexOf("npm run check") >= 0) return t("journeyCheckFullProject");
   if(value.indexOf("test") >= 0) return t("journeyCheckAutomatedBehavior");
@@ -13292,21 +13560,43 @@ function taskDurableAction(path, body, btn, taskId, onOk){
 }
 
 /* Four-section Task Overview: Main asked, Worker returned, Independent result, Final output. */
+/* Compact Checks tab badge: total when all pass, failed/total when any
+ * failed, and empty when verification is unavailable or has no known total.
+ * Never turns "all passed" into a misleading zero. */
+function taskChecksTabHint(iv){
+  if(!iv || iv.available !== true) return "";
+  var total = Number(iv.totalCount);
+  if(!Number.isFinite(total) || total < 0) total = 0;
+  if(total <= 0 && Array.isArray(iv.checks)) total = iv.checks.length;
+  if(total <= 0) return "";
+  var failed = Number(iv.failedCount);
+  if(!Number.isFinite(failed) || failed < 0) failed = 0;
+  if(failed > 0) return String(failed) + "/" + String(total);
+  return String(total);
+}
+
+/* Overview story: four calm conclusions from safe journey facts only.
+ * Raw Worker prose, exact paths, and retained Candidate evidence stay out of
+ * the default reading path; they remain in Result & files / More. */
 function renderFourSectionOverview(task){
   var j = task.journey || {};
   var a = j.assignment || {};
   var we = j.workerExecution || {};
   var iv = j.independentVerification || {};
   var fd = j.finalDelivery || {};
-  var cause = j.cause || {};
   var next = j.nextAction || {};
   var files = Array.isArray(we.changedFilePaths) ? we.changedFilePaths : [];
   var attempts = Array.isArray(we.attempts) ? we.attempts : [];
+  var statusText = task && task.status ? String(task.status) : "waiting";
+  var running = statusText === "running" || statusText === "preparing"
+    || statusText === "verifying" || statusText === "active";
   var container = h("div", "task-four-section");
+  container.setAttribute("data-fl-role", "task-overview-story");
 
-  // 1. Main asked
+  // 1. Main's requested result
   var s1 = h("div", "four-section-card");
   s1.setAttribute("data-fl-role", "task-ov-main-asked");
+  s1.appendChild(h("div", "four-section-step", "1"));
   s1.appendChild(h("div", "four-section-title", t("taskOvMainAsked")));
   s1.appendChild(h("div", "summary-line dim mb-8", t("taskOvMainAskedHint")));
   var goalText = a.presentation && a.presentation.summary
@@ -13323,102 +13613,86 @@ function renderFourSectionOverview(task){
   } else {
     s1.appendChild(h("div", "task-report-empty", t("storyInputMissing")));
   }
+  container.appendChild(s1);
+
+  // 2. Execution outcome: counts only; no raw claim, paths, or Candidate
+  var s2 = h("div", "four-section-card");
+  s2.setAttribute("data-fl-role", "task-ov-worker-returned");
+  s2.appendChild(h("div", "four-section-step", "2"));
+  s2.appendChild(h("div", "four-section-title", t("taskOvWorkerReturned")));
+  s2.appendChild(h("div", "summary-line dim mb-8", t("taskOvWorkerReturnedHint")));
+  /* Attempt/file counts are factual evidence only. Never paint this step as
+   * a success/failure verdict; check and delivery steps own that meaning. */
+  var execConclusion = running
+    ? t("taskOvExecutionInProgress")
+    : attempts.length
+      ? t("taskOvExecutionSummary", {
+          attempts: String(attempts.length),
+          files: String(files.length)
+        })
+      : t("taskOvExecutionNoAttempts");
+  s2.appendChild(h("div", "four-section-conclusion", execConclusion));
   if(we.provider || we.model || we.runtime){
-    s1.appendChild(h("div", "four-section-sub mt-8", t("taskOvWorkerIdentity") + ": " + [
+    s2.appendChild(h("div", "four-section-sub mt-8", t("taskOvWorkerIdentity") + ": " + [
       providerDisplayName(we.provider), we.model, runtimeDisplayName(we.runtime)
     ].filter(Boolean).join(" / ")));
   }
-  container.appendChild(s1);
-
-  // 2. Worker returned
-  var s2 = h("div", "four-section-card");
-  s2.setAttribute("data-fl-role", "task-ov-worker-returned");
-  s2.appendChild(h("div", "four-section-title", t("taskOvWorkerReturned")));
-  s2.appendChild(h("div", "summary-line dim mb-8", t("taskOvWorkerReturnedHint")));
-  if(attempts.length){
-    var attSummary = h("div", "task-report-process");
-    attempts.forEach(function(att){
-      var line = h("div", "task-report-attempt");
-      var turns = att.turns === undefined ? "" : t("journeyTurns", { count: String(att.turns) });
-      var exit = att.exitCode === undefined || att.exitCode === 0
-        ? "" : t("journeyExitCode", { code: String(att.exitCode) });
-      line.appendChild(h("div", "", t("journeyAttemptLabel", { ordinal: String(att.ordinal) })
-        + " · " + attemptPrimaryLabel(att)
-        + (turns ? " · " + turns : "")
-        + (exit ? " · " + exit : "")));
-      attSummary.appendChild(line);
-    });
-    s2.appendChild(attSummary);
-  }
-  if(we.workerClaim && we.workerClaim.text){
-    s2.appendChild(h("div", "four-section-sub mt-8", t("taskOvWorkerClaim")));
-    s2.appendChild(h("div", "worker-claim-preview", we.workerClaim.text));
-    s2.appendChild(h("div", "summary-line dim fs11", t("taskReportClaimNotProof")));
-  }
-  s2.appendChild(h("div", "four-section-sub mt-8", t("taskOvWorkerFiles", { count: String(files.length) })));
-  if(files.length){
-    var fl = h("ul", "task-report-list files");
-    files.slice(0, 10).forEach(function(f){ fl.appendChild(h("li", "", f)); });
-    if(files.length > 10){
-      fl.appendChild(h("li", "dim", t("storyMoreItems", { count: String(files.length - 10) })));
-    }
-    s2.appendChild(fl);
-  }
-  // Retained candidate evidence folded into Worker returned
-  var rc = renderRetainedCandidate(task);
-  if(rc){
-    rc.classList.add("four-section-sub");
-    s2.appendChild(rc);
-  }
+  s2.appendChild(h("div", "summary-line dim fs11 mt-8", t("taskOvEvidenceInResult")));
   container.appendChild(s2);
 
-  // 3. Independent result
+  // 3. Independent checks: conclusion + first actionable failure only
   var s3 = h("div", "four-section-card");
   s3.setAttribute("data-fl-role", "task-ov-independent-result");
+  s3.appendChild(h("div", "four-section-step", "3"));
   s3.appendChild(h("div", "four-section-title", t("taskOvIndependentResult")));
   s3.appendChild(h("div", "summary-line dim mb-8", t("taskOvIndependentResultHint")));
   if(iv && iv.available){
+    var totalCount = Number(iv.totalCount);
+    if(!Number.isFinite(totalCount) || totalCount < 0) totalCount = 0;
+    if(totalCount <= 0 && Array.isArray(iv.checks)) totalCount = iv.checks.length;
+    var failedCount = Number(iv.failedCount);
+    if(!Number.isFinite(failedCount) || failedCount < 0) failedCount = 0;
     var passedAll = iv.conclusion === "passed";
     var conclusionText = passedAll
-      ? t("taskOvChecksPassed", { count: String(iv.totalCount || 0) })
-      : t("taskOvChecksFailed", { failed: String(iv.failedCount || 0), total: String(iv.totalCount || 0) });
+      ? t("taskOvChecksPassed", { count: String(totalCount) })
+      : t("taskOvChecksFailed", {
+          failed: String(failedCount),
+          total: String(totalCount)
+        });
     s3.appendChild(h("div", "four-section-conclusion" + (passedAll ? " ok" : " err"), conclusionText));
-    if(iv.checks && iv.checks.length){
-      var checkList = h("div", "task-report-process");
-      iv.checks.forEach(function(chk){
-        var row = h("div", "task-report-attempt");
-        row.setAttribute("data-fl-role", "verification-check");
-        row.appendChild(h("span", "badge " + (chk.passed ? "badge-ok" : "badge-err"),
-          chk.passed ? t("journeyCheckPassed") : t("journeyCheckFailed")));
-        row.appendChild(document.createTextNode("  " + readableVerificationCheckLabel(chk.label)));
-        if(!chk.passed){
-          if(chk.failureSummary){
-            var fs = h("div", "four-section-failure-summary");
-            fs.setAttribute("data-fl-role", "check-failure-summary");
-            fs.appendChild(h("div", "four-section-failure-label", t("taskOvFailureSummaryLabel")));
-            fs.appendChild(h("div", "four-section-failure-text", chk.failureSummary));
-            row.appendChild(fs);
-          } else {
-            row.appendChild(h("div", "four-section-failure-unavail dim fs11", t("taskOvFailureSummaryUnavailable")));
-          }
+    if(!passedAll && Array.isArray(iv.checks) && iv.checks.length){
+      var firstFailed = null;
+      for(var ci = 0; ci < iv.checks.length; ci++){
+        if(iv.checks[ci] && iv.checks[ci].passed === false){
+          firstFailed = iv.checks[ci];
+          break;
         }
-        checkList.appendChild(row);
-      });
-      s3.appendChild(checkList);
+      }
+      if(firstFailed){
+        var failRow = h("div", "four-section-failure-summary");
+        failRow.setAttribute("data-fl-role", "check-failure-summary");
+        failRow.appendChild(h("div", "four-section-failure-label", t("taskOvCheckFailedLabel")
+          + ": " + readableVerificationCheckLabel(firstFailed.label)));
+        if(firstFailed.failureSummary){
+          failRow.appendChild(h("div", "four-section-failure-text", firstFailed.failureSummary));
+        } else {
+          failRow.appendChild(h("div", "four-section-failure-unavail dim fs11",
+            t("taskOvFailureSummaryUnavailable")));
+        }
+        s3.appendChild(failRow);
+      } else {
+        s3.appendChild(h("div", "summary-line dim fs11 mt-8", t("taskOvNoFailedSummary")));
+      }
     }
   } else {
     s3.appendChild(h("div", "task-report-empty", t("taskOvChecksNotRun")));
   }
-  // Main's handling summary
-  if(fd.mainReview){
-    s3.appendChild(h("div", "four-section-sub mt-8", t("taskReportMainDecision") + ": "
-      + reviewDecisionLabel(fd.mainReview.decision)));
-  }
   container.appendChild(s3);
 
-  // 4. Final output / next action
+  // 4. Final delivery + one next action
   var s4 = h("div", "four-section-card");
   s4.setAttribute("data-fl-role", "task-ov-final-output");
+  s4.appendChild(h("div", "four-section-step", "4"));
   s4.appendChild(h("div", "four-section-title", t("taskOvFinalOutput")));
   s4.appendChild(h("div", "summary-line dim mb-8", t("taskOvFinalOutputHint")));
   var repaired = !!(fd.remediationDisposition && fd.remediationDisposition.status === "verified-repaired-delivered");
@@ -13439,14 +13713,17 @@ function renderFourSectionOverview(task){
       reason: attentionResolutionReasonLabel(resolutionStory.reason || "handled-elsewhere")
     })));
   } else {
-    var statusText = task.status || "waiting";
     if(statusText === "succeeded" || statusText === "completed"){
       s4.appendChild(h("div", "task-report-empty", t("taskOvPendingReview")));
-    } else if(statusText === "running" || statusText === "preparing" || statusText === "verifying" || statusText === "active"){
+    } else if(running){
       s4.appendChild(h("div", "task-report-empty", t("taskOvPendingWorker")));
     } else {
       s4.appendChild(h("div", "task-report-empty", t("taskOvNoOutput")));
     }
+  }
+  if(fd.mainReview && fd.mainReview.decision){
+    s4.appendChild(h("div", "four-section-sub mt-8", t("taskReportMainDecision") + ": "
+      + reviewDecisionLabel(fd.mainReview.decision)));
   }
   var nextText = nextActionLabel(next.label || "investigate");
   s4.appendChild(h("div", "four-section-next mt-8", nextText));
@@ -13754,17 +14031,29 @@ function renderTaskWorkbench(task, extraTabs){
     "task-report-process"
   ));
 
-  // 3) Result + artifacts
+  // 3) Result + artifacts: meaning first; raw Worker report is progressive evidence
   var resultNodes = [];
   var claimStep = presentation.steps.find(function(s){ return s.id === "worker-output"; });
+  if(claimStep && claimStep.bodyKey){
+    var outcomeTone = claimStep.state === "complete" ? " ok"
+      : claimStep.state === "failed" ? " err" : "";
+    resultNodes.push(h("div", "four-section-conclusion" + outcomeTone,
+      t(claimStep.bodyKey, claimStep.params || {})));
+  } else {
+    resultNodes.push(h("div", "task-report-empty", t("storyWorkerOutputNone")));
+  }
+  resultNodes.push(h("div", "summary-line dim fs11", t("taskReportClaimNotProof")));
   if(we.workerClaim && we.workerClaim.text){
-    resultNodes.push(reportBlock(t("storyWorkerClaimLabel"), we.workerClaim.text, true));
-    resultNodes.push(h("div", "task-report-empty", t("taskReportClaimNotProof")));
+    var claimBody = h("div", "worker-claim-preview");
+    claimBody.setAttribute("data-fl-role", "worker-claim-text");
+    claimBody.textContent = we.workerClaim.text;
+    var claimDetails = journeyDisclosure(t("taskReportClaimDisclosure"), claimBody);
+    claimDetails.setAttribute("data-fl-role", "worker-claim-disclosure");
+    claimDetails.classList.add("task-result-claim-disclosure");
+    resultNodes.push(claimDetails);
+    resultNodes.push(h("div", "summary-line dim fs11", t("taskReportClaimDisclosureHint")));
   } else {
     resultNodes.push(h("div", "task-report-empty", t("journeyNoWorkerClaim")));
-  }
-  if(claimStep && claimStep.bodyKey){
-    resultNodes.push(h("div", "summary-line dim", t(claimStep.bodyKey, claimStep.params || {})));
   }
   var files = Array.isArray(we.changedFilePaths) ? we.changedFilePaths : [];
   var resultBody = h("div", "task-tab-body");
@@ -13858,14 +14147,15 @@ function renderTaskWorkbench(task, extraTabs){
 
   var attemptCount = we.attempts && we.attempts.length ? String(we.attempts.length) : "0";
   var fileCount = String(files.length);
-  var failCount = iv && iv.available ? String(iv.failedCount || 0) : "";
+  // Checks badge: total on all-pass, failed/total on failure, absent when unknown.
+  var checksHint = taskChecksTabHint(iv);
 
   var tabs = [
     { id: "overview", label: t("taskTabOverview"), body: overviewBody },
     { id: "instruction", label: t("taskTabInstruction"), body: instrBody },
     { id: "process", label: t("taskTabProcess"), hint: attemptCount, body: processBody },
     { id: "result", label: t("taskTabResult"), hint: fileCount, body: resultBody },
-    { id: "checks", label: t("taskTabChecks"), hint: failCount, body: checksBody }
+    { id: "checks", label: t("taskTabChecks"), hint: checksHint, body: checksBody }
   ];
   (extraTabs || []).forEach(function(tab){ tabs.push(tab); });
 
@@ -14956,7 +15246,7 @@ function render(){
   // Guard: never render null arrays as successful empty evidence.  Classify
   // the current page's data state and show loading/disconnected when the
   // renderer would otherwise treat missing data as empty success.
-  var tab = S.tab || "overview";
+  var tab = S.tab || "work";
   var state = pageEvidenceState(tab);
   if(state === "loading"){
     viewEl.textContent = "";
@@ -14972,6 +15262,7 @@ function render(){
   }
   // "ready" and "stale" both render normally; retained evidence is shown
   // while updStatus already indicates the stale dot in the status bar.
+  // overview remains a bounded compatibility branch only (redirected by switchTab).
   switch(tab){
     case "overview": rOverview(); break;
     case "work": rWork(); break;

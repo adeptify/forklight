@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { daemonSocketPath, taskPaths } from "../src/core/config.js";
+import { resolveTsxImportSpecifier } from "../src/activation/runner.js";
+import {
+  defaultAdvancedPolicyFields,
+  enforcementCapabilityForRuntime,
+  resolveEffectivePolicy,
+} from "../src/core/advanced-policy.js";
+import { daemonSocketPath, localAccountName, taskPaths } from "../src/core/config.js";
 import { buildIntegrationOperationView, buildCompactIntegrationOperationView } from "../src/core/integration-operation.js";
 import { preflightIntegration } from "../src/core/integration.js";
 import { recordMainReview } from "../src/core/main-review.js";
@@ -34,8 +43,10 @@ import { ForkLightDaemon } from "../src/daemon/server.js";
 import { daemonObserverRequest, daemonRequest } from "../src/daemon/client.js";
 import { StateStore } from "../src/state/store.js";
 import {
+  DetachedDaemonFixture,
   observeUntilTerminal,
   probeSocketAlive,
+  waitForDaemonReady,
   type TerminalObservation,
 } from "./helpers/detached-daemon.js";
 import { prepareWorkspace } from "../src/workspace/copy.js";
@@ -606,6 +617,350 @@ test("detached activation teardown waits for terminality even when the test body
   // The exact-home daemon, endpoint, and runner are all gone; the home is
   // removable with no late replacement daemon.
   await rm(fixture.home, { recursive: true, force: true });
+});
+
+test("detached handoff replaces daemon under open observer and recovers active Task once", async () => {
+  // Exact-home proof: real command/server/store boundary, no Provider request.
+  // Open Integration observer + deterministic hanging Worker stay active across
+  // one-use handoff; replacement resumes the Worker through one linked Attempt.
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tsxImport = resolveTsxImportSpecifier(import.meta.url);
+  const cliPath = path.join(repoRoot, "src", "cli.ts");
+  const node = process.execPath;
+  const cliPrefix = [
+    JSON.stringify(node),
+    "--disable-warning=ExperimentalWarning",
+    "--import",
+    JSON.stringify(tsxImport),
+    JSON.stringify(cliPath),
+  ].join(" ");
+
+  const binDir = await mkdtemp(path.join(tmpdir(), "forklight-fake-claude-"));
+  const fakeClaude = path.join(binDir, "claude");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "--version" ]; then echo "1.0.0 (Claude Code)"; exit 0; fi',
+      "trap 'exit 130' INT TERM",
+      "while :; do sleep 0.2; done",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await chmod(fakeClaude, 0o755);
+
+  // Detached Daemon children read Keychain through /usr/bin/security. A
+  // createKeychainStore stdin write can leave an entry the child cannot read;
+  // the measured detached pattern is a direct add-generic-password -U with the
+  // dummy value on argv (test-only; never a live Provider credential).
+  const keychainService = `forklight.test.handoff-${randomUUID()}`;
+  const account = localAccountName();
+  const dummyKey = "test-not-a-live-provider-key";
+  execFileSync(
+    "/usr/bin/security",
+    [
+      "add-generic-password",
+      "-U",
+      "-a",
+      account,
+      "-s",
+      keychainService,
+      "-w",
+      dummyKey,
+    ],
+    { stdio: "ignore" },
+  );
+  // Fail closed before lifecycle work if the child-readable path is broken.
+  const verified = execFileSync(
+    "/usr/bin/security",
+    ["find-generic-password", "-a", account, "-s", keychainService, "-w"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+  ).trim();
+  assert.equal(verified, dummyKey, "dummy Keychain entry must be readable before Daemon start");
+
+  const previousPath = process.env.PATH ?? "";
+  process.env.PATH = `${binDir}${path.delimiter}${previousPath}`;
+
+  const fixture = await DetachedDaemonFixture.create("forklight-handoff-e2e-");
+  let oldPid = 0;
+  try {
+    // --- Seed Integration-ready Task and active Worker Task before start ---
+    const seed = new StateStore(fixture.home);
+    const settings = new SettingsService(seed);
+    settings.update({
+      execution: {
+        maxAttempts: 1,
+        maxExtraAttempts: 0,
+        maxConcurrency: 2,
+        noProgressTimeoutMs: 600_000,
+      },
+    });
+
+    const integrationSource = path.join(fixture.home, "integration-source");
+    await mkdir(integrationSource);
+    await writeFile(path.join(integrationSource, "value.txt"), "before\n");
+    const activationCommand =
+      `${cliPrefix} daemon stop && ${cliPrefix} daemon start --startup-timeout-ms 60000`;
+    const activationCheck =
+      `${cliPrefix} health --json | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{const v=JSON.parse(d);if(v.identityStatus!=="matched")process.exit(1);});'`;
+    const integrationSpec: TaskSpec = {
+      version: 1,
+      name: "Handoff integration",
+      project: integrationSource,
+      goal: "Prove self-upgrade handoff",
+      constraints: [],
+      provider: {
+        name: "deepseek",
+        model: "deepseek-v4-flash",
+        keychainService,
+      },
+      runtime: {
+        name: "claude-code",
+        executable: fakeClaude,
+        effort: "low",
+        maxBudgetUsd: null,
+      },
+      workspace: { exclude: [".git", "node_modules"] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["value.txt"] },
+      acceptance: { commands: ["true"] },
+      delivery: {
+        buildCommands: ['node -e "process.exit(0)"'],
+        activationCommands: [activationCommand],
+        activationCheckCommands: [activationCheck],
+      },
+    };
+    const integrationPaths = taskPaths(fixture.home, "task-handoff-integration");
+    await prepareWorkspace(integrationSpec, integrationPaths);
+    await writeFile(path.join(integrationPaths.workspace, "value.txt"), "after\n");
+    await writeWorkspacePatchReport(integrationPaths, createPathPolicy(integrationSpec));
+    const now = new Date().toISOString();
+    const integrationPolicy = resolveEffectivePolicy(
+      undefined,
+      { baseMaxAttempts: 1, maxExtraAttempts: 0 },
+      defaultAdvancedPolicyFields(),
+      "test",
+      enforcementCapabilityForRuntime("claude-code"),
+    );
+    const integrationTask: TaskRecord = {
+      id: "task-handoff-integration",
+      name: integrationSpec.name,
+      status: "succeeded",
+      sourcePath: integrationSource,
+      taskFile: "forklight://test/handoff-integration",
+      spec: integrationSpec,
+      paths: integrationPaths,
+      sessionId: "session-handoff-integration",
+      currentAttemptId: "attempt-handoff-integration",
+      effectivePolicy: integrationPolicy,
+      createdAt: now,
+      updatedAt: now,
+    };
+    seed.createTask(integrationTask);
+    seed.createAttempt({
+      id: "attempt-handoff-integration",
+      taskId: integrationTask.id,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: integrationTask.sessionId,
+      rawLogPath: path.join(integrationPaths.logs, "attempt.jsonl"),
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+    });
+    seed.addEvent(
+      integrationTask.id,
+      "attempt-handoff-integration",
+      "verification.completed",
+      "Independent verification passed",
+      {
+        passed: true,
+        behaviorPassed: true,
+        policyPassed: true,
+        sourceCompatible: true,
+        commands: [],
+        diffPath: integrationPaths.diff,
+        sourceUnchanged: true,
+      } satisfies VerificationResult,
+    );
+    recordMainReview(seed, integrationTask.id, {
+      decision: "accept",
+      reason: "Independent verification and reviewed Diff passed",
+      confirm: true,
+    });
+    const receipt = await preflightIntegration(
+      seed,
+      integrationTask.id,
+      settings.get().integration,
+    );
+    assert.deepEqual(receipt.rejectionReasons, []);
+
+    // Worker source prepared for a live submit after the daemon starts.
+    const workerSource = path.join(fixture.home, "worker-source");
+    await mkdir(path.join(workerSource, "src"), { recursive: true });
+    await writeFile(path.join(workerSource, "src", "work.ts"), "export const n = 1;\n");
+    seed.close();
+
+    const health = await fixture.ensureReady();
+    // PATH was only needed so the child Daemon inherited the fake claude.
+    // Restore immediately so sibling tests in this process are not affected.
+    process.env.PATH = previousPath;
+    oldPid = health.pid as number;
+    assert.ok(Number.isSafeInteger(oldPid) && oldPid > 0);
+
+    // Submit a deterministic hanging Worker (baseMaxAttempts=1) so recovery
+    // requires the restart grant produced by handoff shutdown intent.
+    const workerTask = await daemonRequest<TaskRecord>(
+      "submit",
+      {
+        task: {
+          version: 1,
+          name: "Handoff active worker",
+          project: workerSource,
+          goal: "Stay running until daemon restart recovery",
+          constraints: [],
+          provider: {
+            name: "deepseek",
+            model: "deepseek-v4-flash",
+            keychainService,
+          },
+          runtime: {
+            name: "claude-code",
+            executable: fakeClaude,
+            effort: "low",
+            maxBudgetUsd: null,
+          },
+          workspace: { exclude: [".git", "node_modules"] },
+          worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src/work.ts"] },
+          acceptance: { commands: ["true"] },
+          advancedPolicyOverride: {
+            baseMaxAttempts: 1,
+            maxExtraAttempts: 0,
+            noProgressTimeoutMs: 600_000,
+          },
+        },
+        baseDirectory: workerSource,
+      },
+      fixture.home,
+    );
+    const workerSessionId = workerTask.sessionId;
+    const workerRuntime = {
+      name: workerTask.spec.runtime.name,
+      effort: workerTask.spec.runtime.effort,
+      model: workerTask.spec.provider.model,
+      provider: workerTask.spec.provider.name,
+    };
+
+    let workerRunning = false;
+    for (let i = 0; i < 100; i += 1) {
+      const status = await daemonRequest<TaskRecord>("status", { taskId: workerTask.id }, fixture.home);
+      if (status.status === "running" && typeof status.workerPid === "number" && status.workerPid > 0) {
+        workerRunning = true;
+        break;
+      }
+      if (status.status === "failed") {
+        throw new Error(`Worker failed to start: ${status.error ?? "unknown"}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(workerRunning, true, "fake Worker must be running before handoff");
+
+    const started = await daemonRequest<{ operationId: string; status: string }>(
+      "integration_apply",
+      { taskId: integrationTask.id, receiptId: receipt.id, confirm: true },
+      fixture.home,
+    );
+    assert.equal(started.status, "running");
+    const operationId = started.operationId;
+
+    // Keep an open observer across endpoint relinquishment and replacement.
+    const terminal = await observeUntilTerminal({
+      home: fixture.home,
+      operationId,
+      escapeDeadlineMs: 120_000,
+    });
+    assert.equal(terminal.view.status, "completed");
+    assert.equal(terminal.view.result?.status, "applied");
+    assert.equal(terminal.view.result?.id, operationId);
+    assert.deepEqual(
+      terminal.view.stages.map(({ stage, status }) => [stage, status]),
+      [
+        ["source-applied", "passed"],
+        ["source-verified", "passed"],
+        ["artifact-built", "passed"],
+        ["runtime-activated", "passed"],
+      ],
+    );
+
+    // Controlled internal health: replacement PID is positive and differs.
+    const replacementHealth = await waitForDaemonReady(fixture.home);
+    const newPid = replacementHealth.pid as number;
+    assert.ok(Number.isSafeInteger(newPid) && newPid > 0);
+    assert.notEqual(newPid, oldPid);
+    await fixture.adoptReplacement(newPid);
+
+    // Active Task lineage: Attempt 1 interrupted history, exactly one ordinal-2
+    // restart recovery under the same Task/session/runtime identity.
+    let recovered = false;
+    for (let i = 0; i < 120; i += 1) {
+      const inspected = await daemonRequest<{
+        task: TaskRecord;
+        attempts: AttemptRecord[];
+        events: Array<{ type: string; payload?: Record<string, unknown> | null }>;
+      }>("inspect", { taskId: workerTask.id }, fixture.home);
+      const attempts = inspected.attempts;
+      const ordinals = attempts.map((a) => a.ordinal).sort((a, b) => a - b);
+      const first = attempts.find((a) => a.ordinal === 1);
+      const second = attempts.find((a) => a.ordinal === 2);
+      if (
+        first?.status === "interrupted"
+        && second !== undefined
+        && ordinals.length === 2
+      ) {
+        assert.equal(second.sessionId, workerSessionId);
+        assert.equal(inspected.task.id, workerTask.id);
+        assert.equal(inspected.task.sessionId, workerSessionId);
+        assert.equal(inspected.task.spec.runtime.name, workerRuntime.name);
+        assert.equal(inspected.task.spec.runtime.effort, workerRuntime.effort);
+        assert.equal(inspected.task.spec.provider.model, workerRuntime.model);
+        assert.equal(inspected.task.spec.provider.name, workerRuntime.provider);
+        // Exactly one restart-recovery grant (not a quality retry).
+        const grants = inspected.events.filter((e) => e.type === "attempt.authorization.granted");
+        assert.equal(grants.length, 1);
+        assert.equal(grants[0]?.payload?.kind, "restart-recovery");
+        assert.equal(grants[0]?.payload?.reason, "system-daemon-restart");
+        assert.equal(grants[0]?.payload?.priorAttemptId, first.id);
+        recovered = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(recovered, true, "exactly one linked recovery Attempt must appear");
+
+    // Idempotent completion: one Integration result for the operation.
+    const history = await daemonRequest<{ results: IntegrationResultRecord[] }>(
+      "integration_history",
+      { taskId: integrationTask.id },
+      fixture.home,
+    );
+    assert.equal(history.results.filter((r) => r.id === operationId).length, 1);
+  } finally {
+    process.env.PATH = previousPath;
+    try {
+      execFileSync(
+        "/usr/bin/security",
+        ["delete-generic-password", "-a", account, "-s", keychainService],
+        { stdio: "ignore" },
+      );
+    } catch {
+      // Best-effort cleanup of the exact test-only service/account pair.
+    }
+    try {
+      await fixture.cleanup();
+    } finally {
+      await rm(binDir, { recursive: true, force: true });
+    }
+  }
 });
 
 // --- Compact Integration Operation View tests ---

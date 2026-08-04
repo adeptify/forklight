@@ -728,12 +728,18 @@ export class ForkLightDaemon {
         );
       case "integration_history":
         return this.coordinator.integrationHistory(requiredString(params.taskId, "taskId"));
-      case "activation_handoff_shutdown":
-        return this.coordinator.authorizeActivationHandoffShutdown(
+      case "activation_handoff_shutdown": {
+        // Restart intent is bound only after positive durable authorization.
+        // Invalid, mismatched, replayed, or terminal handoffs throw before
+        // this assignment and leave shutdown authority unchanged.
+        const authorized = this.coordinator.authorizeActivationHandoffShutdown(
           requiredString(params.operationId, "operationId"),
           requiredString(params.taskId, "taskId"),
           requiredString(params.receiptId, "receiptId"),
         );
+        this.shutdownIntent = "restart";
+        return { ...authorized, intent: this.shutdownIntent };
+      }
       case "shutdown": {
         // Closed stop/restart intent. Omitted or legacy clients stay on stop.
         this.shutdownIntent = parseDaemonShutdownIntent(params.intent);

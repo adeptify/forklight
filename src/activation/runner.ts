@@ -7,8 +7,9 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   ActivationHandoff,
   IntegrationStageEvidence,
@@ -122,8 +123,16 @@ export async function consumeActivationHandoff(
 }
 
 export const ACTIVATION_OPERATION_ID_ENV = "FORKLIGHT_ACTIVATION_OPERATION_ID";
-const ACTIVATION_TASK_ID_ENV = "FORKLIGHT_ACTIVATION_TASK_ID";
-const ACTIVATION_RECEIPT_ID_ENV = "FORKLIGHT_ACTIVATION_RECEIPT_ID";
+export const ACTIVATION_TASK_ID_ENV = "FORKLIGHT_ACTIVATION_TASK_ID";
+export const ACTIVATION_RECEIPT_ID_ENV = "FORKLIGHT_ACTIVATION_RECEIPT_ID";
+
+/** Consumed one-use handoff transport identity. Stripped at replacement Daemon
+ *  child launch so a restarted Daemon never inherits stale handoff context. */
+export const ACTIVATION_HANDOFF_ENV_KEYS = [
+  ACTIVATION_OPERATION_ID_ENV,
+  ACTIVATION_TASK_ID_ENV,
+  ACTIVATION_RECEIPT_ID_ENV,
+] as const;
 
 /** Set operation-context environment variables for every child process
  *  spawned by the activation commands.  The daemon validates these values
@@ -150,6 +159,14 @@ export function readActivationHandoffContext(): {
     return undefined;
   }
   return { operationId, taskId, receiptId };
+}
+
+/** Resolve the repository-installed tsx loader as a cwd-independent file URL.
+ *  Bare `--import tsx` fails when the child cwd is an isolated Integration
+ *  source tree that does not have tsx on its own module path. */
+export function resolveTsxImportSpecifier(fromModuleUrl: string): string {
+  const require = createRequire(fromModuleUrl);
+  return pathToFileURL(require.resolve("tsx")).href;
 }
 
 async function executeCommands(
@@ -219,7 +236,7 @@ function activationLaunchArguments(moduleUrl: string, handoffPath: string): {
       ? [
           "--disable-warning=ExperimentalWarning",
           "--import",
-          "tsx",
+          resolveTsxImportSpecifier(moduleUrl),
           mainPath,
           handoffPath,
         ]

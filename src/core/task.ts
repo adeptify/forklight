@@ -879,12 +879,35 @@ export async function loadTaskSpec(
   return { taskFile, taskFileDigest, spec };
 }
 
-function hardBoundaries(): string[] {
+/**
+ * Runtime tool-surface policy for hard-boundary wording.
+ * Defaults keep Claude/Grok on the tool-only/no-shell contract. Codex uses a
+ * workspace-sandboxed command tool for inspect/search/edit, so its wording must
+ * not forbid the only path it can use while still denying host shell expansion.
+ */
+export type WorkerHardBoundaryPolicy =
+  | { kind: "tool-only-no-shell" }
+  | { kind: "codex-workspace-command"; allowEdits: boolean };
+
+/** Compose hard boundaries that match the selected Runtime's real tool surface.
+ *  Runtime-specific wording may narrow authority but cannot override isolation,
+ *  acceptance, Git, or delivery prohibitions. */
+export function hardBoundaries(
+  policy: WorkerHardBoundaryPolicy = { kind: "tool-only-no-shell" },
+): string[] {
+  // Codex workspace-write may still use runtime-private temporary storage
+  // (task TMPDIR) while product file work stays inside the Task workspace.
+  // Do not claim a narrower write surface than the frozen sandbox enforces.
+  const toolAuthority = policy.kind === "codex-workspace-command"
+    ? policy.allowEdits
+      ? "Use only Codex's workspace-sandboxed command tool for product file inspect, search, and edit inside this isolated Task workspace under workspace-write. Command network access is disabled. Keep product changes inside the Task workspace; do not use global /tmp, host paths, or the source tree for product work. Runtime-private temporary storage is for process needs only. Unrestricted host shell, approval escalation, extra product writable roots, web, apps, MCP, nested agents, source Integration, commit, and push remain forbidden."
+      : "Use only Codex's workspace-sandboxed command tool for product file inspect and search inside this isolated Task workspace under read-only. Do not edit product files. Command network access is disabled. Do not use global /tmp, host paths, or the source tree for product work. Runtime-private temporary storage is for process needs only. Unrestricted host shell, approval escalation, extra product writable roots, web, apps, MCP, nested agents, source Integration, commit, and push remain forbidden."
+    : "Shell access is intentionally unavailable. Do not attempt to run commands.";
   return [
     "Work only inside the current workspace.",
     "Read the task-owned .forklight/workspace-context.md, but do not read or modify ForkLight state outside the workspace.",
     "Never commit, push, create a pull request, or change Git remotes.",
-    "Shell access is intentionally unavailable. Do not attempt to run commands.",
+    toolAuthority,
     "ForkLight will run the acceptance commands independently after you finish.",
     "Inspect the final changes before reporting completion.",
   ];
@@ -1037,6 +1060,11 @@ export interface WorkerPromptAppendices {
    * Used only for durably identified Review Graph reviewer Tasks.
    */
   terminalOutputLines?: string[];
+  /**
+   * Runtime-aware hard-boundary policy. Defaults to tool-only/no-shell so
+   * Claude Code and Grok keep their existing contract when callers omit it.
+   */
+  hardBoundaryPolicy?: WorkerHardBoundaryPolicy;
 }
 
 /** Durable internal namespace for Review Graph reviewer Tasks (not user content). */
@@ -1097,6 +1125,9 @@ export function buildWorkerPrompt(
     ? appendices.checkpointLines
     : claudeCheckpointProtocolLines(spec.acceptance.commands);
   const terminalOutputLines = appendices?.terminalOutputLines;
+  const boundaryLines = hardBoundaries(
+    appendices?.hardBoundaryPolicy ?? { kind: "tool-only-no-shell" },
+  );
   const lines = [
     resuming
       ? "Resume the previously interrupted task using the agreed execution contract."
@@ -1167,7 +1198,7 @@ export function buildWorkerPrompt(
     ...changeBudgetBlock(spec),
     "",
     "Hard boundaries:",
-    ...hardBoundaries().map((boundary) => `- ${boundary}`),
+    ...boundaryLines.map((boundary) => `- ${boundary}`),
     "",
     "Behavioral acceptance criteria:",
     ...spec.acceptance.criteria.map((criterion) => `- ${criterion}`),

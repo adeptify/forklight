@@ -12,6 +12,7 @@ import {
   assessTaskQuality,
   buildWorkerPrompt,
   GENERIC_CODING_SUMMARY_INSTRUCTION,
+  hardBoundaries,
   isReviewGraphReviewerTaskFile,
   loadTaskSpec,
   parseTaskSpec,
@@ -114,6 +115,52 @@ test("prompts the Worker to run the bounded non-authoritative checkpoint when av
   assert.match(prompt, /acceptance-1/);
   assert.match(prompt, /non-authoritative/i);
   assert.match(prompt, /authoritative for success/i);
+});
+
+test("default Worker hard boundaries keep no-shell; Codex policy permits sandboxed command tools only", async () => {
+  const loaded = await loadTaskSpec(path.resolve("examples/deepseek-checkout.yaml"));
+  // Direct callers and Claude/Grok default path stay tool-only/no-shell.
+  const defaultPrompt = buildWorkerPrompt(loaded.spec, false);
+  assert.match(defaultPrompt, /Shell access is intentionally unavailable/);
+  assert.ok(!defaultPrompt.includes("workspace-sandboxed command tool"));
+
+  const editable = hardBoundaries({ kind: "codex-workspace-command", allowEdits: true });
+  const readOnly = hardBoundaries({ kind: "codex-workspace-command", allowEdits: false });
+  assert.ok(editable.some((line) =>
+    line.includes("workspace-sandboxed command tool")
+    && line.includes("product file inspect, search, and edit")
+    && line.includes("workspace-write")
+    && line.includes("Command network access is disabled")
+    && line.includes("Runtime-private temporary storage")));
+  assert.ok(readOnly.some((line) =>
+    line.includes("workspace-sandboxed command tool")
+    && line.includes("product file inspect and search")
+    && line.includes("read-only")
+    && line.includes("Do not edit product files")
+    && line.includes("Command network access is disabled")));
+  assert.ok(!editable.some((line) => line.includes("Shell access is intentionally unavailable")));
+  assert.ok(!readOnly.some((line) => line.includes("Shell access is intentionally unavailable")));
+  // Must not falsely deny runtime-private temp while excluding global /tmp for product work.
+  for (const lines of [editable, readOnly]) {
+    assert.ok(lines.some((line) => line.includes("global /tmp")));
+    assert.ok(lines.some((line) => line.includes("Runtime-private temporary storage")));
+  }
+
+  // Shared isolation/Git/acceptance prohibitions remain on every policy.
+  for (const lines of [hardBoundaries(), editable, readOnly]) {
+    assert.ok(lines.some((line) => line.includes("Work only inside the current workspace")));
+    assert.ok(lines.some((line) => line.includes("Never commit, push")));
+    assert.ok(lines.some((line) =>
+      line.includes("ForkLight will run the acceptance commands independently")));
+  }
+
+  const codexPrompt = buildWorkerPrompt(loaded.spec, false, undefined, {
+    hardBoundaryPolicy: { kind: "codex-workspace-command", allowEdits: true },
+  });
+  assert.match(codexPrompt, /workspace-sandboxed command tool/);
+  assert.match(codexPrompt, /Command network access is disabled/);
+  assert.match(codexPrompt, /Runtime-private temporary storage/);
+  assert.ok(!codexPrompt.includes("Shell access is intentionally unavailable"));
 });
 
 test("builds complete remediation from the latest independent verification", async () => {

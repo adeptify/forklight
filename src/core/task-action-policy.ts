@@ -78,7 +78,8 @@ export type TaskActionReasonCode =
   | "allowance-exhausted"
   | "already-past"
   | "not-eligible"
-  | "unknown-evidence";
+  | "unknown-evidence"
+  | "goal-gate-satisfied";
 
 /** One bounded destination-column disposition. */
 export interface TaskDestinationPolicy {
@@ -117,6 +118,10 @@ export interface TaskActionPolicyInput {
   resolutionState: TaskResolutionState;
   /** Column the card currently sits in (from the canonical hierarchy mapper). */
   currentColumn: WorkHierarchyColumnCode;
+  /** True when the card is complete in its Goal lane because the configured
+   *  Goal milestone gate is satisfied. Broader Task-wide review or Integration
+   *  may still be open; it must never be presented as required here. */
+  planGateSatisfied?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +210,17 @@ function noop(
   return makeEntry({ column, disposition: "no-op", reason, explanation });
 }
 
+/** One closed no-op destination for a card complete in its Goal lane. */
+function goalCompleteEntry(column: WorkHierarchyColumnCode): TaskDestinationPolicy {
+  return noop(
+    column,
+    "goal-gate-satisfied",
+    column === "completed"
+      ? "This Plan item is complete because its Goal milestone gate is satisfied; broader Task review is optional and outside this Goal."
+      : "A Goal-complete Plan item cannot move to another column.",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Projection
 // ---------------------------------------------------------------------------
@@ -230,6 +246,25 @@ export function projectTaskActionPolicy(
     resolutionState,
     currentColumn,
   } = input;
+
+  // A Goal-gate satisfied card is complete in its Goal lane. Every destination
+  // is a closed no-op: no required Main decision, integration, or card move may
+  // be offered for a milestone the Goal already declared satisfied.
+  if (input.planGateSatisfied === true) {
+    return {
+      schemaVersion: TASK_ACTION_POLICY_SCHEMA_VERSION,
+      nextCheckpoint: "This Plan item is complete for its Goal; no Goal action is required.",
+      destinations: {
+        "not-started": goalCompleteEntry("not-started"),
+        ready: goalCompleteEntry("ready"),
+        running: goalCompleteEntry("running"),
+        "waiting-verification": goalCompleteEntry("waiting-verification"),
+        "waiting-user-decision": goalCompleteEntry("waiting-user-decision"),
+        completed: goalCompleteEntry("completed"),
+        "stopped-failed": goalCompleteEntry("stopped-failed"),
+      },
+    };
+  }
 
   const resolved = resolutionState.status === "resolved";
   const events = store.listEvents(taskId);

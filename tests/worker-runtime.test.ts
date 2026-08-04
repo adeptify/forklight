@@ -12,7 +12,9 @@ import {
   buildWorkerPrompt,
   claudeToolProtocolLines,
   GENERIC_CODING_SUMMARY_INSTRUCTION,
+  hardBoundaries,
   isReviewGraphReviewerTaskFile,
+  neutralToolProtocolLines,
   reviewerTerminalOutputLines,
   workerPromptAppendicesForTask,
 } from "../src/core/task.js";
@@ -31,11 +33,13 @@ import {
 import {
   buildCodexCliArgs,
   buildCodexWorkerEnv,
+  codexHardBoundaryPolicy,
   CodexCliAdapter,
+  codexWorkspaceToolLines,
   runCodexWorker,
   seedCodexHome,
 } from "../src/workers/codex.js";
-import { childEnvironment } from "../src/workers/claude.js";
+import { childEnvironment, ClaudeCodeAdapter } from "../src/workers/claude.js";
 import {
   DEFAULT_NO_PROXY,
   validateWorkerNetworkPolicy,
@@ -54,11 +58,18 @@ import {
 } from "../src/events/grok-normalize.js";
 import {
   codexAgentMessageFromLine,
+  CODEX_ACCOUNT_USAGE_LIMIT_REASON,
+  CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY,
   CODEX_APP_SERVER_RESULT_TEXT_MAX,
   codexAppServerTokenUsage,
   CodexEventNormalizer,
   codexUsage,
+  isCodexAccountUsageLimitMessage,
+  privacySafeToolCorrelationToken,
+  privateCodexDiffDigest,
   projectCodexAppServerFinalItem,
+  projectCodexAppServerItemProgress,
+  projectCodexAppServerWorkspaceChangeMilestone,
 } from "../src/events/codex-normalize.js";
 import type { AttemptRecord, TaskRecord, TaskSpec } from "../src/core/types.js";
 import { checkpointSatisfied } from "../src/core/checkpoint.js";
@@ -221,7 +232,11 @@ test("Codex CLI argv freezes model, effort, sandbox, and disabled expansion path
   assert.ok(args.includes("features.apps=false"));
   assert.ok(args.includes('web_search="disabled"'));
   assert.ok(args.includes("project_doc_max_bytes=0"));
+  assert.ok(args.includes("sandbox_workspace_write.network_access=false"));
+  assert.ok(args.includes("sandbox_workspace_write.exclude_slash_tmp=true"));
+  assert.ok(!args.some((arg) => arg.includes("exclude_tmpdir_env_var=true")));
   assert.ok(!args.includes("danger-full-access"));
+  assert.ok(!args.includes("--add-dir"));
   assert.ok(!args.includes("ultra"));
 
   const readOnly = buildCodexCliArgs({
@@ -232,9 +247,206 @@ test("Codex CLI argv freezes model, effort, sandbox, and disabled expansion path
     allowEdits: false,
   });
   assert.equal(readOnly[readOnly.indexOf("--sandbox") + 1], "read-only");
+  assert.ok(readOnly.includes("sandbox_workspace_write.network_access=false"));
+  assert.ok(readOnly.includes("sandbox_workspace_write.exclude_slash_tmp=true"));
+  assert.ok(!readOnly.includes("danger-full-access"));
+  assert.ok(!readOnly.includes("--add-dir"));
   assert.deepEqual(new CodexCliAdapter().effortArgs("xhigh"), [
     "-c", 'model_reasoning_effort="xhigh"',
   ]);
+});
+
+/** Shared helpers for Codex prompt+argv contract regressions (FL-111A). */
+function codexContractSpec(allowEdits: boolean): TaskSpec {
+  return parseTaskSpec(
+    minimalContract({
+      provider: {
+        name: "openai",
+        model: "gpt-5.6-luna",
+        keychainService: "forklight.openai.api-key",
+      },
+      runtime: {
+        name: "codex-cli",
+        executable: "codex",
+        effort: "high",
+        maxBudgetUsd: 0.1,
+      },
+      worker: { allowEdits, allowedCommands: [], focusPaths: ["src"] },
+    }),
+    "/tmp",
+    policy(),
+  );
+}
+
+function renderCodexWorkerPrompt(allowEdits: boolean, nativeGoalExtra = false): string {
+  const toolLines = nativeGoalExtra
+    ? [
+        ...codexWorkspaceToolLines(allowEdits),
+        "- Project instructions from operator config are disabled for this Goal.",
+        "- This is a Runtime-native Goal: it owns the bounded end-to-end implementation.",
+      ]
+    : codexWorkspaceToolLines(allowEdits);
+  return buildWorkerPrompt(codexContractSpec(allowEdits), false, undefined, {
+    toolLines,
+    checkpointLines: [
+      "",
+      "- This Codex Worker foundation does not support ForkLight checkpoint MCP.",
+      "- ForkLight will run the independent acceptance commands after the Worker exits.",
+    ],
+    hardBoundaryPolicy: codexHardBoundaryPolicy(allowEdits),
+  });
+}
+
+function assertCodexForbiddenAuthorityAbsent(prompt: string, args?: string[]): void {
+  // Prompt layer: never grant expansion paths or Worker-run acceptance authority.
+  assert.ok(!prompt.includes("Shell access is intentionally unavailable"));
+  assert.ok(!/danger-full-access|dangerFullAccess/i.test(prompt));
+  assert.ok(!/approval.?escalation is enabled|request approval/i.test(prompt));
+  assert.ok(!prompt.includes("You may run the acceptance commands"));
+  assert.match(prompt, /ForkLight will run the (independent )?acceptance commands/i);
+  assert.match(prompt, /Never commit, push/);
+  assert.match(prompt, /Command network access is disabled|command network is disabled/i);
+  assert.match(prompt, /product file/i);
+  assert.match(prompt, /Runtime-private temporary storage|task-private temporary storage/i);
+  assert.match(prompt, /global \/tmp/i);
+  if (args === undefined) return;
+  // Argv layer: frozen least-privilege launch policy.
+  assert.ok(args.includes('approval_policy="never"'));
+  assert.ok(args.includes("features.multi_agent=false"));
+  assert.ok(args.includes("features.apps=false"));
+  assert.ok(args.includes('web_search="disabled"'));
+  assert.ok(args.includes("--ignore-user-config"));
+  assert.ok(args.includes("--ignore-rules"));
+  assert.ok(args.includes("sandbox_workspace_write.network_access=false"));
+  assert.ok(args.includes("sandbox_workspace_write.exclude_slash_tmp=true"));
+  assert.ok(!args.some((arg) => arg.includes("exclude_tmpdir_env_var=true")));
+  assert.ok(!args.includes("danger-full-access"));
+  assert.ok(!args.includes("--add-dir"));
+}
+
+/** Shared assertions for the Runtime-aware Codex prompt surface (helpers + real artifacts). */
+function assertCodexEditablePromptContract(prompt: string): void {
+  assert.match(prompt, /workspace-sandboxed command tool/i);
+  assert.match(prompt, /product file inspect, search, and edit|inspect, search, and edit as authorized/i);
+  assert.match(prompt, /workspace-write/);
+  assert.ok(!prompt.includes("Shell access is intentionally unavailable"));
+  assert.ok(!prompt.includes("Do not attempt to run commands"));
+  assert.match(prompt, /not separate Read\/Grep\/Edit tools/);
+  assertCodexForbiddenAuthorityAbsent(prompt);
+}
+
+function assertCodexReadOnlyPromptContract(prompt: string): void {
+  assert.match(prompt, /workspace-sandboxed command tool/i);
+  assert.match(prompt, /inspect and search/i);
+  assert.match(prompt, /do not edit product files/i);
+  assert.match(prompt, /read-only/);
+  assert.ok(!prompt.includes("Shell access is intentionally unavailable"));
+  assert.ok(!/inspect, search, and edit as authorized/.test(prompt));
+  assert.ok(!prompt.includes("under workspace-write"));
+  assertCodexForbiddenAuthorityAbsent(prompt);
+}
+
+test("Codex editable prompt+argv permit workspace-sandboxed inspect/search/edit without no-shell contradiction", () => {
+  // Regression for the zero-Diff dogfood defect: Codex was told to use Codex
+  // tools while the shared boundary forbade the only command-backed path.
+  const prompt = renderCodexWorkerPrompt(true);
+  const args = buildCodexCliArgs({
+    prompt,
+    workspace: "/private/task/workspace",
+    model: "gpt-5.6-luna",
+    effort: "high",
+    allowEdits: true,
+  });
+
+  assertCodexEditablePromptContract(prompt);
+  assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
+  assertCodexForbiddenAuthorityAbsent(prompt, args);
+
+  // Same contract is shared with native Goal tool lines (lifecycle unchanged).
+  const goalPrompt = renderCodexWorkerPrompt(true, true);
+  assertCodexEditablePromptContract(goalPrompt);
+  assert.match(goalPrompt, /Runtime-native Goal/);
+});
+
+test("Codex read-only prompt+argv permit inspect/search but forbid edits", () => {
+  const prompt = renderCodexWorkerPrompt(false);
+  const args = buildCodexCliArgs({
+    prompt,
+    workspace: "/private/task/workspace",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    allowEdits: false,
+  });
+
+  assertCodexReadOnlyPromptContract(prompt);
+  assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
+  assertCodexForbiddenAuthorityAbsent(prompt, args);
+});
+
+test("Claude and Grok keep tool-only/no-shell hard boundaries without Codex command-tool wording", () => {
+  const claudeSpec = parseTaskSpec(minimalContract(), "/tmp", policy());
+  const claude = new ClaudeCodeAdapter();
+  const claudeTask = {
+    spec: claudeSpec,
+    taskFile: "/tmp/task.yaml",
+  } as TaskRecord;
+  const claudePrompt = buildWorkerPrompt(claudeSpec, false, undefined, {
+    toolLines: claude.toolProtocolAppendix(claudeTask),
+    checkpointLines: claude.checkpointProtocolAppendix(claudeTask),
+  });
+  assert.ok(claudePrompt.includes("Shell access is intentionally unavailable"));
+  assert.ok(claudePrompt.includes("Do not attempt to run commands"));
+  assert.ok(!claudePrompt.includes("workspace-sandboxed command tool"));
+  assert.ok(!claudePrompt.includes("workspace-write"));
+  assert.ok(claudeToolProtocolLines(["src"]).some((line) => line.includes("Glob")));
+
+  const grokSpec = parseTaskSpec(
+    minimalContract({
+      provider: { name: "xai", model: "grok-build", keychainService: "forklight.xai.api-key" },
+      runtime: { name: "grok-build", executable: "grok", effort: "high", maxBudgetUsd: 0.1 },
+    }),
+    "/tmp",
+    policy(),
+  );
+  const grok = new GrokBuildAdapter();
+  const grokTask = {
+    spec: grokSpec,
+    taskFile: "/tmp/task.yaml",
+  } as TaskRecord;
+  const grokPrompt = buildWorkerPrompt(grokSpec, false, undefined, {
+    toolLines: grok.toolProtocolAppendix(grokTask),
+    checkpointLines: grok.checkpointProtocolAppendix(grokTask),
+  });
+  assert.ok(grokPrompt.includes("Shell access is intentionally unavailable"));
+  assert.ok(grokPrompt.includes("Do not attempt to run commands"));
+  assert.ok(!grokPrompt.includes("workspace-sandboxed command tool"));
+  assert.ok(!grokPrompt.includes("workspace-write"));
+  assert.ok(
+    neutralToolProtocolLines(["src"]).some((line) =>
+      line.includes("Do not use unrestricted shell")),
+  );
+  // Grok tool allowlist still denies unrestricted shell tools.
+  assert.ok(grokDisallowedTools().includes("run_terminal_cmd"));
+
+  // Default hardBoundaries (no policy) remain tool-only/no-shell.
+  const defaults = hardBoundaries();
+  assert.ok(defaults.some((line) => line.includes("Shell access is intentionally unavailable")));
+  assert.ok(!defaults.some((line) => line.includes("workspace-sandboxed command tool")));
+});
+
+test("Runtime hard-boundary policy cannot drop isolation, Git, or acceptance prohibitions", () => {
+  for (const policyKind of [
+    { kind: "tool-only-no-shell" as const },
+    { kind: "codex-workspace-command" as const, allowEdits: true },
+    { kind: "codex-workspace-command" as const, allowEdits: false },
+  ]) {
+    const lines = hardBoundaries(policyKind);
+    assert.ok(lines.some((line) => line.includes("Work only inside the current workspace")));
+    assert.ok(lines.some((line) => line.includes("Never commit, push")));
+    assert.ok(lines.some((line) =>
+      line.includes("ForkLight will run the acceptance commands independently")));
+    assert.ok(!lines.some((line) => /danger-full-access|add-dir|nested agents are enabled/i.test(line)));
+  }
 });
 
 test("Codex JSONL normalizer preserves session, progress, result, and exact usage", () => {
@@ -337,6 +549,105 @@ test("Codex JSONL malformed and conflicting terminal evidence fail closed", () =
   const conflict = duplicate.parseLine('{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}');
   assert.equal(conflict[0]?.type, "worker.failed");
   assert.match(conflict[0]?.terminal?.failureReason ?? "", /conflicting terminal/);
+});
+
+/** Measured Codex provider account usage-limit message family (FL-111D1). */
+const CODEX_QUOTA_MESSAGE =
+  "You've hit your usage limit. Try again later.";
+
+function assertSingleCodexQuotaFailure(events: ReturnType<CodexEventNormalizer["parseLine"]>): void {
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.type, "worker.failed");
+  assert.equal(events[0]?.summary, CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY);
+  assert.equal(events[0]?.terminal?.failureReason, CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY);
+  assert.equal(
+    (events[0]?.payload as { failureCategory?: string } | undefined)?.failureCategory,
+    "budget",
+  );
+  assert.equal(
+    (events[0]?.payload as { reasonCode?: string } | undefined)?.reasonCode,
+    CODEX_ACCOUNT_USAGE_LIMIT_REASON,
+  );
+  assert.equal(events[0]?.terminal?.usage, undefined, "quota rejection never invents usage");
+}
+
+test("Codex account usage-limit error then same-message turn.failed is one budget failure", () => {
+  // Exact measured two-terminal shape: error, then turn.failed with the same message.
+  assert.equal(isCodexAccountUsageLimitMessage(CODEX_QUOTA_MESSAGE), true);
+  assert.equal(isCodexAccountUsageLimitMessage("usage limit credits"), false,
+    "generic tokens alone must not classify as account quota");
+  assert.equal(isCodexAccountUsageLimitMessage("Worker hit a file limit"), false);
+
+  const normalizer = new CodexEventNormalizer();
+  normalizer.parseLine('{"type":"thread.started","thread_id":"thread-quota"}');
+  normalizer.parseLine('{"type":"turn.started"}');
+  const first = normalizer.parseLine(JSON.stringify({
+    type: "error",
+    message: CODEX_QUOTA_MESSAGE,
+  }));
+  assertSingleCodexQuotaFailure(first);
+  const second = normalizer.parseLine(JSON.stringify({
+    type: "turn.failed",
+    error: { message: CODEX_QUOTA_MESSAGE },
+  }));
+  assert.deepEqual(second, [], "identical duplicate failure emits no second public terminal");
+  // A later different terminal still fails closed.
+  const conflict = normalizer.parseLine(JSON.stringify({
+    type: "turn.failed",
+    error: { message: "some other failure" },
+  }));
+  assert.equal(conflict[0]?.type, "worker.failed");
+  assert.match(conflict[0]?.terminal?.failureReason ?? "", /conflicting terminal/);
+});
+
+test("Codex account usage-limit turn.failed then same-message error is also idempotent", () => {
+  const normalizer = new CodexEventNormalizer();
+  const first = normalizer.parseLine(JSON.stringify({
+    type: "turn.failed",
+    error: { message: CODEX_QUOTA_MESSAGE },
+  }));
+  assertSingleCodexQuotaFailure(first);
+  const second = normalizer.parseLine(JSON.stringify({
+    type: "error",
+    message: CODEX_QUOTA_MESSAGE,
+  }));
+  assert.deepEqual(second, [], "reverse-order duplicate is suppressed");
+});
+
+test("Codex different failure reasons and success-related terminals still conflict", () => {
+  // Different failure reasons remain ambiguous.
+  const different = new CodexEventNormalizer();
+  different.parseLine(JSON.stringify({ type: "error", message: "network boom" }));
+  const differentConflict = different.parseLine(JSON.stringify({
+    type: "turn.failed",
+    error: { message: "auth boom" },
+  }));
+  assert.match(differentConflict[0]?.terminal?.failureReason ?? "", /conflicting terminal/);
+
+  // Failure then success conflicts.
+  const failThenOk = new CodexEventNormalizer();
+  failThenOk.parseLine(JSON.stringify({ type: "error", message: CODEX_QUOTA_MESSAGE }));
+  const afterFail = failThenOk.parseLine(
+    '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+  );
+  assert.match(afterFail[0]?.terminal?.failureReason ?? "", /conflicting terminal/);
+
+  // Success then failure conflicts.
+  const okThenFail = new CodexEventNormalizer();
+  okThenFail.parseLine('{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}');
+  const afterOk = okThenFail.parseLine(JSON.stringify({
+    type: "error",
+    message: CODEX_QUOTA_MESSAGE,
+  }));
+  assert.match(afterOk[0]?.terminal?.failureReason ?? "", /conflicting terminal/);
+
+  // Identical successes still conflict (never deduplicated).
+  const twoOk = new CodexEventNormalizer();
+  twoOk.parseLine('{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}');
+  const secondOk = twoOk.parseLine(
+    '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+  );
+  assert.match(secondOk[0]?.terminal?.failureReason ?? "", /conflicting terminal/);
 });
 
 test("Codex JSONL completion without usage succeeds with usage unavailable", () => {
@@ -497,6 +808,130 @@ test("Codex app-server final item projection accepts only canonical final answer
   assert.equal(capped.finalText?.length, CODEX_APP_SERVER_RESULT_TEXT_MAX);
 });
 
+test("Codex app-server item progress projects command/file lifecycle without private content", () => {
+  // Private-looking raw ids must never appear publicly; only a one-way token.
+  const privateCmdId = "item:/Users/me/secret-cmd-id";
+  const privateFileId = "item:/Users/me/secret-file-id";
+  const expectedCmdToken = privacySafeToolCorrelationToken(privateCmdId);
+  const expectedFileToken = privacySafeToolCorrelationToken(privateFileId);
+  assert.equal(typeof expectedCmdToken, "string");
+  assert.equal(expectedCmdToken?.length, 16);
+  assert.notEqual(expectedCmdToken, privateCmdId);
+
+  const commandStart = projectCodexAppServerItemProgress("item/started", {
+    id: privateCmdId,
+    type: "commandExecution",
+    command: "rg secret /etc/passwd",
+    cwd: "/private/host/path",
+    status: "inProgress",
+  });
+  assert.equal(commandStart?.type, "worker.tool.started");
+  assert.equal(commandStart?.summary, "command started");
+  assert.deepEqual(commandStart?.payload, {
+    tool: "commandExecution",
+    toolUseId: expectedCmdToken,
+    activityEvidence: "effective-progress",
+  });
+  assert.equal(isEffectiveProgressEvent(commandStart!.type, commandStart!.payload), true);
+  assert.ok(!JSON.stringify(commandStart).includes("rg secret"));
+  assert.ok(!JSON.stringify(commandStart).includes("/private/host/path"));
+  assert.ok(!JSON.stringify(commandStart).includes(privateCmdId));
+  assert.ok(!JSON.stringify(commandStart).includes("/Users/me/"));
+
+  const fileDone = projectCodexAppServerItemProgress("item/completed", {
+    id: privateFileId,
+    type: "fileChange",
+    changes: [{ path: "src/secret.ts", kind: "update" }],
+    status: "completed",
+  });
+  assert.equal(fileDone?.type, "worker.tool.completed");
+  assert.equal(fileDone?.summary, "file change completed");
+  assert.deepEqual(fileDone?.payload, {
+    tool: "fileChange",
+    toolUseId: expectedFileToken,
+    activityEvidence: "effective-progress",
+  });
+  assert.ok(!JSON.stringify(fileDone).includes("src/secret.ts"));
+  assert.ok(!JSON.stringify(fileDone).includes(privateFileId));
+
+  // Start/complete pairing is stable for the same raw id.
+  const commandDone = projectCodexAppServerItemProgress("item/completed", {
+    id: privateCmdId,
+    type: "commandExecution",
+  });
+  assert.equal(
+    (commandDone?.payload as { toolUseId?: string }).toolUseId,
+    expectedCmdToken,
+  );
+
+  assert.equal(
+    projectCodexAppServerItemProgress("item/started", {
+      id: "item-msg",
+      type: "agentMessage",
+      text: "streaming",
+    }),
+    undefined,
+    "agentMessage is not a tool progress event",
+  );
+  assert.equal(
+    projectCodexAppServerItemProgress("item/completed", { type: "command_execution" }),
+    undefined,
+    "snake_case tool types fail closed",
+  );
+  // Missing/oversized ids still project tool lifecycle but omit correlation.
+  const missingId = projectCodexAppServerItemProgress("item/started", {
+    type: "commandExecution",
+  });
+  assert.equal(missingId?.type, "worker.tool.started");
+  assert.equal(
+    (missingId?.payload as { toolUseId?: string }).toolUseId,
+    undefined,
+    "missing item ids produce no correlation token",
+  );
+  const oversized = projectCodexAppServerItemProgress("item/started", {
+    id: "x".repeat(200),
+    type: "commandExecution",
+  });
+  assert.equal(oversized?.type, "worker.tool.started");
+  assert.equal(
+    (oversized?.payload as { toolUseId?: string }).toolUseId,
+    undefined,
+    "oversized item ids produce no correlation token",
+  );
+});
+
+test("Codex app-server private diff digest is material-only and never a public payload", () => {
+  const first = privateCodexDiffDigest("diff --git a/src/a.ts b/src/a.ts\n+secret");
+  const same = privateCodexDiffDigest("diff --git a/src/a.ts b/src/a.ts\n+secret");
+  const next = privateCodexDiffDigest("diff --git a/src/a.ts b/src/a.ts\n+secret\n+more");
+  assert.equal(typeof first, "string");
+  assert.equal(first, same, "identical private evidence is stable");
+  assert.notEqual(first, next, "materially new evidence changes the digest");
+  // Tail-only changes on a large body remain material (full-evidence hash).
+  const prefix = "x".repeat(300_000);
+  const head = privateCodexDiffDigest(prefix);
+  const tailChanged = privateCodexDiffDigest(`${prefix}y`);
+  assert.notEqual(head, tailChanged, "tail-only changes must alter the private digest");
+  assert.equal(privateCodexDiffDigest(""), undefined);
+  assert.equal(privateCodexDiffDigest(undefined), undefined);
+  assert.equal(privateCodexDiffDigest(null), undefined);
+
+  const milestone = projectCodexAppServerWorkspaceChangeMilestone();
+  assert.equal(milestone.type, "worker.message");
+  assert.equal(
+    (milestone.payload as { activityKind?: string }).activityKind,
+    "workspace-change",
+  );
+  assert.equal(
+    (milestone.payload as { activityEvidence?: string }).activityEvidence,
+    "effective-progress",
+  );
+  assert.equal(isEffectiveProgressEvent(milestone.type, milestone.payload), true);
+  assert.ok(!JSON.stringify(milestone).includes("diff --git"));
+  assert.ok(!JSON.stringify(milestone).includes("src/a.ts"));
+  assert.ok(!JSON.stringify(milestone).includes(first ?? "missing"));
+});
+
 test("seedCodexHome copies only auth and safe catalog with private permissions", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "fl-codex-seed-"));
   const operator = path.join(root, "operator");
@@ -538,6 +973,10 @@ async function codexRuntimeFixture(
     "for (const line of lines) fs.writeSync(1, line + '\\n');",
     "fs.writeFileSync('codex-env-dump.json', JSON.stringify({",
     "  CODEX_HOME: process.env.CODEX_HOME || null,",
+    "  TMPDIR: process.env.TMPDIR || null,",
+    "  TMP: process.env.TMP || null,",
+    "  TEMP: process.env.TEMP || null,",
+    "  argv: process.argv.slice(2),",
     "  hasOpenAIKey: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_API_KEY'),",
     "  hasOpenAIBaseUrl: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_BASE_URL'),",
     "  hasOpenAIOrgId: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_ORG_ID'),",
@@ -657,6 +1096,10 @@ test("runCodexWorker launches a fake Codex, normalizes success with exact usage,
       await readFile(path.join(fixture.workspace, "codex-env-dump.json"), "utf8"),
     ) as {
       CODEX_HOME: string | null;
+      TMPDIR: string | null;
+      TMP: string | null;
+      TEMP: string | null;
+      argv: string[];
       hasOpenAIKey: boolean;
       hasOpenAIBaseUrl: boolean;
       hasOpenAIOrgId: boolean;
@@ -665,6 +1108,10 @@ test("runCodexWorker launches a fake Codex, normalizes success with exact usage,
       cwd: string;
     };
     assert.equal(envDump.CODEX_HOME, path.join(fixture.task.paths.root, "codex-home"));
+    const taskTmp = path.join(fixture.task.paths.root, "codex-tmp");
+    assert.equal(envDump.TMPDIR, taskTmp, "task-private TMPDIR is preserved");
+    assert.equal(envDump.TMP, taskTmp);
+    assert.equal(envDump.TEMP, taskTmp);
     assert.equal(envDump.hasOpenAIKey, false, "OPENAI_API_KEY must not reach the child env");
     assert.equal(envDump.hasOpenAIBaseUrl, false, "OPENAI_BASE_URL must not reach the child env");
     assert.equal(envDump.hasOpenAIOrgId, false, "OPENAI_ORG_ID must not reach the child env");
@@ -676,6 +1123,23 @@ test("runCodexWorker launches a fake Codex, normalizes success with exact usage,
       await realpath(fixture.workspace),
       "Codex runs inside the isolated Task workspace",
     );
+    // Real single-run launch argv must enforce network off + slash-tmp exclude.
+    assert.ok(Array.isArray(envDump.argv) && envDump.argv.length > 0);
+    assert.equal(envDump.argv[envDump.argv.indexOf("--sandbox") + 1], "workspace-write");
+    assert.ok(envDump.argv.includes("sandbox_workspace_write.network_access=false"));
+    assert.ok(envDump.argv.includes("sandbox_workspace_write.exclude_slash_tmp=true"));
+    assert.ok(!envDump.argv.some((arg) => arg.includes("exclude_tmpdir_env_var=true")));
+    assert.ok(envDump.argv.includes('approval_policy="never"'));
+    assert.ok(!envDump.argv.includes("danger-full-access"));
+    assert.ok(!envDump.argv.includes("--add-dir"));
+
+    // Prove runCodexWorker wired the Runtime-aware prompt into the real artifact.
+    const promptArtifact = await readFile(
+      path.join(fixture.task.paths.logs, "attempt-1.prompt.txt"),
+      "utf8",
+    );
+    assertCodexEditablePromptContract(promptArtifact);
+    assertCodexForbiddenAuthorityAbsent(promptArtifact, envDump.argv);
   } finally {
     for (const key of parentEnvKeys) {
       if (previousEnv[key] === undefined) delete process.env[key];
@@ -706,6 +1170,319 @@ test("runCodexWorker fails closed on malformed JSONL and never invents success",
     assert.ok(failed, "worker.failed event persisted for malformed stream");
   } finally {
     fixture.store.close();
+  }
+});
+
+test("runCodexWorker preserves budget class for measured quota error+turn.failed pair", async () => {
+  // Complete fake-process path: normalizer budget must survive child exit summary.
+  const fixture = await codexRuntimeFixture([
+    '{"type":"thread.started","thread_id":"thread-quota"}',
+    '{"type":"turn.started"}',
+    JSON.stringify({ type: "error", message: CODEX_QUOTA_MESSAGE }),
+    JSON.stringify({ type: "turn.failed", error: { message: CODEX_QUOTA_MESSAGE } }),
+  ], 1);
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: false,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "budget",
+      "child exit must not broaden account-quota budget to runtime");
+    assert.equal(result.error, CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY);
+    assert.equal(result.usage, undefined, "quota path never invents Tokens");
+    assert.equal(result.runtimeCostEstimateUsd, undefined, "quota path never invents cost");
+
+    const failedEvents = fixture.store.listEvents(fixture.task.id)
+      .filter((e) => e.type === "worker.failed");
+    assert.equal(failedEvents.length, 1, "exactly one durable failure event for the quota pair");
+    assert.equal(
+      (failedEvents[0]?.payload as { failureCategory?: string } | undefined)?.failureCategory,
+      "budget",
+    );
+    assert.equal(
+      (failedEvents[0]?.payload as { reasonCode?: string } | undefined)?.reasonCode,
+      CODEX_ACCOUNT_USAGE_LIMIT_REASON,
+    );
+    assert.equal(failedEvents[0]?.summary, CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY);
+    assert.ok(
+      !failedEvents.some((e) => /conflicting terminal/i.test(e.summary)),
+      "no terminal-conflict event for identical quota pair",
+    );
+    assert.equal(
+      failureCategoryFromEvents(fixture.store.listEvents(fixture.task.id)),
+      "budget",
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+/**
+ * Full executeAttempt path for measured Codex quota: adapter persists the
+ * terminal, runner must not append a second identical worker.failed.
+ * Placed after advanced-policy imports via shared helpers defined later;
+ * the test body runs only when the suite reaches this registration order,
+ * and imports are module-hoisted.
+ */
+test("executeAttempt keeps exactly one Codex quota worker.failed with budget reasonCode", async () => {
+  const {
+    enforcementCapabilityForRuntime: runtimeCaps,
+    defaultAdvancedPolicyFields,
+  } = await import("../src/core/advanced-policy.js");
+  const root = await mkdtemp(path.join(tmpdir(), "fl-codex-quota-e2e-"));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(path.join(source, "src", "hello.ts"), "export const n = 1;\n");
+  const home = path.join(root, "state");
+  const store = new StateStore(home);
+  const operatorCodexHome = path.join(root, "operator-codex");
+  await mkdir(operatorCodexHome, { recursive: true });
+  await writeFile(path.join(operatorCodexHome, "auth.json"), '{"credentials":"placeholder"}', { mode: 0o600 });
+  await writeFile(path.join(operatorCodexHome, "models_cache.json"), '{"models":[]}', { mode: 0o600 });
+  const script = path.join(root, "fake-codex.cjs");
+  await writeFile(script, [
+    "#!/usr/bin/env node",
+    "const fs = require('node:fs');",
+    `const lines = ${JSON.stringify([
+      '{"type":"thread.started","thread_id":"thread-quota-e2e"}',
+      '{"type":"turn.started"}',
+      JSON.stringify({ type: "error", message: CODEX_QUOTA_MESSAGE }),
+      JSON.stringify({ type: "turn.failed", error: { message: CODEX_QUOTA_MESSAGE } }),
+    ])};`,
+    "for (const line of lines) fs.writeSync(1, line + '\\n');",
+    "process.exit(1);",
+  ].join("\n"), { mode: 0o755 });
+
+  const { taskPaths } = await import("../src/core/config.js");
+  const { prepareWorkspace } = await import("../src/workspace/copy.js");
+  const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const paths = taskPaths(home, id);
+  const spec = parseTaskSpec(
+    minimalContract({
+      project: source,
+      provider: { name: "openai", model: "gpt-5.6-luna", keychainService: "forklight.openai.api-key" },
+      runtime: { name: "codex-cli", executable: script, effort: "max", maxBudgetUsd: null },
+      acceptance: { criteria: ["c1"], commands: ["true"] },
+    }),
+    source,
+    { ...policy(), completionPolicy: { noChangeMode: "off", changeBudgetMode: "off" } },
+  ) as TaskSpec;
+  await prepareWorkspace(spec, paths);
+
+  resetWorkerRegistryForTests();
+  getWorkerAdapter("codex-cli");
+  const capabilities = getWorkerAdapter("codex-cli").capabilities();
+  registerWorkerAdapter({
+    name: "codex-cli",
+    displayName: "Codex CLI (quota e2e)",
+    defaultExecutable: script,
+    capabilities: () => capabilities,
+    doctor: () => ({
+      runtime: "codex-cli",
+      ok: true,
+      executable: script,
+      issues: [],
+      capabilities,
+    }),
+    validateSpec: () => {},
+    effortArgs: () => [],
+    toolProtocolAppendix: () => [],
+    checkpointProtocolAppendix: () => [],
+    run: (ctx) => runCodexWorker(ctx, operatorCodexHome),
+  });
+
+  const values = {
+    ...defaultAdvancedPolicyFields(),
+    baseMaxAttempts: 1,
+    noProgressTimeoutMs: null,
+    completionMode: "off" as const,
+    changeBudgetMode: "off" as const,
+  };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  store.createTask({
+    id,
+    name: spec.name,
+    status: "queued",
+    sourcePath: source,
+    taskFile: path.join(home, "task.yaml"),
+    spec,
+    paths,
+    sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    createdAt: "2026-08-04T00:00:00.000Z",
+    updatedAt: "2026-08-04T00:00:00.000Z",
+    effectivePolicy: {
+      profileId: "codex-quota-e2e",
+      values,
+      provenance,
+      enforcementCapability: runtimeCaps("codex-cli"),
+    },
+  });
+
+  try {
+    const result = await executeAttempt(store, store.getTask(id), false);
+    assert.equal(result.task.status, "failed");
+    assert.equal(result.task.error, CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY);
+    assert.equal(result.attempt.error, CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY);
+
+    const failed = store.listEvents(id).filter(
+      (e) => e.type === "worker.failed" && e.attemptId === result.attempt.id,
+    );
+    assert.equal(failed.length, 1, "runner must not append a second identical quota terminal");
+    assert.equal(failed[0]!.summary, CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY);
+    assert.equal(
+      (failed[0]!.payload as { failureCategory?: string } | undefined)?.failureCategory,
+      "budget",
+    );
+    assert.equal(
+      (failed[0]!.payload as { reasonCode?: string } | undefined)?.reasonCode,
+      CODEX_ACCOUNT_USAGE_LIMIT_REASON,
+      "earlier normalized reasonCode must be retained",
+    );
+    assert.equal(failureCategoryFromEvents(store.listEvents(id)), "budget");
+    assert.ok(
+      !failed.some((e) => /conflicting terminal/i.test(e.summary)),
+      "no terminal-conflict event on the full executeAttempt path",
+    );
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+  }
+});
+
+test("executeAttempt still appends nonmatching worker.failed after adapter terminal", async () => {
+  // Different summary or category must not be suppressed by the exact-duplicate guard.
+  resetWorkerRegistryForTests();
+  getWorkerAdapter("claude-code");
+  const capabilities = getWorkerAdapter("claude-code").capabilities();
+
+  registerWorkerAdapter({
+    name: "claude-code",
+    displayName: "Nonmatching failure Worker",
+    defaultExecutable: process.execPath,
+    capabilities: () => capabilities,
+    doctor: () => ({
+      runtime: "claude-code",
+      ok: true,
+      executable: process.execPath,
+      issues: [],
+      capabilities,
+    }),
+    validateSpec: () => {},
+    effortArgs: () => [],
+    toolProtocolAppendix: () => [],
+    checkpointProtocolAppendix: () => [],
+    run: async (ctx) => {
+      // Adapter already recorded a budget terminal for this Attempt.
+      ctx.store.addEvent(
+        ctx.task.id,
+        ctx.attempt.id,
+        "worker.failed",
+        "adapter budget terminal",
+        { failureCategory: "budget", reasonCode: "adapter-budget" },
+      );
+      // Runner result differs in both summary and category — must still append.
+      return {
+        status: "failed",
+        exitCode: 1,
+        error: "runner runtime terminal",
+        failureCategory: "runtime",
+      };
+    },
+  });
+
+  const { store, task } = await policyRunnerFixture({
+    completionMode: "off",
+    changeBudgetMode: "off",
+  });
+  try {
+    const result = await executeAttempt(store, task, false);
+    assert.equal(result.task.status, "failed");
+    const failed = store.listEvents(task.id).filter(
+      (e) => e.type === "worker.failed" && e.attemptId === result.attempt.id,
+    );
+    assert.equal(failed.length, 2, "nonmatching failure must still append");
+    assert.equal(failed[0]!.summary, "adapter budget terminal");
+    assert.equal(
+      (failed[0]!.payload as { failureCategory?: string } | undefined)?.failureCategory,
+      "budget",
+    );
+    assert.equal(failed[1]!.summary, "runner runtime terminal");
+    assert.equal(
+      (failed[1]!.payload as { failureCategory?: string } | undefined)?.failureCategory,
+      "runtime",
+    );
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+  }
+});
+
+test("executeAttempt does not suppress same-summary failure when category differs", async () => {
+  resetWorkerRegistryForTests();
+  getWorkerAdapter("claude-code");
+  const capabilities = getWorkerAdapter("claude-code").capabilities();
+  const sharedSummary = "shared failure summary";
+
+  registerWorkerAdapter({
+    name: "claude-code",
+    displayName: "Category mismatch Worker",
+    defaultExecutable: process.execPath,
+    capabilities: () => capabilities,
+    doctor: () => ({
+      runtime: "claude-code",
+      ok: true,
+      executable: process.execPath,
+      issues: [],
+      capabilities,
+    }),
+    validateSpec: () => {},
+    effortArgs: () => [],
+    toolProtocolAppendix: () => [],
+    checkpointProtocolAppendix: () => [],
+    run: async (ctx) => {
+      ctx.store.addEvent(
+        ctx.task.id,
+        ctx.attempt.id,
+        "worker.failed",
+        sharedSummary,
+        { failureCategory: "budget" },
+      );
+      return {
+        status: "failed",
+        exitCode: 1,
+        error: sharedSummary,
+        failureCategory: "runtime",
+      };
+    },
+  });
+
+  const { store, task } = await policyRunnerFixture({
+    completionMode: "off",
+    changeBudgetMode: "off",
+  });
+  try {
+    const result = await executeAttempt(store, task, false);
+    const failed = store.listEvents(task.id).filter(
+      (e) => e.type === "worker.failed" && e.attemptId === result.attempt.id,
+    );
+    assert.equal(failed.length, 2, "same summary with different category still appends");
+    assert.equal(
+      (failed[0]!.payload as { failureCategory?: string } | undefined)?.failureCategory,
+      "budget",
+    );
+    assert.equal(
+      (failed[1]!.payload as { failureCategory?: string } | undefined)?.failureCategory,
+      "runtime",
+    );
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
   }
 });
 
@@ -2338,6 +3115,9 @@ function fakeAppServerScript(config: FakeAppServerConfig, logPath: string | null
     "fs.writeFileSync('codex-goal-env-dump.json', JSON.stringify({",
     "  cwd: process.cwd(),",
     "  CODEX_HOME: process.env.CODEX_HOME || null,",
+    "  TMPDIR: process.env.TMPDIR || null,",
+    "  TMP: process.env.TMP || null,",
+    "  TEMP: process.env.TEMP || null,",
     "  hasOpenAIKey: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_API_KEY'),",
     "  hasOpenAIBaseUrl: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_BASE_URL'),",
     "  hasOpenAIOrgId: Object.prototype.hasOwnProperty.call(process.env, 'OPENAI_ORG_ID'),",
@@ -2684,6 +3464,72 @@ function itemCompletedParams(options: {
     threadId: options.threadId ?? "thread-1",
     ...(options.turnId === null ? {} : { turnId: options.turnId ?? "turn-1" }),
     item,
+  };
+}
+
+/** Private-looking app-server item ids used only in fixtures (never public). */
+const PRIVATE_CMD_ITEM_ID = "item:/Users/me/secret-cmd-id";
+const PRIVATE_FILE_ITEM_ID = "item:/Users/me/secret-file-id";
+
+/** Canonical app-server tool item lifecycle params (commandExecution/fileChange). */
+function itemLifecycleParams(
+  method: "item/started" | "item/completed",
+  options: {
+    itemType?: "commandExecution" | "fileChange";
+    itemId?: string;
+    turnId?: string;
+    threadId?: string;
+    privateExtras?: Record<string, unknown>;
+  } = {},
+): { method: string; params: Record<string, unknown> } {
+  const itemType = options.itemType ?? "commandExecution";
+  const item: Record<string, unknown> = {
+    id: options.itemId ?? (
+      itemType === "commandExecution" ? PRIVATE_CMD_ITEM_ID : PRIVATE_FILE_ITEM_ID
+    ),
+    type: itemType,
+    status: method === "item/started" ? "inProgress" : "completed",
+    ...(options.privateExtras ?? (
+      itemType === "commandExecution"
+        ? { command: "sed -i '' 's/n = 1/n = 2/' src/hello.ts", cwd: "/private/workspace" }
+        : {
+            changes: [{ path: "src/hello.ts", kind: "update" }],
+            output: "updated src/hello.ts",
+          }
+    )),
+  };
+  return {
+    method,
+    params: {
+      threadId: options.threadId ?? "thread-1",
+      turnId: options.turnId ?? "turn-1",
+      item,
+    },
+  };
+}
+
+/** Canonical `item/agentMessage/delta` params with private streaming text. */
+function agentMessageDeltaParams(
+  delta: string,
+  options: { itemId?: string; turnId?: string; threadId?: string } = {},
+): Record<string, unknown> {
+  return {
+    threadId: options.threadId ?? "thread-1",
+    turnId: options.turnId ?? "turn-1",
+    itemId: options.itemId ?? "item-msg-1",
+    delta,
+  };
+}
+
+/** Canonical `turn/diff/updated` params with a private diff body. */
+function turnDiffUpdatedParams(
+  diff: string,
+  options: { turnId?: string; threadId?: string } = {},
+): Record<string, unknown> {
+  return {
+    threadId: options.threadId ?? "thread-1",
+    turnId: options.turnId ?? "turn-1",
+    diff,
   };
 }
 
@@ -3496,7 +4342,7 @@ test("Codex native Goal repeated unchanged status/usage cannot reset no-effectiv
     assert.match(result.error ?? "", /No effective native Goal progress|no-progress/);
     const events = fixture.store.listEvents(fixture.task.id);
     // Setup already set status "active" via goal/set. Runtime updates that
-    // repeat the same status are liveness-only and cannot claim effective progress.
+    // repeat the same status are liveness-only, coalesced to one row per Turn.
     const goalActive = events.filter(
       (e) => (e.payload as { activityKind?: string } | undefined)?.activityKind === "goal-active",
     );
@@ -3505,13 +4351,425 @@ test("Codex native Goal repeated unchanged status/usage cannot reset no-effectiv
         && (e.payload as { goalStatus?: string } | undefined)?.goalStatus === "active",
     );
     assert.equal(goalActive.length, 0, "unchanged active status is never effective progress");
-    assert.ok(goalLiveness.length >= 3, "repeated identical status is recorded as liveness");
-    assert.ok(
-      goalLiveness.every(
-        (e) => (e.payload as { activityEvidence?: string }).activityEvidence === "liveness",
-      ),
-      "repeated status carries liveness activityEvidence",
+    assert.equal(goalLiveness.length, 1, "repeated status coalesces to one liveness row per Turn");
+    assert.equal(
+      (goalLiveness[0]?.payload as { activityEvidence?: string }).activityEvidence,
+      "liveness",
     );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal projects command/file/diff progress and suppresses delta flood", async () => {
+  // Observed successful-edit shape: command + file item lifecycle, several
+  // private diffs, and hundreds of agentMessage deltas must become a bounded
+  // privacy-safe public history while the exact terminal join still succeeds.
+  // Deltas are dropped before the race buffer so 120 same-burst deltas cannot
+  // overflow TURN_START_RACE_BUFFER_MAX (64).
+  const privateDiffA = "diff --git a/src/hello.ts b/src/hello.ts\n--- a/src/hello.ts\n+++ b/src/hello.ts\n@@ -1 +1 @@\n-export const n = 1;\n+export const n = 2;\n";
+  const privateDiffB = `${privateDiffA}+// still private\n`;
+  const deltas = Array.from({ length: 120 }, (_, index) => ({
+    method: "item/agentMessage/delta",
+    params: agentMessageDeltaParams(`token-${index} secret-path=/Users/me/secret.ts`),
+  }));
+  const fixture = await codexNativeGoalFixture({
+    config: {
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "turn/started", params: turnStartedParams() },
+          itemLifecycleParams("item/started", { itemType: "commandExecution" }),
+          itemLifecycleParams("item/completed", { itemType: "commandExecution" }),
+          itemLifecycleParams("item/started", { itemType: "fileChange" }),
+          itemLifecycleParams("item/completed", { itemType: "fileChange" }),
+          { method: "turn/diff/updated", params: turnDiffUpdatedParams(privateDiffA) },
+          { method: "turn/diff/updated", params: turnDiffUpdatedParams(privateDiffA) },
+          { method: "turn/diff/updated", params: turnDiffUpdatedParams(privateDiffB) },
+          { method: "turn/diff/updated", params: turnDiffUpdatedParams(privateDiffB) },
+          { method: "turn/diff/updated", params: turnDiffUpdatedParams(`${privateDiffB}+again\n`) },
+          ...deltas,
+          ...exactCurrentTurnTerminalAfter({ text: "Edited the one file" }),
+        ],
+      },
+    },
+  });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: false,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.resultText, "Edited the one file");
+
+    const events = fixture.store.listEvents(fixture.task.id);
+    const toolStarted = events.filter((e) => e.type === "worker.tool.started");
+    const toolCompleted = events.filter((e) => e.type === "worker.tool.completed");
+    const workspaceChange = events.filter(
+      (e) => (e.payload as { activityKind?: string } | undefined)?.activityKind === "workspace-change",
+    );
+    assert.equal(toolStarted.length, 2, "one start per command and file item");
+    assert.equal(toolCompleted.length, 2, "one completion per command and file item");
+    assert.equal(workspaceChange.length, 1, "diff evidence coalesces to one public milestone per Turn");
+    assert.equal(
+      (workspaceChange[0]?.payload as { activityEvidence?: string }).activityEvidence,
+      "effective-progress",
+    );
+    const expectedCmdToken = privacySafeToolCorrelationToken(PRIVATE_CMD_ITEM_ID);
+    const expectedFileToken = privacySafeToolCorrelationToken(PRIVATE_FILE_ITEM_ID);
+    assert.ok(
+      toolStarted.some((e) => (e.payload as { toolUseId?: string }).toolUseId === expectedCmdToken),
+      "command start carries one-way correlation token",
+    );
+    assert.ok(
+      toolCompleted.some((e) => (e.payload as { toolUseId?: string }).toolUseId === expectedFileToken),
+      "file completion carries one-way correlation token",
+    );
+
+    const serialized = JSON.stringify(events);
+    assert.ok(!serialized.includes("sed -i"));
+    assert.ok(!serialized.includes("/private/workspace"));
+    assert.ok(!serialized.includes("src/hello.ts"));
+    assert.ok(!serialized.includes("secret-path="));
+    assert.ok(!serialized.includes("diff --git"));
+    assert.ok(!serialized.includes("/Users/me/secret.ts"));
+    assert.ok(!serialized.includes(PRIVATE_CMD_ITEM_ID));
+    assert.ok(!serialized.includes(PRIVATE_FILE_ITEM_ID));
+    assert.ok(!serialized.includes("/Users/me/"));
+    assert.ok(
+      !events.some((e) => e.summary.includes("item/agentMessage/delta") || e.summary.includes("token-")),
+      "raw deltas must not become one stored event each",
+    );
+    // History stays readable: tools + one workspace milestone + terminal join,
+    // not hundreds of delta/liveness rows from the stream.
+    assert.ok(
+      events.length < 40,
+      `expected bounded public history, got ${events.length} events`,
+    );
+    assert.ok(events.some((e) => e.type === "worker.completed"));
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal liveness-only traffic cannot extend the post-activation watchdog", async () => {
+  // Changing usage/status/plan/deltas/unknown traffic without concrete
+  // tool/file/diff/final/terminal evidence must yield one finite no-progress
+  // stop. Load-safe interval (same family as other post-activation fixtures)
+  // so setup cannot race the timer; each proven setup step still refreshes.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  const fixture = await codexNativeGoalFixture({
+    effectivePolicy: {
+      profileId: "test",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+    },
+    config: {
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "turn/started", params: turnStartedParams() },
+          { method: "thread/goal/updated", params: goalUpdatedParams("active") },
+          { method: "thread/goal/updated", params: goalUpdatedParams("active") },
+          {
+            method: "thread/tokenUsage/updated",
+            params: goalUsageParams({
+              tokenUsage: {
+                total: {
+                  inputTokens: 10,
+                  outputTokens: 1,
+                  cachedInputTokens: 0,
+                  cacheWriteInputTokens: 0,
+                },
+              },
+            }),
+          },
+          {
+            method: "thread/tokenUsage/updated",
+            params: goalUsageParams({
+              tokenUsage: {
+                total: {
+                  inputTokens: 500,
+                  outputTokens: 80,
+                  cachedInputTokens: 100,
+                  cacheWriteInputTokens: 2,
+                },
+              },
+            }),
+          },
+          { method: "item/agentMessage/delta", params: agentMessageDeltaParams("still thinking ") },
+          { method: "item/agentMessage/delta", params: agentMessageDeltaParams("about secrets") },
+          { method: "turn/plan/updated", params: { threadId: "thread-1", turnId: "turn-1", plan: ["read", "edit", "/Users/me/secret-plan"] } },
+          { method: "turn/plan/updated", params: { threadId: "thread-1", turnId: "turn-1", plan: ["more"] } },
+          { method: "unknown/future", params: { threadId: "thread-1", turnId: "turn-1", noise: true, secret: "/Users/me/x" } },
+          { method: "unknown/other", params: { threadId: "thread-1", turnId: "turn-1", more: true } },
+        ],
+      },
+      delayedAfter: {
+        "turn/start": {
+          delayMs: 30,
+          notifications: [
+            // Post-activation liveness only — cannot buy unlimited time.
+            { method: "item/agentMessage/delta", params: agentMessageDeltaParams("more noise") },
+            {
+              method: "thread/tokenUsage/updated",
+              params: goalUsageParams({
+                tokenUsage: {
+                  total: {
+                    inputTokens: 900,
+                    outputTokens: 120,
+                    cachedInputTokens: 200,
+                    cacheWriteInputTokens: 3,
+                  },
+                },
+              }),
+            },
+            { method: "thread/goal/updated", params: goalUpdatedParams("active") },
+            { method: "turn/plan/updated", params: { threadId: "thread-1", turnId: "turn-1", plan: ["again"] } },
+            { method: "unknown/future", params: { threadId: "thread-1", turnId: "turn-1", noise: 2 } },
+          ],
+        },
+      },
+    },
+  });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: false,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.policyLimit?.category, "no-progress");
+    assert.equal(result.policyLimit?.configured, 4_000);
+    assert.match(result.error ?? "", /No effective native Goal progress|no-progress/);
+    const events = fixture.store.listEvents(fixture.task.id);
+    assert.ok(!events.some((e) => e.type === "worker.tool.started"));
+    assert.ok(!events.some((e) => e.type === "worker.completed"));
+    assert.ok(
+      !events.some((e) => e.summary.includes("item/agentMessage/delta") || e.summary.includes("still thinking")),
+      "deltas remain unstored",
+    );
+    // Status / plan / unknown each coalesce to at most one privacy-safe row.
+    const statusRows = events.filter(
+      (e) => (e.payload as { goalStatus?: string } | undefined)?.goalStatus === "active"
+        && (e.payload as { activityKind?: string } | undefined)?.activityKind === "goal-activity",
+    );
+    const planRows = events.filter((e) => e.summary === "Codex native Goal updated its plan");
+    const unknownRows = events.filter(
+      (e) => e.summary === "Codex native Goal reported additional runtime activity",
+    );
+    assert.equal(statusRows.length, 1, "status liveness coalesced per Turn");
+    assert.equal(planRows.length, 1, "plan liveness coalesced per Turn");
+    assert.equal(unknownRows.length, 1, "unknown liveness coalesced per Turn");
+    const serialized = JSON.stringify(events);
+    assert.ok(!serialized.includes("/Users/me/secret-plan"));
+    assert.ok(!serialized.includes("unknown/future"));
+    assert.ok(!serialized.includes("turn/plan/updated"));
+    const failed = events.find((e) => e.type === "worker.failed");
+    assert.equal(
+      (failed?.payload as { reasonCode?: string } | undefined)?.reasonCode,
+      "codex-goal-no-progress",
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal private diff refreshes progress without leaking content", async () => {
+  // Materially new private diffs refresh the watchdog; identical repeats and
+  // public payloads stay free of paths/content. After the last material diff,
+  // pure liveness cannot keep the Goal alive. Load-safe interval proves the
+  // post-activation path rather than racing setup.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  const privateDiff = "diff --git a/src/private.ts b/src/private.ts\n+const token = 'abc';\n";
+  const fixture = await codexNativeGoalFixture({
+    effectivePolicy: {
+      profileId: "test",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+    },
+    config: {
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "turn/started", params: turnStartedParams() },
+          { method: "turn/diff/updated", params: turnDiffUpdatedParams(privateDiff) },
+          { method: "turn/diff/updated", params: turnDiffUpdatedParams(privateDiff) },
+          { method: "turn/diff/updated", params: turnDiffUpdatedParams(`${privateDiff}+second material change\n`) },
+          { method: "turn/diff/updated", params: turnDiffUpdatedParams(`${privateDiff}+second material change\n`) },
+        ],
+      },
+      delayedAfter: {
+        "turn/start": {
+          // After material diffs land in the activation batch, only liveness
+          // arrives later — the watchdog must still fire once.
+          delayMs: 30,
+          notifications: [
+            {
+              method: "thread/tokenUsage/updated",
+              params: goalUsageParams({
+                tokenUsage: {
+                  total: {
+                    inputTokens: 40,
+                    outputTokens: 8,
+                    cachedInputTokens: 1,
+                    cacheWriteInputTokens: 0,
+                  },
+                },
+              }),
+            },
+            { method: "item/agentMessage/delta", params: agentMessageDeltaParams("no real work") },
+            { method: "thread/goal/updated", params: goalUpdatedParams("active") },
+          ],
+        },
+      },
+    },
+  });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: false,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.policyLimit?.category, "no-progress");
+    assert.equal(result.policyLimit?.configured, 4_000);
+    const events = fixture.store.listEvents(fixture.task.id);
+    const workspaceChange = events.filter(
+      (e) => (e.payload as { activityKind?: string } | undefined)?.activityKind === "workspace-change",
+    );
+    assert.equal(workspaceChange.length, 1, "only one public workspace-change milestone per Turn");
+    assert.equal(
+      (workspaceChange[0]?.payload as { activityEvidence?: string }).activityEvidence,
+      "effective-progress",
+    );
+    const serialized = JSON.stringify(events);
+    assert.ok(!serialized.includes("src/private.ts"));
+    assert.ok(!serialized.includes("const token"));
+    assert.ok(!serialized.includes("diff --git"));
+    assert.ok(!serialized.includes("second material change"));
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal ignores stale and malformed item/diff evidence", async () => {
+  // Load-safe post-activation interval: stale/malformed evidence must not
+  // invent progress, and pure silence still ends in one no-progress stop.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  const fixture = await codexNativeGoalFixture({
+    effectivePolicy: {
+      profileId: "test",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+    },
+    config: {
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "turn/started", params: turnStartedParams() },
+          // Other Thread/Turn tool evidence cannot invent progress.
+          itemLifecycleParams("item/started", {
+            itemType: "commandExecution",
+            itemId: "stale-cmd",
+            threadId: "thread-other",
+            turnId: "turn-other",
+          }),
+          itemLifecycleParams("item/completed", {
+            itemType: "fileChange",
+            itemId: "stale-file",
+            turnId: "turn-other",
+          }),
+          // Malformed / non-tool: missing item, snake_case type, agentMessage start.
+          { method: "item/started", params: { threadId: "thread-1", turnId: "turn-1" } },
+          {
+            method: "item/completed",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              item: { type: "command_execution", command: "echo leak" },
+            },
+          },
+          {
+            method: "item/started",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              item: { id: "msg-1", type: "agentMessage", text: "should not store" },
+            },
+          },
+          {
+            method: "turn/diff/updated",
+            params: { threadId: "thread-1", turnId: "turn-other", diff: "diff --git a/x b/x\n+stale" },
+          },
+          {
+            method: "turn/diff/updated",
+            params: { threadId: "thread-1", turnId: "turn-1", diff: "" },
+          },
+          {
+            method: "turn/diff/updated",
+            params: { threadId: "thread-other", turnId: "turn-1", diff: "diff --git a/x b/x\n+cross" },
+          },
+          // Missing turnId cannot complete a tool or refresh progress.
+          {
+            method: "item/started",
+            params: {
+              threadId: "thread-1",
+              item: {
+                id: "no-turn",
+                type: "commandExecution",
+                command: "echo no-turn",
+              },
+            },
+          },
+        ],
+      },
+    },
+  });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: false,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.policyLimit?.category, "no-progress");
+    assert.equal(result.policyLimit?.configured, 4_000);
+    const events = fixture.store.listEvents(fixture.task.id);
+    assert.ok(!events.some((e) => e.type === "worker.tool.started"));
+    assert.ok(!events.some((e) => e.type === "worker.tool.completed"));
+    assert.ok(
+      !events.some(
+        (e) => (e.payload as { activityKind?: string } | undefined)?.activityKind === "workspace-change",
+      ),
+    );
+    const serialized = JSON.stringify(events);
+    assert.ok(!serialized.includes("echo leak"));
+    assert.ok(!serialized.includes("echo no-turn"));
+    assert.ok(!serialized.includes("should not store"));
+    assert.ok(!serialized.includes("diff --git"));
+    assert.ok(!events.some((e) => e.type === "worker.completed"));
   } finally {
     fixture.store.close();
   }
@@ -3897,11 +5155,28 @@ test("Codex native Goal freezes cwd, model, effort, approval, and least-privileg
     assert.ok(featuresBody.includes("apps = false"), "apps stay disabled");
     assert.ok(featuresBody.includes("multi_agent = false"), "nested agents stay disabled");
     assert.ok(!config.includes("danger-full-access"), "never broadens the sandbox");
+    // Explicit workspace-write refinements: network off, global /tmp excluded,
+    // task-private TMPDIR not denied via exclude_tmpdir_env_var.
+    const sandboxWriteIndex = configLines.findIndex((line) => line === "[sandbox_workspace_write]");
+    assert.ok(sandboxWriteIndex >= 0, "[sandbox_workspace_write] table is present");
+    const sandboxWriteBody = configLines.slice(sandboxWriteIndex + 1);
+    const nextTable = sandboxWriteBody.findIndex((line) => line.startsWith("["));
+    const sandboxWriteSection = nextTable >= 0 ? sandboxWriteBody.slice(0, nextTable) : sandboxWriteBody;
+    assert.ok(sandboxWriteSection.includes("network_access = false"), "command network stays disabled");
+    assert.ok(sandboxWriteSection.includes("exclude_slash_tmp = true"), "global /tmp is excluded");
+    assert.ok(
+      !config.includes("exclude_tmpdir_env_var"),
+      "task-private TMPDIR must not be excluded by config",
+    );
 
     const envDump = JSON.parse(
       await readFile(path.join(fixture.task.paths.workspace, "codex-goal-env-dump.json"), "utf8"),
     ) as {
       cwd: string;
+      CODEX_HOME: string | null;
+      TMPDIR: string | null;
+      TMP: string | null;
+      TEMP: string | null;
       hasOpenAIKey: boolean;
       hasOpenAIBaseUrl: boolean;
       hasOpenAIOrgId: boolean;
@@ -3909,11 +5184,27 @@ test("Codex native Goal freezes cwd, model, effort, approval, and least-privileg
       hasCodexApiKey: boolean;
     };
     assert.equal(envDump.cwd, await realpath(fixture.task.paths.workspace), "cwd frozen to the Task workspace");
+    const taskTmp = path.join(fixture.task.paths.root, "codex-tmp");
+    assert.equal(envDump.TMPDIR, taskTmp, "task-private TMPDIR is preserved for native Goal");
+    assert.equal(envDump.TMP, taskTmp);
+    assert.equal(envDump.TEMP, taskTmp);
     assert.equal(envDump.hasOpenAIKey, false, "OPENAI_API_KEY must not reach the app-server child");
     assert.equal(envDump.hasOpenAIBaseUrl, false, "OPENAI_BASE_URL must not reach the app-server child");
     assert.equal(envDump.hasOpenAIOrgId, false, "OPENAI_ORG_ID must not reach the app-server child");
     assert.equal(envDump.hasOpenAIProject, false, "OPENAI_PROJECT must not reach the app-server child");
     assert.equal(envDump.hasCodexApiKey, false, "CODEX_API_KEY must not reach the app-server child");
+
+    // Prove runCodexNativeGoal wired the Runtime-aware prompt into the real artifact.
+    const promptArtifact = await readFile(
+      path.join(fixture.task.paths.logs, "attempt-1.prompt.txt"),
+      "utf8",
+    );
+    assertCodexEditablePromptContract(promptArtifact);
+    assert.match(promptArtifact, /Runtime-native Goal/);
+    assert.ok(
+      !promptArtifact.includes("Shell access is intentionally unavailable"),
+      "native Goal prompt must not carry the tool-only no-shell contradiction",
+    );
   } finally {
     for (const key of parentEnvKeys) {
       if (previousEnv[key] === undefined) delete process.env[key];
@@ -3960,8 +5251,18 @@ test("Codex native Goal freezes read-only least-privilege policy on thread and t
       "utf8",
     );
     assert.ok(config.includes('sandbox_mode = "read-only"'), "read-only Tasks freeze read-only sandbox");
-    assert.ok(!config.includes("workspace-write"), "read-only Tasks never enable workspace-write");
+    assert.ok(!config.includes('sandbox_mode = "workspace-write"'), "read-only Tasks never enable workspace-write");
     assert.ok(!config.includes("danger-full-access"), "never broadens the sandbox");
+    assert.ok(config.includes("network_access = false"), "command network stays disabled");
+    assert.ok(config.includes("exclude_slash_tmp = true"), "global /tmp is excluded");
+    assert.ok(!config.includes("exclude_tmpdir_env_var"), "task-private TMPDIR is not excluded");
+
+    const promptArtifact = await readFile(
+      path.join(fixture.task.paths.logs, "attempt-1.prompt.txt"),
+      "utf8",
+    );
+    assertCodexReadOnlyPromptContract(promptArtifact);
+    assert.match(promptArtifact, /Runtime-native Goal/);
   } finally {
     fixture.store.close();
   }
@@ -4722,6 +6023,11 @@ test("Codex native Goal continuation turn/started resets gates and completes the
     const completedIdx = events.findIndex((e) => e.type === "worker.completed");
     assert.ok(continuationIdx >= 0, "continuation promotion is observed");
     assert.ok(completedIdx >= 0, "worker.completed is observed");
+    assert.equal(
+      (events[continuationIdx]?.payload as { activityEvidence?: string } | undefined)?.activityEvidence,
+      "liveness",
+      "continuation turn start is liveness only and cannot buy watchdog time alone",
+    );
     assert.ok(
       continuationIdx < completedIdx,
       "continuation message (post-durable-write) must precede terminal success",

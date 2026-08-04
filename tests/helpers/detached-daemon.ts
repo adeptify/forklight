@@ -17,6 +17,7 @@ import path from "node:path";
 import { daemonSocketPath } from "../../src/core/config.js";
 import { sleepMs as sleep } from "../../src/core/time.js";
 import {
+  DAEMON_OBSERVER_UNAVAILABLE_MESSAGE,
   daemonObserverRequest,
   daemonRequest,
   startDaemonProcess,
@@ -341,16 +342,25 @@ export async function observeUntilTerminal(options: {
   let waitCount = 0;
   let lastStatus = "outcome-unknown";
   while (Date.now() < deadline) {
-    const view = await daemonObserverRequest<IntegrationOperationView>(
-      "integration_wait",
-      { operationId: options.operationId, timeoutMs: waitTimeoutMs },
-      options.home,
-    );
-    waitCount += 1;
-    if (view.status === "completed" || view.status === "failed") {
-      return { view, waitCount, elapsedMs: Date.now() - startedAt };
+    try {
+      const view = await daemonObserverRequest<IntegrationOperationView>(
+        "integration_wait",
+        { operationId: options.operationId, timeoutMs: waitTimeoutMs },
+        options.home,
+      );
+      waitCount += 1;
+      if (view.status === "completed" || view.status === "failed") {
+        return { view, waitCount, elapsedMs: Date.now() - startedAt };
+      }
+      lastStatus = view.status;
+    } catch (error) {
+      // Endpoint-only handoff relinquishment can drop the observer socket while
+      // the replacement starts. Retry the same operationId; never start a daemon.
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== DAEMON_OBSERVER_UNAVAILABLE_MESSAGE) throw error;
+      lastStatus = "observer-unavailable";
+      await sleep(READY_POLL_INTERVAL_MS);
     }
-    lastStatus = view.status;
   }
   throw new Error(
     `Integration operation ${options.operationId} did not reach a terminal state within ${escapeDeadlineMs}ms (last status: ${lastStatus})`,

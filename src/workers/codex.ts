@@ -12,8 +12,13 @@ import {
   workerNetworkPolicyMode,
   type WorkerNetworkPolicy,
 } from "../core/network-policy.js";
-import { buildWorkerPrompt, workerPromptAppendicesForTask } from "../core/task.js";
+import {
+  buildWorkerPrompt,
+  workerPromptAppendicesForTask,
+  type WorkerHardBoundaryPolicy,
+} from "../core/task.js";
 import type { NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
+import type { WorkerFailureCategory } from "../core/worker-failure.js";
 import {
   codexAgentMessageFromLine,
   CodexEventNormalizer,
@@ -28,6 +33,24 @@ import type {
   WorkerExecutionResult,
   WorkerRunContext,
 } from "./types.js";
+
+const CODEX_FAILURE_CATEGORIES = new Set<WorkerFailureCategory>([
+  "authentication",
+  "budget",
+  "runtime",
+  "connectivity",
+  "contract-infeasible",
+]);
+
+function failureCategoryFromEventPayload(
+  payload: unknown,
+): WorkerFailureCategory | undefined {
+  if (payload === null || typeof payload !== "object") return undefined;
+  const category = (payload as { failureCategory?: unknown }).failureCategory;
+  return typeof category === "string" && CODEX_FAILURE_CATEGORIES.has(category as WorkerFailureCategory)
+    ? category as WorkerFailureCategory
+    : undefined;
+}
 
 const CODEX_AUTH_MAX_BYTES = 2 * 1024 * 1024;
 const CODEX_CATALOG_MAX_BYTES = 4 * 1024 * 1024;
@@ -50,6 +73,18 @@ const CODEX_CAPABILITIES: WorkerCapabilityMatrix = {
 function configValue(key: string, value: string | number | boolean): string {
   return `${key}=${typeof value === "string" ? JSON.stringify(value) : String(value)}`;
 }
+
+/**
+ * Explicit workspace-write sandbox refinements shared by single-run argv and
+ * native-Goal config.toml. Command network stays off; global /tmp is excluded
+ * from writable roots while task-private TMPDIR remains usable (do not set
+ * exclude_tmpdir_env_var). Official Codex workspace-write may otherwise allow
+ * temporary areas and leaves network implicit unless configured.
+ */
+export const CODEX_WORKSPACE_WRITE_SANDBOX_OVERRIDES = {
+  networkAccess: false,
+  excludeSlashTmp: true,
+} as const;
 
 export function buildCodexCliArgs(input: {
   prompt: string;
@@ -83,6 +118,18 @@ export function buildCodexCliArgs(input: {
     configValue("features.apps", false),
     "-c",
     configValue("web_search", "disabled"),
+    // Explicit even for read-only: documents the least-privilege contract and
+    // is ignored when sandbox is not workspace-write.
+    "-c",
+    configValue(
+      "sandbox_workspace_write.network_access",
+      CODEX_WORKSPACE_WRITE_SANDBOX_OVERRIDES.networkAccess,
+    ),
+    "-c",
+    configValue(
+      "sandbox_workspace_write.exclude_slash_tmp",
+      CODEX_WORKSPACE_WRITE_SANDBOX_OVERRIDES.excludeSlashTmp,
+    ),
     input.prompt,
   ];
 }
@@ -150,13 +197,33 @@ function interruptedExitCode(code: number): number {
   return code === 0 ? 130 : code;
 }
 
-function codexToolLines(task: TaskRecord): string[] {
+/**
+ * Shared least-privilege Codex workspace tool contract for single-run and
+ * native Goal. Codex exposes inspect/search/edit through its sandboxed command
+ * tool rather than separate Read/Grep/Edit tools; wording must match argv
+ * sandbox mode without granting host shell, extra roots, or acceptance authority.
+ */
+export function codexWorkspaceToolLines(allowEdits: boolean): string[] {
   return [
-    "- Work only through Codex tools inside the Task workspace sandbox.",
-    `- Workspace mode: ${task.spec.worker.allowEdits ? "edits allowed" : "read-only"}.`,
+    allowEdits
+      ? "- Codex inspects, searches, and edits product files through its workspace-sandboxed command tool (not separate Read/Grep/Edit tools)."
+      : "- Codex inspects and searches product files through its workspace-sandboxed command tool (not separate Read/Grep/Edit tools).",
+    allowEdits
+      ? "- Use that sandboxed command tool for product file work only inside this frozen Task workspace; inspect, search, and edit as authorized under workspace-write."
+      : "- Use that sandboxed command tool for product file work only inside this frozen Task workspace to inspect and search; do not edit product files.",
+    `- Workspace sandbox mode: ${allowEdits ? "workspace-write" : "read-only"}; command network is disabled; global /tmp is excluded while task-private temporary storage remains for runtime needs only.`,
     "- Web, apps, MCP servers, nested agents, and approval escalation are disabled.",
-    "- Do not integrate source, commit, push, or broaden writable paths.",
+    "- Do not integrate source, commit, push, run acceptance commands yourself, or add product writable roots outside the Task workspace.",
   ];
+}
+
+function codexToolLines(task: TaskRecord): string[] {
+  return codexWorkspaceToolLines(task.spec.worker.allowEdits);
+}
+
+/** Runtime-aware hard-boundary policy for both Codex execution paths. */
+export function codexHardBoundaryPolicy(allowEdits: boolean): WorkerHardBoundaryPolicy {
+  return { kind: "codex-workspace-command", allowEdits };
 }
 
 function codexCheckpointLines(): string[] {
@@ -223,6 +290,7 @@ export async function runCodexWorker(
     workerPromptAppendicesForTask(task, {
       toolLines: codexToolLines(task),
       checkpointLines: codexCheckpointLines(),
+      hardBoundaryPolicy: codexHardBoundaryPolicy(task.spec.worker.allowEdits),
     }),
   );
   await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {
@@ -240,6 +308,8 @@ export async function runCodexWorker(
   const stderrChunks: string[] = [];
   const normalizer = new CodexEventNormalizer();
   let terminal: NormalizedWorkerEvent["terminal"];
+  /** Authoritative class from the first normalized terminal; child exit cannot broaden it. */
+  let terminalFailureCategory: WorkerFailureCategory | undefined;
   let runtimeSessionId: string | undefined;
   let lastAgentText: string | undefined;
   // One Attempt must map to exactly one Codex session. A drifted identity is a
@@ -329,6 +399,7 @@ export async function runCodexWorker(
           failureReason,
         };
         terminal = failure;
+        terminalFailureCategory = "runtime";
         clearWatchdog();
         store.addEvent(task.id, attempt.id, "worker.failed", failureReason, {
           failureCategory: "runtime",
@@ -346,6 +417,14 @@ export async function runCodexWorker(
     }
     if (event.terminal !== undefined) {
       terminal = event.terminal;
+      // Carry the normalizer's specific class (e.g. budget for account quota).
+      // A later true conflict terminal may replace it; child exit never does.
+      const fromPayload = failureCategoryFromEventPayload(event.payload);
+      if (fromPayload !== undefined) {
+        terminalFailureCategory = fromPayload;
+      } else if (event.terminal.isError && terminalFailureCategory === undefined) {
+        terminalFailureCategory = "runtime";
+      }
       clearWatchdog();
     } else if (isEffectiveProgressEvent(event.type, event.payload)) {
       // Session/setup and turn-start liveness never reset the stop.
@@ -441,12 +520,14 @@ export async function runCodexWorker(
     };
   }
   if (outcome.code !== 0 || terminal === undefined || terminal.isError) {
+    // Preserve the first normalized terminal class end to end. Process exit
+    // alone must not broaden budget/auth/connectivity back to runtime.
     return {
       status: "failed",
       exitCode: outcome.code,
       ...terminalFields(terminal, lastAgentText),
       error: terminal?.failureReason ?? "Codex Worker exited without successful terminal evidence",
-      failureCategory: "runtime",
+      failureCategory: terminalFailureCategory ?? "runtime",
     };
   }
   return {

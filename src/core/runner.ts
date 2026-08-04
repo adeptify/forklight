@@ -68,6 +68,32 @@ export class TaskLaunchAuthenticationError extends Error {
   }
 }
 
+/**
+ * True when this Attempt already recorded worker.failed with the exact same
+ * public summary and the exact same durable failureCategory (including both
+ * absent). Used only to avoid a second identical runner terminal after the
+ * adapter already persisted one; any mismatch still appends.
+ */
+function sameAttemptExactWorkerFailed(
+  store: StateStore,
+  taskId: string,
+  attemptId: string,
+  summary: string,
+  failureCategory: WorkerExecutionResult["failureCategory"],
+): boolean {
+  for (const event of store.listEvents(taskId)) {
+    if (event.type !== "worker.failed") continue;
+    if (event.attemptId !== attemptId) continue;
+    if (event.summary !== summary) continue;
+    const existing = event.payload !== null && typeof event.payload === "object"
+      ? (event.payload as { failureCategory?: unknown }).failureCategory
+      : undefined;
+    const existingCategory = typeof existing === "string" ? existing : undefined;
+    if (existingCategory === failureCategory) return true;
+  }
+  return false;
+}
+
 /** Persist remote connection evidence only when the selected adapter returned
  * success and the same Attempt emitted the canonical terminal event. This is
  * intentionally independent from later code-quality verification. */
@@ -643,15 +669,29 @@ export async function executeAttempt(
       workerPid: null,
       error: worker.error ?? "Worker execution failed",
     });
-    store.addEvent(
+    // Adapters such as Codex already persist the authoritative terminal
+    // worker.failed (including reasonCode). Skip only an exact same-Attempt
+    // duplicate of summary + durable failureCategory so that one truthful
+    // reason remains; different summary, category, Attempt, or missing class
+    // still appends normally.
+    const failedSummary = worker.error ?? "Worker execution failed";
+    if (!sameAttemptExactWorkerFailed(
+      store,
       task.id,
       attemptId,
-      "worker.failed",
-      worker.error ?? "Worker execution failed",
-      worker.failureCategory === undefined
-        ? undefined
-        : { failureCategory: worker.failureCategory },
-    );
+      failedSummary,
+      worker.failureCategory,
+    )) {
+      store.addEvent(
+        task.id,
+        attemptId,
+        "worker.failed",
+        failedSummary,
+        worker.failureCategory === undefined
+          ? undefined
+          : { failureCategory: worker.failureCategory },
+      );
+    }
     return { task: store.getTask(task.id), attempt: store.getAttempt(attemptId) };
   }
 

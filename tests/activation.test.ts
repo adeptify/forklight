@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   ACTIVATION_OPERATION_ID_ENV,
+  ACTIVATION_RECEIPT_ID_ENV,
+  ACTIVATION_TASK_ID_ENV,
   consumeActivationHandoff,
   readActivationHandoffContext,
+  resolveTsxImportSpecifier,
   runActivation,
   setActivationHandoffContext,
   writeActivationHandoff,
@@ -71,11 +75,11 @@ test("readActivationHandoffContext returns undefined before setActivationHandoff
 
 test("setActivationHandoffContext stores operation identity and readActivationHandoffContext reads it back", () => {
   const savedOp = process.env[ACTIVATION_OPERATION_ID_ENV];
-  const savedTask = process.env["FORKLIGHT_ACTIVATION_TASK_ID"];
-  const savedRec = process.env["FORKLIGHT_ACTIVATION_RECEIPT_ID"];
+  const savedTask = process.env[ACTIVATION_TASK_ID_ENV];
+  const savedRec = process.env[ACTIVATION_RECEIPT_ID_ENV];
   delete process.env[ACTIVATION_OPERATION_ID_ENV];
-  delete process.env["FORKLIGHT_ACTIVATION_TASK_ID"];
-  delete process.env["FORKLIGHT_ACTIVATION_RECEIPT_ID"];
+  delete process.env[ACTIVATION_TASK_ID_ENV];
+  delete process.env[ACTIVATION_RECEIPT_ID_ENV];
   try {
     const handoff: ActivationHandoff = {
       version: 1,
@@ -96,30 +100,59 @@ test("setActivationHandoffContext stores operation identity and readActivationHa
     assert.equal(ctx!.receiptId, "rec-handoff-context");
   } finally {
     delete process.env[ACTIVATION_OPERATION_ID_ENV];
-    delete process.env["FORKLIGHT_ACTIVATION_TASK_ID"];
-    delete process.env["FORKLIGHT_ACTIVATION_RECEIPT_ID"];
+    delete process.env[ACTIVATION_TASK_ID_ENV];
+    delete process.env[ACTIVATION_RECEIPT_ID_ENV];
     if (savedOp !== undefined) process.env[ACTIVATION_OPERATION_ID_ENV] = savedOp;
-    if (savedTask !== undefined) process.env["FORKLIGHT_ACTIVATION_TASK_ID"] = savedTask;
-    if (savedRec !== undefined) process.env["FORKLIGHT_ACTIVATION_RECEIPT_ID"] = savedRec;
+    if (savedTask !== undefined) process.env[ACTIVATION_TASK_ID_ENV] = savedTask;
+    if (savedRec !== undefined) process.env[ACTIVATION_RECEIPT_ID_ENV] = savedRec;
   }
 });
 
 test("readActivationHandoffContext returns undefined when only some env vars are set", () => {
   const savedOp = process.env[ACTIVATION_OPERATION_ID_ENV];
-  const savedTask = process.env["FORKLIGHT_ACTIVATION_TASK_ID"];
-  const savedRec = process.env["FORKLIGHT_ACTIVATION_RECEIPT_ID"];
+  const savedTask = process.env[ACTIVATION_TASK_ID_ENV];
+  const savedRec = process.env[ACTIVATION_RECEIPT_ID_ENV];
   try {
     process.env[ACTIVATION_OPERATION_ID_ENV] = "only-operation";
-    delete process.env["FORKLIGHT_ACTIVATION_TASK_ID"];
-    delete process.env["FORKLIGHT_ACTIVATION_RECEIPT_ID"];
+    delete process.env[ACTIVATION_TASK_ID_ENV];
+    delete process.env[ACTIVATION_RECEIPT_ID_ENV];
     assert.equal(readActivationHandoffContext(), undefined,
       "missing taskId and receiptId must return undefined");
   } finally {
     if (savedOp !== undefined) process.env[ACTIVATION_OPERATION_ID_ENV] = savedOp;
     else delete process.env[ACTIVATION_OPERATION_ID_ENV];
-    if (savedTask !== undefined) process.env["FORKLIGHT_ACTIVATION_TASK_ID"] = savedTask;
-    else delete process.env["FORKLIGHT_ACTIVATION_TASK_ID"];
-    if (savedRec !== undefined) process.env["FORKLIGHT_ACTIVATION_RECEIPT_ID"] = savedRec;
-    else delete process.env["FORKLIGHT_ACTIVATION_RECEIPT_ID"];
+    if (savedTask !== undefined) process.env[ACTIVATION_TASK_ID_ENV] = savedTask;
+    else delete process.env[ACTIVATION_TASK_ID_ENV];
+    if (savedRec !== undefined) process.env[ACTIVATION_RECEIPT_ID_ENV] = savedRec;
+    else delete process.env[ACTIVATION_RECEIPT_ID_ENV];
   }
+});
+
+test("resolveTsxImportSpecifier returns a cwd-independent file URL for the repo tsx loader", () => {
+  const resolved = resolveTsxImportSpecifier(import.meta.url);
+  assert.match(resolved, /^file:\/\//);
+  assert.match(resolved, /tsx/);
+  // Must not be the bare package name that Node would re-resolve from cwd.
+  assert.notEqual(resolved, "tsx");
+});
+
+test("self-upgrade delivery profile uses fail-closed stop && start activation", async () => {
+  const profilePath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "examples",
+    "dogfood",
+    "forklight-self-upgrade-delivery-settings.yaml",
+  );
+  const text = await readFile(profilePath, "utf8");
+  assert.match(
+    text,
+    /daemon stop && node dist\/src\/cli\.js daemon start --startup-timeout-ms 60000/,
+  );
+  assert.doesNotMatch(text, /for i in \{1\.\.100\}/);
+  assert.doesNotMatch(text, /daemon status/);
+  assert.doesNotMatch(text, /daemon stop;/);
+  // Public CLI health proves identity match; it intentionally omits pid.
+  assert.match(text, /identityStatus !== "matched"/);
+  assert.doesNotMatch(text, /value\.pid/);
 });

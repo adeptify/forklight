@@ -60,11 +60,13 @@ test("Narrow screens linearize Goal -> Plan -> Task without a seven-column squee
   // DOM/focus order in the renderer is Goal -> Plan -> Task.
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const rw = extractFunctionSource(js, "rWork");
-  const goalsAppend = rw.indexOf("board.appendChild(renderWorkGoalLane(goal))");
+  const goalsAppend = rw.indexOf("activeGoals.forEach");
+  const finishedAppend = rw.indexOf("renderWorkFinishedGoals");
   const indepAppend = rw.indexOf("board.appendChild(indepGroup)");
   const oneOffAppend = rw.indexOf("board.appendChild(oneOffGroup)");
-  assert.ok(goalsAppend > 0 && indepAppend > goalsAppend && oneOffAppend > indepAppend,
-    "goals render before independent plans before one-off tasks");
+  assert.ok(goalsAppend > 0 && finishedAppend > goalsAppend
+    && indepAppend > finishedAppend && oneOffAppend > indepAppend,
+    "active goals, finished group, independent plans, then one-off tasks");
   const goal = extractFunctionSource(js, "renderWorkGoalLane");
   const plan = extractFunctionSource(js, "renderWorkPlanLane");
   assert.ok(goal.indexOf("renderWorkPlanLane") > 0, "Goal body contains its Plan lanes");
@@ -141,6 +143,56 @@ test("Empty, filtered-empty, stale, and error states stay honest in the Work sur
   assert.ok(pes.includes('"unavailable"'), "first-fetch failure is never an empty board");
 });
 
+test("FL-108B desktop composition reaches the board; narrow layout keeps disclosures usable", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const rw = extractFunctionSource(js, "rWork");
+  // 1280x720 contract: primary action, compact help, filters, then board heading.
+  const outcomeAt = rw.indexOf("renderOutcomeSection()");
+  const storyAt = rw.indexOf('renderPageStory("work")');
+  const filtersAt = rw.indexOf("renderWorkFilters()");
+  const boardAt = rw.indexOf('data-fl-role", "work-board"');
+  const headAt = rw.indexOf('data-fl-role", "work-col-head"');
+  assert.ok(outcomeAt > 0 && storyAt > outcomeAt && filtersAt > storyAt && boardAt > filtersAt,
+    "desktop composition order: outcome → help → filters → board");
+  assert.ok(headAt > boardAt, "canonical board heading is part of the board render");
+  // Compact empty intake and closed help shrink the above-board stack without
+  // fixed viewport heights, clipping, overlays, or hidden form fields.
+  assert.ok(css.includes(".outcome-story-note-empty"), "empty intake has a compact style");
+  assert.ok(css.includes(".page-story-disclosure"), "Work help disclosure style ships");
+  assert.ok(css.includes("min-height: 32px"), "disclosure toggles keep a practical touch target");
+  assert.ok(!/outcome-section[\s\S]{0,120}(height:\s*\d+vh|max-height:\s*\d+vh)/.test(css),
+    "outcome section is not viewport-height locked");
+  assert.ok(!/page-story-disclosure[\s\S]{0,200}(position:\s*fixed|position:\s*absolute)/.test(css),
+    "help stays in document flow");
+  assert.ok(!/work-finished-group[\s\S]{0,200}(position:\s*fixed|overflow:\s*hidden)/.test(css),
+    "finished work stays in flow and is not clipped");
+  // Keyboard/touch: native details/summary disclosures for help and finished work.
+  const story = extractFunctionSource(js, "renderPageStory");
+  assert.ok(story.includes('createElement("details")'), "Work help uses a native details disclosure");
+  assert.ok(story.includes('createElement("summary")'), "Work help summary is keyboard operable");
+  const finished = extractFunctionSource(js, "renderWorkFinishedGoals");
+  assert.ok(finished.includes('createElement("details")'), "Finished work uses a native details disclosure");
+  assert.ok(finished.includes('createElement("summary")'), "Finished work summary is keyboard operable");
+  // Narrow 390px: stacked status groups and no page-level horizontal leak remain.
+  const workMedia = css.match(/@media\s*\(max-width:\s*900px\)\s*\{\s*\.work-col-grid/);
+  assert.ok(workMedia, "narrow workbench breakpoint remains");
+  const narrowStart = workMedia!.index ?? 0;
+  const nextMedia = css.indexOf("@media", narrowStart + 10);
+  const narrowBlock = css.slice(narrowStart, nextMedia > 0 ? nextMedia : css.length);
+  assert.match(narrowBlock, /\.work-board\s*\{\s*overflow-x:\s*visible/,
+    "390px-class narrow layout still avoids board horizontal overflow");
+  assert.match(narrowBlock, /\.work-col-grid\s*\{[\s\S]*?flex-direction:\s*column/,
+    "status groups still stack on narrow screens");
+  // Composer fields stay in the form; advanced remains progressively disclosed.
+  const composer = extractFunctionSource(js, "renderOutcomeComposer");
+  assert.ok(composer.includes('data-fl-role", "outcome-text"'), "primary outcome field remains");
+  assert.ok(composer.includes('data-fl-role", "outcome-advanced"'), "advanced input remains reachable");
+  assert.ok(composer.includes('data-fl-role", "outcome-project"'), "project field is not deleted");
+  assert.ok(composer.includes('data-fl-role", "outcome-context"'), "context field is not deleted");
+  assert.ok(composer.includes('data-fl-role", "outcome-shape"'), "shape field is not deleted");
+});
+
 test("FL-109C2A drag and Move/Act surfaces stay contained and touch-friendly", async () => {
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   assert.match(css, /\.work-card\.is-actionable\[draggable="true"\]\s*\{[\s\S]*?cursor:\s*grab/,
@@ -207,6 +259,60 @@ test("FL-109C2B guided Continue flow is contained and touch-safe at every width"
     "narrow screens stack pending actions");
   assert.match(narrowBlock, /\.task-action-pending-continue,\s*\.task-action-pending-actions\s*\.btn\s*\{\s*width:\s*100%/,
     "narrow screens make pending buttons full-width");
+});
+
+test("FL-108D1 Task Detail four-step story stays readable near 390px", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+
+  const overview = extractFunctionSource(js, "renderFourSectionOverview");
+  assert.ok(overview.includes("task-overview-story"), "ordered story marker ships");
+  assert.ok(overview.includes("four-section-step"), "step markers keep the 1–4 order visible");
+  assert.ok(overview.includes("task-ov-main-asked"), "step 1 remains Main input");
+  assert.ok(overview.includes("task-ov-final-output"), "step 4 remains final delivery");
+  assert.ok(!overview.includes("worker-claim-preview"), "raw Worker report stays off the default Overview");
+
+  const workbench = extractFunctionSource(js, "renderTaskWorkbench");
+  assert.ok(workbench.includes("worker-claim-disclosure"), "Result disclosure remains reachable");
+  assert.ok(workbench.includes("journeyDisclosure"), "disclosure uses a native details control");
+  assert.ok(workbench.includes("taskChecksTabHint"), "Checks badge helper remains wired");
+
+  // Narrow drawer and story: order intact, text wraps, targets stay usable.
+  assert.match(css, /@media\s*\(max-width:\s*768px\)[\s\S]*?#fl-detail[\s\S]*?width:\s*100vw/,
+    "mobile drawer stays full-width near 390px");
+  assert.match(css, /@media\s*\(max-width:\s*768px\)\s*\{[\s\S]*?\.four-section-card/,
+    "four-step story has a mobile restyle");
+  assert.match(css, /\.four-section-card\s*\{[\s\S]*?overflow-wrap:\s*anywhere/,
+    "story text does not clip horizontally");
+  assert.match(css, /\.four-section-title\s*\{[\s\S]*?overflow-wrap:\s*anywhere/,
+    "step titles wrap instead of overflowing");
+  assert.match(css, /\.task-result-claim-disclosure\s*>\s*summary\s*\{[\s\S]*?min-height:\s*32px/,
+    "Worker-report disclosure keeps a practical touch target");
+  assert.match(css, /\.four-section-next\s*\{[\s\S]*?min-height:\s*32px/,
+    "next-action block stays interactive-height on narrow layouts");
+  // Tab row remains the existing wrapping bar; no regress to fixed non-wrapping.
+  assert.ok(css.includes(".task-tab-bar"), "tab bar styles remain");
+  assert.match(css, /\.task-tab-bar\s*\{[\s\S]*?flex-wrap:\s*wrap/,
+    "tab controls remain wrap-friendly on narrow widths");
+
+  // FL-108D2: after unnumbered titles, markers 1-4 remain the only ordinals
+  // and stay visible; no CSS rule may hide them (global or breakpoint).
+  assert.ok(overview.includes('h("div", "four-section-step", "1")'), "marker 1 in DOM");
+  assert.ok(overview.includes('h("div", "four-section-step", "2")'), "marker 2 in DOM");
+  assert.ok(overview.includes('h("div", "four-section-step", "3")'), "marker 3 in DOM");
+  assert.ok(overview.includes('h("div", "four-section-step", "4")'), "marker 4 in DOM");
+  const m1 = overview.indexOf('h("div", "four-section-step", "1")');
+  const m2 = overview.indexOf('h("div", "four-section-step", "2")');
+  const m3 = overview.indexOf('h("div", "four-section-step", "3")');
+  const m4 = overview.indexOf('h("div", "four-section-step", "4")');
+  assert.ok(m1 >= 0 && m2 > m1 && m3 > m2 && m4 > m3,
+    "step markers remain in DOM order 1 through 4");
+  assert.match(css, /\.four-section-step\s*\{[\s\S]*?display:\s*flex/,
+    "global step marker uses a visible flex layout");
+  assert.doesNotMatch(css, /\.four-section-step[^{]*\{[^}]*display\s*:\s*none/,
+    "no CSS rule hides step markers with display:none");
+  assert.doesNotMatch(css, /\.four-section-step[^{]*\{[^}]*visibility\s*:\s*hidden/,
+    "no CSS rule hides step markers with visibility:hidden");
 });
 
 test("FL-109D3B confirmation step and created story stay contained at 390px and keyboard-safe", async () => {

@@ -19,9 +19,10 @@ export const ACTIVITY_EVIDENCE_FIELD = "activityEvidence" as const;
  *  explicit activityEvidence field (legacy-safe fallback). */
 const EFFECTIVE_ACTIVITY_KINDS = new Set([
   "model-response",
-  "goal-turn-started",
-  "goal-active",
+  // Turn completion while the Goal continues is a real terminal transition.
   "goal-continuing",
+  // Privacy-safe workspace-change milestones from native-Goal diff evidence.
+  "workspace-change",
 ]);
 
 /** Closed activityKind values that are Runtime communication only. */
@@ -30,6 +31,10 @@ const LIVENESS_ACTIVITY_KINDS = new Set([
   "session-started",
   "goal-turn-interrupted",
   "goal-activity",
+  // Continuation starts and Goal status churn are observability only: they
+  // cannot buy unlimited time after the active Turn is established.
+  "goal-turn-started",
+  "goal-active",
 ]);
 
 function payloadObject(payload: unknown): Record<string, unknown> | undefined {

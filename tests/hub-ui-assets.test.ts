@@ -139,8 +139,8 @@ test("Hub explains durable Goal supervision with bilingual next actions", async 
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
   assert.ok(html.includes('data-tab="work"'), "Work is the single operate surface entry");
-  assert.ok(!html.includes('data-tab="goals"') && !html.includes('data-tab="plans"') && !html.includes('data-tab="tasks"'),
-    "peer Board/Plans/Goals navigation is folded into Work");
+  assert.ok(!html.includes('data-tab="overview"') && !html.includes('data-tab="goals"') && !html.includes('data-tab="plans"') && !html.includes('data-tab="tasks"'),
+    "Overview and peer Board/Plans/Goals navigation are folded into Work");
   assert.ok(src.includes("function rGoals("));
   assert.ok(src.includes("function showGoalDetail("));
   assert.ok(src.includes('data-fl-role", "goal-detail"'));
@@ -4864,7 +4864,39 @@ test("Hub i18n carries journey keys in both languages and what/why never duplica
   assert.ok(i18n.includes("机器检查可能已经通过，但 Main 已拒绝这份结果"), "zh Main-reject why");
   assert.ok(i18n.includes("任务未能成功完成"), "zh failed what");
   assert.ok(i18n.includes("Provider 拒绝了 API 凭证"), "zh auth why");
-  assert.ok(i18n.includes("Token 或预算达到上限"), "zh budget why");
+  assert.ok(
+    i18n.includes("Token、预算或账户额度上限使运行中止"),
+    "zh budget why distinguishes account quota from Task limits",
+  );
+  assert.ok(
+    i18n.includes("等待额度恢复或切换 Worker"),
+    "zh budget next action says wait or switch Worker for account quota",
+  );
+  assert.ok(
+    i18n.includes("不会补满 Provider 账户额度"),
+    "zh budget next action does not claim Worker settings refill account quota",
+  );
+  // English budget recovery must cover both branches without claiming certainty.
+  assert.ok(
+    i18n.includes("wait for recovery or switch Worker"),
+    "en budget why says wait or switch for account quota",
+  );
+  assert.ok(
+    i18n.includes("adjust that Task's limits or scope"),
+    "en budget why says adjust Task limits only when applicable",
+  );
+  assert.ok(
+    i18n.includes("Changing Worker settings does not refill a Provider account"),
+    "en budget next action refuses refill-via-settings claim",
+  );
+  assert.ok(
+    !i18n.includes("Raise the Worker budget or narrow the task scope, then retry."),
+    "en must not keep the old raise-Worker-budget-only next action",
+  );
+  assert.ok(
+    !i18n.includes("调高 Worker 预算或缩小任务范围，再重试。"),
+    "zh must not keep the old raise-Worker-budget-only next action",
+  );
   for (const key of [
     "journeyFinalOutputLabel", "journeyFinalOutputVerified",
     "journeyFinalOutputRejected", "journeyFinalOutputPending",
@@ -6835,13 +6867,25 @@ test("Hub retained Candidate card consumes only the safe journey projection", as
 
   const fourSectionFn = extractFunctionSource(src, "renderFourSectionOverview");
   assert.ok(
-    fourSectionFn.includes("renderRetainedCandidate(task)"),
-    "Retained Candidate folded into Worker-returned section of four-section Overview",
+    !fourSectionFn.includes("renderRetainedCandidate(task)"),
+    "Overview story keeps retained Candidate out of the default reading path",
+  );
+  assert.ok(
+    !fourSectionFn.includes("workerClaim") && !fourSectionFn.includes("worker-claim-preview"),
+    "Overview story does not surface raw Worker claim text",
+  );
+  assert.ok(
+    !fourSectionFn.includes("task-report-list files") && !fourSectionFn.includes("files.slice"),
+    "Overview story uses file counts only, not exact path lists",
   );
   const workbench = extractFunctionSource(src, "renderTaskWorkbench");
   assert.ok(
     workbench.includes("var resultRetained = renderRetainedCandidate(task)"),
     "Result tab still explains the retained Candidate",
+  );
+  assert.ok(
+    workbench.includes("worker-claim-disclosure") || workbench.includes("taskReportClaimDisclosure"),
+    "Result tab keeps the original Worker report under an explicit disclosure",
   );
 });
 
@@ -7743,12 +7787,15 @@ test("Hub Work surface renders one hierarchy with seven exact columns and never 
 test("Hub Plan lanes lead with completed, blocker, and next action like Goals", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const plan = extractFunctionSource(src, "renderWorkPlanLane");
-  assert.ok(plan.includes("summary.whatCompleted"), "Plan header shows what was completed");
-  assert.ok(plan.includes("summary.blocker"), "Plan header shows the current blocker");
-  assert.ok(plan.includes("summary.nextAction"), "Plan header shows the next action");
-  assert.ok(plan.includes("workGoalBlocker"), "blocker uses a plain-language label");
-  assert.ok(plan.includes("workGoalNext"), "next action uses a plain-language label");
+  assert.ok(plan.includes("appendWorkLaneNarrative(facts, summary"), "Plan header uses shared lane narration");
   assert.ok(plan.includes("workProgressCompact"), "percentage is secondary supporting evidence");
+  const narrative = extractFunctionSource(src, "appendWorkLaneNarrative");
+  assert.ok(narrative.includes("summary.whatCompleted") || narrative.includes("summary && summary.whatCompleted"),
+    "narration reads whatCompleted without mutating it");
+  assert.ok(narrative.includes("workGoalOutcome"), "what-happened uses a plain-language label");
+  assert.ok(narrative.includes("workGoalBlocker"), "blocker uses a plain-language label");
+  assert.ok(narrative.includes("workGoalNext"), "next action uses a plain-language label");
+  assert.ok(narrative.includes("workLaneHasRealBlocker"), "empty/fallback blockers are not forced into the header");
   // Goal and Plan headers are flat bands; the Task card is the only card object.
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   const laneToggle = css.slice(css.indexOf(".work-lane-toggle {"), css.indexOf(".work-lane-toggle:hover"));
@@ -7790,11 +7837,47 @@ test("Hub Work filters request the Core-filtered endpoint and never flatten ance
   assert.ok(src.includes('workRefreshFilterOptions'), "filter options are refreshed from unfiltered projections");
 });
 
+test("Hub authenticates onto Work as the only default work surface", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  // Initial state: Work is active in both HTML chrome and JS state.
+  assert.match(src, /tab:\s*"work"/, "S.tab defaults to work");
+  assert.ok(!src.includes('tab: "overview"'), "S.tab no longer defaults to overview");
+  assert.match(
+    html,
+    /data-tab="work"\s+class="nav-item active"/,
+    "HTML marks Work as the active primary-nav item",
+  );
+  assert.ok(!html.includes('data-tab="overview"'), "Overview is not a primary-nav peer");
+  // Only one Work entry in primary navigation; Configure + secondary Operate remain.
+  const workNavMatches = html.match(/data-tab="work"/g) || [];
+  assert.equal(workNavMatches.length, 1, "exactly one Work primary-nav entry");
+  for (const keep of ["model", "worker", "mains", "delivery", "competitions", "stats"]) {
+    assert.ok(html.includes(`data-tab="${keep}"`), `${keep} stays reachable in primary nav`);
+  }
+  // Initial localized chrome matches Work page metadata (zh-CN default shell).
+  assert.ok(html.includes('id="fl-page-title"') && html.includes(">工作<"), "initial page title is Work");
+  assert.ok(html.includes("统一的目标 → 计划 → 任务看板，含阻塞与下一步"), "initial page sub is Work");
+  assert.ok(i18n.includes('work: { title: "Work"'), "English Work title remains truthful");
+  assert.ok(i18n.includes('work: { title: "工作"'), "Chinese Work title remains truthful");
+  // First refresh requests Work hierarchy/intake slices via the default tab fallback.
+  assert.ok(src.includes('requestPlan(S.tab || "work")'), "refresh falls back to Work deps");
+  assert.ok(src.includes('pageMeta(S.tab || "work")'), "chrome falls back to Work metadata");
+  assert.ok(src.includes('var tab = S.tab || "work"'), "render falls back to Work");
+  // Keyboard/focus order follows visible primary nav: Work is the first Operate item.
+  const operateLabel = html.indexOf('data-i18n="navOperate"');
+  const workBtn = html.indexOf('data-tab="work"');
+  const competeBtn = html.indexOf('data-tab="competitions"');
+  assert.ok(operateLabel > 0 && workBtn > operateLabel, "Work follows the Operate group label");
+  assert.ok(competeBtn > workBtn, "Compete follows Work in focus order");
+});
+
 test("Hub legacy peer pages redirect to the single Work surface", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
   assert.ok(src.includes("LEGACY_TAB_REDIRECT"), "legacy redirect map exists");
-  for (const legacy of ["board", "tasks", "plans", "goals"]) {
+  for (const legacy of ["overview", "board", "tasks", "plans", "goals"]) {
     assert.ok(src.includes(`${legacy}: "work"`), `${legacy} redirects to work`);
   }
   const st = extractFunctionSource(src, "switchTab");
@@ -7802,12 +7885,29 @@ test("Hub legacy peer pages redirect to the single Work surface", async () => {
   assert.ok(st.includes("render()"), "switchTab renders immediately");
   assert.ok(st.includes("refresh()"), "switchTab fetches the new page");
   assert.ok(html.includes('data-tab="work"'), "one Work nav entry");
-  assert.ok(!html.includes('data-tab="tasks"') && !html.includes('data-tab="plans"') && !html.includes('data-tab="goals"'),
-    "peer Board/Plans/Goals nav is gone");
+  assert.ok(
+    !html.includes('data-tab="overview"')
+      && !html.includes('data-tab="tasks"')
+      && !html.includes('data-tab="plans"')
+      && !html.includes('data-tab="goals"'),
+    "Overview and peer Board/Plans/Goals nav are gone",
+  );
+  // Compatibility Overview implementation remains, but is not a peer primary view.
+  assert.ok(src.includes("function rOverview("), "Overview renderer kept as bounded compatibility");
+  assert.ok(src.includes('case "overview":'), "Overview case remains for non-switchTab safety");
   // Legacy detail APIs and the legacy submission page remain functional.
   assert.ok(src.includes("function showPlanBoard("), "Plan detail deep link remains");
   assert.ok(src.includes("function showGoalDetail("), "Goal detail deep link remains");
+  assert.ok(src.includes("function showTask("), "Task detail deep link remains");
   assert.ok(src.includes('switchTab("tasks", { legacy: true })'), "legacy submission opens behind the Advanced action");
+  assert.ok(src.includes('data-fl-role", "work-advanced-submit"') || src.includes('data-fl-role", "work-advanced"'),
+    "Work Advanced entry remains for task-file submission");
+  // The explicit Advanced path must not be swallowed by the legacy redirect.
+  assert.ok(
+    st.includes("opts && opts.legacy && LEGACY_TAB_REDIRECT[name]")
+      || st.includes("opts && opts.legacy"),
+    "switchTab preserves explicit legacy:true bypass for Advanced submission",
+  );
 });
 
 test("Hub Task drawer breadcrumb is truthful about ancestry", async () => {
@@ -8121,12 +8221,13 @@ test("Hub Work copy is bilingual, explanation-first, and internal-vocabulary-fre
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   const { enSection, zhSection } = splitI18n(i18n);
-  assert.ok(src.includes('renderPageStory("work")'), "Work page leads with a purpose story");
+  assert.ok(src.includes('renderPageStory("work")'), "Work page still renders its purpose story");
   const enKeys = [
     "workFilterApply", "workFilterReset", "workColumnWaitingDecision",
     "workCardBlocker", "workCardNext", "workGoalDecision",
     "workIndependentPlans", "workOneOffTasks", "workUnsupportedHierarchy",
     "workFilterInternalProjectsOmitted", "workOneOffCount",
+    "pageStoryWorkHow", "workFinishedWorkCount", "workNoFurtherAction",
   ];
   for (const key of enKeys) {
     assert.ok(enSection.includes(key), `en ${key}`);
@@ -8142,11 +8243,571 @@ test("Hub Work copy is bilingual, explanation-first, and internal-vocabulary-fre
     "zh explains omitted internal project choices");
   assert.ok(i18n.includes("{count} tasks"), "en one-off count is plain");
   assert.ok(i18n.includes("{count} 个任务"), "zh one-off count is plain");
+  assert.ok(i18n.includes("How this page works"), "en Work help disclosure title");
+  assert.ok(i18n.includes("如何使用这个页面"), "zh Work help disclosure title");
+  assert.ok(i18n.includes("Finished work ({count})"), "en finished-work group is plain");
+  assert.ok(i18n.includes("已结束的工作（{count}）"), "zh finished-work group is plain");
+  assert.ok(i18n.includes("What happened: {text}"), "en lane outcome is neutral");
+  assert.ok(i18n.includes("发生了什么：{text}"), "zh lane outcome is neutral");
+  assert.ok(i18n.includes("No further action needed"), "en completed no-action conclusion");
+  assert.ok(i18n.includes("无需后续操作"), "zh completed no-action conclusion");
   // No raw status or dependency codes as primary Work copy.
   assert.ok(!i18n.includes("plan_dependencies"), "Work copy avoids the dependency code");
   assert.ok(!i18n.includes("work_hierarchy"), "Work copy avoids the internal method name");
   assert.ok(!src.includes('data-fl-role", "work-card"') || src.includes("card.breadcrumb"),
     "cards carry the hierarchy breadcrumb for the drawer");
+});
+
+// --- FL-108B: Work page explains itself without overwhelming ---
+
+test("FL-108B Work-only help is a closed disclosure that retains every page-story slot", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const story = extractFunctionSource(src, "renderPageStory");
+  assert.ok(story.includes('page === "work"'), "Work branches into a disclosure");
+  assert.ok(story.includes('data-fl-role", "page-story-disclosure"'), "disclosure role is stable");
+  assert.ok(story.includes('data-fl-role", "page-story-disclosure-toggle"'), "toggle role is stable");
+  assert.ok(story.includes('t("pageStoryWorkHow")'), "disclosure uses the How-this-page title");
+  assert.ok(story.includes("details.appendChild(body)"), "purpose and flow live inside the disclosure");
+  assert.ok(story.includes('data-fl-role", "page-story-purpose"'), "purpose slot retained");
+  assert.ok(story.includes('page-story-" + item.slot'), "input/process/output/next slots retained");
+  // Closed by default: no open attribute is set on the Work details element.
+  assert.ok(!/details\.open\s*=\s*true/.test(story), "Work help is not forced open");
+  assert.ok(!story.includes('setAttribute("open"'), "Work help has no open attribute");
+  // Other pages still append purpose+flow directly (no Work-only disclosure).
+  assert.ok(story.includes("card.appendChild(purpose)"), "non-Work pages keep always-open purpose");
+  assert.ok(story.includes("card.appendChild(flow)"), "non-Work pages keep always-open flow");
+  const rw = extractFunctionSource(src, "rWork");
+  const outcomeAt = rw.indexOf("renderOutcomeSection()");
+  const storyAt = rw.indexOf('renderPageStory("work")');
+  const filtersAt = rw.indexOf("renderWorkFilters()");
+  const boardAt = rw.indexOf('data-fl-role", "work-board"');
+  assert.ok(outcomeAt > 0 && storyAt > outcomeAt && filtersAt > storyAt && boardAt > filtersAt,
+    "Work order is outcome → compact help → filters → board");
+  assert.ok(i18n.includes("How this page works") && i18n.includes("如何使用这个页面"),
+    "bilingual help titles ship");
+  assert.ok(css.includes(".page-story-disclosure"), "disclosure styles ship");
+  assert.ok(css.includes(".page-story-disclosure-summary"), "summary line styles ship");
+  assert.ok(!/page-story-disclosure[\s\S]{0,200}height:\s*\d+vh/.test(css),
+    "help disclosure does not use fixed viewport heights");
+});
+
+test("FL-108B terminal Goals group into one counted, lazy Finished work disclosure", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  assert.ok(src.includes("function workGoalIsTerminalStatus("), "terminal status helper ships");
+  assert.ok(src.includes("function renderWorkFinishedGoals("), "finished-work renderer ships");
+  const isTerminal = extractFunctionSource(src, "workGoalIsTerminalStatus");
+  assert.ok(isTerminal.includes('status === "completed"'), "completed is terminal");
+  assert.ok(isTerminal.includes('status === "stopped"'), "stopped is terminal");
+  assert.ok(isTerminal.includes('status === "failed"'), "failed is terminal");
+  assert.ok(!isTerminal.includes("whatCompleted") && !isTerminal.includes("percent")
+    && !isTerminal.includes("updatedAt") && !isTerminal.includes("columns"),
+    "terminal partition never infers from copy, progress, dates, or Task columns");
+  // Pure helper behavior for the closed status set only.
+  const factory = new Function(`${isTerminal}; return workGoalIsTerminalStatus;`);
+  const check = factory() as (status: string) => boolean;
+  assert.equal(check("completed"), true);
+  assert.equal(check("stopped"), true);
+  assert.equal(check("failed"), true);
+  assert.equal(check("running"), false);
+  assert.equal(check("active"), false);
+  assert.equal(check("pending"), false);
+  const finished = extractFunctionSource(src, "renderWorkFinishedGoals");
+  assert.ok(finished.includes('data-fl-role", "work-finished-group"'), "finished group role");
+  assert.ok(finished.includes('data-fl-role", "work-finished-toggle"'), "finished toggle role");
+  assert.ok(finished.includes("workFinishedWorkCount"), "count is shown in the summary");
+  assert.ok(finished.includes("ensureFinishedBody"), "terminal lanes are lazy");
+  assert.ok(finished.includes("renderWorkGoalLane(goal)"), "same Goal lane renderer when expanded");
+  assert.ok(finished.includes("if(details.open) ensureFinishedBody()"),
+    "lanes render only after the disclosure opens");
+  const rw = extractFunctionSource(src, "rWork");
+  assert.ok(rw.includes("workGoalIsTerminalStatus"), "rWork partitions by canonical status");
+  assert.ok(rw.includes("activeGoals"), "active Goals are collected");
+  assert.ok(rw.includes("terminalGoals"), "terminal Goals are collected");
+  assert.ok(rw.includes("renderWorkFinishedGoals(terminalGoals)"), "terminal group is rendered");
+  const activeAppend = rw.indexOf("activeGoals.forEach");
+  const finishedAppend = rw.indexOf("renderWorkFinishedGoals");
+  const indepAppend = rw.indexOf("work-independent-plans");
+  const oneOffAppend = rw.indexOf("work-oneoff-tasks");
+  assert.ok(activeAppend > 0 && finishedAppend > activeAppend,
+    "active Goals render before the Finished work disclosure");
+  assert.ok(indepAppend > finishedAppend && oneOffAppend > indepAppend,
+    "independent plans and one-off stay after Goal groups");
+  assert.ok(css.includes(".work-finished-group"), "finished group styles ship");
+  assert.ok(!/work-finished-group[\s\S]{0,240}(max-height:\s*\d+vh|overflow:\s*hidden)/.test(css),
+    "finished group does not clip or fix viewport height");
+});
+
+test("FL-108B lane narration is neutral, hides empty blockers, and calms completed next actions", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.ok(src.includes("function workLaneHasRealBlocker("), "real-blocker helper ships");
+  assert.ok(src.includes("function workLaneNextActionText("), "next-action presentation helper ships");
+  assert.ok(src.includes("function appendWorkLaneNarrative("), "shared narrative helper ships");
+  const hasBlocker = extractFunctionSource(src, "workLaneHasRealBlocker");
+  assert.ok(hasBlocker.includes("No current blocker."),
+    "only Core's explicit no-blocker fallback is suppressed by exact match");
+  // Legacy path remains pure; coded path needs the closed maps in scope.
+  const blockerPrelude = [
+    "var WORK_NARRATIVE_EMPTY_BLOCKER_CODES = {\"lane-blocker-none\":true,\"goal-wait-all-gates-satisfied\":true,\"goal-wait-nothing\":true};",
+    "var WORK_NARRATIVE_I18N_KEYS = {\"lane-blocker-blocked\":\"k\",\"goal-wait-machine\":\"k\"};",
+  ].join("\n");
+  const blockerFactory = new Function(`${blockerPrelude}; ${hasBlocker}; return workLaneHasRealBlocker;`);
+  const realBlocker = blockerFactory() as (
+    blocker: unknown,
+    blockerMessage?: { code?: string },
+  ) => boolean;
+  assert.equal(realBlocker(""), false, "empty blocker is hidden");
+  assert.equal(realBlocker(null), false, "null blocker is hidden");
+  assert.equal(realBlocker("No current blocker."), false, "Core fallback is hidden");
+  assert.equal(realBlocker("Waiting: Task A."), true, "real blockers stay visible");
+  assert.equal(realBlocker("x", { code: "lane-blocker-none" }), false, "coded empty blocker is hidden");
+  assert.equal(realBlocker("x", { code: "lane-blocker-blocked" }), true, "coded real blocker is shown");
+  assert.equal(realBlocker("x", { code: "future-unknown-code" }), true,
+    "unrecognized blocker codes stay displayable for fail-closed unavailable copy");
+  const nextSrc = extractFunctionSource(src, "workLaneNextActionText");
+  const narrSrc = extractFunctionSource(src, "workNarrativeText");
+  const safeSrc = extractFunctionSource(src, "workSafeNarrativeParams");
+  // Bind t() and the coded renderer for pure evaluation of the presentation helper.
+  const nextFactory = new Function(
+    "t",
+    `var WORK_NARRATIVE_I18N_KEYS = ${JSON.stringify({
+      "goal-next-none": "workNarrGoalNextNone",
+      "card-next-waiting-main-decision": "workNarrCardNextWaitingMainDecision",
+    })};
+     ${safeSrc};
+     ${narrSrc};
+     ${nextSrc};
+     return workLaneNextActionText;`,
+  );
+  const nextText = nextFactory((key: string, vars?: Record<string, string>) => {
+    if (!vars) return key;
+    return Object.keys(vars).reduce((s, k) => s.split(`{${k}}`).join(vars[k]!), key);
+  }) as (
+    summary: {
+      nextAction?: string;
+      whatCompleted?: string;
+      nextActionMessage?: { code: string; params?: Record<string, string | number> };
+    },
+    opts?: { completedNoDecision?: boolean },
+  ) => string;
+  assert.equal(
+    nextText({ nextAction: "", whatCompleted: "Goal finished." }, { completedNoDecision: true }),
+    "workNoFurtherAction",
+    "empty completed next action becomes no-action conclusion",
+  );
+  assert.equal(
+    nextText({ nextAction: "Goal finished.", whatCompleted: "Goal finished." }, { completedNoDecision: true }),
+    "workNoFurtherAction",
+    "duplicate completed outcome is not repeated as next action",
+  );
+  assert.equal(
+    nextText({ nextAction: "Inspect the failed Task.", whatCompleted: "Worker failed." }, { completedNoDecision: true }),
+    "Inspect the failed Task.",
+    "real next actions stay visible even on completed Goals",
+  );
+  assert.equal(
+    nextText({ nextAction: "", whatCompleted: "Still running." }, {}),
+    "workNoNext",
+    "active empty next action keeps the ordinary no-next label",
+  );
+  assert.equal(
+    nextText({
+      nextAction: "Every milestone gate is satisfied.",
+      nextActionMessage: { code: "goal-next-none" },
+    }, { completedNoDecision: true }),
+    "workNoFurtherAction",
+    "coded none next action calms completed Goals without reading English prose",
+  );
+  const narrative = extractFunctionSource(src, "appendWorkLaneNarrative");
+  assert.ok(narrative.includes("workGoalOutcome"), "what-happened label is used");
+  assert.ok(narrative.includes("workNarrativeText"), "lane narration uses the coded renderer");
+  assert.ok(narrative.includes("completedNoDecision"), "completed-no-decision path is presentation-only");
+  assert.ok(!narrative.includes("summary.whatCompleted =") && !narrative.includes("summary.blocker =")
+    && !narrative.includes("summary.nextAction ="),
+    "narration never mutates canonical summary fields");
+  const goal = extractFunctionSource(src, "renderWorkGoalLane");
+  assert.ok(goal.includes("appendWorkLaneNarrative"), "Goal lane uses shared narration");
+  assert.ok(goal.includes('goal.status === "completed"') && goal.includes("decisionCount === 0"),
+    "completed-no-decision is derived from status + decision count only");
+  assert.match(enSection, /workGoalOutcome['"]?\s*:\s*["']What happened:/);
+  assert.match(zhSection, /workGoalOutcome['"]?\s*:\s*["']发生了什么：/);
+  assert.ok(enSection.includes("workNoFurtherAction") && zhSection.includes("workNoFurtherAction"));
+  assert.ok(!enSection.includes("Done: {text}"), "en no longer labels every summary as Done");
+  assert.ok(!zhSection.includes("已完成：{text}"), "zh no longer labels every summary as completed work");
+});
+
+test("FL-108C1 Work narrative is code-driven, bilingual, and fails closed", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  assert.ok(src.includes("function workNarrativeText("), "coded narrative renderer ships");
+  assert.ok(src.includes("var WORK_NARRATIVE_I18N_KEYS"), "closed code→key map ships");
+  assert.ok(src.includes("workNarrUnavailable"), "fail-closed copy key is referenced");
+  // Hub must not choose lifecycle copy by matching English prose.
+  const narrSrc = extractFunctionSource(src, "workNarrativeText");
+  const appendSrc = extractFunctionSource(src, "appendWorkLaneNarrative");
+  const cardSrc = extractFunctionSource(src, "renderWorkCard");
+  const oneOffSrc = extractFunctionSource(src, "renderWorkOneOffLane");
+  for (const banned of [
+    "Every milestone gate is satisfied",
+    "Main stopped this Goal",
+    "Goal is stopped; future Task admission is blocked",
+    "Waiting for a Main decision",
+    ".match(",
+    "RegExp",
+    "includes(\"Every",
+    "includes('Every",
+  ]) {
+    assert.ok(!narrSrc.includes(banned), `workNarrativeText must not contain prose parse: ${banned}`);
+    assert.ok(!appendSrc.includes(banned), `appendWorkLaneNarrative must not contain prose parse: ${banned}`);
+  }
+  assert.ok(cardSrc.includes("workNarrativeText"), "cards render next action via codes");
+  assert.ok(oneOffSrc.includes("workNarrativeText"), "one-off lane renders next action via codes");
+
+  // Evaluate the pure renderer with a tiny i18n stand-in.
+  const safeSrc = extractFunctionSource(src, "workSafeNarrativeParams");
+  const keys = {
+    "goal-what-completed": "workNarrGoalWhatCompleted",
+    "goal-what-main-stop": "workNarrGoalWhatMainStop",
+    "goal-wait-admission-blocked": "workNarrGoalWaitAdmissionBlocked",
+    "card-next-waiting-main-decision": "workNarrCardNextWaitingMainDecision",
+    "lane-what-completed-names": "workNarrLaneWhatCompletedNames",
+    "card-what-delivered": "workNarrCardWhatDelivered",
+    "card-next-goal-gate-satisfied": "workNarrCardNextGoalGateSatisfied",
+  };
+  const strings: Record<string, string> = {
+    workNarrUnavailable: "STATUS_UNAVAILABLE",
+    workNarrGoalWhatCompleted: "所有计划步骤均已完成。",
+    workNarrGoalWhatMainStop: "Main 已停止此目标。",
+    workNarrGoalWaitAdmissionBlocked: "不会启动新任务；正在运行的任务保留其现有控制。",
+    workNarrCardNextWaitingMainDecision: "正在等待 Main 做决定。",
+    workNarrLaneWhatCompletedNames: "已完成：{names}。",
+    workNarrLaneWhatCompletedNamesExtra: "已完成：{names}（另有 {extraCount} 项）。",
+    workNarrCardWhatDelivered: "{name} 已交付。",
+    workNarrCardNextGateMachine: "自动检查已通过。",
+    workNarrCardNextGateMainAccept: "Main 已确认结果。",
+    workNarrCardNextGateIntegration: "已接受的结果已安全应用。",
+    workNarrCardNextGateIntegrationOriginal: "Main 修复源码并按原有验收规则重新检查后，已安全应用。",
+    workNarrCardNextGateIntegrationAmended: "Main 修复源码并按修正后的验收规则重新检查后，已安全应用。",
+    workNarrCardNextGoalGateSatisfied: "此里程碑已完成。",
+    workNarrGateUnknown: "未知",
+  };
+  const factory = new Function(
+    "t",
+    `var WORK_NARRATIVE_I18N_KEYS = ${JSON.stringify(keys)};
+     ${safeSrc};
+     ${narrSrc};
+     return workNarrativeText;`,
+  );
+  const render = factory((key: string, vars?: Record<string, string>) => {
+    let out = strings[key] ?? key;
+    if (vars) {
+      Object.keys(vars).forEach((k) => {
+        out = out.split(`{${k}}`).join(String(vars[k]));
+      });
+    }
+    return out;
+  }) as (
+    msg: { code: string; params?: Record<string, string | number> } | null | undefined,
+    legacy?: string,
+  ) => string;
+
+  // Chinese completed / stopped / one-off decision — no English lifecycle leak.
+  assert.equal(render({ code: "goal-what-completed" }, "Every milestone gate is satisfied."),
+    "所有计划步骤均已完成。");
+  assert.equal(render({ code: "goal-what-main-stop" }, "Main stopped this Goal."),
+    "Main 已停止此目标。");
+  assert.equal(render({ code: "goal-wait-admission-blocked" },
+    "Goal is stopped; future Task admission is blocked."),
+  "不会启动新任务；正在运行的任务保留其现有控制。");
+  assert.equal(render({ code: "card-next-waiting-main-decision" }, "Waiting for a Main decision."),
+    "正在等待 Main 做决定。");
+  // User-authored name preserved inside localized shell.
+  assert.equal(render({ code: "card-what-delivered", params: { name: "结算修复" } }, "x"),
+    "结算修复 已交付。");
+  assert.equal(
+    render({ code: "lane-what-completed-names", params: { names: "A, B", extraCount: 2 } }, "x"),
+    "已完成：A, B（另有 2 项）。",
+  );
+  assert.equal(render({ code: "card-next-goal-gate-satisfied", params: { gate: "machine" } }, "x"),
+    "自动检查已通过。");
+  // Unrecognized code fails closed: no raw code, no success claim, no legacy English.
+  const unknown = render({ code: "future-core-code-v99" }, "Every milestone gate is satisfied.");
+  assert.equal(unknown, "STATUS_UNAVAILABLE");
+  assert.ok(!unknown.includes("future-core-code-v99"), "raw code never shown");
+  assert.ok(!unknown.includes("Every milestone"), "legacy English not used for unknown codes");
+  assert.ok(!/satisfied|completed|success/i.test(unknown), "unknown codes invent no success");
+  // Unrecognized blocker narrative is displayable and fails closed to unavailable.
+  const unknownBlocker = render(
+    { code: "future-blocker-code-v99" },
+    "Waiting: Task A.",
+  );
+  assert.equal(unknownBlocker, "STATUS_UNAVAILABLE",
+    "unrecognized blocker message renders localized unavailable copy");
+  assert.ok(!unknownBlocker.includes("future-blocker-code-v99"), "raw blocker code never shown");
+  assert.ok(!unknownBlocker.includes("Waiting:"), "legacy English blocker not used for unknown codes");
+  assert.ok(!/satisfied|completed|success/i.test(unknownBlocker), "unknown blocker invents no success");
+  // Absent coded message preserves legacy compatibility.
+  assert.equal(render(null, "Legacy technical evidence."), "Legacy technical evidence.");
+  assert.equal(render(undefined, "  "), "");
+
+  // workSafeNarrativeParams: Core-equivalent bounds (8 keys, 200 chars, safe int 0..1e6).
+  const safeFactory = new Function(`${safeSrc}; return workSafeNarrativeParams;`);
+  const safeParams = safeFactory() as (
+    params: Record<string, unknown> | null | undefined,
+  ) => Record<string, string | number>;
+  const nineKeys: Record<string, string> = {};
+  for (let i = 0; i < 9; i += 1) nineKeys[`k${i}`] = `v${i}`;
+  const capped = safeParams(nineKeys);
+  assert.equal(Object.keys(capped).length, 8, "at most 8 own keys accepted");
+  assert.equal(capped.k8, undefined, "ninth key is omitted");
+  assert.equal(capped.k0, "v0", "first valid keys are retained");
+  const long = "x".repeat(250);
+  const sliced = safeParams({ name: long });
+  assert.equal(String(sliced.name).length, 200, "strings are sliced to 200 chars");
+  assert.equal(sliced.name, long.slice(0, 200), "string prefix is preserved");
+  const nums = safeParams({
+    ok: 0,
+    mid: 42,
+    max: 1_000_000,
+    over: 1_000_001,
+    neg: -1,
+    float: 1.5,
+    nan: Number.NaN,
+    inf: Number.POSITIVE_INFINITY,
+    bool: true as unknown as number,
+  });
+  assert.equal(nums.ok, 0, "zero is accepted");
+  assert.equal(nums.mid, 42, "safe positive int is accepted");
+  assert.equal(nums.max, 1_000_000, "upper bound 1_000_000 is accepted");
+  assert.equal(nums.over, undefined, "oversize int is omitted");
+  assert.equal(nums.neg, undefined, "negative is omitted");
+  assert.equal(nums.float, undefined, "float is omitted");
+  assert.equal(nums.nan, undefined, "NaN is omitted");
+  assert.equal(nums.inf, undefined, "Infinity is omitted");
+  assert.equal((nums as Record<string, unknown>).bool, undefined, "boolean is omitted");
+  assert.deepEqual(safeParams(null), {}, "null params yield empty object");
+  assert.deepEqual(safeParams(undefined), {}, "undefined params yield empty object");
+  assert.deepEqual(safeParams({ empty: "" }), {}, "empty strings are omitted");
+  // Valid params still reach interpolation after bounding.
+  assert.equal(
+    render({
+      code: "card-what-delivered",
+      params: {
+        name: "结算修复",
+        noise: -3,
+        extra1: 1,
+        extra2: 2,
+        extra3: 3,
+        extra4: 4,
+        extra5: 5,
+        extra6: 6,
+        extra7: 7,
+        dropMe: "ninth",
+      },
+    }, "x"),
+    "结算修复 已交付。",
+    "valid name still renders; invalid/excess params never break interpolation",
+  );
+
+  // Bilingual keys exist for the measured defect sentences and fail-closed copy.
+  for (const key of [
+    "workNarrUnavailable",
+    "workNarrGoalWhatCompleted",
+    "workNarrGoalWhatMainStop",
+    "workNarrGoalWaitAdmissionBlocked",
+    "workNarrCardNextWaitingMainDecision",
+    "workNarrLaneWhatCompletedNamesExtra",
+    "workNarrCardNextNeedsRecovery",
+    "workNarrLaneNextNoStep",
+  ]) {
+    assert.ok(enSection.includes(`${key}:`), `en has ${key}`);
+    assert.ok(zhSection.includes(`${key}:`), `zh has ${key}`);
+  }
+  assert.ok(zhSection.includes("所有计划步骤均已完成。"), "zh completed Goal copy");
+  assert.ok(zhSection.includes("Main 已停止此目标"), "zh main-stop copy");
+  assert.ok(zhSection.includes("不会启动新任务；正在运行的任务保留其现有控制。"), "zh admission-blocked copy");
+  assert.ok(zhSection.includes("正在等待 Main 做决定。"), "zh Main-decision copy");
+  assert.ok(zhSection.includes("此视图暂时无法提供状态说明。"), "zh fail-closed copy");
+  // English keys keep the plain meaning for en locale.
+  assert.ok(enSection.includes("All planned steps are complete."), "en completed Goal copy");
+  assert.ok(enSection.includes("Waiting for Main to decide."), "en Main-decision copy");
+});
+
+test("FL-108C2 Work narrative is plain language and bilingual for every closed code", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  const extract = (section: string): Record<string, string> => {
+    const out: Record<string, string> = {};
+    const re = /\b(workNarr[A-Za-z0-9]+):\s*"((?:[^"\\]|\\.)*)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(section)) !== null) {
+      out[m[1]!] = m[2]!;
+    }
+    return out;
+  };
+  const en = extract(enSection);
+  const zh = extract(zhSection);
+
+  // Completeness: every FL-108C1 narrative key ships in both locales.
+  const keys = Object.keys(en);
+  assert.ok(keys.length > 55, "workNarr block retains its full key set");
+  for (const key of keys) {
+    assert.ok(zh[key] !== undefined, `zh has ${key}`);
+    assert.ok(en[key]!.trim().length > 0, `en ${key} is non-empty`);
+    assert.ok(zh[key]!.trim().length > 0, `zh ${key} is non-empty`);
+  }
+  for (const key of Object.keys(zh)) {
+    assert.ok(en[key] !== undefined, `en has ${key}`);
+  }
+
+  // Guard: default Work narration never ships the measured internal phrases.
+  const bannedEn = [
+    "milestone gate",
+    "Task admission",
+    "Task authority",
+    "Worker slot",
+    "exact Candidate",
+    "Main action",
+    "Machine gate",
+    "Main-accept gate",
+    "Integration gate",
+    "machine verification",
+  ];
+  const bannedZh = [
+    "里程碑闸门",
+    "Task 准入",
+    "Task 权限",
+    "Worker 槽位",
+    "精确候选",
+    "Main 动作",
+    "机器闸门",
+    "Main 接受闸门",
+    "合入闸门",
+    "Main 接受",
+    "机器验收",
+  ];
+  for (const key of keys) {
+    for (const phrase of bannedEn) {
+      assert.ok(!en[key]!.includes(phrase), `en ${key} must not say "${phrase}": ${en[key]}`);
+    }
+    for (const phrase of bannedZh) {
+      assert.ok(!zh[key]!.includes(phrase), `zh ${key} must not say "${phrase}": ${zh[key]}`);
+    }
+  }
+
+  // Measured live strings and representative active states read plainly in both locales.
+  const fixtures: Array<{ key: string; en: string; zh: string }> = [
+    { key: "workNarrGoalWhatCompleted", en: "All planned steps are complete.", zh: "所有计划步骤均已完成。" },
+    { key: "workNarrGoalWhatMainStop", en: "Main stopped this Goal.", zh: "Main 已停止此目标。" },
+    { key: "workNarrGoalWhatCorrectionCap", en: "The correction limit for this Goal was reached.", zh: "此目标的修正次数已达上限。" },
+    { key: "workNarrGoalWhatReviewCap", en: "The review limit for this Goal was reached.", zh: "此目标的审查轮次已达上限。" },
+    { key: "workNarrGoalWhatNoNewEvidenceCap", en: "This Goal advanced too many times without new evidence, so it was stopped.", zh: "此目标在没有新证据的情况下推进次数过多，因此已停止。" },
+    { key: "workNarrGoalWhatDurationExceeded", en: "This Goal reached its total time limit.", zh: "此目标已达到总时长上限。" },
+    { key: "workNarrGoalWhatNoProgress", en: "This Goal made no progress within the allowed time.", zh: "此目标在允许的时间内没有进展。" },
+    { key: "workNarrGoalWhatMilestoneFailed", en: "A milestone task in this Goal failed.", zh: "此目标中的某个里程碑任务失败。" },
+    { key: "workNarrGoalWaitAdmissionBlocked", en: "No new tasks will start; running tasks keep their existing controls.", zh: "不会启动新任务；正在运行的任务保留其现有控制。" },
+    { key: "workNarrGoalWaitMachine", en: "Waiting for automatic checks to pass on this milestone.", zh: "正在等待此里程碑的自动检查通过。" },
+    { key: "workNarrGoalWaitMainAccept", en: "Waiting for Main to confirm the result of this milestone.", zh: "正在等待 Main 确认此里程碑的结果。" },
+    { key: "workNarrGoalWaitIntegration", en: "Waiting for the accepted result to be safely applied to the project.", zh: "正在等待已接受的结果安全应用到项目。" },
+    { key: "workNarrGoalWaitTask", en: "Waiting for the linked task to finish or become ready.", zh: "正在等待关联任务完成或变为就绪。" },
+    { key: "workNarrGoalNextWaitForWorker", en: "Wait for execution capacity and automatic checks to finish", zh: "等待执行容量可用且自动检查完成" },
+    { key: "workNarrGoalNextMainAccept", en: "Confirm and accept this result", zh: "确认并接受此结果" },
+    { key: "workNarrGoalNextMainReview", en: "Confirm, revise, or reject this result", zh: "确认、返工或拒绝此结果" },
+    { key: "workNarrGoalNextIntegrate", en: "Run a safety check, then approve applying the result", zh: "运行安全检查，然后批准应用结果" },
+    { key: "workNarrGoalNextCorrectOrDecide", en: "Inspect the failed task, then correct, revise, or stop", zh: "检查失败的任务，然后选择修正、返工或停止" },
+    { key: "workNarrGoalNextStopOrDecide", en: "Inspect the outcome, then decide whether to correct it, adjust a limit, or leave it as is", zh: "查看结果，然后决定是修正它、调整限额，还是保持现状" },
+    { key: "workNarrGoalNextResumeTask", en: "Resume the interrupted task", zh: "恢复被中断的任务" },
+    { key: "workNarrGoalNextNone", en: "No decision needed right now", zh: "当前无需做决定" },
+    { key: "workNarrCardWhatDelivered", en: "{name} delivered.", zh: "{name} 已交付。" },
+    { key: "workNarrCardNextReady", en: "Ready to run when execution capacity is available.", zh: "执行容量可用时即可运行。" },
+    { key: "workNarrCardNextRunning", en: "A worker is executing this task.", zh: "Worker 正在执行此任务。" },
+    { key: "workNarrCardNextWaitingVerification", en: "Waiting for automatic checks to pass.", zh: "正在等待自动检查通过。" },
+    { key: "workNarrCardNextWaitingMainDecision", en: "Waiting for Main to decide.", zh: "正在等待 Main 做决定。" },
+    { key: "workNarrCardNextNeedsRecovery", en: "Needs Main attention or recovery.", zh: "需要 Main 关注或恢复。" },
+    { key: "workNarrCardNextGateMachine", en: "Automatic checks passed.", zh: "自动检查已通过。" },
+    { key: "workNarrCardNextGateMainAccept", en: "Main confirmed the result.", zh: "Main 已确认结果。" },
+    { key: "workNarrCardNextGateIntegration", en: "The accepted result was safely applied.", zh: "已接受的结果已安全应用。" },
+  ];
+  for (const fx of fixtures) {
+    assert.equal(en[fx.key], fx.en, `en ${fx.key} matches plain-language fixture`);
+    assert.equal(zh[fx.key], fx.zh, `zh ${fx.key} matches plain-language fixture`);
+  }
+
+  // Stopped reasons stay distinct: each what-line names its own cause, never a repeat-stop.
+  const stoppedWhat = [
+    en.workNarrGoalWhatMainStop!,
+    en.workNarrGoalWhatCorrectionCap!,
+    en.workNarrGoalWhatReviewCap!,
+    en.workNarrGoalWhatNoNewEvidenceCap!,
+    en.workNarrGoalWhatDurationExceeded!,
+    en.workNarrGoalWhatNoProgress!,
+    en.workNarrGoalWhatMilestoneFailed!,
+  ];
+  assert.equal(new Set(stoppedWhat).size, stoppedWhat.length, "stopped causes are not flattened");
+  for (const line of stoppedWhat) {
+    assert.ok(!/stop this goal/i.test(line), `stopped what-line must not ask to stop again: ${line}`);
+  }
+  // The shared stop-or-decide next step fits both terminal stopped and waiting cap Goals.
+  assert.ok(!/stop|retry/i.test(en.workNarrGoalNextStopOrDecide!),
+    "shared next step never re-asks to stop and implies no automatic retry");
+  assert.ok(!zh.workNarrGoalNextStopOrDecide!.includes("停止"),
+    "zh shared next step never re-asks to stop");
+  // Gate-satisfied next actions name the concrete condition, never a raw gate code.
+  for (const key of ["workNarrCardNextGateMachine", "workNarrCardNextGateMainAccept", "workNarrCardNextGateIntegration"]) {
+    assert.ok(!en[key]!.includes("{gate}"), `en ${key} must not interpolate a raw gate param`);
+    assert.ok(!zh[key]!.includes("{gate}"), `zh ${key} must not interpolate a raw gate param`);
+  }
+  // Three generic gate-param templates stay concrete (no raw {gate} placeholder).
+  for (const key of ["workNarrGoalWhatMilestoneSatisfied", "workNarrCardWhatGoalGateComplete", "workNarrCardNextGoalGateSatisfied"]) {
+    assert.ok(!en[key]!.includes("{gate}"), `en ${key} must not interpolate a raw gate param`);
+    assert.ok(!zh[key]!.includes("{gate}"), `zh ${key} must not interpolate a raw gate param`);
+  }
+  // Waiting states name what is waited for and who/what moves it forward.
+  assert.ok(en.workNarrGoalWaitMachine!.includes("automatic checks") && en.workNarrGoalWaitMainAccept!.includes("Main"),
+    "en waiting states name the concrete handoff");
+  assert.ok(zh.workNarrGoalWaitMachine!.includes("自动检查") && zh.workNarrGoalWaitMainAccept!.includes("Main"),
+    "zh waiting states name the concrete handoff");
+});
+
+test("FL-108B Work composition stays presentation-only with no Core lifecycle mutation", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const helpers = [
+    "workGoalIsTerminalStatus",
+    "workLaneHasRealBlocker",
+    "workLaneNextActionText",
+    "appendWorkLaneNarrative",
+    "renderWorkFinishedGoals",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  for (const banned of [
+    "fetch(",
+    "S.workHierarchy",
+    "goal.status =",
+    "summary.blocker =",
+    "summary.nextAction =",
+    "summary.whatCompleted =",
+    "/api/ops/",
+    "localStorage",
+  ]) {
+    assert.ok(!helpers.includes(banned), `presentation helpers must not contain ${banned}`);
+  }
+  const rw = extractFunctionSource(src, "rWork");
+  assert.ok(rw.includes("normalizeWorkHierarchy(S.workHierarchy)"),
+    "rWork still consumes the canonical hierarchy adapter");
+  assert.ok(rw.includes("activeGoals.push(goal)") && rw.includes("terminalGoals.push(goal)"),
+    "partition keeps the same Goal object references");
+  assert.ok(!rw.includes("JSON.parse(JSON.stringify") && !rw.includes("structuredClone"),
+    "Goals are not deep-copied for presentation");
+  // Empty intake remains reachable with a compact role marker.
+  const intake = extractFunctionSource(src, "renderIntakeStory");
+  assert.ok(intake.includes("outcome-story-note-empty"), "empty intake uses the compact note class");
+  assert.ok(intake.includes("outcomeEmpty"), "empty intake copy is retained");
 });
 
 // --- FL-109C2A truthful drag + keyboard action handoff ---
@@ -8799,4 +9460,456 @@ test("FL-109D3B created story keys are bilingual plain language", async () => {
   assert.ok(zhSection.includes("工作已创建"), "zh created story states the durable result");
   assert.ok(enSection.includes("could not confirm whether"), "en network failure stays uncertain");
   assert.ok(zhSection.includes("无法确认工作是否已创建"), "zh network failure stays uncertain");
+});
+
+// --- FL-108D1: Task Detail tells one clear input-to-delivery story ---
+
+test("FL-108D1 Checks tab hint is total on all-pass, failed/total on failure, empty when unknown", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const hintSrc = extractFunctionSource(src, "taskChecksTabHint");
+  const hint = new Function(`${hintSrc}\nreturn taskChecksTabHint;`)() as (
+    iv: unknown,
+  ) => string;
+
+  assert.equal(
+    hint({ available: true, conclusion: "passed", totalCount: 4, failedCount: 0 }),
+    "4",
+    "all-pass shows the total check count, never 0",
+  );
+  assert.equal(
+    hint({ available: true, conclusion: "failed", totalCount: 4, failedCount: 1 }),
+    "1/4",
+    "failure shows compact failed/total",
+  );
+  assert.equal(
+    hint({ available: true, conclusion: "failed", totalCount: 4, failedCount: 4 }),
+    "4/4",
+    "all-failed still uses failed/total form",
+  );
+  assert.equal(hint({ available: false }), "", "unavailable checks show no numeric pass claim");
+  assert.equal(hint(null), "", "missing verification shows no numeric pass claim");
+  assert.equal(
+    hint({ available: true, conclusion: "passed", totalCount: 0, failedCount: 0, checks: [] }),
+    "",
+    "zero-total available evidence does not invent a success count",
+  );
+  assert.equal(
+    hint({
+      available: true,
+      conclusion: "passed",
+      checks: [{ passed: true }, { passed: true }, { passed: true }],
+    }),
+    "3",
+    "falls back to checks.length when totalCount is absent",
+  );
+
+  const workbench = extractFunctionSource(src, "renderTaskWorkbench");
+  assert.ok(workbench.includes("taskChecksTabHint(iv)"), "workbench uses the honest Checks badge helper");
+  assert.ok(
+    !/hint:\s*failCount/.test(workbench) && !workbench.includes('hint: failCount'),
+    "workbench no longer uses failed-count alone as the Checks badge",
+  );
+});
+
+test("FL-108D1 Overview is a four-step story without raw claim, paths, or retained Candidate", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const overview = extractFunctionSource(src, "renderFourSectionOverview");
+
+  assert.ok(overview.includes('data-fl-role", "task-overview-story"'), "overview has a stable story marker");
+  assert.ok(overview.includes('data-fl-role", "task-ov-main-asked"'), "step 1 Main input");
+  assert.ok(overview.includes('data-fl-role", "task-ov-worker-returned"'), "step 2 execution");
+  assert.ok(overview.includes('data-fl-role", "task-ov-independent-result"'), "step 3 checks");
+  assert.ok(overview.includes('data-fl-role", "task-ov-final-output"'), "step 4 delivery");
+
+  // Ordered append: Main → execution → checks → delivery.
+  const s1 = overview.indexOf('task-ov-main-asked');
+  const s2 = overview.indexOf('task-ov-worker-returned');
+  const s3 = overview.indexOf('task-ov-independent-result');
+  const s4 = overview.indexOf('task-ov-final-output');
+  assert.ok(s1 > 0 && s2 > s1 && s3 > s2 && s4 > s3, "four steps append in input-to-delivery order");
+
+  // Default path excludes raw progressive evidence.
+  assert.ok(!overview.includes("worker-claim-preview"), "no raw Worker claim preview on Overview");
+  assert.ok(!overview.includes("we.workerClaim"), "does not read Worker claim text for default story");
+  assert.ok(!overview.includes("task-report-list files"), "no exact path list on Overview");
+  assert.ok(!overview.includes("files.slice"), "does not render path slices on Overview");
+  assert.ok(!overview.includes("renderRetainedCandidate"), "retained Candidate stays off Overview");
+  assert.ok(overview.includes("taskOvExecutionSummary"), "execution uses attempt/file counts");
+  assert.ok(overview.includes("taskOvExecutionInProgress"), "active work has an in-progress conclusion");
+  assert.ok(overview.includes("taskOvEvidenceInResult"), "points users to Result & files for raw evidence");
+  assert.ok(overview.includes("check-failure-summary"), "failed checks can surface the first safe failure");
+  assert.ok(overview.includes("firstFailed"), "only the first actionable failure is lifted");
+  // Delivery precedence is preserved.
+  assert.ok(overview.includes("verified-repaired-delivered"), "repaired delivery still leads");
+  assert.ok(overview.includes("taskOvIntegrated"), "integrated delivery conclusion remains");
+  assert.ok(overview.includes("taskOvReadyIntegrate"), "ready-to-integrate remains");
+  assert.ok(overview.includes("nextActionLabel"), "one next action remains on the final step");
+  assert.ok(overview.includes("a.presentation.summary"), "exact Main-authored summary is preferred");
+});
+
+test("FL-108D1 Result & files leads with meaning and keeps original Worker report progressive", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const workbench = extractFunctionSource(src, "renderTaskWorkbench");
+
+  // Meaning-first outcome from the story adapter body key.
+  assert.ok(workbench.includes("claimStep.bodyKey"), "Result leads with localized factual outcome");
+  assert.ok(workbench.includes("taskReportClaimDisclosure"), "Worker report has an explicit disclosure label");
+  assert.ok(workbench.includes("worker-claim-disclosure"), "Worker claim disclosure has a stable marker");
+  assert.ok(workbench.includes("worker-claim-text"), "exact Worker text remains reachable");
+  assert.ok(workbench.includes("journeyDisclosure"), "uses the shared closed disclosure control");
+  assert.ok(workbench.includes("taskReportClaimDisclosureHint"), "disclosure is labeled unverified");
+  // Evidence remains in this tab.
+  assert.ok(workbench.includes("taskReportArtifactsTitle"), "changed paths stay in Result & files");
+  assert.ok(workbench.includes("renderRetainedCandidate(task)"), "retained Candidate stays in Result & files");
+  // Process / Result badges stay count-based.
+  assert.ok(workbench.includes("hint: attemptCount"), "Process badge shows attempt count");
+  assert.ok(workbench.includes("hint: fileCount"), "Result badge shows file count");
+  assert.ok(workbench.includes("hint: checksHint"), "Checks badge uses the honest helper");
+});
+
+test("FL-108D1 Overview and Result copy are bilingual and keep Chinese free of English Worker report defaults", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  const keys = [
+    "taskOvMainAsked", "taskOvMainAskedHint",
+    "taskOvWorkerReturned", "taskOvWorkerReturnedHint",
+    "taskOvExecutionSummary", "taskOvExecutionInProgress", "taskOvExecutionNoAttempts",
+    "taskOvEvidenceInResult",
+    "taskOvIndependentResult", "taskOvIndependentResultHint",
+    "taskOvChecksPassed", "taskOvChecksFailed", "taskOvChecksNotRun",
+    "taskOvFinalOutput", "taskOvFinalOutputHint",
+    "taskOvIntegrated", "taskOvPendingWorker", "taskOvNoOutput",
+    "taskTabOverviewHint",
+    "taskReportResultTitle", "taskReportResultHint",
+    "taskReportClaimNotProof", "taskReportClaimDisclosure", "taskReportClaimDisclosureHint",
+  ];
+  for (const key of keys) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+
+  function labelOf(section: string, key: string): string {
+    const match = new RegExp(`${key}['"]?\\s*:\\s*"([^"]+)"`).exec(section);
+    return match?.[1] ?? "";
+  }
+
+  assert.match(labelOf(enSection, "taskOvExecutionSummary"), /attempt.*file/i);
+  assert.match(labelOf(zhSection, "taskOvExecutionSummary"), /尝试.*变更文件/);
+  assert.match(labelOf(enSection, "taskReportClaimDisclosure"), /unverified|not proof/i);
+  assert.match(labelOf(zhSection, "taskReportClaimDisclosure"), /未经验证|不是证明/);
+  assert.match(labelOf(zhSection, "taskOvEvidenceInResult"), /结果与文件/);
+  assert.match(labelOf(zhSection, "taskTabOverviewHint"), /Main 要求|实际执行|独立检查|最终交付/);
+  // Default Chinese story copy must not embed English Worker-report scaffolding.
+  assert.doesNotMatch(labelOf(zhSection, "taskOvWorkerReturnedHint"), /I updated|Implemented|Worker self-report:/);
+  assert.doesNotMatch(labelOf(zhSection, "taskReportClaimDisclosure"), /View the Worker's original report/);
+  // Integrated success stays truthful in Chinese (hero/delivery precedence copy).
+  assert.match(labelOf(zhSection, "taskOvIntegrated"), /合入/);
+  assert.match(labelOf(enSection, "taskOvIntegrated"), /Integrated|source project/i);
+});
+
+test("FL-108D1 success, failure, active, no-change, and legacy fixtures preserve truth boundaries", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const overview = extractFunctionSource(src, "renderFourSectionOverview");
+  const hintSrc = extractFunctionSource(src, "taskChecksTabHint");
+  const hint = new Function(`${hintSrc}\nreturn taskChecksTabHint;`)() as (
+    iv: unknown,
+  ) => string;
+
+  // Integrated success: 2 files, 4 checks passed → badge "4".
+  const successIv = {
+    available: true,
+    conclusion: "passed",
+    totalCount: 4,
+    failedCount: 0,
+    checks: [
+      { label: "a", passed: true },
+      { label: "b", passed: true },
+      { label: "c", passed: true },
+      { label: "d", passed: true },
+    ],
+  };
+  assert.equal(hint(successIv), "4", "integrated success Checks badge is 4, not 0");
+
+  // Failed verification: 1 of 4 failed.
+  assert.equal(
+    hint({ available: true, conclusion: "failed", totalCount: 4, failedCount: 1 }),
+    "1/4",
+    "failed verification Checks badge is failed/total",
+  );
+  assert.ok(overview.includes("taskOvChecksFailed"), "Overview can state failed/total");
+  assert.ok(overview.includes("failureSummary"), "Overview can show the first safe failure summary");
+
+  // Active work: verification not started → no numeric pass claim.
+  assert.equal(hint({ available: false }), "", "active Task Checks badge stays empty");
+  assert.ok(overview.includes("taskOvExecutionInProgress"), "active execution conclusion exists");
+  assert.ok(overview.includes("taskOvPendingWorker"), "active delivery stays pending");
+  assert.ok(overview.includes('statusText === "running"'), "running status keeps delivery pending");
+
+  // No-change Task: zero files still honest.
+  assert.ok(overview.includes("taskOvExecutionSummary"), "no-change still reports attempt/file counts");
+  assert.ok(overview.includes("String(files.length)"), "file count may be zero without inventing output");
+
+  // Legacy Task without rich journey: missing presentation and verification.
+  assert.ok(overview.includes("storyInputMissing"), "legacy missing brief is stated");
+  assert.ok(overview.includes("taskOvChecksNotRun"), "legacy missing checks are unavailable, not zero-pass");
+  assert.ok(overview.includes("taskOvNoOutput"), "legacy missing delivery is unavailable, not invented");
+  assert.equal(hint(undefined), "", "legacy missing verification has no numeric success");
+
+  // Machine/Main/delivery remain separate: main review is not used as check conclusion.
+  assert.ok(overview.includes("taskReportMainDecision"), "Main decision stays on the delivery step");
+  assert.ok(
+    overview.indexOf("task-ov-final-output") < overview.indexOf("taskReportMainDecision")
+      || overview.includes("fd.mainReview"),
+    "Main decision is associated with final delivery, not independent checks",
+  );
+});
+
+test("FL-108D1 Task Detail story layout stays scannable without a new visual system", async () => {
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  assert.ok(css.includes(".task-four-section"), "overview story container ships");
+  assert.ok(css.includes(".four-section-step"), "numbered step markers ship");
+  assert.ok(css.includes(".four-section-card:not(:last-child)::after"), "subtle step connectors ship");
+  assert.ok(css.includes(".task-result-claim-disclosure"), "Worker claim disclosure styles ship");
+  assert.match(css, /\.four-section-card\s*\{[\s\S]*?overflow-wrap:\s*anywhere/,
+    "story cards wrap long text");
+  assert.match(css, /\.four-section-next\s*\{[\s\S]*?min-height:\s*32px/,
+    "next-action block keeps a practical target height");
+  assert.match(css, /\.task-result-claim-disclosure\s*>\s*summary\s*\{[\s\S]*?min-height:\s*32px/,
+    "claim disclosure summary meets a practical touch target");
+  assert.match(
+    css,
+    /@media\s*\(max-width:\s*768px\)\s*\{[\s\S]*?\.four-section-card/,
+    "mobile breakpoint restyles the four-step story",
+  );
+  // Still uses existing token language rather than a new palette.
+  assert.match(css, /\.four-section-conclusion\.ok\s*\{[\s\S]*?var\(--green/,
+    "pass conclusion uses existing green token");
+  assert.match(css, /\.four-section-conclusion\.err\s*\{[\s\S]*?var\(--red/,
+    "fail conclusion uses existing red token");
+});
+
+// --- FL-108D2: remove three misleading Task Detail cues ---
+
+test("FL-108D2 English and Chinese step titles have one visible number via the marker only", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  const overview = extractFunctionSource(src, "renderFourSectionOverview");
+
+  // Marker remains the sole ordinal; DOM order is unchanged.
+  assert.ok(overview.includes('h("div", "four-section-step", "1")'), "marker 1 ships");
+  assert.ok(overview.includes('h("div", "four-section-step", "2")'), "marker 2 ships");
+  assert.ok(overview.includes('h("div", "four-section-step", "3")'), "marker 3 ships");
+  assert.ok(overview.includes('h("div", "four-section-step", "4")'), "marker 4 ships");
+  assert.ok(overview.includes('t("taskOvMainAsked")'), "step 1 title key remains");
+  assert.ok(overview.includes('t("taskOvWorkerReturned")'), "step 2 title key remains");
+  assert.ok(overview.includes('t("taskOvIndependentResult")'), "step 3 title key remains");
+  assert.ok(overview.includes('t("taskOvFinalOutput")'), "step 4 title key remains");
+
+  function labelOf(section: string, key: string): string {
+    const match = new RegExp(`${key}['"]?\\s*:\\s*"([^"]+)"`).exec(section);
+    return match?.[1] ?? "";
+  }
+
+  const stepKeys = [
+    "taskOvMainAsked",
+    "taskOvWorkerReturned",
+    "taskOvIndependentResult",
+    "taskOvFinalOutput",
+  ] as const;
+  for (const key of stepKeys) {
+    const en = labelOf(enSection, key);
+    const zh = labelOf(zhSection, key);
+    assert.ok(en.length > 0, `en ${key} present`);
+    assert.ok(zh.length > 0, `zh ${key} present`);
+    assert.doesNotMatch(en, /^\s*\d+[\.\u3001\uff0e\)]\s*/,
+      `en ${key} has no numeric prefix (marker owns the ordinal)`);
+    assert.doesNotMatch(zh, /^\s*\d+[\.\u3001\uff0e\)]\s*/,
+      `zh ${key} has no numeric prefix (marker owns the ordinal)`);
+  }
+});
+
+test("FL-108D2 execution-count conclusion stays outcome-neutral in every lifecycle state", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const overview = extractFunctionSource(src, "renderFourSectionOverview");
+
+  // Counts are facts: never append ok/err based on attempts, files, or status.
+  assert.ok(
+    overview.includes('h("div", "four-section-conclusion", execConclusion)'),
+    "execution conclusion uses the base neutral class only",
+  );
+  assert.ok(
+    !/execTone/.test(overview),
+    "no outcome-tone variable remains on the execution-count step",
+  );
+  assert.ok(
+    !/attempts\.length\s*\?\s*["'] ok["']/.test(overview),
+    "attempt presence never paints the execution step green",
+  );
+  // Check and delivery steps still own pass/fail / delivery meaning.
+  assert.ok(
+    overview.includes('four-section-conclusion" + (passedAll ? " ok" : " err")'),
+    "independent-check conclusion still carries pass/fail tone",
+  );
+  assert.ok(overview.includes('"four-section-conclusion ok", t("taskOvIntegrated")')
+    || overview.includes('four-section-conclusion ok", t("taskOvIntegrated")'),
+    "delivery success tone remains on the delivery step");
+  assert.ok(overview.includes("taskOvExecutionSummary"), "success path still shows counts");
+  assert.ok(overview.includes("taskOvExecutionInProgress"), "active path still shows in-progress copy");
+  assert.ok(overview.includes("taskOvExecutionNoAttempts"), "legacy/no-attempt path still shows empty counts");
+});
+
+test("FL-108D2 build and fallback check labels are readable and outcome-neutral in both languages", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  const labelSrc = extractFunctionSource(src, "readableVerificationCheckLabel");
+
+  function labelOf(section: string, key: string): string {
+    const match = new RegExp(`${key}['"]?\\s*:\\s*"([^"]+)"`).exec(section);
+    return match?.[1] ?? "";
+  }
+
+  const enBuild = labelOf(enSection, "journeyCheckProjectBuild");
+  const zhBuild = labelOf(zhSection, "journeyCheckProjectBuild");
+  const enFallback = labelOf(enSection, "journeyCheckAcceptanceFallback");
+  const zhFallback = labelOf(zhSection, "journeyCheckAcceptanceFallback");
+  const enFailedPrefix = labelOf(enSection, "taskOvCheckFailedLabel");
+  const zhFailedPrefix = labelOf(zhSection, "taskOvCheckFailedLabel");
+
+  assert.ok(enBuild.length > 0 && /build/i.test(enBuild), "en project-build label is readable");
+  assert.ok(zhBuild.length > 0 && /构建|编译/.test(zhBuild), "zh project-build label is readable");
+  assert.doesNotMatch(enBuild, /\bpass(?:es|ed)?\b/i, "en build label never claims passed");
+  assert.doesNotMatch(zhBuild, /通过|失败|未通过/, "zh build label never claims pass/fail");
+  assert.doesNotMatch(enFallback, /\bpass(?:es|ed)?\b|\bfail(?:ed|s)?\b/i,
+    "en fallback is a neutral noun phrase");
+  assert.doesNotMatch(zhFallback, /通过|失败|未通过/,
+    "zh fallback is a neutral noun phrase");
+  assert.match(enFallback, /acceptance check/i, "en fallback names a required acceptance check");
+  assert.match(zhFallback, /验收检查/, "zh fallback names a required acceptance check");
+
+  // Bounded command map ships for npm run build before the generic fallback.
+  assert.ok(labelSrc.includes('npm run build'), "maps the known build command");
+  assert.ok(labelSrc.includes("journeyCheckProjectBuild"), "build uses the dedicated readable key");
+  assert.ok(labelSrc.includes("journeyCheckAcceptanceFallback"), "unmapped commands use the neutral fallback");
+
+  const dictEn: Record<string, string> = {
+    journeyCheckUiContract: "ui-contract",
+    journeyCheckScriptLoads: "script-loads",
+    journeyCheckProjectCompiles: "compiles",
+    journeyCheckProjectBuild: enBuild,
+    journeyCheckPatchFormat: "patch-format",
+    journeyCheckFullProject: "full-project",
+    journeyCheckAutomatedBehavior: "automated-behavior",
+    journeyCheckAcceptanceFallback: enFallback,
+  };
+  const dictZh: Record<string, string> = {
+    journeyCheckUiContract: "界面约定",
+    journeyCheckScriptLoads: "脚本可加载",
+    journeyCheckProjectCompiles: "编译检查",
+    journeyCheckProjectBuild: zhBuild,
+    journeyCheckPatchFormat: "补丁格式",
+    journeyCheckFullProject: "完整测试",
+    journeyCheckAutomatedBehavior: "自动化行为",
+    journeyCheckAcceptanceFallback: zhFallback,
+  };
+  function makeT(dict: Record<string, string>) {
+    return (key: string) => dict[key] ?? key;
+  }
+  const labelFor = (dict: Record<string, string>) => new Function("t", `
+    ${labelSrc}
+    return readableVerificationCheckLabel;
+  `)(makeT(dict)) as (label: string) => string;
+
+  for (const [locale, dict, buildLabel, fallbackLabel, failedPrefix] of [
+    ["en", dictEn, enBuild, enFallback, enFailedPrefix],
+    ["zh", dictZh, zhBuild, zhFallback, zhFailedPrefix],
+  ] as const) {
+    const label = labelFor(dict);
+    // Integrated success path: known build command is still a neutral noun.
+    assert.equal(label("npm run build"), buildLabel, `${locale} maps npm run build`);
+    // Measured failed-build contradiction must never appear.
+    // Note: the failed-check *prefix* may say "未通过"/"Failed"; only the
+    // readable *name* must stay free of pass claims.
+    const failedBuildSummary = `${failedPrefix}: ${label("npm run build")}`;
+    assert.equal(failedBuildSummary, `${failedPrefix}: ${buildLabel}`,
+      `${locale} failed-build summary uses the readable build name`);
+    assert.doesNotMatch(buildLabel, /通过|passes|passed/i,
+      `${locale} build name never claims the check passed`);
+    assert.doesNotMatch(failedBuildSummary,
+      /验收检查通过|acceptance check passes/i,
+      `${locale} failed-build summary never embeds the old contradiction`);
+    if (locale === "zh") {
+      assert.notEqual(
+        failedBuildSummary,
+        "未通过的检查: 一项必要的验收检查通过",
+        "exact measured Chinese contradiction cannot render",
+      );
+      assert.equal(
+        failedBuildSummary,
+        "未通过的检查: 项目构建检查",
+        "Chinese failed build reads as failed build check, not passed acceptance",
+      );
+    } else {
+      assert.notEqual(
+        failedBuildSummary,
+        "Failed check: A required acceptance check passes",
+        "exact measured English contradiction cannot render",
+      );
+      assert.equal(
+        failedBuildSummary,
+        "Failed check: Project build check",
+        "English failed build reads as failed build check, not passed acceptance",
+      );
+    }
+    // Unmapped / future acceptance command stays a neutral noun phrase.
+    assert.equal(label("some-future-acceptance-tool --strict"), fallbackLabel,
+      `${locale} unmapped command uses neutral fallback`);
+    assert.doesNotMatch(label("some-future-acceptance-tool --strict"),
+      /\bpass(?:es|ed)?\b|\bfail(?:ed|s)?\b|通过|失败/,
+      `${locale} fallback wording stays outcome-neutral`);
+    // Known non-build mappings remain bounded and distinct.
+    assert.equal(label("npx tsc --noEmit"), dict.journeyCheckProjectCompiles,
+      `${locale} tsc still maps to compile label`);
+    assert.equal(label("npm test"), dict.journeyCheckAutomatedBehavior,
+      `${locale} test still maps to automated-behavior label`);
+  }
+});
+
+test("FL-108D2 failed verification, integrated success, and active work preserve progressive evidence", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const overview = extractFunctionSource(src, "renderFourSectionOverview");
+  const workbench = extractFunctionSource(src, "renderTaskWorkbench");
+  const labelSrc = extractFunctionSource(src, "readableVerificationCheckLabel");
+
+  // Failed verification: first actionable failure still surfaces with readable label.
+  assert.ok(overview.includes("check-failure-summary"), "failed-check summary remains");
+  assert.ok(overview.includes("readableVerificationCheckLabel(firstFailed.label)"),
+    "failed summary uses the readable label helper");
+  assert.ok(overview.includes("firstFailed.failureSummary"),
+    "raw failure diagnostic remains reachable on Overview when present");
+  assert.ok(overview.includes("taskOvChecksFailed"), "failed/total check conclusion remains");
+
+  // Integrated success: check/delivery still communicate success; execution stays neutral.
+  assert.ok(overview.includes("taskOvChecksPassed"), "all-pass check conclusion remains");
+  assert.ok(overview.includes("taskOvIntegrated") || overview.includes("taskOvDelivered"),
+    "delivery hero conclusions remain");
+  assert.ok(
+    overview.includes('h("div", "four-section-conclusion", execConclusion)'),
+    "success path execution counts stay neutral",
+  );
+
+  // Active work: pending checks, neutral counts, no invented green execution verdict.
+  assert.ok(overview.includes("taskOvExecutionInProgress"), "active execution copy remains");
+  assert.ok(overview.includes("taskOvChecksNotRun"), "active checks stay pending");
+  assert.ok(overview.includes("taskOvPendingWorker"), "active delivery stays pending");
+
+  // Progressive raw evidence locations are preserved.
+  assert.ok(workbench.includes("worker-claim-disclosure"), "original Worker report disclosure remains");
+  assert.ok(workbench.includes("worker-claim-text"), "exact Worker text remains reachable");
+  assert.ok(workbench.includes("taskReportArtifactsTitle"), "exact paths remain in Result & files");
+  assert.ok(workbench.includes("renderRetainedCandidate(task)"), "retained Candidate remains reachable");
+  // Label helper never hides the raw command by inventing pass/fail from it.
+  assert.ok(!/passed\s*===|conclusion\s*===/.test(labelSrc),
+    "readable label helper does not inspect check outcome");
 });

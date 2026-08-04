@@ -17,12 +17,15 @@ import {
   type SafeTaskSummary,
 } from "../src/core/task-summary.js";
 import type {
+  AttemptRecord,
   CandidateHandoffOrigin,
   CandidateHandoffRecord,
   DecisionStage,
   DependencyRecord,
   GoalMilestoneRecord,
   GoalRecord,
+  IntegrationReceiptRecord,
+  IntegrationResultRecord,
   PlanItemRecord,
   PlanRecord,
   TaskRecord,
@@ -94,6 +97,101 @@ function summaryFor(
     undefined,
     decisionStage,
   );
+}
+
+/** Machine gate evidence: succeeded + passing verification event. */
+function seedMachineSucceeded(store: StateStore, taskId: string): void {
+  store.setTaskStatus(taskId, "succeeded", {
+    error: null,
+    finishedAt: new Date().toISOString(),
+  });
+  store.addEvent(taskId, undefined, "verification.completed", "verification passed", {
+    passed: true,
+    commands: [],
+  });
+}
+
+/** Fresh exact Main accept bound to the current Candidate revision. */
+function seedMainAccept(store: StateStore, taskId: string, digest = "a".repeat(64)): void {
+  const task = store.getTask(taskId);
+  const attemptId = task.currentAttemptId ?? `attempt-${taskId.slice(0, 8)}`;
+  try {
+    store.getAttempt(attemptId);
+  } catch {
+    const attempt: AttemptRecord = {
+      id: attemptId,
+      taskId,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: `session-${attemptId}`,
+      rawLogPath: path.join(task.paths.logs, "worker.log"),
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+    };
+    store.createAttempt(attempt);
+  }
+  store.updateTask(taskId, { currentAttemptId: attemptId });
+  store.setTaskStatus(taskId, "succeeded", { error: null, finishedAt: new Date().toISOString() });
+  store.addEvent(taskId, attemptId, "verification.completed", "verification passed", {
+    passed: true,
+    commands: [],
+  });
+  const verification = store.listEvents(taskId)
+    .filter((e) => e.type === "verification.completed")
+    .at(-1)!;
+  const revisionId = `rev-${digest.slice(0, 8)}`;
+  store.addEvent(taskId, attemptId, "candidate.revision.captured", "revision captured", {
+    id: revisionId,
+    taskId,
+    attemptId,
+    attemptOrdinal: 1,
+    verificationEventSequence: verification.sequence,
+    patchDigest: digest,
+    filesChanged: 1,
+    changedLines: 1,
+    affectedPaths: ["src/a.ts"],
+    verificationPassed: true,
+    createdAt: new Date().toISOString(),
+  });
+  store.addEvent(taskId, attemptId, "main-review.completed", "Main agent review: accept", {
+    decision: "accept",
+    reason: "Accepted for the work-hierarchy regression fixture",
+    attemptId,
+    verificationEventSequence: verification.sequence,
+    candidateRevisionId: revisionId,
+    acceptedPatchDigest: digest,
+  });
+}
+
+/** Integration gate evidence: applied receipt bound to the exact accepted digest. */
+function seedIntegrationApplied(
+  store: StateStore,
+  taskId: string,
+  digest = "a".repeat(64),
+): void {
+  const receiptId = "receipt-1";
+  const receipt: IntegrationReceiptRecord = {
+    id: receiptId,
+    taskId,
+    patchDigest: digest,
+    affectedFiles: ["src/a.ts"],
+    rejectionReasons: [],
+    sourceEvidence: {},
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    consumed: true,
+  };
+  store.saveIntegrationReceipt(receipt);
+  const result: IntegrationResultRecord = {
+    id: "op-1",
+    receiptId,
+    taskId,
+    status: "applied",
+    appliedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+  store.saveIntegrationResult(result);
+  store.addEvent(taskId, undefined, "integration.apply.completed", "Integration applied", result);
 }
 
 function flatAllCards(view: WorkHierarchyView): WorkHierarchyTaskCard[] {
@@ -492,7 +590,16 @@ test("projects Goal Plan, Independent Plan, One-off, seven columns, deps, summar
 
     assert.equal(findCard(view, "task-console")!.column, "running");
     assert.equal(findCard(view, "task-verify")!.column, "waiting-verification");
-    assert.equal(findCard(view, "task-review")!.column, "waiting-user-decision");
+    // FL-109E2: the machine gate is satisfied for this Goal milestone, so the
+    // card is complete in the Goal lane even though the Task-wide decision
+    // stage (awaiting-main-review) is still inspectable on the card.
+    const reviewCard = findCard(view, "task-review")!;
+    assert.equal(reviewCard.column, "completed");
+    assert.equal(reviewCard.placementReason, "goal-gate-satisfied");
+    assert.equal(reviewCard.decisionStage, "awaiting-main-review");
+    assert.equal(reviewCard.goalGate?.gate, "machine");
+    assert.equal(reviewCard.goalGate?.satisfied, true);
+    assert.equal(reviewCard.nextAction, "Machine gate is satisfied.");
     assert.equal(findCard(view, "task-failed")!.column, "stopped-failed");
 
     // Ready must not contain the dependency-blocked service card
@@ -900,6 +1007,778 @@ test("every Task card carries a Core-owned action policy covering all seven dest
     assert.deepEqual(again, view);
     const serialized = JSON.stringify(view);
     assert.doesNotMatch(serialized, /SECRET_PROMPT|PRIVATE_LOG|sk-private-key|proxy:\/\/evil|resultText/);
+  } finally {
+    store.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FL-109E2: Goal milestone gate satisfaction reconciles the Goal Plan lane
+// ---------------------------------------------------------------------------
+
+test("completed mixed-gate Goal projects a 4/4 completed Plan with no required user-decision story", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-goal-gate-reconcile-"));
+  const store = new StateStore(home);
+  try {
+    const m1 = taskRecord("wh-m1", { status: "queued", name: "Machine one", project: "/tmp/reconcile-project" });
+    const m2 = taskRecord("wh-main", { status: "queued", name: "Main accept", project: "/tmp/reconcile-project" });
+    const m3 = taskRecord("wh-int", { status: "queued", name: "Integration", project: "/tmp/reconcile-project" });
+    const m4 = taskRecord("wh-m2", { status: "queued", name: "Machine two", project: "/tmp/reconcile-project" });
+
+    const plan: PlanRecord = {
+      id: "reconcile-plan",
+      name: "Reconcile Goal Plan",
+      objective: "Mixed gates",
+      planFile: "/tmp/reconcile-plan.yaml",
+      createdAt: TS,
+      updatedAt: "2026-08-03T13:00:00.000Z",
+    };
+    const items: PlanItemRecord[] = [
+      { id: "m1", planId: plan.id, taskId: m1.id, itemIndex: 0, taskFile: m1.taskFile },
+      { id: "m2", planId: plan.id, taskId: m2.id, itemIndex: 1, taskFile: m2.taskFile },
+      { id: "m3", planId: plan.id, taskId: m3.id, itemIndex: 2, taskFile: m3.taskFile },
+      { id: "m4", planId: plan.id, taskId: m4.id, itemIndex: 3, taskFile: m4.taskFile },
+    ];
+    const gates = ["machine", "main-accept", "integration", "machine"] as const;
+    const milestones: GoalMilestoneRecord[] = items.map((item, index) => ({
+      goalId: "reconcile-goal",
+      itemId: item.id,
+      taskId: item.taskId!,
+      gate: gates[index]!,
+      itemIndex: item.itemIndex,
+      satisfied: true,
+      reasonCode: "none" as const,
+      reason: "satisfied",
+      updatedAt: TS,
+    }));
+    const goal: GoalRecord = {
+      id: "reconcile-goal",
+      version: 1,
+      name: "Reconcile Goal",
+      objective: "Reproduce completed Goal vs 1/4 Plan contradiction",
+      planId: plan.id,
+      goalFile: "/tmp/reconcile-goal.json",
+      policy: {
+        maxDurationMs: null,
+        noProgressTimeoutMs: null,
+        maxCorrectionRounds: 1,
+        maxReviewRounds: 1,
+        maxNoNewEvidenceCycles: 2,
+      },
+      status: "completed",
+      reasonCode: "goal-completed",
+      reason: "Every milestone gate is satisfied.",
+      evidenceDigest: "c".repeat(64),
+      evidenceAt: TS,
+      counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+      createdAt: TS,
+      updatedAt: "2026-08-03T13:00:00.000Z",
+      completedAt: "2026-08-03T13:00:00.000Z",
+    };
+
+    store.createPlanExecutionWithGoal(
+      [m1, m2, m3, m4].map((task) => ({
+        task,
+        creationEvent: { summary: `created ${task.id}`, payload: {} },
+      })),
+      plan,
+      items,
+      [],
+      goal,
+      milestones,
+    );
+
+    // Seed the four mixed gate evidence chains.
+    seedMachineSucceeded(store, m1.id);
+    seedMainAccept(store, m2.id, "b".repeat(64));
+    seedMainAccept(store, m3.id, "c".repeat(64));
+    seedIntegrationApplied(store, m3.id, "c".repeat(64));
+    // Real retained-delivery shape: machine history remains failed while Main
+    // has separately verified the repaired source as delivered.
+    store.setTaskStatus(m3.id, "failed", {
+      error: "historical Worker failure",
+      finishedAt: new Date().toISOString(),
+    });
+    store.saveRemediationDisposition(m3.id, {
+      status: "verified-repaired-delivered",
+      checkId: "repair-check",
+      createdAt: new Date().toISOString(),
+      acceptanceBasis: "original-acceptance",
+    });
+    seedMachineSucceeded(store, m4.id);
+
+    // The real contradiction: underlying Tasks still carry broader Task-wide
+    // decision stages (waiting for Main / ready for Integration) that the Goal
+    // gates already outscope.
+    const projectSurface = (task: TaskRecord): SafeTaskSummary => {
+      let stage: DecisionStage | undefined;
+      if (task.id === m1.id || task.id === m4.id) stage = "awaiting-main-review";
+      else if (task.id === m2.id) stage = "ready-for-integration";
+      else if (task.id === m3.id) {
+        return buildTaskSummary(
+          task,
+          undefined,
+          undefined,
+          {
+            status: "verified-repaired-delivered",
+            checkId: "repair-check",
+            createdAt: new Date().toISOString(),
+            acceptanceBasis: "original-acceptance",
+          },
+          "revision-requested",
+        );
+      }
+      return summaryFor(task, stage);
+    };
+
+    const view = projectWorkHierarchy(store, projectSurface);
+    const goalLane = view.goals[0]!;
+    const planLane = goalLane.plans[0]!;
+    assert.equal(goalLane.status, "completed");
+
+    // Every Goal-owned card is completed in this Goal's lane.
+    for (const taskId of [m1.id, m2.id, m3.id, m4.id]) {
+      const card = findCard(view, taskId)!;
+      assert.equal(card.column, "completed", taskId);
+      assert.equal(card.goalGate?.satisfied, true, taskId);
+    }
+    // The gate override explains the cards whose Task-wide stage would otherwise
+    // claim a required decision; the already-delivered integration card keeps
+    // its durable delivered-outcome placement while still carrying goalGate.
+    assert.equal(findCard(view, m1.id)!.placementReason, "goal-gate-satisfied");
+    assert.equal(findCard(view, m2.id)!.placementReason, "goal-gate-satisfied");
+    assert.equal(findCard(view, m4.id)!.placementReason, "goal-gate-satisfied");
+    assert.equal(findCard(view, m3.id)!.placementReason, "delivered-outcome");
+    assert.equal(findCard(view, m3.id)!.status, "failed");
+    assert.deepEqual(findCard(view, m3.id)!.blockers, []);
+    assert.match(
+      findCard(view, m3.id)!.nextAction,
+      /Integration gate is satisfied by verified Main-repaired source delivery/,
+    );
+
+    // Progress is 4/4 with no required user-decision story.
+    assert.deepEqual(planLane.summary.progress, { total: 4, completed: 4, percent: 100 });
+    assert.equal(planLane.columns.completed.length, 4);
+    assert.equal(planLane.columns["waiting-user-decision"].length, 0);
+    assert.equal(planLane.columns["stopped-failed"].length, 0);
+    assert.ok(!/Main decision|Main must/i.test(planLane.summary.nextAction));
+
+    // Underlying Task facts stay inspectable and the action policy never
+    // demands a required Main decision or a card move.
+    const m1Card = findCard(view, m1.id)!;
+    assert.equal(m1Card.status, "succeeded");
+    assert.equal(m1Card.decisionStage, "awaiting-main-review");
+    assert.equal(m1Card.goalGate!.gate, "machine");
+    assert.equal(
+      m1Card.actionPolicy.nextCheckpoint,
+      "This Plan item is complete for its Goal; no Goal action is required.",
+    );
+    for (const code of WORK_HIERARCHY_COLUMNS) {
+      const entry = m1Card.actionPolicy.destinations[code];
+      assert.equal(entry.disposition, "no-op", code);
+      assert.equal(entry.operation, undefined, code);
+    }
+
+    // A main-accept gated card completes while its Task-wide stage is
+    // ready-for-integration; the broader Integration step is outside the gate.
+    const m2Card = findCard(view, m2.id)!;
+    assert.equal(m2Card.goalGate!.gate, "main-accept");
+    assert.equal(m2Card.decisionStage, "ready-for-integration");
+    assert.equal(m2Card.nextAction, "Main-accept gate is satisfied.");
+
+    // Deterministic and privacy-safe.
+    assert.deepEqual(projectWorkHierarchy(store, projectSurface), view);
+    const serialized = JSON.stringify(view);
+    assert.doesNotMatch(serialized, /SECRET_PROMPT|PRIVATE_LOG|sk-private-key|proxy:\/\/evil|resultText/);
+  } finally {
+    store.close();
+  }
+});
+
+test("unsatisfied effective handoff successor stays non-complete; independent and one-off work unchanged", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-handoff-fails-closed-"));
+  const store = new StateStore(home);
+  try {
+    const original = taskRecord("ho-orig", { status: "queued", name: "Handoff original", project: "/tmp/handoff-project" });
+    const successor = taskRecord("ho-succ", { status: "queued", name: "Handoff successor", project: "/tmp/handoff-project" });
+    // Independent and one-off Tasks share the underlying machine-succeeded +
+    // awaiting-Main-review facts of the Goal card so placement comparison is exact.
+    const indep = taskRecord("ho-indep", { status: "succeeded", name: "Independent same stage", project: "/tmp/indep-project" });
+    const oneOff = taskRecord("ho-oneoff", { status: "succeeded", name: "One-off same stage", project: "/tmp/oneoff-project" });
+
+    const plan: PlanRecord = {
+      id: "handoff-plan",
+      name: "Handoff Plan",
+      objective: "Successor fails closed",
+      planFile: "/tmp/handoff-plan.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    const items: PlanItemRecord[] = [
+      { id: "ho-item", planId: plan.id, taskId: original.id, itemIndex: 0, taskFile: original.taskFile },
+    ];
+    const milestones: GoalMilestoneRecord[] = [
+      {
+        goalId: "handoff-goal",
+        itemId: "ho-item",
+        taskId: original.id,
+        gate: "machine",
+        itemIndex: 0,
+        satisfied: false,
+        reasonCode: "waiting-machine",
+        reason: "waiting",
+        updatedAt: TS,
+      },
+    ];
+    const goal: GoalRecord = {
+      id: "handoff-goal",
+      version: 1,
+      name: "Handoff Goal",
+      objective: "Successor authority",
+      planId: plan.id,
+      goalFile: "/tmp/handoff-goal.json",
+      policy: {
+        maxDurationMs: null,
+        noProgressTimeoutMs: null,
+        maxCorrectionRounds: 1,
+        maxReviewRounds: 1,
+        maxNoNewEvidenceCycles: 2,
+      },
+      status: "waiting",
+      reasonCode: "waiting-machine",
+      reason: "Waiting for machine verification success on this milestone.",
+      evidenceDigest: "d".repeat(64),
+      evidenceAt: TS,
+      counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    store.createPlanExecutionWithGoal(
+      [{ task: original, creationEvent: { summary: "created", payload: {} } }],
+      plan,
+      items,
+      [],
+      goal,
+      milestones,
+    );
+    const indepPlan: PlanRecord = {
+      id: "handoff-indep-plan",
+      name: "Independent Plan",
+      objective: "No Goal parent",
+      planFile: "/tmp/handoff-indep-plan.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    store.createTask(indep);
+    store.createPlanGraph(
+      indepPlan,
+      [{ id: "indep-item", planId: indepPlan.id, taskId: indep.id, itemIndex: 0, taskFile: indep.taskFile }],
+      [],
+    );
+    store.createTask(oneOff);
+
+    // The original is machine-succeeded, but a durable Goal-Task handoff makes
+    // the still-queued successor authoritative for the gate.
+    seedMachineSucceeded(store, original.id);
+    store.createCandidateHandoff({
+      record: handoffRecord(
+        "ho-handoff",
+        { kind: "goal-task", goalId: "handoff-goal", itemId: "ho-item" },
+        original.id,
+        successor.id,
+      ),
+      task: successor,
+      authorizationEvent: { summary: "handoff authorized", payload: {} },
+    });
+
+    const projectSurface = (task: TaskRecord): SafeTaskSummary => {
+      if (task.id === oneOff.id || task.id === indep.id) {
+        return summaryFor(task, "awaiting-main-review");
+      }
+      return summaryFor(task, "queued");
+    };
+    const view = projectWorkHierarchy(store, projectSurface);
+
+    // The queued successor keeps the gate unsatisfied; the terminal original
+    // record cannot paint the card complete.
+    const card = findCard(view, "ho-succ")!;
+    assert.equal(card.taskId, "ho-succ");
+    assert.equal(card.breadcrumb.originalTaskId, "ho-orig");
+    assert.equal(card.column, "ready");
+    assert.equal(card.goalGate?.satisfied, false);
+    assert.equal(card.goalGate?.reasonCode, "waiting-machine");
+    assert.notEqual(card.column, "completed");
+    assert.equal(findCard(view, "ho-orig"), undefined);
+
+    // Independent Plan card with the same Task-wide stage keeps Task placement
+    // and its Task-wide action policy (no Goal-gate override).
+    const indepCard = findCard(view, "ho-indep")!;
+    assert.equal(indepCard.breadcrumb.goalId, undefined);
+    assert.equal(indepCard.goalGate, undefined);
+    assert.equal(indepCard.column, "waiting-user-decision");
+    assert.match(indepCard.actionPolicy.nextCheckpoint, /Main must review this Task/);
+    assert.notEqual(
+      indepCard.actionPolicy.nextCheckpoint,
+      "This Plan item is complete for its Goal; no Goal action is required.",
+    );
+
+    // One-off card with the same Task-wide stage keeps Task placement.
+    const oneOffCard = findCard(view, "ho-oneoff")!;
+    assert.equal(oneOffCard.goalGate, undefined);
+    assert.equal(oneOffCard.column, "waiting-user-decision");
+    assert.match(oneOffCard.actionPolicy.nextCheckpoint, /Main must review this Task/);
+  } finally {
+    store.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FL-108C1: closed Work hierarchy narrative messages (additive, bilingual-ready)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_GOAL_POLICY = {
+  maxDurationMs: null,
+  noProgressTimeoutMs: null,
+  maxCorrectionRounds: 1,
+  maxReviewRounds: 1,
+  maxNoNewEvidenceCycles: 2,
+} as const;
+
+function seedMinimalGoal(
+  store: StateStore,
+  opts: {
+    goalId: string;
+    planId: string;
+    status: GoalRecord["status"];
+    reasonCode: GoalRecord["reasonCode"];
+    reason: string;
+    task: TaskRecord;
+    itemId?: string;
+    gate?: GoalMilestoneRecord["gate"];
+    milestoneSatisfied?: boolean;
+    milestoneReasonCode?: GoalMilestoneRecord["reasonCode"];
+  },
+): void {
+  const itemId = opts.itemId ?? "m1";
+  const plan: PlanRecord = {
+    id: opts.planId,
+    name: `Plan ${opts.planId}`,
+    objective: "Narrative fixture",
+    planFile: `/tmp/${opts.planId}.yaml`,
+    createdAt: TS,
+    updatedAt: TS,
+  };
+  const items: PlanItemRecord[] = [
+    {
+      id: itemId,
+      planId: plan.id,
+      taskId: opts.task.id,
+      itemIndex: 0,
+      taskFile: opts.task.taskFile,
+    },
+  ];
+  const milestones: GoalMilestoneRecord[] = [
+    {
+      goalId: opts.goalId,
+      itemId,
+      taskId: opts.task.id,
+      gate: opts.gate ?? "machine",
+      itemIndex: 0,
+      satisfied: opts.milestoneSatisfied ?? opts.status === "completed",
+      reasonCode: opts.milestoneReasonCode
+        ?? (opts.status === "completed" ? "none" : opts.reasonCode),
+      reason: opts.reason,
+      updatedAt: TS,
+    },
+  ];
+  const goal: GoalRecord = {
+    id: opts.goalId,
+    version: 1,
+    name: `Goal ${opts.goalId}`,
+    objective: "Narrative",
+    planId: plan.id,
+    goalFile: `/tmp/${opts.goalId}.json`,
+    policy: { ...DEFAULT_GOAL_POLICY },
+    status: opts.status,
+    reasonCode: opts.reasonCode,
+    reason: opts.reason,
+    evidenceDigest: "d".repeat(64),
+    evidenceAt: TS,
+    counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+    createdAt: TS,
+    updatedAt: TS,
+    ...(opts.status === "completed" ? { completedAt: TS } : {}),
+    ...(opts.status === "stopped" ? { stoppedAt: TS } : {}),
+  };
+  store.createPlanExecutionWithGoal(
+    [{ task: opts.task, creationEvent: { summary: "created", payload: {} } }],
+    plan,
+    items,
+    [],
+    goal,
+    milestones,
+  );
+}
+
+test("FL-108C1 coded messages cover Goal, Plan, Task, and one-off narration", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-narrative-"));
+  const store = new StateStore(home);
+  try {
+    // --- Completed Goal ---
+    const doneTask = taskRecord("narr-done", {
+      status: "succeeded",
+      name: "Done task",
+      project: "/tmp/narr-done",
+    });
+    seedMinimalGoal(store, {
+      goalId: "narr-completed",
+      planId: "narr-completed-plan",
+      status: "completed",
+      reasonCode: "goal-completed",
+      reason: "Every milestone gate is satisfied.",
+      task: doneTask,
+      milestoneSatisfied: true,
+      milestoneReasonCode: "none",
+    });
+    seedMachineSucceeded(store, doneTask.id);
+
+    // --- Main-stopped Goal ---
+    const stopTask = taskRecord("narr-stop", {
+      status: "queued",
+      name: "Stopped mid",
+      project: "/tmp/narr-stop",
+    });
+    seedMinimalGoal(store, {
+      goalId: "narr-main-stop",
+      planId: "narr-stop-plan",
+      status: "stopped",
+      reasonCode: "main-stop",
+      reason: "Main stopped this Goal. History remains readable; active Tasks use Task authority.",
+      task: stopTask,
+      milestoneSatisfied: false,
+      milestoneReasonCode: "waiting-task",
+    });
+
+    // --- No-progress stopped Goal ---
+    const npTask = taskRecord("narr-np", {
+      status: "queued",
+      name: "No progress",
+      project: "/tmp/narr-np",
+    });
+    seedMinimalGoal(store, {
+      goalId: "narr-no-progress",
+      planId: "narr-np-plan",
+      status: "stopped",
+      reasonCode: "no-progress",
+      reason: "No authoritative milestone evidence changed within the Goal no-progress window. Future Task admission is blocked; running Workers were not killed.",
+      task: npTask,
+      milestoneSatisfied: false,
+      milestoneReasonCode: "waiting-machine",
+    });
+
+    // --- Cap-stopped Goal ---
+    const capTask = taskRecord("narr-cap", {
+      status: "queued",
+      name: "Cap stop",
+      project: "/tmp/narr-cap",
+    });
+    seedMinimalGoal(store, {
+      goalId: "narr-cap",
+      planId: "narr-cap-plan",
+      status: "stopped",
+      reasonCode: "correction-cap",
+      reason: "Goal correction allowance is exhausted. Main must decide without another automatic correction.",
+      task: capTask,
+      milestoneSatisfied: false,
+      milestoneReasonCode: "waiting-main-accept",
+    });
+
+    // --- Active first-milestone Goal (running card) ---
+    const runTask = taskRecord("narr-run", {
+      status: "running",
+      name: "Active first",
+      project: "/tmp/narr-run",
+    });
+    seedMinimalGoal(store, {
+      goalId: "narr-active",
+      planId: "narr-active-plan",
+      status: "running",
+      reasonCode: "waiting-machine",
+      reason: "Waiting for machine verification success on this milestone.",
+      task: runTask,
+      milestoneSatisfied: false,
+      milestoneReasonCode: "waiting-machine",
+    });
+
+    // --- Independent plan: completed names + extra, dependency waiting, failed ---
+    const c1 = taskRecord("narr-c1", {
+      status: "succeeded",
+      name: "Alpha",
+      project: "/tmp/narr-plan",
+    });
+    const c2 = taskRecord("narr-c2", {
+      status: "succeeded",
+      name: "Beta",
+      project: "/tmp/narr-plan",
+    });
+    const c3 = taskRecord("narr-c3", {
+      status: "succeeded",
+      name: "Gamma",
+      project: "/tmp/narr-plan",
+    });
+    const c4 = taskRecord("narr-c4", {
+      status: "succeeded",
+      name: "Delta",
+      project: "/tmp/narr-plan",
+    });
+    const waitDep = taskRecord("narr-wait", {
+      status: "queued",
+      name: "Needs dep",
+      project: "/tmp/narr-plan",
+    });
+    const failTask = taskRecord("narr-fail", {
+      status: "failed",
+      name: "Broken",
+      project: "/tmp/narr-plan",
+      error: "SECRET_PROMPT boom",
+    });
+    const verifyTask = taskRecord("narr-verify", {
+      status: "verifying",
+      name: "Verifying",
+      project: "/tmp/narr-plan",
+    });
+    const readyTask = taskRecord("narr-ready", {
+      status: "queued",
+      name: "Ready one",
+      project: "/tmp/narr-plan",
+    });
+    const indepPlan: PlanRecord = {
+      id: "narr-indep-plan",
+      name: "Indep narrative plan",
+      objective: "Card coverage",
+      planFile: "/tmp/narr-indep.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    const indepItems: PlanItemRecord[] = [
+      { id: "a", planId: indepPlan.id, taskId: c1.id, itemIndex: 0, taskFile: c1.taskFile },
+      { id: "b", planId: indepPlan.id, taskId: c2.id, itemIndex: 1, taskFile: c2.taskFile },
+      { id: "c", planId: indepPlan.id, taskId: c3.id, itemIndex: 2, taskFile: c3.taskFile },
+      { id: "d", planId: indepPlan.id, taskId: c4.id, itemIndex: 3, taskFile: c4.taskFile },
+      { id: "w", planId: indepPlan.id, taskId: waitDep.id, itemIndex: 4, taskFile: waitDep.taskFile },
+      { id: "f", planId: indepPlan.id, taskId: failTask.id, itemIndex: 5, taskFile: failTask.taskFile },
+      { id: "v", planId: indepPlan.id, taskId: verifyTask.id, itemIndex: 6, taskFile: verifyTask.taskFile },
+      { id: "r", planId: indepPlan.id, taskId: readyTask.id, itemIndex: 7, taskFile: readyTask.taskFile },
+    ];
+    const indepDeps: DependencyRecord[] = [
+      { planId: indepPlan.id, itemId: "w", dependsOnItemId: "f" },
+    ];
+    for (const task of [c1, c2, c3, c4, waitDep, failTask, verifyTask, readyTask]) {
+      store.createTask(task);
+    }
+    // Delivered outcomes for completed cards
+    for (const task of [c1, c2, c3, c4]) {
+      store.setTaskStatus(task.id, "succeeded", {
+        error: null,
+        finishedAt: TS,
+      });
+    }
+    store.createPlanGraph(indepPlan, indepItems, indepDeps);
+
+    // --- One-off waiting for Main decision ---
+    const oneOff = taskRecord("narr-oneoff", {
+      status: "succeeded",
+      name: "One-off decide",
+      project: "/tmp/narr-oneoff",
+    });
+    store.createTask(oneOff);
+
+    const projectSurface = (task: TaskRecord): SafeTaskSummary => {
+      if (task.id === doneTask.id || task.id === c1.id || task.id === c2.id
+        || task.id === c3.id || task.id === c4.id) {
+        return summaryFor(task, "delivered");
+      }
+      if (task.id === oneOff.id) return summaryFor(task, "awaiting-main-review");
+      if (task.id === runTask.id) return summaryFor(task, "worker-running");
+      if (task.id === verifyTask.id) return summaryFor(task, "queued");
+      if (task.id === failTask.id) return summaryFor(task, "machine-failed");
+      if (task.id === waitDep.id) return summaryFor(task, "queued");
+      if (task.id === readyTask.id) return summaryFor(task, "queued");
+      return summaryFor(task);
+    };
+
+    const view = projectWorkHierarchy(store, projectSurface);
+
+    // Completed Goal messages
+    const completedGoal = view.goals.find((g) => g.goalId === "narr-completed")!;
+    assert.equal(completedGoal.summary.whatCompletedMessage?.code, "goal-what-completed");
+    assert.equal(completedGoal.summary.blockerMessage?.code, "goal-wait-all-gates-satisfied");
+    assert.equal(completedGoal.summary.nextActionMessage?.code, "goal-next-none");
+    // Legacy compatibility strings remain
+    assert.match(completedGoal.summary.whatCompleted, /Every milestone gate is satisfied/);
+    assert.equal(completedGoal.summary.whatCompletedMessage?.code, "goal-what-completed");
+
+    // Main-stopped Goal
+    const stoppedGoal = view.goals.find((g) => g.goalId === "narr-main-stop")!;
+    assert.equal(stoppedGoal.summary.whatCompletedMessage?.code, "goal-what-main-stop");
+    assert.equal(stoppedGoal.summary.blockerMessage?.code, "goal-wait-admission-blocked");
+    assert.equal(stoppedGoal.summary.nextActionMessage?.code, "goal-next-stop-or-decide");
+    assert.match(stoppedGoal.summary.blocker, /Goal is stopped; future Task admission is blocked/);
+
+    // No-progress stopped keeps reason distinction
+    const npGoal = view.goals.find((g) => g.goalId === "narr-no-progress")!;
+    assert.equal(npGoal.summary.whatCompletedMessage?.code, "goal-what-no-progress");
+    assert.equal(npGoal.summary.blockerMessage?.code, "goal-wait-admission-blocked");
+
+    // Cap-stopped keeps reason distinction
+    const capGoal = view.goals.find((g) => g.goalId === "narr-cap")!;
+    assert.equal(capGoal.summary.whatCompletedMessage?.code, "goal-what-correction-cap");
+    assert.equal(capGoal.summary.blockerMessage?.code, "goal-wait-admission-blocked");
+
+    // Active first milestone
+    const activeGoal = view.goals.find((g) => g.goalId === "narr-active")!;
+    assert.equal(activeGoal.summary.whatCompletedMessage?.code, "goal-what-started");
+    assert.equal(activeGoal.summary.blockerMessage?.code, "goal-wait-machine");
+    const runCard = findCard(view, "narr-run")!;
+    assert.equal(runCard.column, "running");
+    assert.equal(runCard.nextActionMessage?.code, "card-next-running");
+    assert.equal(runCard.whatCompletedMessage?.code, "card-what-nothing");
+
+    // Independent plan: completed-name aggregation with extra count
+    const indep = view.independentPlans.find((p) => p.planId === "narr-indep-plan")!;
+    assert.equal(indep.summary.whatCompletedMessage?.code, "lane-what-completed-names");
+    assert.equal(indep.summary.whatCompletedMessage?.params?.extraCount, 1);
+    assert.match(String(indep.summary.whatCompletedMessage?.params?.names ?? ""), /Alpha/);
+    // Failed card recovery
+    const failedCard = findCard(view, "narr-fail")!;
+    assert.equal(failedCard.column, "stopped-failed");
+    assert.equal(failedCard.nextActionMessage?.code, "card-next-needs-recovery");
+    assert.equal(failedCard.whatCompletedMessage?.code, "card-what-nothing");
+    // Dependency waiting (failed dep → dependency-failed blocker)
+    const waitCard = findCard(view, "narr-wait")!;
+    assert.equal(waitCard.column, "not-started");
+    assert.equal(waitCard.nextActionMessage?.code, "card-next-waiting-prerequisite");
+    assert.equal(waitCard.nextActionMessage?.params?.label, "Broken");
+    // Verification
+    const vCard = findCard(view, "narr-verify")!;
+    assert.equal(vCard.column, "waiting-verification");
+    assert.equal(vCard.nextActionMessage?.code, "card-next-waiting-verification");
+    // Ready
+    const rCard = findCard(view, "narr-ready")!;
+    assert.equal(rCard.column, "ready");
+    assert.equal(rCard.nextActionMessage?.code, "card-next-ready");
+    // Completed delivered names preserved
+    const alpha = findCard(view, "narr-c1")!;
+    assert.equal(alpha.whatCompletedMessage?.code, "card-what-delivered");
+    assert.equal(alpha.whatCompletedMessage?.params?.name, "Alpha");
+    assert.equal(alpha.nextActionMessage?.code, "card-next-no-further-action");
+    // Plan blocker uses failed card
+    assert.equal(indep.summary.blockerMessage?.code, "lane-blocker-blocked");
+    assert.equal(indep.summary.blockerMessage?.params?.label, "Broken");
+
+    // One-off waiting for Main decision
+    assert.ok(view.oneOffTasks);
+    const oneOffCard = findCard(view, "narr-oneoff")!;
+    assert.equal(oneOffCard.column, "waiting-user-decision");
+    assert.equal(oneOffCard.nextActionMessage?.code, "card-next-waiting-main-decision");
+    assert.equal(
+      view.oneOffTasks!.summary.nextActionMessage?.code,
+      "card-next-waiting-main-decision",
+    );
+    assert.match(view.oneOffTasks!.summary.nextAction, /Waiting for a Main decision/);
+
+    // Filtered hierarchy recomputes lane messages from filtered cards only
+    const filtered = projectWorkHierarchy(store, projectSurface, {
+      project: "/tmp/narr-plan",
+      column: "ready",
+    });
+    assert.equal(filtered.independentPlans.length, 1);
+    const fPlan = filtered.independentPlans[0]!;
+    assert.equal(fPlan.summary.progress.total, 1);
+    assert.equal(fPlan.summary.progress.completed, 0);
+    assert.equal(fPlan.summary.whatCompletedMessage?.code, "lane-what-none-completed");
+    assert.equal(fPlan.summary.blockerMessage?.code, "lane-blocker-none");
+    assert.equal(fPlan.summary.nextActionMessage?.code, "card-next-ready");
+    // Goal-owned messages stay Goal authority even under filter
+    const fActive = filtered.goals.find((g) => g.goalId === "narr-active");
+    // Active goal has no ready cards under this project filter → hidden when filtered
+    assert.equal(fActive, undefined);
+
+    // No private leakage in messages
+    const serialized = JSON.stringify(view);
+    assert.doesNotMatch(serialized, /SECRET_PROMPT|PRIVATE_LOG|sk-private-key/);
+    // Lifecycle unchanged
+    assert.equal(store.getTask("narr-run").status, "running");
+    assert.equal(store.getTask("narr-fail").status, "failed");
+  } finally {
+    store.close();
+  }
+});
+
+test("FL-108C1 completed Goal gate cards expose coded gate-satisfied messages", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-narr-gate-"));
+  const store = new StateStore(home);
+  try {
+    const m1 = taskRecord("ng-m1", { status: "queued", name: "Gate machine", project: "/tmp/ng" });
+    const plan: PlanRecord = {
+      id: "ng-plan",
+      name: "NG Plan",
+      objective: "Gate narrative",
+      planFile: "/tmp/ng-plan.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    const items: PlanItemRecord[] = [
+      { id: "m1", planId: plan.id, taskId: m1.id, itemIndex: 0, taskFile: m1.taskFile },
+    ];
+    const milestones: GoalMilestoneRecord[] = [{
+      goalId: "ng-goal",
+      itemId: "m1",
+      taskId: m1.id,
+      gate: "machine",
+      itemIndex: 0,
+      satisfied: true,
+      reasonCode: "none",
+      reason: "satisfied",
+      updatedAt: TS,
+    }];
+    const goal: GoalRecord = {
+      id: "ng-goal",
+      version: 1,
+      name: "NG Goal",
+      objective: "Gate",
+      planId: plan.id,
+      goalFile: "/tmp/ng-goal.json",
+      policy: { ...DEFAULT_GOAL_POLICY },
+      status: "completed",
+      reasonCode: "goal-completed",
+      reason: "Every milestone gate is satisfied.",
+      evidenceDigest: "e".repeat(64),
+      evidenceAt: TS,
+      counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+      createdAt: TS,
+      updatedAt: TS,
+      completedAt: TS,
+    };
+    store.createPlanExecutionWithGoal(
+      [{ task: m1, creationEvent: { summary: "created", payload: {} } }],
+      plan,
+      items,
+      [],
+      goal,
+      milestones,
+    );
+    seedMachineSucceeded(store, m1.id);
+    const view = projectWorkHierarchy(store, (task) => summaryFor(task, "awaiting-main-review"));
+    const card = findCard(view, m1.id)!;
+    assert.equal(card.column, "completed");
+    assert.equal(card.whatCompletedMessage?.code, "card-what-goal-gate-complete");
+    assert.equal(card.whatCompletedMessage?.params?.name, "Gate machine");
+    assert.equal(card.whatCompletedMessage?.params?.gate, "machine");
+    assert.equal(card.nextActionMessage?.code, "card-next-goal-gate-satisfied");
+    assert.equal(card.nextActionMessage?.params?.gate, "machine");
+    // Legacy string preserved for compatibility consumers
+    assert.equal(card.nextAction, "Machine gate is satisfied.");
   } finally {
     store.close();
   }

@@ -27,11 +27,13 @@
  * expansion, no raw prompts/private content on public surfaces, and no
  * unbounded local retry loop. ForkLight duration and no-progress controllers
  * stay authoritative. The no-progress watchdog arms before the first setup
- * request and refreshes only on proven setup progress (setup responses and
- * durable binding writes) or recognized bound-Thread effective runtime
- * evidence (exact current-Turn Goal/item/Turn progress and cumulative usage).
- * Arbitrary notifications never refresh it; null no-progress stays unlimited
- * with no total-time cap.
+ * request and refreshes on proven setup progress (setup responses and durable
+ * binding writes). After the active Turn is bound, only concrete effective
+ * progress refreshes it: exact current-Turn command/file tool lifecycle,
+ * materially new private diff evidence, new accepted final output, or a real
+ * terminal transition (Turn completed / first Goal complete gate). Usage,
+ * status churn, plan/unknown traffic, message deltas, and continuation starts
+ * are liveness only. Null no-progress stays unlimited with no total-time cap.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -56,13 +58,21 @@ import type {
 } from "../core/types.js";
 import {
   codexAppServerTokenUsage,
+  privateCodexDiffDigest,
   projectCodexAppServerFinalItem,
+  projectCodexAppServerItemProgress,
+  projectCodexAppServerWorkspaceChangeMilestone,
 } from "../events/codex-normalize.js";
-import { buildCodexWorkerEnv, seedCodexHome } from "./codex.js";
+import {
+  buildCodexWorkerEnv,
+  CODEX_WORKSPACE_WRITE_SANDBOX_OVERRIDES,
+  codexHardBoundaryPolicy,
+  codexWorkspaceToolLines,
+  seedCodexHome,
+} from "./codex.js";
 import type { WorkerExecutionResult, WorkerRunContext } from "./types.js";
 
 const CODEX_GOAL_OBJECTIVE_MAX = 4000;
-const MAX_SUMMARY = 240;
 /** Same-burst turn/start notifications are buffered until the Turn binding is
  *  durable. Overflow fails closed rather than dropping evidence silently. */
 const TURN_START_RACE_BUFFER_MAX = 64;
@@ -104,10 +114,8 @@ function buildGoalObjective(spec: TaskSpec): string {
 
 function codexGoalToolLines(task: TaskRecord): string[] {
   return [
-    "- Work only through Codex tools inside the Task workspace sandbox.",
-    `- Workspace mode: ${task.spec.worker.allowEdits ? "edits allowed" : "read-only"}.`,
-    "- Web, apps, MCP servers, nested agents, project instructions, and approval escalation are disabled.",
-    "- Do not integrate source, commit, push, or broaden writable paths.",
+    ...codexWorkspaceToolLines(task.spec.worker.allowEdits),
+    "- Project instructions from operator config are disabled for this Goal.",
     "- This is a Runtime-native Goal: it owns the bounded end-to-end implementation.",
     "- ForkLight still owns the workspace boundary, independent acceptance, no-progress stop, finite correction/retry authority, and return to Main.",
   ];
@@ -134,6 +142,12 @@ function codexGoalConfig(model: string, effort: string, allowEdits: boolean): st
     `sandbox_mode = ${JSON.stringify(allowEdits ? "workspace-write" : "read-only")}`,
     "project_doc_max_bytes = 0",
     'web_search = "disabled"',
+    "",
+    // Explicit workspace-write refinements (same contract as single-run -c flags).
+    // exclude_tmpdir_env_var is intentionally omitted so task-private TMPDIR stays usable.
+    "[sandbox_workspace_write]",
+    `network_access = ${CODEX_WORKSPACE_WRITE_SANDBOX_OVERRIDES.networkAccess}`,
+    `exclude_slash_tmp = ${CODEX_WORKSPACE_WRITE_SANDBOX_OVERRIDES.excludeSlashTmp}`,
     "",
     "[features]",
     "apps = false",
@@ -463,20 +477,6 @@ function notificationUsage(params: Record<string, unknown>): AttemptTokenUsage |
   return codexAppServerTokenUsage((tokenUsage as Record<string, unknown>).total);
 }
 
-/** True when two usage snapshots carry identical closed counters. */
-function usageCountersEqual(
-  left: AttemptTokenUsage | undefined,
-  right: AttemptTokenUsage,
-): boolean {
-  if (left === undefined) return false;
-  return (
-    left.inputTokens === right.inputTokens
-    && left.outputTokens === right.outputTokens
-    && left.cacheReadInputTokens === right.cacheReadInputTokens
-    && left.cacheCreationInputTokens === right.cacheCreationInputTokens
-  );
-}
-
 /** Canonical nested `params.turn.id` from turn/started or turn/completed. */
 function canonicalNestedTurnId(params: Record<string, unknown>): string | undefined {
   const turn = params.turn;
@@ -558,6 +558,7 @@ export async function runCodexNativeGoal(
     workerPromptAppendicesForTask(task, {
       toolLines: codexGoalToolLines(task),
       checkpointLines: codexGoalCheckpointLines(),
+      hardBoundaryPolicy: codexHardBoundaryPolicy(task.spec.worker.allowEdits),
     }),
   );
   await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {
@@ -618,6 +619,16 @@ export async function runCodexNativeGoal(
     /** Once any explicit non-null agentMessage phase is seen on the current
      *  Turn, later phase:null items cannot be accepted as legacy finals. */
     let sawExplicitNonNullPhase = false;
+    /** Private per-Turn digest of the latest material `turn/diff/updated` body.
+     *  Never published; used only to detect new workspace-change evidence. */
+    let lastPrivateDiffDigest: string | undefined;
+    /** At most one public workspace-change milestone is stored per active Turn. */
+    let workspaceChangeMilestoneEmitted = false;
+    /** Bounded per-Turn liveness publication: one row each for status, plan, and
+     *  unknown traffic. None may refresh the effective-progress watchdog. */
+    let livenessStatusEmitted = false;
+    let livenessPlanEmitted = false;
+    let livenessUnknownEmitted = false;
     let stopReason: "none" | "interrupt" | "no-progress" = "none";
     let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
     let escalationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -812,6 +823,32 @@ export async function runCodexNativeGoal(
       && turnId === currentTurnId
     );
 
+    /** Reset private per-Turn progress projection state when authority moves. */
+    const resetTurnProgressProjection = (): void => {
+      lastPrivateDiffDigest = undefined;
+      workspaceChangeMilestoneEmitted = false;
+      livenessStatusEmitted = false;
+      livenessPlanEmitted = false;
+      livenessUnknownEmitted = false;
+    };
+
+    /**
+     * Publish one privacy-safe progress event. Effective tool/file/workspace
+     * evidence also refreshes the post-activation no-progress watchdog.
+     */
+    const publishProgressEvent = (
+      type: "worker.tool.started" | "worker.tool.completed" | "worker.message",
+      summary: string,
+      payload: Record<string, unknown>,
+      options: { refreshWatchdog: boolean },
+    ): void => {
+      store.addEvent(task.id, attempt.id, type, summary, payload);
+      hooks.onEvent?.({ type, summary, payload });
+      if (options.refreshWatchdog) {
+        scheduleWatchdog();
+      }
+    };
+
     const processNotification = (
       method: string,
       params: Record<string, unknown>,
@@ -850,10 +887,21 @@ export async function runCodexNativeGoal(
         || method === "thread/tokenUsage/updated"
         || method === "turn/completed"
         || method === "turn/started"
-        || method === "item/completed";
+        || method === "item/started"
+        || method === "item/completed"
+        || method === "item/agentMessage/delta"
+        || method === "turn/diff/updated"
+        || method === "turn/plan/updated";
       if (recognized) {
         if (!boundNotification) return;
       } else if (notificationThreadId !== undefined && !boundNotification) {
+        return;
+      }
+
+      // Streaming answer deltas: never store one event per token/delta and
+      // never treat character output as effective progress. Prefer the early
+      // drop in onNotification so same-burst floods never enter race buffers.
+      if (method === "item/agentMessage/delta") {
         return;
       }
 
@@ -863,6 +911,8 @@ export async function runCodexNativeGoal(
         // replay the already-active id is inert. A later distinct id may promote
         // only after the prior Turn ended and only after the new binding is
         // durable — never mutate currentTurnId or gates before that write.
+        // Overlapping continuation starts are invalidated only in the
+        // continuation buffer path (single authority), not re-checked here.
         if (binding === undefined) return;
         const bound = binding;
         const startedId = canonicalNestedTurnId(params);
@@ -885,13 +935,6 @@ export async function runCodexNativeGoal(
           fail(
             "Codex native Goal started a new Turn before the prior Turn ended",
             "codex-goal-turn-continuation-premature",
-          );
-          return;
-        }
-        if (continuationPromotion !== null) {
-          fail(
-            "Codex native Goal reported overlapping Turn start identities",
-            "codex-goal-turn-continuation-ambiguous",
           );
           return;
         }
@@ -948,11 +991,14 @@ export async function runCodexNativeGoal(
           currentTurnAwaitingStartConfirmation = false;
           finalResultText = undefined;
           sawExplicitNonNullPhase = false;
+          resetTurnProgressProjection();
+          // Continuation start is Runtime liveness only: it cannot reset the
+          // post-activation effective-progress watchdog by itself.
           store.addEvent(task.id, attempt.id, "worker.message", "Codex native Goal started a continuation Turn", withActivityEvidence({
             activityKind: "goal-turn-started",
             threadId: nextBinding.threadId,
             turnId: promoteTo,
-          }, RUNTIME_ACTIVITY_EFFECTIVE));
+          }, RUNTIME_ACTIVITY_LIVENESS));
           hooks.onEvent?.({
             type: "worker.message",
             summary: "Codex native Goal started a continuation Turn",
@@ -968,9 +1014,6 @@ export async function runCodexNativeGoal(
           }
           if (outcome !== undefined) return;
           tryJoinTerminalSuccess();
-          if (outcome !== undefined) return;
-          // No-progress refreshes only after durable promotion + replay.
-          scheduleWatchdog();
         }).catch((error) => {
           if (outcome !== undefined) return;
           continuationPromotion = null;
@@ -999,16 +1042,19 @@ export async function runCodexNativeGoal(
           fail("Codex native Goal emitted a goal update without a status", "codex-goal-status-missing");
           return;
         }
-        // Repeated identical status is Runtime liveness only: it must not reset
-        // the no-effective-progress watchdog or claim a new substantive step.
-        const statusChanged = goalStatus !== status;
+        // Goal status churn is Runtime liveness only after activation: it must
+        // not reset the no-effective-progress watchdog. The first transition
+        // into the Goal-complete gate is a terminal transition and may refresh
+        // while other join partners are still open. Public status rows are
+        // coalesced to at most one privacy-safe event per Turn.
         goalStatus = status;
-        if (statusChanged) {
-          scheduleWatchdog();
-        }
         if (status === "complete") {
+          const firstCompleteGate = !currentTurnGoalComplete;
           currentTurnGoalComplete = true;
           tryJoinTerminalSuccess();
+          if (outcome === undefined && firstCompleteGate) {
+            scheduleWatchdog();
+          }
           return;
         }
         // Exact current-Turn non-complete status invalidates any earlier
@@ -1019,16 +1065,23 @@ export async function runCodexNativeGoal(
           fail(stableGoalFailureReason(status), "codex-goal-stopped");
           return;
         }
-        store.addEvent(task.id, attempt.id, "worker.message", `Codex native Goal is ${status}`, withActivityEvidence({
-          activityKind: statusChanged ? "goal-active" : "goal-activity",
-          goalStatus: status,
-          threadId: binding?.threadId,
-          turnId: currentTurnId,
-        }, statusChanged ? RUNTIME_ACTIVITY_EFFECTIVE : RUNTIME_ACTIVITY_LIVENESS));
-        hooks.onEvent?.({
-          type: "worker.message",
-          summary: `Codex native Goal is ${status}`,
-        });
+        if (!livenessStatusEmitted) {
+          livenessStatusEmitted = true;
+          // Closed status label only — never raw goal payload fields.
+          const summary = status === "active"
+            ? "Codex native Goal is active"
+            : "Codex native Goal reported a status update";
+          store.addEvent(task.id, attempt.id, "worker.message", summary, withActivityEvidence({
+            activityKind: "goal-activity",
+            goalStatus: status,
+            threadId: binding?.threadId,
+            turnId: currentTurnId,
+          }, RUNTIME_ACTIVITY_LIVENESS));
+          hooks.onEvent?.({
+            type: "worker.message",
+            summary,
+          });
+        }
         return;
       }
 
@@ -1039,24 +1092,42 @@ export async function runCodexNativeGoal(
           return;
         }
         // Cumulative snapshot REPLACES any earlier total — never double-counts
-        // automatic continuation Turns. Unchanged counters are liveness only
-        // and must not reset the no-effective-progress watchdog.
-        const usageChanged = !usageCountersEqual(latestUsage, usage);
+        // automatic continuation Turns. Token-usage changes are liveness only
+        // after activation and must not reset the effective-progress watchdog.
         latestUsage = usage;
-        if (usageChanged) {
-          scheduleWatchdog();
-        }
         return;
       }
 
-      if (method === "item/completed") {
-        // Final output requires the exact current Turn. Stale/missing turnId,
-        // commentary, snake_case, and unknown/missing phase cannot invent
-        // resultText. Prompt/reasoning never enter this path.
+      if (method === "item/started" || method === "item/completed") {
+        // Tool/file lifecycle and final output require the exact current Turn.
+        // Stale/missing turnId cannot invent progress or terminal text.
         if (!isExactCurrentTurn(notificationTurnId(params))) {
           return;
         }
         currentTurnAwaitingStartConfirmation = false;
+        // Privacy-safe command/file projection first: never store command, cwd,
+        // output, path, or content from the raw item payload.
+        const toolProgress = projectCodexAppServerItemProgress(method, params.item);
+        if (toolProgress !== undefined) {
+          publishProgressEvent(
+            toolProgress.type,
+            toolProgress.summary,
+            {
+              ...toolProgress.payload,
+              threadId: binding?.threadId,
+              turnId: currentTurnId,
+            },
+            { refreshWatchdog: true },
+          );
+          return;
+        }
+        if (method !== "item/completed") {
+          // Non-tool item starts (including agentMessage) are not progress and
+          // must not flood history.
+          return;
+        }
+        // Final output only: commentary, snake_case, and unknown/missing phase
+        // cannot invent resultText. Prompt/reasoning never enter this path.
         const projected = projectCodexAppServerFinalItem(
           params.item,
           !sawExplicitNonNullPhase,
@@ -1072,6 +1143,41 @@ export async function runCodexNativeGoal(
             scheduleWatchdog();
           }
           tryJoinTerminalSuccess();
+        }
+        return;
+      }
+
+      if (method === "turn/diff/updated") {
+        // Material workspace-change evidence for the exact current Turn.
+        // Private digest comparison may refresh the watchdog; public events
+        // stay one bounded milestone per Turn and never carry the raw diff.
+        if (!isExactCurrentTurn(notificationTurnId(params))) {
+          return;
+        }
+        currentTurnAwaitingStartConfirmation = false;
+        const digest = privateCodexDiffDigest(params.diff);
+        if (digest === undefined) {
+          return;
+        }
+        if (digest === lastPrivateDiffDigest) {
+          return;
+        }
+        lastPrivateDiffDigest = digest;
+        scheduleWatchdog();
+        if (!workspaceChangeMilestoneEmitted) {
+          workspaceChangeMilestoneEmitted = true;
+          const milestone = projectCodexAppServerWorkspaceChangeMilestone();
+          publishProgressEvent(
+            milestone.type,
+            milestone.summary,
+            {
+              ...milestone.payload,
+              threadId: binding?.threadId,
+              turnId: currentTurnId,
+            },
+            // Watchdog already refreshed for the private material change.
+            { refreshWatchdog: false },
+          );
         }
         return;
       }
@@ -1138,15 +1244,33 @@ export async function runCodexNativeGoal(
         return;
       }
 
-      // Unknown future notification → bounded observability, never a progress
-      // reset: unrecognized/noisy traffic cannot keep a stuck Worker alive.
-      const summary = `Codex native Goal ${method.replaceAll("_", " ")}`.slice(0, MAX_SUMMARY);
-      // Unknown notifications are observability/liveness only — never progress.
-      store.addEvent(task.id, attempt.id, "worker.message", summary, withActivityEvidence({
-        activityKind: "goal-activity",
-        threadId: binding?.threadId,
-      }, RUNTIME_ACTIVITY_LIVENESS));
-      hooks.onEvent?.({ type: "worker.message", summary });
+      // Plan updates: liveness only, one privacy-safe row per Turn, no payload.
+      if (method === "turn/plan/updated") {
+        if (!livenessPlanEmitted) {
+          livenessPlanEmitted = true;
+          const summary = "Codex native Goal updated its plan";
+          store.addEvent(task.id, attempt.id, "worker.message", summary, withActivityEvidence({
+            activityKind: "goal-activity",
+            threadId: binding?.threadId,
+            turnId: currentTurnId,
+          }, RUNTIME_ACTIVITY_LIVENESS));
+          hooks.onEvent?.({ type: "worker.message", summary });
+        }
+        return;
+      }
+
+      // Unknown future notification → at most one privacy-safe liveness row per
+      // Turn. Never echo raw method names or payloads, and never refresh the
+      // effective-progress watchdog.
+      if (!livenessUnknownEmitted) {
+        livenessUnknownEmitted = true;
+        const summary = "Codex native Goal reported additional runtime activity";
+        store.addEvent(task.id, attempt.id, "worker.message", summary, withActivityEvidence({
+          activityKind: "goal-activity",
+          threadId: binding?.threadId,
+        }, RUNTIME_ACTIVITY_LIVENESS));
+        hooks.onEvent?.({ type: "worker.message", summary });
+      }
     };
 
     const onNotification = (
@@ -1156,6 +1280,13 @@ export async function runCodexNativeGoal(
       if (outcome !== undefined) return;
       checkExternalInterrupt();
       if (outcome !== undefined) return;
+
+      // Drop streaming answer deltas before any race/continuation buffer so a
+      // real same-burst flood cannot overflow the bounded buffer or invent
+      // progress. processNotification also ignores them as defense in depth.
+      if (method === "item/agentMessage/delta") {
+        return;
+      }
 
       // Buffer same-burst and in-flight notifications from immediately before
       // turn/start through durable Turn activation. Entries have no authority
@@ -1536,6 +1667,7 @@ export async function runCodexNativeGoal(
         ));
         finalResultText = undefined;
         sawExplicitNonNullPhase = false;
+        resetTurnProgressProjection();
         replayingTurnStartBuffer = true;
         try {
           for (const entry of buffered ?? []) {

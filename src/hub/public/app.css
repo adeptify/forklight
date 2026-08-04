@@ -756,7 +756,7 @@ button:focus-visible,
 /* One board: Goal and Plan swimlanes group vertically, execution columns
  * separate horizontally. Task cards alone live inside the seven columns. */
 .work-filters {
-  margin-bottom: var(--gap);
+  margin-bottom: var(--gap-sm);
 }
 .work-filters-form {
   display: flex;
@@ -766,7 +766,7 @@ button:focus-visible,
   background: var(--paper);
   border: var(--border);
   border-radius: var(--radius);
-  padding: var(--pad-sm) var(--pad);
+  padding: 6px var(--pad-sm);
   box-shadow: var(--shadow-soft);
 }
 .work-filter-field {
@@ -993,6 +993,38 @@ button:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+/* FL-108B: counted terminal-Goal history group — closed by default, same
+ * lane renderer when expanded, no fixed heights or clipping. */
+.work-finished-group {
+  border: var(--border);
+  border-radius: var(--radius);
+  background: var(--paper);
+  min-width: 0;
+}
+.work-finished-group > summary.work-finished-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 10px;
+  font-weight: 700;
+  font-size: 12.5px;
+  color: var(--muted);
+  min-height: 32px;
+  overflow-wrap: anywhere;
+}
+.work-finished-group > summary.work-finished-summary::-webkit-details-marker {
+  display: none;
+}
+.work-finished-group[open] > summary.work-finished-summary {
+  border-bottom: var(--border);
+  color: var(--ink);
+}
+.work-finished-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: 6px 0 4px;
+  min-width: 0;
 }
 
 /* FL-109C2A: truthful drag + keyboard action handoff.
@@ -1256,38 +1288,40 @@ button:focus-visible,
 
 /* --- Outcome composer + intake story (FL-109D2) --- */
 /* One outcome-first composer above the Work board; calm, contained, and
- * progressively disclosed. Nothing here can create work or start a Worker. */
+ * progressively disclosed. Nothing here can create work or start a Worker.
+ * FL-108B keeps the default empty-intake composition compact so the board
+ * heading is reachable early without clipping or fixed viewport heights. */
 .outcome-section {
   display: flex;
   flex-direction: column;
-  gap: var(--gap);
+  gap: var(--gap-sm);
   min-width: 0;
-  margin-bottom: var(--gap);
+  margin-bottom: var(--gap-sm);
 }
 .outcome-composer {
   border: var(--border);
   border-radius: var(--radius);
   background: var(--paper);
   box-shadow: var(--shadow-soft);
-  padding: var(--pad);
+  padding: var(--pad-sm) var(--pad);
   min-width: 0;
 }
 .outcome-composer-title {
   font-weight: 750;
-  font-size: 15px;
+  font-size: 14px;
   color: var(--ink);
 }
 .outcome-composer-hint {
-  margin-top: 4px;
-  font-size: 12.5px;
+  margin-top: 2px;
+  font-size: 12px;
   color: var(--muted);
   overflow-wrap: anywhere;
 }
 .outcome-form {
   display: flex;
   flex-direction: column;
-  gap: var(--gap);
-  margin-top: var(--gap-sm);
+  gap: var(--gap-sm);
+  margin-top: 6px;
   min-width: 0;
 }
 .outcome-field {
@@ -1317,7 +1351,7 @@ button:focus-visible,
 }
 .outcome-textarea {
   resize: vertical;
-  min-height: 64px;
+  min-height: 48px;
   line-height: 1.45;
 }
 .outcome-textarea:focus,
@@ -1394,6 +1428,12 @@ button:focus-visible,
   font-size: 13px;
   color: var(--ink);
   overflow-wrap: anywhere;
+}
+/* Default empty intake: one compact line, not a tall empty card. */
+.outcome-story-note-empty {
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 .outcome-story-note-title {
   font-weight: 700;
@@ -2065,18 +2105,51 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
 .compact-status-row.ok { background: var(--green-soft); border-color: color-mix(in srgb, var(--green) 28%, var(--line)); }
 .compact-status-badge { flex-shrink: 0; font-weight: 700; }
 .compact-expandable { cursor: pointer; }
-/* Four-section Task Overview */
+/* Four-section Task Overview: one ordered input → delivery story.
+ * Step markers and a subtle connector keep scanning calm; raw evidence stays out. */
 .task-four-section {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 0;
+  min-width: 0;
 }
 .four-section-card {
+  position: relative;
   border: var(--border);
   border-radius: var(--radius);
   background: var(--paper);
-  padding: 14px 16px 16px;
+  padding: 14px 16px 16px 48px;
   min-width: 0;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+.four-section-card:last-child { margin-bottom: 0; }
+.four-section-card:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 23px;
+  top: 42px;
+  bottom: -10px;
+  width: 2px;
+  background: color-mix(in srgb, var(--line) 80%, transparent);
+  pointer-events: none;
+}
+.four-section-step {
+  position: absolute;
+  left: 12px;
+  top: 14px;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--ink);
+  background: var(--bg2);
+  border: var(--border);
+  z-index: 1;
 }
 .four-section-title {
   font-size: 15px;
@@ -2084,6 +2157,7 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   color: var(--ink);
   margin-bottom: 4px;
   letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
 }
 .four-section-sub {
   padding: 10px 12px;
@@ -2092,6 +2166,7 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   border-radius: var(--radius-sm);
   background: var(--bg);
   font-size: 12.5px;
+  overflow-wrap: anywhere;
 }
 .four-section-conclusion {
   padding: 8px 12px;
@@ -2099,6 +2174,10 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   font-weight: 650;
   font-size: 13px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+  background: var(--bg2);
+  border: var(--border);
+  color: var(--ink);
 }
 .four-section-conclusion.ok {
   background: var(--green-soft);
@@ -2123,13 +2202,16 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   font-size: 14px;
   font-weight: 650;
   color: var(--ink);
+  overflow-wrap: anywhere;
+  min-height: 32px;
 }
 .four-section-failure-summary {
-  margin-top: 6px;
-  padding: 6px 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--red-soft);
   border: 1px solid color-mix(in srgb, var(--red) 20%, var(--line));
+  overflow-wrap: anywhere;
 }
 .four-section-failure-label {
   font-size: 10.5px;
@@ -2146,6 +2228,7 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   line-height: 1.45;
   font-family: var(--mono);
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .four-section-failure-unavail {
   margin-top: 4px;
@@ -2163,7 +2246,47 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
   font-family: var(--font);
+}
+.task-result-claim-disclosure {
+  margin-top: 10px;
+  min-width: 0;
+}
+.task-result-claim-disclosure > summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  font-weight: 650;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.task-result-claim-disclosure > summary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--hi) 55%, var(--line));
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+@media (max-width: 768px) {
+  .four-section-card {
+    padding: 12px 12px 14px 42px;
+    margin-bottom: 8px;
+  }
+  .four-section-step {
+    left: 10px;
+    top: 12px;
+    width: 22px;
+    height: 22px;
+    font-size: 11px;
+  }
+  .four-section-card:not(:last-child)::after {
+    left: 20px;
+    top: 38px;
+    bottom: -8px;
+  }
+  .four-section-title { font-size: 14px; }
+  .four-section-conclusion,
+  .four-section-next { font-size: 13px; }
 }
 .task-report-grid {
   display: grid;
@@ -2555,12 +2678,40 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
 }
 
 /* --- Top-level page story: why this page exists, then the four-part flow ---
- * Purpose leads. Input, system work, result, and next action follow in order. */
+ * Purpose leads. Input, system work, result, and next action follow in order.
+ * Work alone collapses the full story into a closed disclosure (FL-108B). */
 .guide-card.page-story {
   padding: 0;
   overflow: hidden;
   min-width: 0;
-  margin-bottom: var(--gap);
+  margin-bottom: var(--gap-sm);
+}
+.guide-card.page-story-work {
+  border-left-width: 2px;
+}
+.page-story-disclosure {
+  min-width: 0;
+}
+.page-story-disclosure > summary.page-story-disclosure-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 12px;
+  font-weight: 700;
+  font-size: 12.5px;
+  color: var(--muted);
+  min-height: 32px;
+  overflow-wrap: anywhere;
+}
+.page-story-disclosure > summary.page-story-disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+.page-story-disclosure[open] > summary.page-story-disclosure-summary {
+  border-bottom: var(--border);
+  color: var(--ink);
+  background: var(--bg2);
+}
+.page-story-disclosure-body {
+  min-width: 0;
 }
 .page-story-purpose {
   padding: var(--pad-sm) var(--pad);

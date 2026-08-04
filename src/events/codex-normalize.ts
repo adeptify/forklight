@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   RUNTIME_ACTIVITY_EFFECTIVE,
   RUNTIME_ACTIVITY_LIVENESS,
@@ -6,6 +7,41 @@ import {
 import type { AttemptTokenUsage, NormalizedWorkerEvent } from "../core/types.js";
 
 const MAX_SUMMARY = 240;
+/** Raw app-server item ids accepted only when non-empty and length-bounded. */
+const MAX_RAW_ITEM_ID = 128;
+/** Public correlation token length (hex chars of a one-way digest). */
+const TOOL_CORRELATION_TOKEN_HEX = 16;
+
+/** Closed app-server item types that map to privacy-safe tool lifecycle events. */
+export const CODEX_APP_SERVER_TOOL_ITEM_TYPES = [
+  "commandExecution",
+  "fileChange",
+] as const;
+
+export type CodexAppServerToolItemType = (typeof CODEX_APP_SERVER_TOOL_ITEM_TYPES)[number];
+
+export type CodexAppServerItemProgressEvent = {
+  type: "worker.tool.started" | "worker.tool.completed";
+  summary: string;
+  payload: Record<string, unknown>;
+};
+
+export type CodexAppServerWorkspaceChangeEvent = {
+  type: "worker.message";
+  summary: string;
+  payload: Record<string, unknown>;
+};
+
+/**
+ * One-way bounded correlation token for tool start/complete pairing.
+ * Requires a non-empty length-bounded raw id; never returns the raw id.
+ */
+export function privacySafeToolCorrelationToken(rawId: unknown): string | undefined {
+  if (typeof rawId !== "string" || rawId.length < 1 || rawId.length > MAX_RAW_ITEM_ID) {
+    return undefined;
+  }
+  return createHash("sha256").update(rawId).digest("hex").slice(0, TOOL_CORRELATION_TOKEN_HEX);
+}
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -95,6 +131,84 @@ export function codexAppServerTokenUsage(raw: unknown): AttemptTokenUsage | unde
 export const CODEX_APP_SERVER_RESULT_TEXT_MAX = 32_000;
 
 /**
+ * Privacy-safe projection of exact-current-Turn `item/started` and
+ * `item/completed` for commandExecution and fileChange. Emits only closed
+ * tool enums and an optional one-way correlation token — never raw item ids,
+ * command, cwd, output, path, or content fields from the raw item.
+ */
+export function projectCodexAppServerItemProgress(
+  method: "item/started" | "item/completed",
+  item: unknown,
+): CodexAppServerItemProgressEvent | undefined {
+  const obj = object(item);
+  if (obj === undefined) return undefined;
+  const itemType = obj.type;
+  if (itemType !== "commandExecution" && itemType !== "fileChange") {
+    return undefined;
+  }
+  const started = method === "item/started";
+  const label = itemType === "commandExecution" ? "command" : "file change";
+  // Require a valid non-empty id for pairing; publish only the one-way token.
+  const toolUseId = privacySafeToolCorrelationToken(obj.id);
+  return {
+    type: started ? "worker.tool.started" : "worker.tool.completed",
+    summary: `${label} ${started ? "started" : "completed"}`,
+    payload: withActivityEvidence(
+      {
+        tool: itemType,
+        ...(toolUseId === undefined ? {} : { toolUseId }),
+      },
+      RUNTIME_ACTIVITY_EFFECTIVE,
+    ),
+  };
+}
+
+/**
+ * Private material digest for `turn/diff/updated`. Compares whether the
+ * app-server presented new workspace-change evidence without ever exposing
+ * paths, patches, or content on public surfaces. Returns undefined for empty
+ * or unusable evidence so callers stay inert.
+ *
+ * Hashes the complete serialized body (plus length) so tail-only changes
+ * remain material even for large diffs.
+ */
+export function privateCodexDiffDigest(diff: unknown): string | undefined {
+  if (diff === undefined || diff === null) return undefined;
+  let serialized: string;
+  if (typeof diff === "string") {
+    serialized = diff;
+  } else if (typeof diff === "object") {
+    try {
+      serialized = JSON.stringify(diff);
+    } catch {
+      return undefined;
+    }
+  } else {
+    return undefined;
+  }
+  if (serialized.length < 1) return undefined;
+  return createHash("sha256")
+    .update(`${serialized.length}\n`)
+    .update(serialized)
+    .digest("hex");
+}
+
+/**
+ * One bounded public milestone for workspace-change evidence on a Turn.
+ * Carries only closed activity metadata — never paths, diffs, or content.
+ */
+export function projectCodexAppServerWorkspaceChangeMilestone(): CodexAppServerWorkspaceChangeEvent {
+  return {
+    type: "worker.message",
+    summary: "Codex native Goal updated workspace files",
+    payload: withActivityEvidence(
+      { activityKind: "workspace-change" },
+      RUNTIME_ACTIVITY_EFFECTIVE,
+    ),
+  };
+}
+
+/**
  * Strict projection of one Codex app-server item into optional final-answer
  * text. Canonical items use camelCase `agentMessage` with an explicit phase:
  * - `final_answer` may yield bounded non-empty terminal text
@@ -152,11 +266,76 @@ export function projectCodexAppServerFinalItem(
   return { explicitNonNullPhase: false };
 }
 
+/**
+ * Content-safe summary for the measured Codex provider account usage-limit
+ * family. Public surfaces must not depend on raw provider prose or URLs.
+ */
+export const CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY = "Codex account usage limit reached";
+
+/** Stable reason code for Codex provider/account quota exhaustion (not Task maxBudget). */
+export const CODEX_ACCOUNT_USAGE_LIMIT_REASON = "codex-account-usage-limit";
+
+/**
+ * Narrow match for the measured OpenAI/Codex account usage-limit message family.
+ * Requires the multi-word provider phrase; bare tokens such as "usage", "limit",
+ * or "credits" alone never classify as account quota.
+ */
+export function isCodexAccountUsageLimitMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  // Measured family: "You've hit your usage limit..." / "You have hit your usage limit..."
+  // Also accept "reached your usage limit" as the same provider family.
+  return normalized.includes("hit your usage limit")
+    || normalized.includes("reached your usage limit");
+}
+
+function extractCodexFailureMessage(root: Record<string, unknown>): string {
+  const error = object(root.error);
+  if (typeof root.message === "string" && root.message.length > 0) return root.message;
+  if (typeof error?.message === "string" && error.message.length > 0) return error.message;
+  return "Codex Worker reported failure";
+}
+
+function classifyCodexFailure(message: string): {
+  summary: string;
+  failureCategory: "budget" | "runtime";
+  reasonCode?: string;
+  failureReason: string;
+} {
+  if (isCodexAccountUsageLimitMessage(message)) {
+    return {
+      summary: CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY,
+      failureCategory: "budget",
+      reasonCode: CODEX_ACCOUNT_USAGE_LIMIT_REASON,
+      failureReason: CODEX_ACCOUNT_USAGE_LIMIT_SUMMARY,
+    };
+  }
+  return {
+    summary: message.slice(0, MAX_SUMMARY),
+    failureCategory: "runtime",
+    failureReason: message.slice(0, 2_000),
+  };
+}
+
+function terminalConflictEvent(): NormalizedWorkerEvent {
+  return {
+    type: "worker.failed",
+    summary: "Codex emitted conflicting terminal evidence",
+    payload: { failureCategory: "runtime", reasonCode: "codex-terminal-conflict" },
+    terminal: { isError: true, failureReason: "Codex emitted conflicting terminal evidence" },
+  };
+}
+
 /** Strict stateful projection of `codex exec --json` JSONL. Unknown valid
  * events remain bounded progress; malformed or conflicting terminal evidence
  * becomes a terminal failure rather than guessed success. */
 export class CodexEventNormalizer {
   private terminalSeen = false;
+  /**
+   * Fingerprint of the first failure terminal's full extracted message.
+   * Only an identical later failure (`error` / `turn.failed`) is idempotent;
+   * success is never deduplicated and different failure reasons conflict.
+   */
+  private failureTerminalFingerprint: string | undefined;
 
   parseLine(line: string): NormalizedWorkerEvent[] {
     const trimmed = line.trim();
@@ -166,6 +345,7 @@ export class CodexEventNormalizer {
       raw = JSON.parse(trimmed);
     } catch {
       this.terminalSeen = true;
+      this.failureTerminalFingerprint = undefined;
       return [{
         type: "worker.failed",
         summary: "Codex emitted malformed JSONL",
@@ -176,6 +356,7 @@ export class CodexEventNormalizer {
     const root = object(raw);
     if (root === undefined || typeof root.type !== "string") {
       this.terminalSeen = true;
+      this.failureTerminalFingerprint = undefined;
       return [{
         type: "worker.failed",
         summary: "Codex emitted an invalid event envelope",
@@ -185,12 +366,18 @@ export class CodexEventNormalizer {
     }
     const type = root.type;
     if (this.terminalSeen) {
-      return [{
-        type: "worker.failed",
-        summary: "Codex emitted conflicting terminal evidence",
-        payload: { failureCategory: "runtime", reasonCode: "codex-terminal-conflict" },
-        terminal: { isError: true, failureReason: "Codex emitted conflicting terminal evidence" },
-      }];
+      // Codex often emits one `error` and one same-message `turn.failed` for a
+      // single rejection. That pair is duplicate terminal evidence, not conflict.
+      if (type === "turn.failed" || type === "error") {
+        const message = extractCodexFailureMessage(root);
+        if (
+          this.failureTerminalFingerprint !== undefined
+          && this.failureTerminalFingerprint === message
+        ) {
+          return [];
+        }
+      }
+      return [terminalConflictEvent()];
     }
     if (type === "thread.started") {
       if (typeof root.thread_id !== "string" || root.thread_id.length < 1) {
@@ -271,6 +458,9 @@ export class CodexEventNormalizer {
     }
     if (type === "turn.completed") {
       this.terminalSeen = true;
+      // Success is never an idempotent fingerprint; a later terminal always
+      // conflicts (including another success or any failure).
+      this.failureTerminalFingerprint = undefined;
       // A terminal completion that carries a usage object which cannot be
       // projected into exact disjoint counters is malformed terminal evidence
       // and fails closed. An absent usage stays unavailable on a successful
@@ -291,16 +481,18 @@ export class CodexEventNormalizer {
       }];
     }
     if (type === "turn.failed" || type === "error") {
+      const message = extractCodexFailureMessage(root);
       this.terminalSeen = true;
-      const error = object(root.error);
-      const message = typeof root.message === "string"
-        ? root.message
-        : typeof error?.message === "string" ? error.message : "Codex Worker reported failure";
+      this.failureTerminalFingerprint = message;
+      const classified = classifyCodexFailure(message);
       return [{
         type: "worker.failed",
-        summary: message.slice(0, MAX_SUMMARY),
-        payload: { failureCategory: "runtime" },
-        terminal: { isError: true, failureReason: message.slice(0, 2_000) },
+        summary: classified.summary,
+        payload: {
+          failureCategory: classified.failureCategory,
+          ...(classified.reasonCode === undefined ? {} : { reasonCode: classified.reasonCode }),
+        },
+        terminal: { isError: true, failureReason: classified.failureReason },
       }];
     }
     // Unknown structured stream records: Runtime liveness only so noisy

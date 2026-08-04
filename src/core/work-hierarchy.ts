@@ -10,6 +10,7 @@ import {
   evaluateMilestoneGate,
   projectGoal,
   resolveEffectiveMilestoneLineage,
+  type GoalDeliveryBasis,
   type GoalView,
 } from "./goal.js";
 import {
@@ -25,7 +26,9 @@ import {
 import type {
   DecisionStage,
   DependencyRecord,
+  GoalMilestoneGate,
   GoalMilestoneRecord,
+  GoalReasonCode,
   PlanItemRecord,
   PlanRecord,
   TaskRecord,
@@ -56,7 +59,8 @@ export type WorkHierarchyPlacementReason =
   | "awaiting-main-decision"
   | "delivered-outcome"
   | "stopped-or-failed"
-  | "unrecognized-evidence";
+  | "unrecognized-evidence"
+  | "goal-gate-satisfied";
 
 export const WORK_HIERARCHY_COLUMNS: readonly WorkHierarchyColumnCode[] = [
   "not-started",
@@ -116,15 +120,113 @@ export interface WorkHierarchyBreadcrumb {
   effectiveTaskId?: string;
 }
 
+/**
+ * Closed Work hierarchy narrative codes (FL-108C1).
+ * Core owns meaning; Hub localizes known codes and fails closed on unknowns.
+ * Never derived by parsing legacy English prose.
+ */
+export type WorkHierarchyNarrativeCode =
+  // Goal what-happened
+  | "goal-what-completed"
+  | "goal-what-main-stop"
+  | "goal-what-correction-cap"
+  | "goal-what-review-cap"
+  | "goal-what-no-new-evidence-cap"
+  | "goal-what-duration-exceeded"
+  | "goal-what-no-progress"
+  | "goal-what-milestone-failed"
+  | "goal-what-started"
+  | "goal-what-milestone-satisfied"
+  | "goal-what-current"
+  // Goal waiting / blocker
+  | "goal-wait-admission-blocked"
+  | "goal-wait-all-gates-satisfied"
+  | "goal-wait-nothing"
+  | "goal-wait-machine"
+  | "goal-wait-main-accept"
+  | "goal-wait-integration"
+  | "goal-wait-task"
+  | "goal-wait-milestone-failed"
+  | "goal-wait-main-stop"
+  | "goal-wait-correction-cap"
+  | "goal-wait-review-cap"
+  | "goal-wait-no-new-evidence-cap"
+  | "goal-wait-duration-exceeded"
+  | "goal-wait-no-progress"
+  | "goal-wait-progressing"
+  // Goal next action (mirrors GoalNextActionCode)
+  | "goal-next-wait-for-worker"
+  | "goal-next-main-accept"
+  | "goal-next-main-review"
+  | "goal-next-integrate"
+  | "goal-next-correct-or-decide"
+  | "goal-next-advance"
+  | "goal-next-stop-or-decide"
+  | "goal-next-resume-task"
+  | "goal-next-none"
+  // Card what-happened
+  | "card-what-delivered"
+  | "card-what-nothing"
+  | "card-what-goal-gate-complete"
+  // Card next action
+  | "card-next-waiting-prerequisite"
+  | "card-next-not-started"
+  | "card-next-ready"
+  | "card-next-running"
+  | "card-next-waiting-verification"
+  | "card-next-waiting-main-decision"
+  | "card-next-no-further-action"
+  | "card-next-needs-recovery"
+  | "card-next-goal-gate-satisfied"
+  // Lane aggregation
+  | "lane-what-none-completed"
+  | "lane-what-completed-names"
+  | "lane-what-completed-count"
+  | "lane-blocker-blocked"
+  | "lane-blocker-waiting"
+  | "lane-blocker-none"
+  | "lane-next-no-step";
+
+/** Bounded primitive params only: labels, names, counts, closed codes, milestone ids. */
+export type WorkHierarchyNarrativeParamValue = string | number;
+
+export interface WorkHierarchyNarrativeMessage {
+  code: WorkHierarchyNarrativeCode;
+  params?: Record<string, WorkHierarchyNarrativeParamValue>;
+}
+
 export interface WorkHierarchyLaneSummary {
   whatCompleted: string;
   blocker: string;
   nextAction: string;
+  /** Coded what-happened; Hub prefers this over the legacy string when present. */
+  whatCompletedMessage?: WorkHierarchyNarrativeMessage;
+  /** Coded blocker/waiting state; empty codes stay additive compatibility only. */
+  blockerMessage?: WorkHierarchyNarrativeMessage;
+  /** Coded next action; Hub prefers this over the legacy string when present. */
+  nextActionMessage?: WorkHierarchyNarrativeMessage;
   progress: {
     total: number;
     completed: number;
     percent: number;
   };
+}
+
+/** Bounded Plan-relative milestone truth on a Goal-owned card.
+ *  Explains why the card is complete (or still waiting) in this Goal's lane
+ *  without hiding the underlying Task-wide decision stage, status, or board
+ *  placement. Derived from the same evaluateMilestoneGate authority as the
+ *  Goal milestone projection; never inferred from the Goal label alone. */
+export interface WorkHierarchyGoalGateEvidence {
+  gate: GoalMilestoneGate;
+  satisfied: boolean;
+  reasonCode: GoalReasonCode;
+  /** Privacy-safe plain explanation from the Goal gate authority. */
+  reason: string;
+  /** Privacy-safe next action in the Goal's lane. */
+  nextAction: string;
+  /** Delivery provenance when an integration gate is satisfied. */
+  deliveryBasis?: GoalDeliveryBasis;
 }
 
 export interface WorkHierarchyTaskCard {
@@ -150,6 +252,12 @@ export interface WorkHierarchyTaskCard {
   blockers: WorkHierarchyBlocker[];
   whatCompleted: string;
   nextAction: string;
+  /** Coded what-happened beside the legacy string (FL-108C1). */
+  whatCompletedMessage?: WorkHierarchyNarrativeMessage;
+  /** Coded next action beside the legacy string (FL-108C1). */
+  nextActionMessage?: WorkHierarchyNarrativeMessage;
+  /** Present only on Goal-supervised Plan cards (FL-109E2). */
+  goalGate?: WorkHierarchyGoalGateEvidence;
   /** Core-owned truthful action policy (FL-109C1). Read-only; Hub never recomputes. */
   actionPolicy: TaskActionPolicy;
   updatedAt: string;
@@ -518,9 +626,50 @@ function filterColumns(
   return placeCards(kept);
 }
 
+const MAX_NARRATIVE_PARAM_KEYS = 8;
+const MAX_NARRATIVE_PARAM_STR = 200;
+const MAX_NARRATIVE_PARAM_INT = 1_000_000;
+
+/** Build a bounded narrative message; params are user-safe primitives only. */
+function narrativeMessage(
+  code: WorkHierarchyNarrativeCode,
+  params?: Record<string, WorkHierarchyNarrativeParamValue>,
+): WorkHierarchyNarrativeMessage {
+  if (params === undefined) return { code };
+  const safe: Record<string, WorkHierarchyNarrativeParamValue> = {};
+  let count = 0;
+  for (const [key, value] of Object.entries(params)) {
+    if (count >= MAX_NARRATIVE_PARAM_KEYS) break;
+    if (typeof value === "string") {
+      const trimmed = value.slice(0, MAX_NARRATIVE_PARAM_STR);
+      if (trimmed.length === 0) continue;
+      safe[key] = trimmed;
+      count += 1;
+    } else if (
+      typeof value === "number"
+      && Number.isSafeInteger(value)
+      && value >= 0
+      && value <= MAX_NARRATIVE_PARAM_INT
+    ) {
+      safe[key] = value;
+      count += 1;
+    }
+  }
+  return Object.keys(safe).length > 0 ? { code, params: safe } : { code };
+}
+
+interface LaneSummaryFallback {
+  whatCompleted?: string;
+  blocker?: string;
+  nextAction?: string;
+  whatCompletedMessage?: WorkHierarchyNarrativeMessage;
+  blockerMessage?: WorkHierarchyNarrativeMessage;
+  nextActionMessage?: WorkHierarchyNarrativeMessage;
+}
+
 function deriveLaneSummary(
   cards: readonly WorkHierarchyTaskCard[],
-  fallback?: { whatCompleted?: string; blocker?: string; nextAction?: string },
+  fallback?: LaneSummaryFallback,
 ): WorkHierarchyLaneSummary {
   const completed = cards.filter((c) => c.column === "completed");
   const total = cards.length;
@@ -528,26 +677,45 @@ function deriveLaneSummary(
   const percent = total === 0 ? 0 : Math.round((completedCount / total) * 100);
 
   let whatCompleted: string;
+  let whatCompletedMessage: WorkHierarchyNarrativeMessage;
   if (fallback?.whatCompleted !== undefined && fallback.whatCompleted.length > 0) {
     whatCompleted = fallback.whatCompleted.slice(0, 500);
+    whatCompletedMessage = fallback.whatCompletedMessage
+      ?? narrativeMessage("lane-what-none-completed");
   } else if (completedCount === 0) {
     whatCompleted = "No Tasks completed yet.";
+    whatCompletedMessage = narrativeMessage("lane-what-none-completed");
   } else {
     const names = completed
       .map((c) => c.name)
       .filter((n) => n.length > 0)
       .slice(0, MAX_COMPLETED_NAMES);
-    const extra = completedCount > names.length
-      ? ` (+${completedCount - names.length} more)`
-      : "";
-    whatCompleted = names.length === 0
-      ? `${completedCount} Task(s) completed.`
-      : `Completed: ${names.join(", ")}${extra}.`;
+    const extraCount = completedCount > names.length
+      ? completedCount - names.length
+      : 0;
+    const extra = extraCount > 0 ? ` (+${extraCount} more)` : "";
+    if (names.length === 0) {
+      whatCompleted = `${completedCount} Task(s) completed.`;
+      whatCompletedMessage = narrativeMessage("lane-what-completed-count", {
+        count: completedCount,
+      });
+    } else {
+      whatCompleted = `Completed: ${names.join(", ")}${extra}.`;
+      whatCompletedMessage = narrativeMessage(
+        "lane-what-completed-names",
+        extraCount > 0
+          ? { names: names.join(", "), extraCount }
+          : { names: names.join(", ") },
+      );
+    }
   }
 
   let blocker: string;
+  let blockerMessage: WorkHierarchyNarrativeMessage;
   if (fallback?.blocker !== undefined && fallback.blocker.length > 0) {
     blocker = fallback.blocker.slice(0, 500);
+    blockerMessage = fallback.blockerMessage
+      ?? narrativeMessage("lane-blocker-none");
   } else {
     const failed = cards.find((c) => c.column === "stopped-failed");
     const waiting = cards.find(
@@ -556,17 +724,23 @@ function deriveLaneSummary(
     if (failed !== undefined) {
       const label = failed.blockers[0]?.label ?? failed.name;
       blocker = `Blocked: ${label}.`;
+      blockerMessage = narrativeMessage("lane-blocker-blocked", { label });
     } else if (waiting !== undefined) {
       const label = waiting.blockers[0]?.label ?? waiting.name;
       blocker = `Waiting: ${label}.`;
+      blockerMessage = narrativeMessage("lane-blocker-waiting", { label });
     } else {
       blocker = "No current blocker.";
+      blockerMessage = narrativeMessage("lane-blocker-none");
     }
   }
 
   let nextAction: string;
+  let nextActionMessage: WorkHierarchyNarrativeMessage;
   if (fallback?.nextAction !== undefined && fallback.nextAction.length > 0) {
     nextAction = fallback.nextAction.slice(0, 500);
+    nextActionMessage = fallback.nextActionMessage
+      ?? narrativeMessage("lane-next-no-step");
   } else {
     const priority: WorkHierarchyColumnCode[] = [
       "running",
@@ -581,13 +755,23 @@ function deriveLaneSummary(
       chosen = cards.find((c) => c.column === code);
       if (chosen !== undefined) break;
     }
-    nextAction = chosen?.nextAction ?? "No next executable step.";
+    if (chosen !== undefined) {
+      nextAction = chosen.nextAction;
+      nextActionMessage = chosen.nextActionMessage
+        ?? narrativeMessage("lane-next-no-step");
+    } else {
+      nextAction = "No next executable step.";
+      nextActionMessage = narrativeMessage("lane-next-no-step");
+    }
   }
 
   return {
     whatCompleted,
     blocker,
     nextAction,
+    whatCompletedMessage,
+    blockerMessage,
+    nextActionMessage,
     progress: { total, completed: completedCount, percent },
   };
 }
@@ -595,37 +779,243 @@ function deriveLaneSummary(
 function nextActionForCard(
   column: WorkHierarchyColumnCode,
   blockers: WorkHierarchyBlocker[],
-): string {
+): { text: string; message: WorkHierarchyNarrativeMessage } {
   switch (column) {
     case "not-started": {
       const dep = blockers.find(
         (b) => b.code === "dependency-waiting" || b.code === "dependency-failed",
       );
-      return dep !== undefined
-        ? `Waiting on prerequisite: ${dep.label}.`
-        : "Not started yet.";
+      if (dep !== undefined) {
+        return {
+          text: `Waiting on prerequisite: ${dep.label}.`,
+          message: narrativeMessage("card-next-waiting-prerequisite", {
+            label: dep.label,
+          }),
+        };
+      }
+      return {
+        text: "Not started yet.",
+        message: narrativeMessage("card-next-not-started"),
+      };
     }
     case "ready":
-      return "Ready to run when a Worker slot is available.";
+      return {
+        text: "Ready to run when a Worker slot is available.",
+        message: narrativeMessage("card-next-ready"),
+      };
     case "running":
-      return "Worker is executing this Task.";
+      return {
+        text: "Worker is executing this Task.",
+        message: narrativeMessage("card-next-running"),
+      };
     case "waiting-verification":
-      return "Waiting for machine verification.";
+      return {
+        text: "Waiting for machine verification.",
+        message: narrativeMessage("card-next-waiting-verification"),
+      };
     case "waiting-user-decision":
-      return "Waiting for a Main decision.";
+      return {
+        text: "Waiting for a Main decision.",
+        message: narrativeMessage("card-next-waiting-main-decision"),
+      };
     case "completed":
-      return "No further action required.";
+      return {
+        text: "No further action required.",
+        message: narrativeMessage("card-next-no-further-action"),
+      };
     case "stopped-failed":
-      return "Needs Main attention or recovery.";
+      return {
+        text: "Needs Main attention or recovery.",
+        message: narrativeMessage("card-next-needs-recovery"),
+      };
   }
 }
 
 function whatCompletedForCard(
   column: WorkHierarchyColumnCode,
   name: string,
-): string {
-  if (column === "completed") return `${name} delivered.`;
-  return "Nothing completed yet.";
+): { text: string; message: WorkHierarchyNarrativeMessage } {
+  if (column === "completed") {
+    return {
+      text: `${name} delivered.`,
+      message: narrativeMessage("card-what-delivered", { name }),
+    };
+  }
+  return {
+    text: "Nothing completed yet.",
+    message: narrativeMessage("card-what-nothing"),
+  };
+}
+
+function goalGateSatisfiedNext(
+  goalGate: WorkHierarchyGoalGateEvidence,
+): { text: string; message: WorkHierarchyNarrativeMessage } {
+  const params: Record<string, WorkHierarchyNarrativeParamValue> = {
+    gate: goalGate.gate,
+  };
+  if (goalGate.deliveryBasis !== undefined) {
+    params.deliveryBasis = goalGate.deliveryBasis;
+  }
+  return {
+    text: goalGate.nextAction,
+    message: narrativeMessage("card-next-goal-gate-satisfied", params),
+  };
+}
+
+function goalWhatMessage(
+  reasonCode: GoalReasonCode,
+): WorkHierarchyNarrativeMessage {
+  switch (reasonCode) {
+    case "goal-completed":
+      return narrativeMessage("goal-what-completed");
+    case "main-stop":
+      return narrativeMessage("goal-what-main-stop");
+    case "correction-cap":
+      return narrativeMessage("goal-what-correction-cap");
+    case "review-cap":
+      return narrativeMessage("goal-what-review-cap");
+    case "no-new-evidence-cap":
+      return narrativeMessage("goal-what-no-new-evidence-cap");
+    case "duration-exceeded":
+      return narrativeMessage("goal-what-duration-exceeded");
+    case "no-progress":
+      return narrativeMessage("goal-what-no-progress");
+    case "milestone-failed":
+      return narrativeMessage("goal-what-milestone-failed");
+    default:
+      return narrativeMessage("goal-what-current");
+  }
+}
+
+function goalWaitMessage(
+  reasonCode: GoalReasonCode,
+): WorkHierarchyNarrativeMessage {
+  switch (reasonCode) {
+    case "main-stop":
+      return narrativeMessage("goal-wait-main-stop");
+    case "correction-cap":
+      return narrativeMessage("goal-wait-correction-cap");
+    case "review-cap":
+      return narrativeMessage("goal-wait-review-cap");
+    case "no-new-evidence-cap":
+      return narrativeMessage("goal-wait-no-new-evidence-cap");
+    case "duration-exceeded":
+      return narrativeMessage("goal-wait-duration-exceeded");
+    case "no-progress":
+      return narrativeMessage("goal-wait-no-progress");
+    case "milestone-failed":
+      return narrativeMessage("goal-wait-milestone-failed");
+    case "waiting-machine":
+      return narrativeMessage("goal-wait-machine");
+    case "waiting-main-accept":
+      return narrativeMessage("goal-wait-main-accept");
+    case "waiting-integration":
+      return narrativeMessage("goal-wait-integration");
+    case "waiting-task":
+      return narrativeMessage("goal-wait-task");
+    case "goal-completed":
+      return narrativeMessage("goal-wait-all-gates-satisfied");
+    case "none":
+    default:
+      return narrativeMessage("goal-wait-progressing");
+  }
+}
+
+function goalNextMessage(
+  nextActionCode: GoalView["nextActionCode"],
+): WorkHierarchyNarrativeMessage {
+  switch (nextActionCode) {
+    case "wait-for-worker":
+      return narrativeMessage("goal-next-wait-for-worker");
+    case "main-accept":
+      return narrativeMessage("goal-next-main-accept");
+    case "main-review":
+      return narrativeMessage("goal-next-main-review");
+    case "integrate":
+      return narrativeMessage("goal-next-integrate");
+    case "correct-or-decide":
+      return narrativeMessage("goal-next-correct-or-decide");
+    case "advance":
+      return narrativeMessage("goal-next-advance");
+    case "stop-or-decide":
+      return narrativeMessage("goal-next-stop-or-decide");
+    case "resume-task":
+      return narrativeMessage("goal-next-resume-task");
+    case "none":
+    default:
+      return narrativeMessage("goal-next-none");
+  }
+}
+
+/**
+ * Derive Goal-lane narrative codes from GoalView authority (status,
+ * reasonCode, nextActionCode, milestone evidence). Mirrors projectGoal
+ * branches that create the legacy English sentences; never parses prose.
+ */
+function deriveGoalLaneMessages(goalView: GoalView): {
+  whatCompletedMessage: WorkHierarchyNarrativeMessage;
+  blockerMessage: WorkHierarchyNarrativeMessage;
+  nextActionMessage: WorkHierarchyNarrativeMessage;
+} {
+  const nextActionMessage = goalNextMessage(goalView.nextActionCode);
+  const capCodes = new Set<GoalReasonCode>([
+    "correction-cap",
+    "review-cap",
+    "no-new-evidence-cap",
+  ]);
+
+  if (goalView.status === "stopped") {
+    return {
+      whatCompletedMessage: goalWhatMessage(goalView.reasonCode),
+      blockerMessage: narrativeMessage("goal-wait-admission-blocked"),
+      nextActionMessage,
+    };
+  }
+  if (goalView.status === "completed") {
+    return {
+      whatCompletedMessage: narrativeMessage("goal-what-completed"),
+      blockerMessage: narrativeMessage("goal-wait-all-gates-satisfied"),
+      nextActionMessage: narrativeMessage("goal-next-none"),
+    };
+  }
+
+  const failed = goalView.milestones.find((m) => m.reasonCode === "milestone-failed");
+  if (goalView.status === "failed" || failed !== undefined) {
+    return {
+      whatCompletedMessage: narrativeMessage("goal-what-milestone-failed"),
+      blockerMessage: narrativeMessage("goal-wait-milestone-failed"),
+      nextActionMessage,
+    };
+  }
+
+  if (goalView.status === "waiting" && capCodes.has(goalView.reasonCode)) {
+    return {
+      whatCompletedMessage: goalWhatMessage(goalView.reasonCode),
+      blockerMessage: goalWaitMessage(goalView.reasonCode),
+      nextActionMessage,
+    };
+  }
+
+  const unsatisfied = goalView.milestones.find((m) => !m.satisfied);
+  if (unsatisfied !== undefined) {
+    const previous = goalView.milestones.filter((m) => m.satisfied).at(-1);
+    return {
+      whatCompletedMessage: previous === undefined
+        ? narrativeMessage("goal-what-started")
+        : narrativeMessage("goal-what-milestone-satisfied", {
+          itemId: previous.itemId,
+          gate: previous.gate,
+        }),
+      blockerMessage: goalWaitMessage(unsatisfied.reasonCode),
+      nextActionMessage,
+    };
+  }
+
+  return {
+    whatCompletedMessage: narrativeMessage("goal-what-completed"),
+    blockerMessage: narrativeMessage("goal-wait-all-gates-satisfied"),
+    nextActionMessage: narrativeMessage("goal-next-none"),
+  };
 }
 
 /** True only when the summary carries durable delivered/activated/
@@ -812,6 +1202,7 @@ function projectPlanLane(
     let originalTaskId = item.taskId;
     let effectiveTaskId = item.taskId;
     let effectiveTask: TaskRecord | undefined;
+    let milestone: GoalMilestoneRecord | undefined;
     if (item.taskId !== undefined) {
       ctx.claimedTaskIds.add(item.taskId);
       try {
@@ -821,7 +1212,7 @@ function projectPlanLane(
       }
     }
     if (ctx.milestones !== undefined && item.taskId !== undefined) {
-      const milestone = ctx.milestones.find((m) => m.itemId === item.id);
+      milestone = ctx.milestones.find((m) => m.itemId === item.id);
       if (milestone !== undefined) {
         const lineage = resolveEffectiveMilestoneLineage(store, milestone);
         if (lineage.originalTaskId !== undefined) {
@@ -857,16 +1248,50 @@ function projectPlanLane(
       depInfo.gateSatisfaction,
     );
 
-    const placement = mapTaskToHierarchyColumn({
+    // FL-109E2: Plan-relative milestone gate truth. The configured Goal gate is
+    // the authority for this card's column in the Goal lane. The underlying
+    // Task-wide status / decision stage / board placement stay inspectable on
+    // the card; they never downgrade a satisfied gate back to a required Main
+    // decision or integration step that the Goal already outscoped.
+    let goalGate: WorkHierarchyGoalGateEvidence | undefined;
+    if (ctx.goalId !== undefined && milestone !== undefined) {
+      const gateEvidence = evaluateMilestoneGate(
+        store,
+        milestone.gate,
+        effectiveTaskId,
+        effectiveTask?.status,
+      );
+      goalGate = {
+        gate: milestone.gate,
+        satisfied: gateEvidence.satisfied,
+        reasonCode: gateEvidence.reasonCode,
+        reason: gateEvidence.reason,
+        nextAction: gateEvidence.nextAction,
+        ...(gateEvidence.deliveryBasis === undefined
+          ? {}
+          : { deliveryBasis: gateEvidence.deliveryBasis }),
+      };
+    }
+
+    let placement = mapTaskToHierarchyColumn({
       status: summary.status,
       ...(summary.decisionStage === undefined ? {} : { decisionStage: summary.decisionStage }),
       ...(summary.boardScope === undefined ? {} : { boardScope: summary.boardScope }),
       ...(summary.boardReason === undefined ? {} : { boardReason: summary.boardReason }),
       dependenciesSatisfied: depInfo.satisfied,
     });
+    // A satisfied configured gate completes the card in this Goal's lane even
+    // when the Task-wide decision stage still shows a broader review or
+    // Integration step. A Task already Task-wide completed keeps its durable
+    // delivered-outcome signal; the gate truth is still carried in goalGate.
+    if (goalGate?.satisfied === true && placement.column !== "completed") {
+      placement = { column: "completed", placementReason: "goal-gate-satisfied" };
+    }
+    const goalGateCompleted = goalGate?.satisfied === true;
 
     // FL-109C1: Core-owned truthful action policy fed only by authoritative
-    // Store evidence. Read-only; the Hub forwards it unchanged.
+    // Store evidence. Read-only; the Hub forwards it unchanged. A Goal-gate
+    // satisfied card must never claim a required Main decision or card move.
     const actionPolicy = projectTaskActionPolicy(store, {
       taskId: effectiveTaskId,
       status: summary.status,
@@ -877,10 +1302,15 @@ function projectPlanLane(
       delivered: hasDeliveredSummary(summary),
       resolutionState: summary.attentionResolution ?? { status: "none" },
       currentColumn: placement.column,
+      ...(goalGate?.satisfied === true ? { planGateSatisfied: true } : {}),
     });
 
     const safeName = sanitiseName(summary.name) ?? sanitiseName(effectiveTask.name) ?? "Task";
-    const blockers = buildCardBlockers(namedDependencies, summary.status, safeName);
+    // A gate-satisfied card is complete in the Goal lane; dependency or terminal
+    // status blockers describe scheduling, not this milestone's own completion.
+    const blockers = goalGateCompleted
+      ? []
+      : buildCardBlockers(namedDependencies, summary.status, safeName);
     const planName = sanitiseName(ctx.plan.name);
     const goalName = sanitiseName(ctx.goalName);
 
@@ -897,6 +1327,29 @@ function projectPlanLane(
     };
 
     const workerProfileId = effectiveTask.spec.workerProfileId;
+    // FL-108C1: legacy strings and coded messages are produced on the same
+    // typed branch so Hub never recovers meaning from English prose.
+    let whatCompleted: string;
+    let whatCompletedMessage: WorkHierarchyNarrativeMessage;
+    let nextAction: string;
+    let nextActionMessage: WorkHierarchyNarrativeMessage;
+    if (goalGateCompleted && goalGate !== undefined) {
+      const gateNext = goalGateSatisfiedNext(goalGate);
+      whatCompleted = `${safeName} complete for this Goal (${goalGate.gate} gate).`;
+      whatCompletedMessage = narrativeMessage("card-what-goal-gate-complete", {
+        name: safeName,
+        gate: goalGate.gate,
+      });
+      nextAction = gateNext.text;
+      nextActionMessage = gateNext.message;
+    } else {
+      const what = whatCompletedForCard(placement.column, safeName);
+      const next = nextActionForCard(placement.column, blockers);
+      whatCompleted = what.text;
+      whatCompletedMessage = what.message;
+      nextAction = next.text;
+      nextActionMessage = next.message;
+    }
     cards.push({
       taskId: effectiveTaskId,
       name: safeName,
@@ -917,8 +1370,11 @@ function projectPlanLane(
       namedDependencies,
       namedRequiredBy,
       blockers,
-      whatCompleted: whatCompletedForCard(placement.column, safeName),
-      nextAction: nextActionForCard(placement.column, blockers),
+      whatCompleted,
+      whatCompletedMessage,
+      nextAction,
+      nextActionMessage,
+      ...(goalGate === undefined ? {} : { goalGate }),
       actionPolicy,
       updatedAt: summary.updatedAt,
     });
@@ -983,6 +1439,8 @@ function projectOneOffCard(
   const safeName = sanitiseName(summary.name) ?? sanitiseName(task.name) ?? "Task";
   const blockers = buildCardBlockers([], summary.status, safeName);
   const workerProfileId = task.spec.workerProfileId;
+  const what = whatCompletedForCard(placement.column, safeName);
+  const next = nextActionForCard(placement.column, blockers);
   return {
     taskId: task.id,
     name: safeName,
@@ -1004,8 +1462,10 @@ function projectOneOffCard(
     namedDependencies: [],
     namedRequiredBy: [],
     blockers,
-    whatCompleted: whatCompletedForCard(placement.column, safeName),
-    nextAction: nextActionForCard(placement.column, blockers),
+    whatCompleted: what.text,
+    whatCompletedMessage: what.message,
+    nextAction: next.text,
+    nextActionMessage: next.message,
     actionPolicy,
     updatedAt: summary.updatedAt,
   };
@@ -1098,6 +1558,7 @@ export function projectWorkHierarchy(
       summary: deriveLaneSummary(flatCards(filteredPlanColumns)),
     };
     const planCards = flatCards(filteredPlanColumns);
+    const goalMessages = deriveGoalLaneMessages(goalView);
     goalLanes.push({
       kind: "goal",
       goalId: goalView.goalId,
@@ -1109,6 +1570,9 @@ export function projectWorkHierarchy(
         whatCompleted: goalView.whatJustHappened,
         blocker: goalView.whatIsWaiting,
         nextAction: goalView.nextAction,
+        whatCompletedMessage: goalMessages.whatCompletedMessage,
+        blockerMessage: goalMessages.blockerMessage,
+        nextActionMessage: goalMessages.nextActionMessage,
       }),
       plans: [filteredPlan],
     });

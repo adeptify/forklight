@@ -1,6 +1,6 @@
 # ForkLight Project
 
-Last reconciled: 2026-08-02 (Asia/Shanghai)
+Last reconciled: 2026-08-04 (Asia/Shanghai)
 
 ## Authority
 
@@ -222,7 +222,7 @@ Passing the active milestone alone does not complete the Goal.
 ### Machine truth
 
 - Source of the following facts: authenticated local CLI/Daemon/Store reads on
-  2026-08-02. They are a checkpoint, not a promise that process IDs stay fixed.
+  2026-08-04. They are a checkpoint, not a promise that process IDs stay fixed.
 - CLI and Daemon identity: **matched**.
 - Build and source identity: **matched** at the last authenticated health check;
   exact hashes remain machine-owned because editing this file changes the
@@ -245,45 +245,31 @@ Passing the active milestone alone does not complete the Goal.
   recommendation.
 - M4 direct-Main paired evidence: 2 low-confidence samples across 2 classes and
   2 Profiles; not enough for a general savings claim.
-- Latest accepted full-suite evidence is **2479/2479** after FL-109A
-  Integration, including build, old Board/Goal/Task surfaces, the new hierarchy,
-  all Runtime paths, Hub bridges, and `git diff --check`.
-- FL-104 is **implemented and integrated**, not pending implementation.
-  Candidate Task `7ba94774-0289-482a-a23a-8224d1e97fa9` was freshly reverified
-  after protocol repairs, Main-accepted, and integrated by operation
-  `11b0fa7f-de4c-4c3f-974e-f9705f43f71f` (source verification, build,
-  activation, and activation checks all passed). The real model-backed
-  native-Goal smoke passes. FL-004 has now closed the real Daemon
-  restart/resume and second-Profile graduation gaps.
-- FL-108A is **implemented, integrated, and independently reviewed**. DeepSeek
-  Task `0d8996ed-7fd4-422a-8a89-b99142730e8f` produced Candidate
-  `80a8bdf4-d022-4aff-9a23-f2c79340baac`; Main accepted the exact digest and
-  Integration `5b30015a-2fdc-444f-a34e-105f8926e8bf` passed source apply,
-  verification, build, activation, and activation checks. Grok read-only Task
-  `bcad11fd-3b7d-4bbf-8fea-5b5fa58824a8` then returned ACCEPT with no blocking
-  findings and zero Diff.
-- FL-107B is **implemented, integrated, and live-dogfooded**. Review Graph,
-  Worker-Profile Competition, and cross-Worker handoff now freeze the selected
-  destination Worker's network policy; normal, Plan, Goal, registration, and
-  adaptation paths preserve their existing snapshot. With the Daemon started
-  under zero proxy environment, Grok judge Task
-  `d21aeac2-7c33-49a2-a9d2-f809b1c576e0` froze `custom-proxy`, completed, and
-  proposed accept without exposing proxy values in public events. The prior
-  failed judge remains infrastructure evidence, not model-quality evidence.
-- FL-109A is **implemented, integrated, and independently reviewed**. The
-  selected Grok Candidate exposes one closed Goal -> Plan -> Task hierarchy,
-  seven dependency-aware columns, standalone lanes, narrative summaries,
-  ancestor-preserving filters, and one read-only Daemon/Hub endpoint. Main
-  rejected a smaller DeepSeek alternative for contract and privacy omissions;
-  DeepSeek then independently accepted the selected exact revision.
-- The long-term Codex Goal is active with the exact `Long-term Goal` objective.
-  FL-001 and FL-002 are complete; FL-002 used a recorded `workers-unavailable`
-  Main-direct recovery only after both selected Worker paths ended before a
-  Candidate, and the recovery was independently checked. The Codex Worker
-  Runtime foundation then integrated as `f097ca23-0e34-4bc4-8970-cb78f8d6c3b9`
-  (DeepSeek Task `5cef4acd-13e4-4c95-92a8-a40affcfcb4f`) and
-  `892bad32-16a9-423e-ab9d-972773f37729` (Grok-reviewed follow-up
-  `ee55a008-22e9-4556-8e9e-d0ee764567b5`), completing M0 at 3/3.
+- Latest accepted full-suite evidence is **2637/2637** after FL-108D2 safe
+  Integration and activation. CLI/Daemon build and source identity matched at
+  the authenticated health check. Exact hashes and process IDs remain
+  machine-owned and should be read live.
+- FL-111D1 is integrated. Grok Task
+  `170851d8-171f-445f-af18-ea06fb84de29` passed five checks at accepted
+  revision `9857b5de-ed33-401e-a200-14b53ebe2cff`, digest
+  `1e846861817a854f62713592f91f63c6269e038fd0e87355f958b8bb3c53e11e`;
+  one Grok judge recommended accept. Integration
+  `61df6b11-29db-44da-943b-4888d146b3e3` passed all four stages. Its first
+  Integration attempt rolled back on one unrelated detached-Daemon handoff
+  test fluctuation; the exact test passed alone before the single bounded retry.
+- Future Codex account-quota failures now remain one budget-class reason with
+  wait-or-switch guidance. Codex Luna Max is still account-quota blocked, so
+  it is not retried and is not counted as model-quality evidence. No Provider
+  usage, cost or direct-Main Token-savings claim was invented.
+- FL-108D2 is integrated and live-audited. Successful and failed Task Detail
+  stories now use one visible number per step, neutral attempt/file counts and
+  truthful failed-check labels without changing lifecycle evidence.
+- Completed-slice IDs, revisions, digests, Integrations and historical failure
+  truth live once in `Current delivery slices` below and in ForkLight Store;
+  this checkpoint does not duplicate their chronological narratives.
+- The long-term Codex Goal remains active with the exact `Long-term Goal`
+  objective. Current execution must continue from `Now` and automatically
+  start the next selected action after each stable checkpoint.
 - Repository worktree is intentionally dirty with active ForkLight source,
   tests, contracts, examples, and this documentation consolidation. Preserve
   unrelated work; no commit or push has been authorized.
@@ -383,6 +369,12 @@ in ForkLight Store and the evidence registry.
 | FL-107 | Each Worker can freeze `inherit`, `direct`, or credential-free `custom-proxy` routing. Claude, Grok and both Codex paths apply it; events expose only the mode; Hub advanced settings load and switch it bilingually. | DeepSeek Task `b064f658-88fb-4dbb-9ad8-7e5046260da3`; Candidate `28f133fd-72cf-4c91-9bf7-026df9608577`; Grok judge `8e231382-71a0-4643-a0c3-cf3cd88ef204`; Integration `cc146c23-81e9-4286-84c7-c5e458bc8d27`; zero-Diff Grok smoke `0be3aa84-14b5-41bf-82ea-8df74034f296`. |
 | FL-107B | Every Task derived from a selected Worker now keeps that Worker's exact network route; legacy inherit clears stale source routing, and public evidence still exposes only the mode. | DeepSeek Task `609e5f2c-a692-4746-8061-8fcb0984b16c`; Candidate `5cbfdd16-d2b1-420c-81bd-3c5f60f5e332`, digest `02cf145a00de5afd7fd85b22df9aaefc79d766c0ab0b302317c07ca40c2a76a5`; Integration `ab4959c8-2071-4572-9cfe-20a42ada7979`; zero-proxy Grok Review Graph `ee4a5d3c-e084-4311-ae12-d8686156d5d6`; full suite **2467/2467**. |
 | FL-108A | Worker cards now lead with one plain-language connection conclusion and an actual next action; execution limits and technical evidence remain progressively available. | DeepSeek Task `0d8996ed-7fd4-422a-8a89-b99142730e8f`; Candidate `80a8bdf4-d022-4aff-9a23-f2c79340baac`; Integration `5b30015a-2fdc-444f-a34e-105f8926e8bf`; Grok ACCEPT `bcad11fd-3b7d-4bbf-8fea-5b5fa58824a8`; bilingual browser and full-suite pass. |
+| FL-108B | Work now leads with outcome intake, compact help, filters and the live hierarchy. Active Goals lead; terminal Goals stay reachable in one lazy counted disclosure; neutral lane narration hides empty blockers and redundant completed actions without changing Core truth. | Grok Task `450a99ab-89de-4acc-8398-6b74b8e6fdd2`; corrected revision `188964ab-cfc2-47fc-980e-00e976c6dfb9`, digest `3fbdc510f25fd16716b497484f770b55cc09326e90d7adfd1d79c6dcea57a34f`; Integration `c11ed502-34cd-4f0e-9b7b-cefccf95246f`; four stages passed; matched activation; authenticated desktop browser audit; **2615/2615**. |
+| FL-108C1 | Work cards and Goal/Plan/one-off summaries now carry one closed Core-owned narrative meaning plus bounded params. Hub localizes that meaning instead of parsing or displaying Core-authored English; unknown future meanings fail closed while legacy strings remain compatibility evidence. | Codex Luna Max quota Task `3e490326-8049-4df2-aed5-cc1af8ce846a`; Grok Task `eb81711b-9dd3-4fe1-9db2-565ab8f414a7`; corrected revision `ebf31371-edae-4a07-8bda-986b33714688`, digest `d8fe57216b2a962712ee27eac7236cb521fde91c54f51c39e0bf777be27b1923`; Integration `4314975a-6dd0-4a66-a4f5-83e8d78cbb27`; four stages passed; matched activation and authenticated bilingual browser audit; **2618/2618**. |
+| FL-108C2 | The default Work story now says what completed, stopped, is waiting, was checked, needs a decision or was safely applied in plain English and Chinese. Distinct lifecycle causes remain intact, shared stopped/waiting actions stay neutral, and generic templates cannot expose raw gate values. | Failed Grok history `c30badf2-0c6d-460f-9710-97c6dbf8d42e`; DeepSeek Flash Task `6b776433-6144-41fb-9ecd-07ef4ee04dd2`; accepted revision `f2c04cfa-6718-4b3c-9394-8751dc715835`, digest `ebbef640d5f91a029bbe5b7eee8994ac7f0b6f408377e1e91029ebd09dd058e6`; Integration `5222e2df-d735-4f9a-ac9d-418fee59f5db`; matched activation and authenticated browser audit; **2619/2619**. |
+| FL-108D1 | Task Detail now opens with one four-step Main request -> execution -> independent checks -> final delivery/next-action story. Raw Worker prose and paths are progressive evidence; Checks shows total or failed/total instead of a false zero. | Grok Task `06b1a367-3621-44bc-96d7-dd696ba27051`; revision `c2732343-a4d8-4ea3-833e-fcbff5dc9825`, digest `961662fe02947996c3f3523c8525dda76a74e19b70719e8c8590e9e044c8e2fa`; Grok ACCEPT judge plus unusable quota-blocked Codex judge; Integration `ad77503a-0fbf-4146-8c8d-b872cf9cd02f`; matched activation and authenticated success/failure/progressive-evidence audit; **2626/2626**. |
+| FL-108D2 | Task Detail tells the same four-step story without duplicate step numbers or green wording on failed work. Failed checks keep their real check name, and attempt/file counts remain neutral evidence. | Grok Task `78a8b5a7-dad8-4e35-acfd-c5f2a26849c2`; accepted revision `f1bd08e9-a4c8-4bee-929a-7ddd0fdec720`, digest `26e7591c5edd917e28d0bb5f6565cd8bcb12d14605090d2ef41ca54d553b8c7a`; Integration `da45f365-605a-4d02-9088-07800133434e`; four stages, matched activation, authenticated success/failure browser audit; **2637/2637**. |
+| FL-111D1 | A real Codex account-quota rejection now stays one truthful budget failure when Codex emits matching `error` and `turn.failed` records. Different terminal evidence still fails closed; Hub tells the user to wait or switch Worker instead of implying Worker settings refill an account. | Grok Task `170851d8-171f-445f-af18-ea06fb84de29`; accepted revision `9857b5de-ed33-401e-a200-14b53ebe2cff`, digest `1e846861817a854f62713592f91f63c6269e038fd0e87355f958b8bb3c53e11e`; Grok ACCEPT judge; one rolled-back infrastructure fluctuation followed by successful Integration `61df6b11-29db-44da-943b-4888d146b3e3`; matched activation; **2633/2633**. |
 | FL-109A | Core now provides the single versioned Goal -> Plan -> Task hierarchy that the unified workbench can render without rebuilding lifecycle truth in JavaScript. | Grok Task `feb5fd84-8163-403e-8cf8-51000f547722`; accepted revision `905a8088-0af8-492e-acca-2d66f5191874`, digest `06fd44659c73a58425ff04b3cfb18f3620b6a9d545d0750e1aab601969ae0531`; DeepSeek Review Graph `1ece2e75-b6bb-4435-93ff-ee342ec60638`; Integration `d4a41c40-3962-41a6-aac4-10063575a251`; **2479/2479**. |
 | FL-109B | Hub now has one read-only hierarchical Work view: seven execution columns inside expandable Goal and Plan lanes, one-off Tasks, retained hierarchy under filters, and an explanatory Task drawer. Historical internal workspaces are summarized instead of flooding the Project selector. | DeepSeek Tasks `5f89af15-a396-4320-a8cb-d19a0d75d442` and `9fe4dd9a-1da3-4057-b0f8-67e752b04eb6`; Grok correction `541fc790-791a-479e-a3b5-cb9b36f1e2bd`; Integrations `3675679e-bc18-47b7-85c9-4a00004520f1`, `72b73769-619a-423e-8e9e-3f3e1ac7c74d`, and `9a4f47cb-b125-4988-bc6b-98d1219a60fe`; bilingual 1280px/390px browser audit; **2499/2499**. |
 | FL-109C1 | Every hierarchy Task card now carries one Core-owned policy for all seven destinations: exact durable operation, fixed Main intent, required input/confirmation, ordered Integration path, automatic-only movement, or a fail-closed no-op explanation. | DeepSeek Flash Task `83941207-e92e-4f18-abd6-9c2e67a5e05c`; corrected revision `88fa16de-7d78-4fd3-8e9d-474c9e750d0e`, digest `1b539262c016d022609952ff0ea7d4b00fdf2c6cbcbd176beef8d1e58ed624b8`; zero-Worker reverify 5/5; Grok ACCEPT graph `46e09ab5-aee5-4bad-887d-667a7d7dc79d`; Integration `d7df0343-feb4-42c4-a415-aea0424bcd2b`; **2515/2515**. |
@@ -392,6 +384,12 @@ in ForkLight Store and the evidence registry.
 | FL-109D2 | Work now starts with one calm outcome composer. A recorded intake explicitly says that nothing started, offers only an id-based handoff to Main, and later renders Main's canonical Task/Plan/Goal proposal as a bilingual unconfirmed preview without browser-side classification or work creation. | DeepSeek Flash Task `b863f4cc-97e0-471a-93ea-662a20d7590d`; corrected revision `7b40f633-8ff5-42f8-b5c6-398312c8171b`, digest `50ade22f24aa30bfae94f66ce4dcdd449eb63095bcbfb2f03516d19dfaaef50d`; Integration `bfd06931-f9d2-4649-9cbe-516665c72840`; all source/apply/build/activation stages passed; **full suite passed**. |
 | FL-109D3A | A connected Main can explicitly confirm the current proposal once. ForkLight revalidates the complete artifact graph, creates the existing Task/Plan/Goal graph and linked receipt in one transaction, queues only committed Tasks, and returns the same receipt on retry. Created truth advances revision so a stale proposal cannot overwrite it; multiline outcome/context input is accepted safely. | DeepSeek Flash Task `9e34c321-c99f-4eec-a594-f7a2023b61e4`; corrected revision `4afaa218-298f-4f0a-87b2-0b676e3da78c`, digest `294e919055a0b3bbcebe83f8a668efec0167f1ab172ac64f79c6af9e516f123d`; Integration `ff3bf884-526f-4eea-8563-2065bb48d2ba`; all four stages passed; focused, build, full suite and diff checks passed. |
 | FL-109D3B | A user can explicitly confirm Main's proposed Task/Plan/Goal from Hub, see canonical created truth and the next action, and then follow the actual work on the existing hierarchy board. The request is single-flight and closed; uncertain failures preserve the proposal and avoid false claims; success never inserts optimistic cards. | DeepSeek Flash Task `f24bd375-57fb-4924-986c-a194c57d3a80`; revision `5df31754-2247-439e-b186-6c65cbcf367d`, digest `216ddd55e61759eb86cfc93b65fcf0d45bd2bf2082110c41007ac6256418bb28`; Integration `a0cf0a0b-658b-4774-b67d-3e22c0f00043`; all four stages passed; focused, build, full suite and diff checks passed. |
+| FL-109D4A | The complete shipped Task-shaped outcome path now has one isolated real-stack proof: pending intake creates no work, Main proposes, the user confirms once, canonical One-off work appears, identical confirmation replays without duplication, and receipt/hierarchy truth survives a full temporary restart with zero Provider execution. | DeepSeek Flash Task `d75ebff7-2ab1-4a16-b6a2-e105387f6bb1`; corrected revision `b9fdd925-3b29-4d58-bf07-25aa590e5997`, digest `c8c0c55d04efa0b1cae94e9651d8231a66f50ee92a34befaf0a23a21cd511c38`; Integration `e569f44b-e2b2-4f4d-8c74-d466e9ac4767`; four stages passed; **2591/2591**. |
+| FL-109E1 | Hub now opens on Work as the sole default work surface. The primary navigation has one Work entry, old Overview/board/tasks/plans/goals selections converge on Work, and advanced submission plus contextual Task/Plan/Goal details remain reachable. | Grok Task `2f347134-8f85-474b-9e4d-4826537a3b2a`; corrected revision `8ecf7447-065c-4a0f-ac74-0a8636176539`, digest `f926aa1b526b0b252d5976ba5fc23ea614de2e1fd1863a6a40a4f7885ee92136`; Integration `d732da73-2e6c-44de-8214-b698ad135641` truthfully retained source after the self-restart acknowledgement failed; current CLI/Daemon identity then matched and Main remediation check `0691f877-ce0c-4a49-b3f1-3472d651659c` passed 4/4; static UI detector returned no findings; **2592/2592**. |
+| FL-111A | Codex single-run and native Goal prompts now match the real Codex command-tool surface: product work is allowed only through read-only/workspace-write inside the isolated Task boundary, command network is explicitly off, global `/tmp` is excluded, task-private temp remains available, and approval/add-dir/full-access/web/apps/MCP/nested-agent expansion stays denied. Claude and Grok keep their no-unrestricted-shell default. | Grok Task `f9347dbc-74a7-49a3-9b88-b6d99b025eac`; corrected revision `3c311f6c-e541-4a4a-978d-c2bc507b51e1`, digest `a93a6f3498c571834ca3a574f5e258c2f308d89ebcc8ebef020a41875c76ad88`; unusable DeepSeek judge schema violation retained without retry; Integration `5510b6ff-8ec6-4641-9d2d-d74de1d41902` passed all four stages; **2597/2597**. Real Luna Max single-run Task `4a754967-22e6-4a7f-a4b5-de1ad0556851` then produced an exact one-file/one-line Candidate and passed independent checks. Its complete Worker volume was 77,517 Tokens; direct-Main baseline is missing, so no savings claim is made. |
+| FL-111B | Real Codex Luna Max single-run and native Goal both make an exact isolated edit. Native Goal now projects command/file/diff work into bounded privacy-safe progress, drops raw message deltas before race buffers, treats status/usage/plan/unknown traffic as bounded liveness, and lets only concrete work or terminal evidence refresh the active watchdog. | Native Goal Task `e8185716-3b8e-4cbc-b84a-36099f189aec`; Grok Task `0116290b-db10-4ddf-a0e1-aed1fe92b477`; corrected revision `cfa220bc-d9e6-43f0-8a65-33a408e9964f`, digest `4df40ef5ebe430cb53dcf9da4f6269195928dc5bd0f3726dc78d76bca00b7505`; Codex Luna Max Judge `e29ce442-787d-48f7-afec-d423849a60df` ACCEPT; Integration `7fc35d05-df39-4199-8abf-2252273f1aa0` passed all four stages; **2603/2603**. Native Goal Worker volume was 116,977 Tokens and Judge volume was 538,468 Tokens; both lack an exact direct-Main baseline, so no savings claim is made. |
+| FL-111C | ForkLight can finish a self-upgrade handoff without asking the old Daemon to acknowledge its own death: restart authority is validated first, the replacement inherits no consumed handoff context, one active Task resumes through one linked recovery Attempt, and exact identity becomes current. | Grok Tasks `a3c10fa2-0e35-49aa-809a-a50b8bb36242` and `60548e87-7c62-4cca-9077-81531768fc20`; retained working revision `28c911d4-9b50-4344-bc2a-8b4ac34c94e0`, digest `3cd9de1fe7d7693fc394ffd94bc5be98b2e1b3e8ec57ad59376d3ecfa43de9ef`; finite Main test repair; Main-remediation check `dff3e9d9-c889-4632-a0ed-20c7ea157fd4` passed 4/4; focused **56/56**, full suite **2608/2608**, matched activation identity. Worker failure history is preserved; no successful Integration is invented. Codex Luna Max Task `8db71792-850c-4df5-84a9-b10125569583` was quota-blocked before implementation and is not model-quality evidence. |
+| FL-109E2 | A Goal milestone completed under its configured machine, Main-accept or Integration gate now appears complete in that Goal's Plan lane without hiding the underlying Task status, decision or repair facts. Effective handoff successors still fail closed; independent Plans and one-offs are unchanged. | DeepSeek Flash Task `bb7e9840-e332-47f5-9a75-021ef2b8aa10`; corrected revision `50365417-86ca-42e9-8277-8b4196469edb`, digest `c231677ade9abab5221ac5b15010a9f3f6bbae71bbd7408a0ec86083be6a7172`; Grok Review Graph `7a7610d5-faf1-4315-9b78-8cc558f92d01`; Main-remediation check `2297f43d-8144-401c-99d8-6f99efc2f0a6`; real Goal and Plan both 4/4; **2610/2610**. No Integration is invented. |
 
 FL-107 also exposed one contract-authoring lesson: its first Task omitted
 `workspace.generatedPaths: ["dist/**"]`, so verifier build output inflated the
@@ -418,17 +416,15 @@ new authority, or a safety/coordination boundary.
 
 | ID | Owner | State | Action | Done when |
 | --- | --- | --- | --- | --- |
-| FL-109D4A | Main + DeepSeek Flash | Implementing (`d75ebff7-2ab1-4a16-b6a2-e105387f6bb1`) | Prove the shipped outcome-to-board chain across real isolated Hub/Daemon/Store boundaries: create, Main propose, user confirm, One-off hierarchy, replay, and restart, with zero Provider calls. | One deterministic E2E test proves exactly one durable Task/receipt and canonical hierarchy across restart with no production state or mock confirmation; any discovered product fix is bounded; continue automatically to FL-109E1. |
+| FL-110 | Grok 4.5 + Main | Waiting for user auth (`c2c5c237-50d2-4b0b-895c-a109a89c402e`) | The 14-file Candidate is retained. Its first verification found one forbidden punctuation mark and one unused test binding; the single correction then stopped before model work because the operator Grok OAuth expired and its refresh token was rejected. Re-authenticate Grok once, then resume the bounded correction without relabelling it as model failure. | Focused/full verification passes on the retained implementation, Main accepts and safely integrates it, then automatically starts the live dogfood proof. |
 
 ### Next
 
 | ID | Milestone | Action | Exit evidence |
 | --- | --- | --- | --- |
-| FL-101 | M3 | Accumulate natural same-scope evidence and form the first fair comparable cohort; improve recommendations only where the cohort supports it. | At least one comparable exact-class or family cohort; plain-language recommendation and override path verified. |
+| FL-101 | M3 | Accumulate natural same-scope evidence and form the first fair comparable cohort; improve recommendations only where the cohort supports it. The 2026-08-04 routing check for `self-upgrade-activation-handoff-continuity` returned 0 comparable candidates across Grok, DeepSeek Flash and Codex Luna, so no replay was authorized. | At least one comparable exact-class or family cohort; plain-language recommendation and override path verified. |
 | FL-102 | M1 | Run the clean-user protocol on a new macOS account, disposable VM, or new Mac with an unfamiliar user. | Complete worksheet, timing, interventions, comprehension, reviewed delivery, and restart evidence. |
-| FL-108 | M3/UX | Continue recomposing Hub information around “发生了什么、结果是什么、下一步做什么” without deleting evidence. FL-108A handles Worker cards; later slices must use FL-109's single work hierarchy rather than polishing obsolete peer lists. | Main-approved information architecture; bilingual browser audit; default surfaces are calmer while inputs, outputs, process, failure, retained work, cost and technical evidence remain progressively available. |
-| FL-109E truth reconciliation | M3/UX | Reconcile legacy terminal Goal summaries that can say completed while a child Plan still reports incomplete milestones or decision Tasks. Treat this as durable Core truth, not a browser-copy patch. | Real-data fixture makes Goal, Plan and effective child lineage agree or exposes one bounded migration-required explanation; no contradictory completion story remains. |
-| FL-110 | M2/M3 | Generalize exact Candidate retained-partial handoff from Goal/Competition to an ordinary Task so a replacement Worker can consume safe reusable paths without rebuilding the whole Candidate. | A failed ordinary Task hands one immutable revision and bounded gaps to another Profile; destination verification proves only the remainder was redone and source history stays immutable. |
+| FL-110P | M2/M3 | Dogfood ordinary-Task handoff on a controlled ForkLight-only Candidate, with Grok as source or implementer and DeepSeek Flash as the distinct successor while Codex quota remains unavailable. | Exact source revision and approved reusable paths create one successor; replay creates none; successor reruns full acceptance; source stays unchanged and no obsolete patch is integrated. |
 
 ### Later
 

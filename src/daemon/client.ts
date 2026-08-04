@@ -4,6 +4,10 @@ import { closeSync, mkdirSync, openSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  ACTIVATION_HANDOFF_ENV_KEYS,
+  resolveTsxImportSpecifier,
+} from "../activation/runner.js";
 import { daemonLogPath, daemonSocketPath, forklightHome } from "../core/config.js";
 import {
   compareBuildIdentity,
@@ -485,7 +489,9 @@ export function daemonLaunchArguments(moduleUrl: string): {
       args: [
         "--disable-warning=ExperimentalWarning",
         "--import",
-        "tsx",
+        // Cwd-independent absolute file URL so a source-dev CLI launched from
+        // an isolated Integration source cwd still loads the repo tsx.
+        resolveTsxImportSpecifier(moduleUrl),
         path.join(directory, "main.ts"),
       ],
       mode: "source-dev",
@@ -499,6 +505,23 @@ export function daemonLaunchArguments(moduleUrl: string): {
     ],
     mode: "dist",
   };
+}
+
+/**
+ * Build the environment for one replacement Daemon child.
+ * Removes only the three consumed activation handoff transport fields so a
+ * restarted Daemon never inherits stale operation/task/receipt identity.
+ * PATH, proxy/auth variables, and FORKLIGHT_HOME behavior are preserved.
+ */
+export function daemonChildEnvironment(
+  home: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv, FORKLIGHT_HOME: home };
+  for (const key of ACTIVATION_HANDOFF_ENV_KEYS) {
+    delete env[key];
+  }
+  return env;
 }
 
 /** Single-dispatch routing seam: try daemon bootstrap once; if it succeeds
@@ -532,7 +555,7 @@ export function launchDaemonProcess(home = forklightHome()): DaemonChildHandle {
   const launch = daemonLaunchArguments(import.meta.url);
   const child = spawn(launch.executable, launch.args, {
     detached: true,
-    env: { ...process.env, FORKLIGHT_HOME: home },
+    env: daemonChildEnvironment(home),
     stdio: ["ignore", logFd, logFd],
   });
   let exited = false;
