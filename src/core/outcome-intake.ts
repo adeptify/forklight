@@ -86,8 +86,15 @@ export interface OutcomeIntakeArtifactFacts {
   displayName: string;
   objective: string;
   taskCount: number;
+  /** Goal file version (1 or 2). Present only for Goal proposals so the
+   *  confirmation story can name the exact contract family. */
+  goalVersion?: 1 | 2;
   /** Dependency waves when the artifact is a Plan or Goal-backed Plan. */
   dependencyWaves?: string[][];
+  /** Distinct structured Task contract versions (2 or 3) bound by the loaded
+   *  artifact. Absent only on legacy facts loads; the version-2 confirmation
+   *  story is preserved for them. */
+  taskContractVersions?: Array<2 | 3>;
 }
 
 /** One explicit Main proposal bound to a validated artifact. */
@@ -103,7 +110,13 @@ export interface OutcomeIntakeProposal {
   displayName: string;
   objective: string;
   taskCount: number;
+  /** Goal file version when the proposal is a Goal artifact. */
+  goalVersion?: 1 | 2;
   dependencyWaves?: string[][];
+  /** Distinct structured Task contract versions (2 or 3) bound by the
+   *  artifact. Absent only on legacy stored proposals; the version-2 story is
+   *  preserved for them. */
+  taskContractVersions?: Array<2 | 3>;
   proposedAt: string;
 }
 
@@ -346,11 +359,46 @@ export function artifactKindForShape(shape: ProposedShape): OutcomeIntakeArtifac
   return "goal";
 }
 
-/** Contracts involved in confirming this shape, for the confirmation story. */
-export function contractsInvolvedForShape(shape: ProposedShape): string[] {
-  if (shape === "task") return ["task-contract-v2"];
-  if (shape === "plan") return ["work-plan-v1", "task-contract-v2"];
-  return ["goal-v1", "work-plan-v1", "task-contract-v2"];
+/** Distinct structured Task contract versions in ascending deterministic
+ *  order. A Plan or Goal binding both versions reports each exactly once. */
+export function distinctTaskContractVersions(
+  versions: readonly (2 | 3)[],
+): Array<2 | 3> {
+  return [...new Set(versions)].sort((a, b) => a - b);
+}
+
+function taskContractVersionLabels(versions: readonly (2 | 3)[]): string[] {
+  return distinctTaskContractVersions(versions).map(
+    (version) => `task-contract-v${version}`,
+  );
+}
+
+/** Contracts involved in confirming this shape, for the confirmation story.
+ *  Goal proposals cover both file versions because a confirmed Goal may be
+ *  v1 (one Plan) or v2 (two or more ordered Plans). `taskContractVersions`
+ *  names the actual structured Task contract versions bound by the loaded
+ *  artifact; when absent the legacy version-2 story is preserved so existing
+ *  v2 records stay byte-compatible. */
+export function contractsInvolvedForShape(
+  shape: ProposedShape,
+  goalVersion?: 1 | 2,
+  taskContractVersions?: readonly (2 | 3)[],
+): string[] {
+  const versions = taskContractVersions !== undefined && taskContractVersions.length > 0
+    ? taskContractVersions
+    : ([2] as const);
+  if (shape === "task") return taskContractVersionLabels(versions);
+  if (shape === "plan") {
+    return ["work-plan-v1", ...taskContractVersionLabels(versions)];
+  }
+  // Goal v1 stays the legacy family; v2 additionally identifies the multi-phase
+  // contract family so the confirmation story stays truthful per file version.
+  return [
+    "goal-v1",
+    ...(goalVersion === 2 ? ["goal-v2"] : []),
+    "work-plan-v1",
+    ...taskContractVersionLabels(versions),
+  ];
 }
 
 /** Attach or replace the current Main proposal. Revision advances by exactly
@@ -370,9 +418,15 @@ export function buildProposedOutcomeIntake(
     displayName: artifact.facts.displayName,
     objective: artifact.facts.objective,
     taskCount: artifact.facts.taskCount,
+    ...(artifact.facts.goalVersion === undefined
+      ? {}
+      : { goalVersion: artifact.facts.goalVersion }),
     ...(artifact.facts.dependencyWaves === undefined
       ? {}
       : { dependencyWaves: artifact.facts.dependencyWaves }),
+    ...(artifact.facts.taskContractVersions === undefined
+      ? {}
+      : { taskContractVersions: artifact.facts.taskContractVersions }),
     proposedAt: now,
   };
   return {
@@ -447,7 +501,11 @@ export interface OutcomeIntakeProposalView {
   displayName: string;
   objective: string;
   taskCount: number;
+  /** Goal file version when the proposal is a Goal artifact. */
+  goalVersion?: 1 | 2;
   dependencyWaves?: string[][];
+  /** Distinct structured Task contract versions bound by the artifact. */
+  taskContractVersions?: Array<2 | 3>;
   proposedAt: string;
 }
 
@@ -477,9 +535,13 @@ function projectOutcomeIntakeProposal(proposal: OutcomeIntakeProposal): OutcomeI
     displayName: proposal.displayName,
     objective: proposal.objective,
     taskCount: proposal.taskCount,
+    ...(proposal.goalVersion === undefined ? {} : { goalVersion: proposal.goalVersion }),
     ...(proposal.dependencyWaves === undefined
       ? {}
       : { dependencyWaves: proposal.dependencyWaves }),
+    ...(proposal.taskContractVersions === undefined
+      ? {}
+      : { taskContractVersions: proposal.taskContractVersions }),
     proposedAt: proposal.proposedAt,
   };
 }
@@ -551,7 +613,11 @@ export function buildOutcomeIntakeConfirmationPreview(
       : { dependencyWaves: proposal.dependencyWaves }),
     artifactKind: proposal.artifactKind,
     artifactDigestPrefix: proposal.artifactDigest.slice(0, 16),
-    contractsInvolved: contractsInvolvedForShape(proposal.shape),
+    contractsInvolved: contractsInvolvedForShape(
+      proposal.shape,
+      proposal.goalVersion,
+      proposal.taskContractVersions,
+    ),
     confirmationHappened: false,
     workCreated: 0,
     note: "Not confirmed; nothing has been created.",

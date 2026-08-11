@@ -155,6 +155,52 @@ async function writeGoalContract(
   return goalFile;
 }
 
+async function writeTwoPhaseGoalContract(root: string): Promise<{
+  goalFile: string;
+  planFiles: string[];
+}> {
+  const taskFile = await writeTaskContract(root, "Phase task", "phase-project", "phase-task.json");
+  const planA = await writePlanContract(root, [taskFile, taskFile], "phase-a-plan");
+  const planB = await writePlanContract(root, [taskFile, taskFile], "phase-b-plan");
+  const goalFile = path.join(root, "goal-v2.json");
+  await writeFile(
+    goalFile,
+    JSON.stringify(
+      {
+        version: 2,
+        name: "Two phase goal",
+        objective: "Two ordered phases with duplicate local item ids",
+        policy: {
+          maxDurationMs: null,
+          noProgressTimeoutMs: null,
+          maxCorrectionRounds: 1,
+          maxReviewRounds: 1,
+          maxNoNewEvidenceCycles: 3,
+        },
+        plans: [
+          {
+            planFile: `./${path.basename(planA)}`,
+            milestones: [
+              { itemId: "item-1", gate: "machine" },
+              { itemId: "item-2", gate: "machine" },
+            ],
+          },
+          {
+            planFile: `./${path.basename(planB)}`,
+            milestones: [
+              { itemId: "item-1", gate: "machine" },
+              { itemId: "item-2", gate: "machine" },
+            ],
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  return { goalFile, planFiles: [planA, planB] };
+}
+
 function taskArtifactLoad(): OutcomeIntakeArtifactLoad {
   return {
     facts: {
@@ -1250,6 +1296,104 @@ test("confirming a Goal commits Plan, dependencies, Goal, and milestones atomica
   }
 });
 
+test("v2 goal proposal binds the complete multi-phase artifact graph", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-outcome-goal-v2-digest-"));
+  const store = new StateStore(home);
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store), 0);
+  try {
+    const { goalFile } = await writeTwoPhaseGoalContract(home);
+    const intake = coordinator.createOutcomeIntake({ outcome: "A two-phase supervised outcome" });
+    const first = await coordinator.proposeOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 1,
+      shape: "goal",
+      reason: "Two ordered phases are required",
+      artifactPath: goalFile,
+    });
+    assert.equal(first.preview.selectedShape, "goal");
+    assert.equal(first.preview.taskCount, 4, "taskCount covers every phase");
+    assert.ok(first.preview.contractsInvolved.includes("goal-v2"));
+    const firstDigest = store.getOutcomeIntake(intake.id).proposal!.artifactDigest;
+    assert.ok(firstDigest, "v2 goal proposal persists an artifact graph digest");
+
+    // Editing a referenced phase Task changes the complete graph digest.
+    await writeTaskContract(home, "Changed phase task", "phase-project", "phase-task.json");
+    const second = await coordinator.proposeOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 2,
+      shape: "goal",
+      reason: "Artifact changed; re-propose with the new digest",
+      artifactPath: goalFile,
+    });
+    const secondDigest = store.getOutcomeIntake(intake.id).proposal!.artifactDigest;
+    assert.notEqual(secondDigest, firstDigest);
+    assert.equal(second.preview.taskCount, 4);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("confirming a v2 goal commits every phase Plan and milestone atomically", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-outcome-confirm-goal-v2-"));
+  const store = new StateStore(home);
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store), 0);
+  try {
+    const { goalFile } = await writeTwoPhaseGoalContract(home);
+    const intake = coordinator.createOutcomeIntake({ outcome: "A two-phase supervised outcome" });
+    await coordinator.proposeOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 1,
+      shape: "goal",
+      reason: "Two ordered phases are required",
+      artifactPath: goalFile,
+    });
+
+    const confirmed = await coordinator.confirmOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 2,
+      confirm: true,
+    });
+    assert.equal(confirmed.receipt.shape, "goal");
+    assert.equal(confirmed.receipt.taskIds.length, 4);
+    assert.ok(confirmed.receipt.planId);
+    assert.ok(confirmed.receipt.goalId);
+    assert.equal(store.listPlans().length, 2);
+    assert.equal(store.listGoals().length, 1);
+    assert.equal(store.listTasks().length, 4);
+    assert.equal(store.getGoalMilestones(confirmed.receipt.goalId!).length, 4);
+
+    const goalId = confirmed.receipt.goalId!;
+    const associations = store.listGoalPlanAssociations(goalId);
+    assert.equal(associations.length, 2);
+    assert.equal(associations[0]!.planId, confirmed.receipt.planId);
+    const phaseTwoMilestones = store.getGoalMilestones(goalId)
+      .filter((m) => m.planId === associations[1]!.planId);
+    assert.equal(phaseTwoMilestones.length, 2);
+    for (const milestone of phaseTwoMilestones) {
+      assert.equal(store.getTask(milestone.taskId!).status, "waiting");
+      assert.match(store.getTask(milestone.taskId!).error ?? "", /earlier Goal phase/i);
+    }
+    assert.equal(store.getGoal(goalId).status, "running");
+
+    // Exactly-once retry returns the same receipt and inserts nothing new.
+    const retry = await coordinator.confirmOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 2,
+      confirm: true,
+    });
+    assert.equal(retry.receipt.receiptId, confirmed.receipt.receiptId);
+    assert.equal(store.listPlans().length, 2);
+    assert.equal(store.listGoals().length, 1);
+    assert.equal(store.listTasks().length, 4);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("confirmation fails closed when the root artifact changed after proposal", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-outcome-confirm-root-change-"));
   const store = new StateStore(home);
@@ -1786,6 +1930,159 @@ test("daemon confirms an outcome intake and creates exactly one Task through the
     assert.equal(tasksAfterRetry.length, 1);
   } finally {
     await daemon.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("version-3 Task proposal and confirmation use existing receipt semantics", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-outcome-v3-task-"));
+  const store = new StateStore(home);
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store), 0);
+  try {
+    const taskFile = path.resolve("fixtures/v3-domain-neutral-task.yaml");
+    const intake = coordinator.createOutcomeIntake({ outcome: "A context-rich version-3 outcome" });
+    const proposed = await coordinator.proposeOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 1,
+      shape: "task",
+      reason: "The v3 background must flow through outcome intake",
+      artifactPath: taskFile,
+    });
+    assert.equal(proposed.preview.selectedShape, "task");
+    assert.equal(proposed.preview.taskCount, 1);
+    assert.deepEqual(proposed.preview.contractsInvolved, ["task-contract-v3"]);
+    assert.equal(proposed.preview.confirmationHappened, false);
+    assert.equal(proposed.preview.workCreated, 0);
+    assert.deepEqual(proposed.intake.proposal?.taskContractVersions, [3]);
+
+    const confirmed = await coordinator.confirmOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 2,
+      confirm: true,
+    });
+    assert.equal(confirmed.receipt.shape, "task");
+    assert.equal(confirmed.receipt.taskIds.length, 1);
+    assert.equal(confirmed.receipt.planId, undefined);
+    assert.equal(confirmed.receipt.goalId, undefined);
+    assert.equal(store.listTasks().length, 1);
+
+    const task = store.getTask(confirmed.receipt.taskIds[0]!);
+    assert.equal(task.spec.version, 3);
+    if (task.spec.version === 3) {
+      assert.equal(
+        task.spec.contract.background.purpose,
+        "Exercise context-rich version-3 Task contracts inside hierarchy work.",
+      );
+      assert.deepEqual(task.spec.contract.background.priorDecisions, [
+        "Plan and Goal items must support version 3.",
+        "Preserve version 2 behavior exactly and keep rejecting version 1 in structured Plans.",
+      ]);
+    } else {
+      assert.fail("expected a version-3 Task spec");
+    }
+
+    const retry = await coordinator.confirmOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 2,
+      confirm: true,
+    });
+    assert.equal(retry.receipt.receiptId, confirmed.receipt.receiptId);
+    assert.equal(store.listTasks().length, 1, "retry must not create a second Task");
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("mixed v2/v3 Plan proposal reports both actual Task contract versions once", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-outcome-v3-mixed-plan-"));
+  const store = new StateStore(home);
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store), 0);
+  try {
+    const v2TaskFile = await writeTaskContract(home, "V2 plan step", "v2-mix-project", "v2-mix-task.json");
+    const v3TaskFile = path.resolve("fixtures/v3-domain-neutral-task.yaml");
+    const planFile = path.join(home, "mixed-plan.json");
+    await writeFile(
+      planFile,
+      JSON.stringify({
+        version: 1,
+        name: "mixed-plan",
+        objective: "Coordinate one v2 and one v3 Task step.",
+        items: [
+          { id: "item-1", task: `./${path.basename(v2TaskFile)}`, dependsOn: [] },
+          { id: "item-2", task: v3TaskFile, dependsOn: ["item-1"] },
+        ],
+      }, null, 2),
+    );
+    const intake = coordinator.createOutcomeIntake({ outcome: "A mixed v2/v3 hierarchy outcome" });
+    const proposed = await coordinator.proposeOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 1,
+      shape: "plan",
+      reason: "Mixed v2/v3 hierarchy fits",
+      artifactPath: planFile,
+    });
+    assert.equal(proposed.preview.selectedShape, "plan");
+    assert.equal(proposed.preview.taskCount, 2);
+    assert.deepEqual(proposed.preview.contractsInvolved, [
+      "work-plan-v1",
+      "task-contract-v2",
+      "task-contract-v3",
+    ]);
+    assert.deepEqual(proposed.intake.proposal?.taskContractVersions, [2, 3]);
+    assert.equal(store.listTasks().length, 0);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("mixed v2/v3 Goal proposal reports both actual Task contract versions once", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-outcome-v3-mixed-goal-"));
+  const store = new StateStore(home);
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store), 0);
+  try {
+    const v2TaskFile = await writeTaskContract(home, "Goal v2 step", "goal-v2-mix-project", "goal-v2-mix-task.json");
+    const v3TaskFile = path.resolve("fixtures/v3-domain-neutral-task.yaml");
+    const planPath = path.join(home, "mixed-goal-plan.json");
+    await writeFile(
+      planPath,
+      JSON.stringify({
+        version: 1,
+        name: "mixed-goal-plan",
+        objective: "Four mixed-version steps for a Goal proposal.",
+        items: [
+          { id: "item-1", task: `./${path.basename(v2TaskFile)}`, dependsOn: [] },
+          { id: "item-2", task: v3TaskFile, dependsOn: ["item-1"] },
+          { id: "item-3", task: v3TaskFile, dependsOn: ["item-2"] },
+          { id: "item-4", task: `./${path.basename(v2TaskFile)}`, dependsOn: ["item-3"] },
+        ],
+      }, null, 2),
+    );
+    const goalFile = await writeGoalContract(home, "mixed-goal-plan.json", "mixed-goal");
+    const intake = coordinator.createOutcomeIntake({ outcome: "A mixed v2/v3 supervised outcome" });
+    const proposed = await coordinator.proposeOutcomeIntake({
+      intakeId: intake.id,
+      expectedRevision: 1,
+      shape: "goal",
+      reason: "Mixed v2/v3 Goal hierarchy fits",
+      artifactPath: goalFile,
+    });
+    assert.equal(proposed.preview.selectedShape, "goal");
+    assert.equal(proposed.preview.taskCount, 4);
+    assert.deepEqual(proposed.preview.contractsInvolved, [
+      "goal-v1",
+      "work-plan-v1",
+      "task-contract-v2",
+      "task-contract-v3",
+    ]);
+    assert.deepEqual(proposed.intake.proposal?.taskContractVersions, [2, 3]);
+    assert.equal(store.listTasks().length, 0);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
     await rm(home, { recursive: true, force: true });
   }
 });

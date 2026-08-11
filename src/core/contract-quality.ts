@@ -20,6 +20,7 @@ import type {
   QualityReport,
   QualityWarning,
   ResolvedContractQualityValues,
+  TaskBackground,
   TaskSpec,
 } from "./types.js";
 
@@ -227,6 +228,25 @@ function maximumLabel(maximum: number | null): string {
   return maximum === null ? "unlimited" : String(maximum);
 }
 
+/** Every background field path whose value is empty. Field-specific so Main can
+ *  fix exactly the missing context. Strictly mirrors the parser's required
+ *  shape (a quality gate cannot be looser than the schema it validates). */
+function missingBackgroundFields(background: TaskBackground): string[] {
+  const missing: string[] = [];
+  if (background.purpose.length === 0) missing.push("task.contract.background.purpose");
+  if (background.audience.length === 0) missing.push("task.contract.background.audience");
+  if (background.currentSituation.length === 0) {
+    missing.push("task.contract.background.currentSituation");
+  }
+  if (background.parentGoalPlan.length === 0) missing.push("task.contract.background.parentGoalPlan");
+  if (background.priorDecisions.length === 0) missing.push("task.contract.background.priorDecisions");
+  if (background.suppliedInputs.length === 0) missing.push("task.contract.background.suppliedInputs");
+  if (background.downstreamUse.length === 0) missing.push("task.contract.background.downstreamUse");
+  if (background.workerAuthority.length === 0) missing.push("task.contract.background.workerAuthority");
+  if (background.returnToMain.length === 0) missing.push("task.contract.background.returnToMain");
+  return missing;
+}
+
 /** Evaluate flexible Quality checks. `passed` remains check truth;
  * `admitted` is the separate policy decision. */
 export function assessTaskQualityWithPolicy(
@@ -257,13 +277,6 @@ export function assessTaskQualityWithPolicy(
 
   const { values, mode } = policy;
   const contract = spec.contract;
-  const moduleDetailsComplete = contract.modules.length > 0
-    && contract.modules.every((module) =>
-      module.responsibility.length >= values.minModuleResponsibilityCharacters
-      && module.consumes.length > 0
-      && module.produces.length > 0
-      && module.boundaries.length > 0
-    );
   const scenarioNames = new Set(contract.scenarios.map((scenario) => scenario.name.toLowerCase()));
   const stringFields: ContractStringField[] = [];
   collectContractStringFields({ contract, acceptance: spec.acceptance }, "", stringFields);
@@ -276,39 +289,104 @@ export function assessTaskQualityWithPolicy(
     qualityCheck(mode, "outcome", "Concrete outcome",
       contract.outcome.length >= values.minOutcomeCharacters,
       `Describe one observable result with enough detail to judge success (minimum ${values.minOutcomeCharacters} characters)`),
-    qualityCheck(mode, "context", "Relevant context", contract.context.length > 0,
-      "Include the current behavior or reason for the change"),
-    qualityCheck(mode, "scope", "In-scope and out-of-scope boundaries",
-      contract.inScope.length > 0 && contract.outOfScope.length > 0,
-      "State both what may change and what must remain untouched"),
-    qualityCheck(mode, "execution", "Execution path",
-      contract.executionSteps.length > 0 && contract.deliverables.length > 0,
-      "List implementation steps and concrete deliverables"),
-    qualityCheck(mode, "modules", "Module production and consumption", moduleDetailsComplete,
-      `Each module needs a responsibility (minimum ${values.minModuleResponsibilityCharacters} characters), inputs, outputs, and boundaries`),
-    qualityCheck(mode, "call-chain", "Call chain",
-      contract.callChain.length >= values.minCallChainSteps,
-      `Show at least ${values.minCallChainSteps} step(s) from producer to consumer`),
-    qualityCheck(mode, "scenarios", "Normal and boundary scenarios",
-      contract.scenarios.length >= values.minScenarios
-        && scenarioNames.size === contract.scenarios.length,
-      `Provide at least ${values.minScenarios} uniquely named scenario(s), including a boundary or failure case`),
-    qualityCheck(mode, "risks", "Known risks", contract.risks.length > 0,
-      "Name at least one implementation or integration risk"),
-    qualityCheck(mode, "acceptance", "Behavioral and executable acceptance",
-      spec.acceptance.criteria.length > 0 && spec.acceptance.commands.length > 0,
-      "Require both human-readable criteria and independent commands"),
-    qualityCheck(mode, "placeholders", "No unresolved placeholders",
-      placeholders.sentinelFields.length === 0, placeholderDetail),
-    qualityCheck(mode, "change-budget", "Bounded change surface",
-      maximumSatisfied(contract.changeBudget.maxFiles, values.maxFiles)
-        && maximumSatisfied(contract.changeBudget.maxDiffLines, values.maxDiffLines),
-      `Split the task until one attempt changes at most ${maximumLabel(values.maxFiles)} files and ${maximumLabel(values.maxDiffLines)} added/deleted lines`),
-    qualityCheck(mode, "focus-paths", "Focused inspection entry points",
-      spec.worker.focusPaths.length > 0
-        && maximumSatisfied(spec.worker.focusPaths.length, values.maxFocusPaths),
-      `Name one to ${maximumLabel(values.maxFocusPaths)} files or directories the Worker should inspect first`),
   ];
+
+  if (spec.version === 2) {
+    const v2 = spec.contract;
+    const moduleDetailsComplete = v2.modules.length > 0
+      && v2.modules.every((module) =>
+        module.responsibility.length >= values.minModuleResponsibilityCharacters
+        && module.consumes.length > 0
+        && module.produces.length > 0
+        && module.boundaries.length > 0
+      );
+    checks.push(
+      qualityCheck(mode, "context", "Relevant context", v2.context.length > 0,
+        "Include the current behavior or reason for the change"),
+      qualityCheck(mode, "scope", "In-scope and out-of-scope boundaries",
+        v2.inScope.length > 0 && v2.outOfScope.length > 0,
+        "State both what may change and what must remain untouched"),
+      qualityCheck(mode, "execution", "Execution path",
+        v2.executionSteps.length > 0 && v2.deliverables.length > 0,
+        "List implementation steps and concrete deliverables"),
+      qualityCheck(mode, "modules", "Module production and consumption", moduleDetailsComplete,
+        `Each module needs a responsibility (minimum ${values.minModuleResponsibilityCharacters} characters), inputs, outputs, and boundaries`),
+      qualityCheck(mode, "call-chain", "Call chain",
+        v2.callChain.length >= values.minCallChainSteps,
+        `Show at least ${values.minCallChainSteps} step(s) from producer to consumer`),
+      qualityCheck(mode, "scenarios", "Normal and boundary scenarios",
+        v2.scenarios.length >= values.minScenarios
+          && scenarioNames.size === v2.scenarios.length,
+        `Provide at least ${values.minScenarios} uniquely named scenario(s), including a boundary or failure case`),
+      qualityCheck(mode, "risks", "Known risks", v2.risks.length > 0,
+        "Name at least one implementation or integration risk"),
+      qualityCheck(mode, "acceptance", "Behavioral and executable acceptance",
+        spec.acceptance.criteria.length > 0 && spec.acceptance.commands.length > 0,
+        "Require both human-readable criteria and independent commands"),
+      qualityCheck(mode, "placeholders", "No unresolved placeholders",
+        placeholders.sentinelFields.length === 0, placeholderDetail),
+      qualityCheck(mode, "change-budget", "Bounded change surface",
+        maximumSatisfied(v2.changeBudget.maxFiles, values.maxFiles)
+          && maximumSatisfied(v2.changeBudget.maxDiffLines, values.maxDiffLines),
+        `Split the task until one attempt changes at most ${maximumLabel(values.maxFiles)} files and ${maximumLabel(values.maxDiffLines)} added/deleted lines`),
+      qualityCheck(mode, "focus-paths", "Focused inspection entry points",
+        spec.worker.focusPaths.length > 0
+          && maximumSatisfied(spec.worker.focusPaths.length, values.maxFocusPaths),
+        `Name one to ${maximumLabel(values.maxFocusPaths)} files or directories the Worker should inspect first`),
+    );
+  } else {
+    const v3 = spec.contract;
+    const missingBackground = missingBackgroundFields(v3.background);
+    const coding = v3.coding;
+    // Coding-only checks pass for domain-neutral Tasks (no Coding extension).
+    const moduleDetailsComplete = coding === undefined
+      || (coding.modules.length > 0
+        && coding.modules.every((module) =>
+          module.responsibility.length >= values.minModuleResponsibilityCharacters
+          && module.consumes.length > 0
+          && module.produces.length > 0
+          && module.boundaries.length > 0
+        ));
+    const callChainComplete = coding === undefined
+      || coding.callChain.length >= values.minCallChainSteps;
+    const changeBudgetSatisfied = coding === undefined
+      || (maximumSatisfied(coding.changeBudget.maxFiles, values.maxFiles)
+        && maximumSatisfied(coding.changeBudget.maxDiffLines, values.maxDiffLines));
+    checks.push(
+      qualityCheck(mode, "background", "Structured background",
+        missingBackground.length === 0,
+        missingBackground.length === 0
+          ? "Explain why the work matters, who it serves, the current situation, parent work, prior decisions, inputs, output use, Worker authority, and return-to-Main decisions"
+          : `Missing required background: ${missingBackground.join(", ")}`),
+      qualityCheck(mode, "scope", "In-scope and out-of-scope boundaries",
+        v3.inScope.length > 0 && v3.outOfScope.length > 0,
+        "State both what may change and what must remain untouched"),
+      qualityCheck(mode, "execution", "Execution path",
+        v3.executionSteps.length > 0 && v3.deliverables.length > 0,
+        "List implementation steps and concrete deliverables"),
+      qualityCheck(mode, "modules", "Coding detail (optional)", moduleDetailsComplete,
+        `Optional Coding extension modules need a responsibility (minimum ${values.minModuleResponsibilityCharacters} characters), inputs, outputs, and boundaries; domain-neutral Tasks may omit them`),
+      qualityCheck(mode, "call-chain", "Coding call chain (optional)", callChainComplete,
+        `When a Coding extension is present, show at least ${values.minCallChainSteps} step(s) from producer to consumer`),
+      qualityCheck(mode, "scenarios", "Normal and boundary scenarios",
+        v3.scenarios.length >= values.minScenarios
+          && scenarioNames.size === v3.scenarios.length,
+        `Provide at least ${values.minScenarios} uniquely named scenario(s), including a boundary or failure case`),
+      qualityCheck(mode, "risks", "Known risks", v3.risks.length > 0,
+        "Name at least one implementation or integration risk"),
+      qualityCheck(mode, "acceptance", "Behavioral and executable acceptance",
+        spec.acceptance.criteria.length > 0 && spec.acceptance.commands.length > 0,
+        "Require both human-readable criteria and independent commands"),
+      qualityCheck(mode, "placeholders", "No unresolved placeholders",
+        placeholders.sentinelFields.length === 0, placeholderDetail),
+      qualityCheck(mode, "change-budget", "Coding change budget (optional)", changeBudgetSatisfied,
+        `When a Coding extension is present, split the task until one attempt changes at most ${maximumLabel(values.maxFiles)} files and ${maximumLabel(values.maxDiffLines)} added/deleted lines`),
+      qualityCheck(mode, "focus-paths", "Focused inspection entry points",
+        spec.worker.focusPaths.length > 0
+          && maximumSatisfied(spec.worker.focusPaths.length, values.maxFocusPaths),
+        `Name one to ${maximumLabel(values.maxFocusPaths)} files or directories the Worker should inspect first`),
+    );
+  }
 
   const failedChecks = checks.filter((check) => !check.passed);
   const issues = failedChecks.map((check) => `${check.label}: ${check.detail}`);

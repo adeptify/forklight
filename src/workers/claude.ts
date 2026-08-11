@@ -12,6 +12,7 @@ import {
   buildWorkerPrompt,
   claudeCheckpointProtocolLines,
   claudeToolProtocolLines,
+  workerValidationRepairProtocolLines,
   workerPromptAppendicesForTask,
 } from "../core/task.js";
 import { checkpointLaunch } from "../core/checkpoint.js";
@@ -190,6 +191,31 @@ function executablePath(executable: string): string {
   return realpathSync(candidate);
 }
 
+/**
+ * Literal-only checkpoint runtime exceptions: the exact ForkLight Node runtime
+ * (process.execPath and its realpath) plus the four canonical modules proven
+ * necessary for the checkpoint MCP server. These are never granted as subpath
+ * exceptions — a literal exception reads only the exact file, so no broad
+ * Node/NVM/Home parent directory becomes readable. Ancestor traversal stays
+ * literal-only via homePathAncestors.
+ */
+function checkpointRuntimeLiteralPaths(): string[] {
+  const currentFile = fileURLToPath(import.meta.url);
+  const sourceMode = currentFile.endsWith(".ts");
+  const runtimeRoot = path.dirname(path.dirname(currentFile));
+  const nodeExecutable = process.execPath;
+  const realNodeExecutable = realpathSync(nodeExecutable);
+  return [
+    nodeExecutable,
+    realNodeExecutable,
+    path.join(runtimeRoot, "activation", `runner.${sourceMode ? "ts" : "js"}`),
+    path.join(runtimeRoot, "core", `source-digest.${sourceMode ? "ts" : "js"}`),
+    path.join(runtimeRoot, "core", `time.${sourceMode ? "ts" : "js"}`),
+    path.join(runtimeRoot, "core", `process.${sourceMode ? "ts" : "js"}`),
+  ];
+}
+
+/** Canonical checkpoint module-closure read roots (subpath + literal). */
 function checkpointRuntimeReadPaths(task: TaskRecord): string[] {
   const currentFile = fileURLToPath(import.meta.url);
   const sourceMode = currentFile.endsWith(".ts");
@@ -242,14 +268,18 @@ export function workerLaunch(task: TaskRecord, claudeArgs: string[]): WorkerLaun
   const runtimeDirectory = path.dirname(executable);
   const temporaryDirectories = runtimeTemporaryDirectoryAliases();
   const checkpointReadPaths = checkpointRuntimeReadPaths(task);
+  const checkpointLiteralPaths = checkpointRuntimeLiteralPaths();
   const checkpointReadRules = [
+    // Module-closure roots may be read recursively (subpath + literal).
     ...checkpointReadPaths.map(
       (readPath) => `    (require-not (subpath "${sandboxLiteral(readPath)}"))`,
     ),
-    ...checkpointReadPaths.map(
+    // Every read root plus the literal-only runtime/module files.
+    ...[...checkpointReadPaths, ...checkpointLiteralPaths].map(
       (readPath) => `    (require-not (literal "${sandboxLiteral(readPath)}"))`,
     ),
-    ...homePathAncestors(checkpointReadPaths).map(
+    // Literal ancestor traversal only — never a Node/NVM/Home parent subpath.
+    ...homePathAncestors([...checkpointReadPaths, ...checkpointLiteralPaths]).map(
       (readPath) => `    (require-not (literal "${sandboxLiteral(readPath)}"))`,
     ),
   ]
@@ -412,6 +442,7 @@ export async function runClaudeWorker(
     workerPromptAppendicesForTask(task, {
       toolLines: adapter.toolProtocolAppendix(task),
       checkpointLines: adapter.checkpointProtocolAppendix(task),
+      validationRepairLines: workerValidationRepairProtocolLines(task.spec.acceptance.commands, "claude"),
     }),
   );
   await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {

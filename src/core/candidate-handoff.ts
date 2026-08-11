@@ -372,6 +372,61 @@ export function buildHandoffSuccessorSpec(
         ...cloned.contract.executionSteps,
       ],
     };
+  } else if (cloned.version === 3) {
+    // Version-3 successors keep the universal background first-class: handoff
+    // facts enter the background lists, and gap/path work stays in the
+    // domain-neutral scope/execution fields. Coding detail is untouched.
+    const pathLines = input.reusablePaths.length === 0
+      ? ["No reusable paths were imported; complete every remaining gap from the original contract."]
+      : input.reusablePaths.map(
+          (filePath) => `Reusable path already imported into this workspace: ${filePath}`,
+        );
+    const gapLines = input.remainingGaps.flatMap((gap, index) => [
+      `Remaining gap ${index + 1}: ${gap.description}`,
+      `Gap ${index + 1} acceptance expectation: ${gap.acceptanceExpectation}`,
+    ]);
+    cloned.contract = {
+      ...cloned.contract,
+      background: {
+        ...cloned.contract.background,
+        priorDecisions: [
+          ...cloned.contract.background.priorDecisions,
+          "Cross-Worker handoff successor: reusable paths are already imported; complete only the remaining gaps.",
+          "This is not a retry, correction, or adaptation of the source Task.",
+          `Source Candidate digest prefix: ${input.digestPrefix}`,
+        ],
+        suppliedInputs: [
+          ...cloned.contract.background.suppliedInputs,
+          ...pathLines,
+          ...gapLines,
+        ],
+        workerAuthority: [
+          ...cloned.contract.background.workerAuthority,
+          "Complete remaining gaps in one ordinary Attempt, then stop. No retry, multi-hop handoff, Integration, commit, or push.",
+        ],
+      },
+      inScope: [
+        ...cloned.contract.inScope,
+        "Complete every remaining handoff gap against the original acceptance commands",
+        ...input.remainingGaps.map(
+          (gap, index) => `Close gap ${index + 1}: ${gap.description}`,
+        ),
+      ],
+      outOfScope: [
+        ...cloned.contract.outOfScope,
+        "Rewriting retained reusable paths without cause",
+        "Automatic Integration, commit, push, or multi-hop handoff",
+        "Reading private revision artifact paths or source Worker transcripts",
+      ],
+      executionSteps: [
+        "Inspect every preloaded reusable path in the workspace",
+        ...input.remainingGaps.map(
+          (gap, index) => `Complete gap ${index + 1} to satisfy: ${gap.acceptanceExpectation}`,
+        ),
+        "Stop after one pass and return the ordinary summary",
+        ...cloned.contract.executionSteps,
+      ],
+    };
   }
   // Freeze the destination Profile's network policy. Legacy destination omission
   // deletes the source Task's frozen policy so the successor inherits the Daemon

@@ -96,6 +96,7 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_goal_stop",
         "forklight_goal_submit",
         "forklight_goal_task_handoff",
+        "forklight_goal_validate",
         "forklight_health",
         "forklight_inspect",
         "forklight_integration_apply",
@@ -155,6 +156,95 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
       healthData.mcpBuildIdentity?.buildId,
       healthData.daemonBuildIdentity?.buildId,
     );
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP forklight_goal_validate returns one bounded preview and creates no work", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-goal-validate-"));
+  const root = path.join(home, "goal");
+  await mkdir(root, { recursive: true });
+  const task = path.resolve("examples/deepseek-checkout.yaml");
+  const planFile = path.join(root, "plan.json");
+  await writeFile(
+    planFile,
+    JSON.stringify({
+      version: 1,
+      name: "MCP goal validate plan",
+      objective: "Four-task plan for the MCP goal_validate tool.",
+      items: [
+        { id: "foundation", task, dependsOn: [] },
+        { id: "service", task, dependsOn: ["foundation"] },
+        { id: "console", task, dependsOn: ["foundation"] },
+        { id: "integrate-docs", task, dependsOn: ["service", "console"] },
+      ],
+    }),
+  );
+  const goalFile = path.join(root, "goal.json");
+  await writeFile(
+    goalFile,
+    JSON.stringify({
+      version: 1,
+      name: "MCP goal validate",
+      objective: "Prove the MCP goal_validate tool is read-only and bounded.",
+      planFile,
+      policy: {
+        maxDurationMs: null,
+        noProgressTimeoutMs: null,
+        maxCorrectionRounds: 1,
+        maxReviewRounds: 1,
+        maxNoNewEvidenceCycles: 2,
+      },
+      milestones: [
+        { itemId: "foundation", gate: "machine" },
+        { itemId: "service", gate: "machine" },
+        { itemId: "console", gate: "machine" },
+        { itemId: "integrate-docs", gate: "machine" },
+      ],
+    }, null, 2),
+  );
+
+  const daemon = new ForkLightDaemon(home, 1);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({
+      name: "forklight_goal_validate",
+      arguments: { goalFile },
+    });
+    assert.equal(result.isError, undefined);
+    const data = result.structuredContent as {
+      passed?: boolean;
+      version?: number;
+      phaseCount?: number;
+      taskCount?: number;
+      name?: string;
+    };
+    assert.equal(data.passed, true);
+    assert.equal(data.version, 1);
+    assert.equal(data.phaseCount, 1);
+    assert.equal(data.taskCount, 4);
+    assert.equal(data.name, "MCP goal validate");
+    const text = Array.isArray(result.content)
+      ? result.content.map((c) => ("text" in c ? c.text : "")).join("\n")
+      : "";
+    assert.doesNotMatch(text, /python3|unittest|deepseek|api-key/);
+
+    // Read-only parity: no Goal, Plan, or Task was created.
+    const store = new StateStore(home);
+    try {
+      assert.deepEqual(store.listGoals(), []);
+      assert.deepEqual(store.listTasks(), []);
+      assert.deepEqual(store.listPlans(), []);
+    } finally {
+      store.close();
+    }
   } finally {
     await client.close();
     await server.close();
@@ -2719,8 +2809,88 @@ test("MCP resolve/reopen tools require confirm and bounded closed inputs", async
     assert.ok(inputSchema.properties?.reason);
     assert.ok(inputSchema.properties?.evidenceTaskId);
     assert.ok((inputSchema.required ?? []).includes("confirm"), "confirm is required");
+    // The public contract describes the shared succeeded-not-delivered eligibility
+    // so Main can close stale successful work through the same tool.
+    assert.match(resolveTool?.description ?? "", /succeeded.*no delivered outcome/i);
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+test("MCP task_resolve/reopen close and reopen a succeeded non-delivered Task", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-resolve-succeeded-"));
+  const store = new StateStore(home);
+  const taskId = randomUUID();
+  store.createTask({
+    id: taskId,
+    name: "succeeded-resolve",
+    status: "succeeded",
+    sourcePath: "/source",
+    taskFile: `/task-${taskId}.yaml`,
+    spec: {
+      version: 1,
+      name: "succeeded-resolve",
+      project: "/source",
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.test" },
+      runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: null },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+      goal: "surface",
+      constraints: [],
+      acceptance: { commands: ["true"] },
+    },
+    paths: {
+      root: "/state/task",
+      baseline: "/state/task/baseline",
+      workspace: "/state/task/workspace",
+      logs: "/state/task/logs",
+      claudeConfig: "/state/task/claude",
+      diff: "/state/task/diff.patch",
+    },
+    sessionId: "session",
+    createdAt: "2026-08-03T12:00:00.000Z",
+    updatedAt: "2026-08-03T12:00:00.000Z",
+  });
+  store.addEvent(taskId, undefined, "verification.completed", "Independent verification passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: "/state/task/diff.patch",
+    sourceUnchanged: false,
+  });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const resolved = await client.callTool({
+      name: "forklight_task_resolve",
+      arguments: { taskId, reason: "no-longer-needed", confirm: true },
+    });
+    assert.equal(resolved.isError, undefined, toolErrorText(resolved));
+    const body = resolved.structuredContent as Record<string, unknown>;
+    assert.equal((body.state as Record<string, unknown>).status, "resolved");
+    assert.equal(body.boardScope, "history");
+    assert.equal(body.boardReason, "attention-resolved");
+
+    const reopened = await client.callTool({
+      name: "forklight_task_reopen",
+      arguments: { taskId, confirm: true },
+    });
+    assert.equal(reopened.isError, undefined, toolErrorText(reopened));
+    const reopenBody = reopened.structuredContent as Record<string, unknown>;
+    assert.equal((reopenBody.state as Record<string, unknown>).status, "reopened");
+    assert.equal(reopenBody.boardScope, "now");
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
   }
 });

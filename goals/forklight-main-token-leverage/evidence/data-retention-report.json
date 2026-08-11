@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-09T22:29:30+08:00",
+  "mode": "applied-and-verified",
+  "source": {
+    "database": "/Users/yijunwang/Library/Application Support/ForkLight/forklight.sqlite",
+    "currentLogicalState": {
+      "taskCount": 293,
+      "attemptCount": 431,
+      "eventCount": 213300,
+      "goalCount": 0,
+      "planCount": 0,
+      "outcomeIntakeCount": 0,
+      "reviewGraphCount": 41,
+      "competitionCount": 1,
+      "pairedSampleCount": 2,
+      "integrationResultCount": 160,
+      "runDirectoryCount": 292,
+      "reviewProjectDirectoryCount": 41,
+      "waitingUserDecisionCount": 0
+    },
+    "quickCheck": "ok",
+    "foreignKeyViolations": 0,
+    "daemonIdentity": "matched"
+  },
+  "backups": {
+    "baseline": {
+      "target": "/Users/yijunwang/Library/Application Support/ForkLight Backups/2026-08-09-main-token-leverage-baseline",
+      "databaseSha256": "770fc3c277a8310aa959e07cc1395584c86006f9eac57de463900901a8c22b52",
+      "taskCount": 553,
+      "attemptCount": 815,
+      "eventCount": 288785,
+      "goalCount": 10,
+      "planCount": 13,
+      "integrationResultCount": 192,
+      "runDirectoryCount": 534,
+      "quickCheck": "ok",
+      "isolatedRestoreRead": "passed",
+      "present": true
+    },
+    "preLiveCleanup": {
+      "target": "/Users/yijunwang/Library/Application Support/ForkLight Backups/2026-08-09-pre-live-retention-cleanup",
+      "databaseSha256": "16795db1850186a85be0d1ed261071b9eefa6aeba7ea74d1e9dbd9c17eed1279",
+      "taskCount": 559,
+      "attemptCount": 823,
+      "eventCount": 290566,
+      "goalCount": 10,
+      "planCount": 13,
+      "integrationResultCount": 198,
+      "runDirectoryCount": 540,
+      "quickCheck": "ok",
+      "foreignKeyViolations": 0,
+      "sourceAndBackupHashMatched": true,
+      "present": true
+    },
+    "backupDeletionAuthorized": false
+  },
+  "retentionSelection": {
+    "evaluatedTaskCount": 559,
+    "baseRoutingEvidenceCount": 240,
+    "acceptedDirectMainPairTaskCount": 2,
+    "referentialClosureAdditionalTaskCount": 49,
+    "finalKeepCount": 291,
+    "deleteCount": 268,
+    "deleteTaskIdListSha256": "0f98c0563d2b344b6d93bf80e2aca7d9e52b58cbbfe538e71830024c980fd0a2",
+    "deletedStatusBreakdown": {
+      "succeeded": 91,
+      "failed": 148,
+      "interrupted": 12,
+      "waiting": 16,
+      "blocked": 1
+    },
+    "closureRules": [
+      "Keep classified routing evidence with a Candidate revision and Main review.",
+      "Keep failed, interrupted or blocked evidence with explicit failure attribution when useful for routing.",
+      "Keep accepted direct-Main paired samples.",
+      "Recursively keep Tasks referenced by Candidate handoff, review assignment or judge graphs, Competition candidates, and adaptation lineage."
+    ]
+  },
+  "liveCleanup": {
+    "authorized": true,
+    "simulation": {
+      "performedOnTemporaryDatabase": true,
+      "resultTaskCount": 291,
+      "resultReviewGraphCount": 41,
+      "resultCompetitionCount": 1,
+      "resultPairedSampleCount": 2,
+      "quickCheck": "ok",
+      "foreignKeyViolations": 0
+    },
+    "applied": true,
+    "deletedTaskCount": 268,
+    "deletedRunDirectoryCount": 250,
+    "deletedReviewProjectDirectoryCount": 1,
+    "postCleanup": {
+      "taskCount": 291,
+      "attemptCount": 428,
+      "eventCount": 212659,
+      "goalCount": 0,
+      "planCount": 0,
+      "outcomeIntakeCount": 0,
+      "reviewGraphCount": 41,
+      "competitionCount": 1,
+      "pairedSampleCount": 2,
+      "runDirectoryCount": 290,
+      "runsWithoutTask": 0,
+      "tasksWithoutRunDirectory": 1,
+      "quickCheck": "ok",
+      "foreignKeyViolations": 0,
+      "databaseBytesAfterVacuum": 368349184,
+      "databaseSha256AfterVacuum": "73471d1ebfb5933a372402c48a8716ffac4aff21d5d0ab44f861cd40dabb320a"
+    }
+  },
+  "operationalAttentionCleanup": {
+    "reason": "Retained evidence-bearing succeeded Tasks no longer required a current Main decision.",
+    "implementationTaskId": "34488658-22ca-4f0f-87c6-a0b6e21994a5",
+    "resolvedTaskCount": 89,
+    "taskIdListSha256": "0af780091e4add89e6195562647b1e0c19178be3c2e1309e178867fd5d948b11",
+    "resolutionReason": "no-longer-needed",
+    "allMachineStatusesRemainSucceeded": true,
+    "resolutionEventCount": 89,
+    "waitingUserDecisionCountAfter": 0,
+    "taskRowsDeleted": 0,
+    "pairedSampleCountAfter": 2,
+    "quickCheck": "ok",
+    "foreignKeyViolations": 0,
+    "reversibleBy": [
+      "Explicitly reopen an individual Task.",
+      "Restore either retained verified backup if a full historical rollback is ever separately authorized."
+    ]
+  },
+  "caveats": [
+    "The two backups remain material recovery evidence and were not deleted.",
+    "Current logical counts include the two M1 closing Tasks created after the destructive retention cleanup.",
+    "Historical resolution changes only current attention placement; it does not invent delivery, quality, routing, Token, cost or timing facts.",
+    "No general Main Token savings claim is made from retained data without a valid same-scope, same-acceptance direct-Main pair."
+  ]
+}

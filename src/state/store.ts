@@ -5,6 +5,7 @@ import type {
   AdaptationTransitionRecord,
   AttemptRecord,
   CandidateHandoffRecord,
+  CheckpointOperationRecord,
   CompetitionCandidateRecord,
   CompetitionEvaluationRecord,
   CompetitionRecord,
@@ -13,6 +14,7 @@ import type {
   EventRecord,
   EventType,
   GoalMilestoneRecord,
+  GoalPlanAssociation,
   GoalRecord,
   IntegrationReceiptRecord,
   IntegrationResultRecord,
@@ -56,6 +58,42 @@ type TaskRecordPatch = Omit<Partial<TaskRecord>, "effectivePolicy" | "error" | "
 function parseRecord<T>(value: unknown, label: string): T {
   if (typeof value !== "string") throw new Error(`Invalid ${label} record in state database`);
   return JSON.parse(value) as T;
+}
+
+/** Stable content-free corruption error for checkpoint operation reads. The
+ *  message never contains a JSON parser snippet, operation id, or stored
+ *  content so a corrupt record cannot leak private bytes. */
+export const CHECKPOINT_OPERATION_CORRUPTION_ERROR =
+  "Corrupt checkpoint operation record in state database";
+
+function isCheckpointOperationRecord(value: unknown): value is CheckpointOperationRecord {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.operationId === "string"
+    && typeof record.taskId === "string"
+    && typeof record.attemptId === "string"
+    && Array.isArray(record.commandIds)
+    && record.commandIds.every((commandId) => typeof commandId === "string")
+    && typeof record.createdAt === "string"
+    && typeof record.updatedAt === "string"
+  );
+}
+
+/** Parse one checkpoint operation record, failing closed with a stable
+ *  content-free error on malformed JSON or an invalid shape. */
+function parseCheckpointOperationRecord(value: unknown): CheckpointOperationRecord {
+  if (typeof value !== "string") throw new Error(CHECKPOINT_OPERATION_CORRUPTION_ERROR);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(CHECKPOINT_OPERATION_CORRUPTION_ERROR);
+  }
+  if (!isCheckpointOperationRecord(parsed)) {
+    throw new Error(CHECKPOINT_OPERATION_CORRUPTION_ERROR);
+  }
+  return parsed;
 }
 
 interface CalibrationRow {
@@ -222,6 +260,16 @@ export class StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_integration_results_task
         ON integration_results(task_id, created_at);
+      CREATE TABLE IF NOT EXISTS checkpoint_operations (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        attempt_id TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_checkpoint_operations_task
+        ON checkpoint_operations(task_id, created_at);
       CREATE TABLE IF NOT EXISTS provider_probes (
         provider TEXT PRIMARY KEY,
         record_json TEXT NOT NULL,
@@ -354,17 +402,28 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status, updated_at);
       CREATE TABLE IF NOT EXISTS goal_milestones (
         goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+        plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
         item_id TEXT NOT NULL,
         task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
         gate TEXT NOT NULL,
         item_index INTEGER NOT NULL,
         satisfied INTEGER NOT NULL DEFAULT 0,
         record_json TEXT NOT NULL,
-        PRIMARY KEY (goal_id, item_id),
-        UNIQUE (goal_id, item_index)
+        PRIMARY KEY (goal_id, plan_id, item_id),
+        UNIQUE (goal_id, plan_id, item_index)
       );
       CREATE INDEX IF NOT EXISTS idx_goal_milestones_task ON goal_milestones(task_id);
       CREATE INDEX IF NOT EXISTS idx_goal_milestones_goal ON goal_milestones(goal_id, item_index);
+      CREATE TABLE IF NOT EXISTS goal_plan_associations (
+        goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+        plan_id TEXT NOT NULL UNIQUE REFERENCES plans(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (goal_id, plan_id),
+        UNIQUE (goal_id, ordinal)
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_plan_associations_goal
+        ON goal_plan_associations(goal_id, ordinal);
       CREATE TABLE IF NOT EXISTS candidate_handoffs (
         id TEXT PRIMARY KEY,
         source_revision_id TEXT NOT NULL UNIQUE,
@@ -403,6 +462,94 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_outcome_intakes_status
         ON outcome_intakes(status, updated_at DESC);
     `);
+    // Idempotent legacy primary Plan backfill: each Goal's goals.plan_id becomes
+    // ordinal 0. Safe on every open; INSERT OR IGNORE never duplicates or reorders.
+    this.db.exec(`
+      INSERT OR IGNORE INTO goal_plan_associations (goal_id, plan_id, ordinal, created_at)
+      SELECT id, plan_id, 0, created_at FROM goals
+    `);
+    // Plan-qualified milestone identity (FL-112E2): legacy milestone rows have
+    // no plan_id and must be rebuilt once with the Goal's primary Plan.
+    this.migrateGoalMilestonePlanIdentity();
+  }
+
+  /**
+   * Rebuild the goal_milestones table with plan-qualified identity when it was
+   * created by an older schema. Idempotent: no-op when plan_id already exists.
+   * Legacy rows are backfilled to their Goal's primary Plan and the record_json
+   * is rewritten with the same planId so reads and writes stay consistent.
+   */
+  private migrateGoalMilestonePlanIdentity(): void {
+    const columns = this.db
+      .prepare("PRAGMA table_info(goal_milestones)")
+      .all() as unknown as Array<{ name: string }>;
+    if (columns.some((column) => column.name === "plan_id")) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT gm.goal_id AS goal_id, gm.item_id AS item_id, gm.task_id AS task_id,
+                  gm.gate AS gate, gm.item_index AS item_index, gm.satisfied AS satisfied,
+                  gm.record_json AS record_json, g.plan_id AS plan_id
+           FROM goal_milestones gm
+           JOIN goals g ON g.id = gm.goal_id`,
+        )
+        .all() as unknown as Array<{
+        goal_id: string;
+        plan_id: string;
+        item_id: string;
+        task_id: string | null;
+        gate: string;
+        item_index: number;
+        satisfied: number;
+        record_json: string;
+      }>;
+      this.db.exec("ALTER TABLE goal_milestones RENAME TO goal_milestones_legacy");
+      this.db.exec(`
+        CREATE TABLE goal_milestones (
+          goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+          plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+          item_id TEXT NOT NULL,
+          task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+          gate TEXT NOT NULL,
+          item_index INTEGER NOT NULL,
+          satisfied INTEGER NOT NULL DEFAULT 0,
+          record_json TEXT NOT NULL,
+          PRIMARY KEY (goal_id, plan_id, item_id),
+          UNIQUE (goal_id, plan_id, item_index)
+        );
+      `);
+      const insert = this.db.prepare(
+        `INSERT INTO goal_milestones
+          (goal_id, plan_id, item_id, task_id, gate, item_index, satisfied, record_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const row of rows) {
+        const record = parseRecord<GoalMilestoneRecord>(row.record_json, "goal milestone");
+        const normalized = { ...record, planId: row.plan_id };
+        insert.run(
+          row.goal_id,
+          row.plan_id,
+          row.item_id,
+          row.task_id,
+          row.gate,
+          row.item_index,
+          row.satisfied ? 1 : 0,
+          JSON.stringify(normalized),
+        );
+      }
+      this.db.exec("DROP TABLE goal_milestones_legacy");
+      this.db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_goal_milestones_task ON goal_milestones(task_id)",
+      );
+      this.db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_goal_milestones_goal ON goal_milestones(goal_id, item_index)",
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   close(): void {
@@ -826,6 +973,140 @@ export class StateStore {
     );
   }
 
+  /** Shared validation for an ordered multi-Plan Goal graph. Every phase Plan
+   *  must be independently valid and own one unique staged Task per item;
+   *  associations are ordinals 0..n-1; milestones are plan-qualified. */
+  private validateGoalPhasesExecution(params: {
+    registrationsByPlan: StagedTaskRegistration[][];
+    plans: PlanRecord[];
+    itemsByPlan: PlanItemRecord[][];
+    dependenciesByPlan: DependencyRecord[][];
+    goal: GoalRecord;
+    associations: GoalPlanAssociation[];
+    milestones: GoalMilestoneRecord[];
+  }): void {
+    const { plans, registrationsByPlan, itemsByPlan, dependenciesByPlan } = params;
+    if (plans.length < 2) {
+      throw new Error("A Goal must declare at least two ordered phase Plans");
+    }
+    if (
+      plans.length !== registrationsByPlan.length
+      || plans.length !== itemsByPlan.length
+      || plans.length !== dependenciesByPlan.length
+    ) {
+      throw new Error("Goal phase registration counts must match");
+    }
+    const planIds = new Set<string>();
+    for (let index = 0; index < plans.length; index += 1) {
+      const plan = plans[index]!;
+      if (planIds.has(plan.id)) throw new Error("Goal phase Plans must be unique");
+      planIds.add(plan.id);
+      this.validatePlanExecution(
+        registrationsByPlan[index]!,
+        plan,
+        itemsByPlan[index]!,
+        dependenciesByPlan[index]!,
+      );
+    }
+    if (params.goal.planId !== plans[0]!.id) {
+      throw new Error("Goal planId must match the first phase Plan");
+    }
+    if (params.associations.length !== plans.length) {
+      throw new Error("Goal must declare one association per phase Plan");
+    }
+    for (let index = 0; index < plans.length; index += 1) {
+      const association = params.associations[index]!;
+      if (
+        association.goalId !== params.goal.id
+        || association.planId !== plans[index]!.id
+        || association.ordinal !== index
+      ) {
+        throw new Error("Goal associations must be ordered by phase Plan");
+      }
+    }
+    const planIndex = new Map(plans.map((plan, index) => [plan.id, index]));
+    for (const milestone of params.milestones) {
+      if (milestone.goalId !== params.goal.id) {
+        throw new Error(`Every milestone must belong to goal ${params.goal.id}`);
+      }
+      if (milestone.planId === undefined) {
+        throw new Error("Every Goal milestone must carry a plan identity");
+      }
+      const index = planIndex.get(milestone.planId);
+      if (index === undefined) {
+        throw new Error(
+          `Milestone ${milestone.itemId} references unknown plan ${milestone.planId}`,
+        );
+      }
+      const items = params.itemsByPlan[index]!;
+      if (!items.some((item) => item.id === milestone.itemId && item.taskId === milestone.taskId)) {
+        throw new Error(`Milestone ${milestone.itemId} must link the registered plan Task`);
+      }
+    }
+    // Exact one-to-one milestone coverage per Plan item: every item must have
+    // exactly one plan-qualified milestone linked to its registered Task.
+    // Missing, duplicate, extra, or mismatched rows fail before any mutation.
+    for (let index = 0; index < plans.length; index += 1) {
+      const planId = plans[index]!.id;
+      const items = params.itemsByPlan[index]!;
+      const countByItem = new Map<string, number>();
+      for (const milestone of params.milestones) {
+        if ((milestone.planId ?? params.goal.planId) !== planId) continue;
+        countByItem.set(milestone.itemId, (countByItem.get(milestone.itemId) ?? 0) + 1);
+      }
+      for (const item of items) {
+        const count = countByItem.get(item.id) ?? 0;
+        if (count === 0) {
+          throw new Error(`Plan item ${item.id} is missing a goal milestone gate`);
+        }
+        if (count > 1) {
+          throw new Error(`Plan item ${item.id} has duplicate goal milestone gates`);
+        }
+      }
+    }
+  }
+
+  /** Shared insert body for an ordered multi-Plan Goal graph. */
+  private insertGoalPhasesExecution(params: {
+    registrationsByPlan: StagedTaskRegistration[][];
+    plans: PlanRecord[];
+    itemsByPlan: PlanItemRecord[][];
+    dependenciesByPlan: DependencyRecord[][];
+    goal: GoalRecord;
+    associations: GoalPlanAssociation[];
+    milestones: GoalMilestoneRecord[];
+  }): void {
+    for (let index = 0; index < params.plans.length; index += 1) {
+      this.insertPlanExecution(
+        params.registrationsByPlan[index]!,
+        params.plans[index]!,
+        params.itemsByPlan[index]!,
+        params.dependenciesByPlan[index]!,
+      );
+    }
+    this.insertGoalRecords(params.goal, params.associations, params.milestones);
+  }
+
+  /**
+   * Atomically register every ordered phase Plan graph (Tasks, dependencies,
+   * items), the ordered Goal-Plan associations, the Goal record, and every
+   * plan-qualified milestone as one unit before any in-memory queue action.
+   * A relational or validation failure in any later phase leaves zero new
+   * Task, Plan, association, Goal, milestone, or event rows.
+   */
+  createGoalPhasesExecution(params: {
+    registrationsByPlan: StagedTaskRegistration[][];
+    plans: PlanRecord[];
+    itemsByPlan: PlanItemRecord[][];
+    dependenciesByPlan: DependencyRecord[][];
+    goal: GoalRecord;
+    associations: GoalPlanAssociation[];
+    milestones: GoalMilestoneRecord[];
+  }): void {
+    this.validateGoalPhasesExecution(params);
+    this.transact(() => this.insertGoalPhasesExecution(params));
+  }
+
   /**
    * Atomically confirm one explicit Main outcome intake: commit the complete
    * existing Task/Plan/Goal registration graph AND advance the intake to the
@@ -846,6 +1127,14 @@ export class StateStore {
     dependencies?: DependencyRecord[];
     goal?: GoalRecord;
     milestones?: GoalMilestoneRecord[];
+    /** Ordered multi-Plan Goal graph for v2 confirmations. */
+    goalPhases?: {
+      registrationsByPlan: StagedTaskRegistration[][];
+      plans: PlanRecord[];
+      itemsByPlan: PlanItemRecord[][];
+      dependenciesByPlan: DependencyRecord[][];
+      associations: GoalPlanAssociation[];
+    };
   }): void {
     this.transact(() => {
       const row = this.db
@@ -885,6 +1174,22 @@ export class StateStore {
       ) {
         throw new Error("Confirmation receipt does not match the staged work graph");
       }
+      // Multi-phase Goals insert registrationsByPlan, not the flat registrations
+      // array. Bind receipt-facing and insertion-facing Task order exactly so a
+      // length, order, duplicate, or identity mismatch fails before mutation.
+      if (params.goalPhases !== undefined) {
+        const phaseTaskIds = params.goalPhases.registrationsByPlan
+          .flat()
+          .map(({ task }) => task.id);
+        if (
+          stagedTaskIds.length !== phaseTaskIds.length
+          || stagedTaskIds.some((taskId, index) => taskId !== phaseTaskIds[index])
+        ) {
+          throw new Error(
+            "Confirmation staged work graph does not match the ordered phase registrations",
+          );
+        }
+      }
       if (params.plan === undefined) {
         if (receipt.planId !== undefined) {
           throw new Error("Confirmation receipt plan does not match the staged plan");
@@ -900,30 +1205,54 @@ export class StateStore {
         throw new Error("Confirmation receipt goal does not match the staged goal");
       }
       if (params.goal !== undefined) {
-        if (
-          params.plan === undefined
-          || params.items === undefined
-          || params.dependencies === undefined
-          || params.milestones === undefined
-        ) {
-          throw new Error("Goal confirmation requires a complete plan graph");
+        if (params.goalPhases !== undefined) {
+          if (params.milestones === undefined) {
+            throw new Error("Goal confirmation requires plan-qualified milestones");
+          }
+          this.validateGoalPhasesExecution({
+            registrationsByPlan: params.goalPhases.registrationsByPlan,
+            plans: params.goalPhases.plans,
+            itemsByPlan: params.goalPhases.itemsByPlan,
+            dependenciesByPlan: params.goalPhases.dependenciesByPlan,
+            goal: params.goal,
+            associations: params.goalPhases.associations,
+            milestones: params.milestones,
+          });
+          this.insertGoalPhasesExecution({
+            registrationsByPlan: params.goalPhases.registrationsByPlan,
+            plans: params.goalPhases.plans,
+            itemsByPlan: params.goalPhases.itemsByPlan,
+            dependenciesByPlan: params.goalPhases.dependenciesByPlan,
+            goal: params.goal,
+            associations: params.goalPhases.associations,
+            milestones: params.milestones,
+          });
+        } else {
+          if (
+            params.plan === undefined
+            || params.items === undefined
+            || params.dependencies === undefined
+            || params.milestones === undefined
+          ) {
+            throw new Error("Goal confirmation requires a complete plan graph");
+          }
+          this.validateGoalExecution(
+            params.registrations,
+            params.plan,
+            params.items,
+            params.dependencies,
+            params.goal,
+            params.milestones,
+          );
+          this.insertPlanExecutionWithGoal(
+            params.registrations,
+            params.plan,
+            params.items,
+            params.dependencies,
+            params.goal,
+            params.milestones,
+          );
         }
-        this.validateGoalExecution(
-          params.registrations,
-          params.plan,
-          params.items,
-          params.dependencies,
-          params.goal,
-          params.milestones,
-        );
-        this.insertPlanExecutionWithGoal(
-          params.registrations,
-          params.plan,
-          params.items,
-          params.dependencies,
-          params.goal,
-          params.milestones,
-        );
       } else if (params.plan !== undefined) {
         if (params.items === undefined || params.dependencies === undefined) {
           throw new Error("Plan confirmation requires a complete item graph");
@@ -964,7 +1293,13 @@ export class StateStore {
     });
   }
 
-  private insertGoal(goal: GoalRecord, milestones: GoalMilestoneRecord[]): void {
+  /** Insert one Goal with its ordered associations and plan-qualified
+   *  milestones as one unit. Legacy single-Plan creation uses ordinal zero. */
+  private insertGoalRecords(
+    goal: GoalRecord,
+    associations: GoalPlanAssociation[],
+    milestones: GoalMilestoneRecord[],
+  ): void {
     this.db
       .prepare(
         "INSERT INTO goals (id, plan_id, status, created_at, updated_at, record_json) VALUES (?, ?, ?, ?, ?, ?)",
@@ -977,22 +1312,46 @@ export class StateStore {
         goal.updatedAt,
         JSON.stringify(goal),
       );
-    const insertMilestone = this.db.prepare(
-      `INSERT INTO goal_milestones
-        (goal_id, item_id, task_id, gate, item_index, satisfied, record_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    const insertAssociation = this.db.prepare(
+      `INSERT INTO goal_plan_associations (goal_id, plan_id, ordinal, created_at)
+       VALUES (?, ?, ?, ?)`,
     );
-    for (const milestone of milestones) {
-      insertMilestone.run(
-        milestone.goalId,
-        milestone.itemId,
-        milestone.taskId ?? null,
-        milestone.gate,
-        milestone.itemIndex,
-        milestone.satisfied ? 1 : 0,
-        JSON.stringify(milestone),
+    for (const association of associations) {
+      insertAssociation.run(
+        association.goalId,
+        association.planId,
+        association.ordinal,
+        association.createdAt,
       );
     }
+    const insertMilestone = this.db.prepare(
+      `INSERT INTO goal_milestones
+        (goal_id, plan_id, item_id, task_id, gate, item_index, satisfied, record_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const milestone of milestones) {
+      const normalized = { ...milestone, planId: milestone.planId ?? goal.planId };
+      insertMilestone.run(
+        normalized.goalId,
+        normalized.planId,
+        normalized.itemId,
+        normalized.taskId ?? null,
+        normalized.gate,
+        normalized.itemIndex,
+        normalized.satisfied ? 1 : 0,
+        JSON.stringify(normalized),
+      );
+    }
+  }
+
+  private insertGoal(goal: GoalRecord, milestones: GoalMilestoneRecord[]): void {
+    const association: GoalPlanAssociation = {
+      goalId: goal.id,
+      planId: goal.planId,
+      ordinal: 0,
+      createdAt: goal.createdAt,
+    };
+    this.insertGoalRecords(goal, [association], milestones);
   }
 
   saveGoal(goal: GoalRecord, milestones?: readonly GoalMilestoneRecord[]): void {
@@ -1006,17 +1365,19 @@ export class StateStore {
         const update = this.db.prepare(
           `UPDATE goal_milestones
            SET task_id = ?, gate = ?, item_index = ?, satisfied = ?, record_json = ?
-           WHERE goal_id = ? AND item_id = ?`,
+           WHERE goal_id = ? AND plan_id = ? AND item_id = ?`,
         );
         for (const milestone of milestones) {
+          const normalized = { ...milestone, planId: milestone.planId ?? goal.planId };
           update.run(
-            milestone.taskId ?? null,
-            milestone.gate,
-            milestone.itemIndex,
-            milestone.satisfied ? 1 : 0,
-            JSON.stringify(milestone),
-            milestone.goalId,
-            milestone.itemId,
+            normalized.taskId ?? null,
+            normalized.gate,
+            normalized.itemIndex,
+            normalized.satisfied ? 1 : 0,
+            JSON.stringify(normalized),
+            normalized.goalId,
+            normalized.planId,
+            normalized.itemId,
           );
         }
       }
@@ -1040,8 +1401,15 @@ export class StateStore {
   }
 
   getGoalByPlanId(planId: string): GoalRecord | undefined {
+    // Ownership truth is the durable association relation (primary and later Plans).
     const row = this.db
-      .prepare("SELECT record_json FROM goals WHERE plan_id = ?")
+      .prepare(
+        `SELECT g.record_json AS record_json
+         FROM goal_plan_associations gpa
+         JOIN goals g ON g.id = gpa.goal_id
+         WHERE gpa.plan_id = ?
+         LIMIT 1`,
+      )
       .get(planId) as { record_json: string } | undefined;
     return row ? parseRecord<GoalRecord>(row.record_json, "goal") : undefined;
   }
@@ -1070,24 +1438,140 @@ export class StateStore {
         return undefined;
       }
     }
+
+    // Later associated Plans have no primary milestones yet; resolve via Plan ownership.
+    const planItem = this.getPlanItemByTaskId(taskId);
+    if (planItem !== undefined) {
+      return this.getGoalByPlanId(planItem.planId);
+    }
     return undefined;
+  }
+
+  /**
+   * Ordered durable Plan membership for one Goal. Fail-closed on unknown Goal.
+   * Does not claim later Plans are active or milestone-supervised.
+   */
+  listGoalPlanAssociations(goalId: string): GoalPlanAssociation[] {
+    this.getGoal(goalId);
+    const rows = this.db
+      .prepare(
+        `SELECT goal_id, plan_id, ordinal, created_at
+         FROM goal_plan_associations
+         WHERE goal_id = ?
+         ORDER BY ordinal ASC`,
+      )
+      .all(goalId) as unknown as Array<{
+      goal_id: string;
+      plan_id: string;
+      ordinal: number;
+      created_at: string;
+    }>;
+    return rows.map((row) => ({
+      goalId: row.goal_id,
+      planId: row.plan_id,
+      ordinal: row.ordinal,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Append one already-persisted independent Plan as the next ordered member.
+   * Fail-closed: Goal/Plan must exist; Plan must not already have a Goal owner;
+   * ordinal is assigned as max+1 (or 0 when empty). Does not create Tasks,
+   * admit queue work, or mutate milestones.
+   */
+  attachPlanToGoal(goalId: string, planId: string): GoalPlanAssociation {
+    return this.atomic(() => {
+      this.getGoal(goalId);
+      this.getPlan(planId);
+
+      const owned = this.db
+        .prepare(
+          "SELECT goal_id AS goal_id FROM goal_plan_associations WHERE plan_id = ?",
+        )
+        .get(planId) as { goal_id: string } | undefined;
+      if (owned !== undefined) {
+        throw new Error(
+          owned.goal_id === goalId
+            ? `Plan ${planId} is already associated with goal ${goalId}`
+            : `Plan ${planId} is already owned by goal ${owned.goal_id}`,
+        );
+      }
+
+      const maxRow = this.db
+        .prepare(
+          "SELECT MAX(ordinal) AS max_ord FROM goal_plan_associations WHERE goal_id = ?",
+        )
+        .get(goalId) as { max_ord: number | null } | undefined;
+      const nextOrdinal =
+        maxRow?.max_ord === null || maxRow?.max_ord === undefined
+          ? 0
+          : maxRow.max_ord + 1;
+      if (!Number.isSafeInteger(nextOrdinal) || nextOrdinal < 0) {
+        throw new Error(`Invalid next ordinal for goal ${goalId}`);
+      }
+
+      const createdAt = now();
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO goal_plan_associations (goal_id, plan_id, ordinal, created_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(goalId, planId, nextOrdinal, createdAt);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/UNIQUE constraint failed/i.test(message)) {
+          throw new Error(
+            `Goal ${goalId} already has a Plan at ordinal ${nextOrdinal} or Plan ${planId} is already associated`,
+          );
+        }
+        throw error;
+      }
+
+      return {
+        goalId,
+        planId,
+        ordinal: nextOrdinal,
+        createdAt,
+      };
+    });
   }
 
   getGoalMilestones(goalId: string): GoalMilestoneRecord[] {
     const rows = this.db
       .prepare(
-        "SELECT record_json FROM goal_milestones WHERE goal_id = ? ORDER BY item_index",
+        `SELECT gm.record_json AS record_json, gm.plan_id AS plan_id
+         FROM goal_milestones gm
+         LEFT JOIN goal_plan_associations gpa
+           ON gpa.goal_id = gm.goal_id AND gpa.plan_id = gm.plan_id
+         WHERE gm.goal_id = ?
+         ORDER BY gpa.ordinal ASC, gm.item_index ASC`,
       )
-      .all(goalId) as unknown as Array<{ record_json: string }>;
-    return rows.map((row) => parseRecord<GoalMilestoneRecord>(row.record_json, "goal milestone"));
+      .all(goalId) as unknown as Array<{ record_json: string; plan_id: string }>;
+    return rows.map((row) => {
+      const record = parseRecord<GoalMilestoneRecord>(row.record_json, "goal milestone");
+      if (record.planId === undefined) return { ...record, planId: row.plan_id };
+      return record;
+    });
   }
 
-  getGoalMilestone(goalId: string, itemId: string): GoalMilestoneRecord | undefined {
-    const row = this.db
-      .prepare(
-        "SELECT record_json FROM goal_milestones WHERE goal_id = ? AND item_id = ?",
-      )
-      .get(goalId, itemId) as { record_json: string } | undefined;
+  getGoalMilestone(
+    goalId: string,
+    itemId: string,
+    planId?: string,
+  ): GoalMilestoneRecord | undefined {
+    const row = planId === undefined
+      ? (this.db
+          .prepare(
+            "SELECT record_json FROM goal_milestones WHERE goal_id = ? AND item_id = ?",
+          )
+          .get(goalId, itemId) as { record_json: string } | undefined)
+      : (this.db
+          .prepare(
+            "SELECT record_json FROM goal_milestones WHERE goal_id = ? AND plan_id = ? AND item_id = ?",
+          )
+          .get(goalId, planId, itemId) as { record_json: string } | undefined);
     return row
       ? parseRecord<GoalMilestoneRecord>(row.record_json, "goal milestone")
       : undefined;
@@ -1514,6 +1998,40 @@ export class StateStore {
     return rows.map((row) =>
       parseRecord<IntegrationResultRecord>(row.record_json, "integration result"),
     );
+  }
+
+  /** Insert or replace the durable checkpoint operation identity record. */
+  saveCheckpointOperation(record: CheckpointOperationRecord): void {
+    if (!isCheckpointOperationRecord(record)) {
+      throw new Error(CHECKPOINT_OPERATION_CORRUPTION_ERROR);
+    }
+    this.db
+      .prepare(
+        `INSERT INTO checkpoint_operations (id, task_id, attempt_id, record_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           task_id = excluded.task_id,
+           attempt_id = excluded.attempt_id,
+           record_json = excluded.record_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        record.operationId,
+        record.taskId,
+        record.attemptId,
+        JSON.stringify(record),
+        record.createdAt,
+        record.updatedAt,
+      );
+  }
+
+  getCheckpointOperation(operationId: string): CheckpointOperationRecord | undefined {
+    const row = this.db
+      .prepare("SELECT record_json FROM checkpoint_operations WHERE id = ?")
+      .get(operationId) as { record_json: string } | undefined;
+    return row === undefined
+      ? undefined
+      : parseCheckpointOperationRecord(row.record_json);
   }
 
   /**

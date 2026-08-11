@@ -65,6 +65,7 @@ import type {
   QualityCheck,
   QualityReport,
   ResolvedExecutionMode,
+  TaskBackground,
   TaskRecord,
   TaskSpec,
 } from "./types.js";
@@ -80,6 +81,21 @@ export interface SafeIntegrationFeasibility {
   integrationMaxFiles: number;
   integrationMaxLines: number;
   issues: string[];
+}
+
+/** Exact Main-approved version-3 contract background projected verbatim.
+ *  Main-authored, never inferred or translated; present only for version-3
+ *  Tasks so legacy v1/v2 previews keep their exact shape. */
+export interface SafeTaskBackground {
+  purpose: string;
+  audience: string;
+  currentSituation: string;
+  parentGoalPlan: string;
+  priorDecisions: string[];
+  suppliedInputs: string[];
+  downstreamUse: string;
+  workerAuthority: string[];
+  returnToMain: string[];
 }
 
 /** Explicit allowlist result — never spread TaskSpec or settings. */
@@ -147,6 +163,12 @@ export interface SafeTaskAdmissionPreview {
    * Integration authority.
    */
   workspaceBoundaryAdvice: WorkspaceBoundaryAdvice;
+  /**
+   * Exact Main-approved version-3 contract background. Present only for
+   * version-3 Tasks; absent for legacy v1/v2 shapes. Projected verbatim so a
+   * bound submit round-trips the same background Main previewed.
+   */
+  background?: SafeTaskBackground;
   /**
    * Content-free digest binding the preview to the exact Task file bytes and
    * the current effective admission settings (selection, policy/provenance,
@@ -246,6 +268,23 @@ function safeIntegrationSummary(
     integrationMaxFiles: feasibility.integrationMaxFiles,
     integrationMaxLines: feasibility.integrationMaxLines,
     issues: [...feasibility.issues],
+  };
+}
+
+/** Detached verbatim background copy so preview consumers cannot alias the
+ *  immutable stored Task arrays. Arrays are copied; scalars are Main-authored
+ *  exact strings. */
+function safeBackground(background: TaskBackground): SafeTaskBackground {
+  return {
+    purpose: background.purpose,
+    audience: background.audience,
+    currentSituation: background.currentSituation,
+    parentGoalPlan: background.parentGoalPlan,
+    priorDecisions: [...background.priorDecisions],
+    suppliedInputs: [...background.suppliedInputs],
+    downstreamUse: background.downstreamUse,
+    workerAuthority: [...background.workerAuthority],
+    returnToMain: [...background.returnToMain],
   };
 }
 
@@ -363,6 +402,7 @@ export function projectSafeTaskAdmissionPreview(
       ...(prepared.profileLabel === undefined ? {} : { workerProfileLabel: prepared.profileLabel }),
     }),
     workspaceBoundaryAdvice: prepared.workspaceBoundaryAdvice,
+    ...(spec.version === 3 ? { background: safeBackground(spec.contract.background) } : {}),
     previewRevisionDigest: prepared.previewRevisionDigest,
   };
 }
@@ -557,6 +597,34 @@ export function formatTaskAdmissionPreviewHuman(preview: SafeTaskAdmissionPrevie
     `  noProgressTimeoutMs=${values.noProgressTimeoutMs === null ? "unlimited" : values.noProgressTimeoutMs}`
     + ` (${provenance.noProgressTimeoutMs})`,
   );
+  if (preview.background !== undefined) {
+    lines.push("Background:");
+    lines.push(`  Why this matters: ${preview.background.purpose}`);
+    lines.push(`  Who or what it serves: ${preview.background.audience}`);
+    lines.push(`  Current situation: ${preview.background.currentSituation}`);
+    lines.push(`  Parent Goal/Plan: ${preview.background.parentGoalPlan}`);
+    if (preview.background.priorDecisions.length > 0) {
+      lines.push("  Prior decisions:");
+      for (const decision of preview.background.priorDecisions) {
+        lines.push(`    - ${decision}`);
+      }
+    }
+    if (preview.background.suppliedInputs.length > 0) {
+      lines.push("  Supplied inputs:");
+      for (const input of preview.background.suppliedInputs) {
+        lines.push(`    - ${input}`);
+      }
+    }
+    lines.push(`  How the output is used: ${preview.background.downstreamUse}`);
+    lines.push("  Worker authority:");
+    for (const authority of preview.background.workerAuthority) {
+      lines.push(`    - ${authority}`);
+    }
+    lines.push("  Decisions that must return to Main:");
+    for (const decision of preview.background.returnToMain) {
+      lines.push(`    - ${decision}`);
+    }
+  }
   lines.push(
     `Task Contract: ${preview.quality.passed ? "PASS" : "FAIL"} (${preview.quality.score}/100)`,
   );

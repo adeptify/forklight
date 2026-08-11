@@ -17,6 +17,12 @@ import { SetupService } from "../src/setup/service.js";
 import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
 import { StateStore } from "../src/state/store.js";
 import { currentBuildIdentity } from "../src/core/build-identity.js";
+import {
+  defaultAdvancedPolicyFields,
+  defaultEnforcementCapability,
+  resolveEffectivePolicy,
+} from "../src/core/advanced-policy.js";
+import type { AdvancedPolicyFields } from "../src/core/types.js";
 
 class MemoryKeychain implements SetupKeychainStore {
   readonly values = new Map<string, string>();
@@ -3307,6 +3313,54 @@ test("Hub /api/ops/tasks/history bounds daemon errors with privacy-safe language
 });
 
 // --- Execution preference defaulting (FL-104) ---
+
+test("saved Worker values freeze into the immutable effective snapshot of a new Task", () => {
+  // The values a user saves in the Worker settings editor are the exact values
+  // a brand-new Task freezes through the existing shared resolver path.
+  const savedWorkerAdvancedPolicy: Partial<AdvancedPolicyFields> = {
+    maxDurationMs: 900000,
+    maxConcurrency: 1,
+    completionMode: "warn",
+    maxWorkerValidationRepairs: 2,
+    maxMainCorrections: 1,
+    maxMainReverifications: 1,
+    maxAdaptationRounds: 0,
+  };
+  const global = defaultAdvancedPolicyFields();
+  const capability = defaultEnforcementCapability();
+  const workerPolicy = resolveEffectivePolicy(
+    savedWorkerAdvancedPolicy,
+    undefined,
+    global,
+    "prof-snapshot",
+    capability,
+  );
+  assert.equal(workerPolicy.values.maxDurationMs, 900000);
+  assert.equal(workerPolicy.values.maxWorkerValidationRepairs, 2);
+  assert.equal(workerPolicy.values.maxMainReverifications, 1);
+  assert.equal(workerPolicy.values.maxAdaptationRounds, 0);
+  assert.equal(workerPolicy.provenance.maxWorkerValidationRepairs, "worker");
+  assert.equal(workerPolicy.provenance.maxDurationMs, "worker");
+
+  // A later Worker edit must not reinterpret an already-frozen Task snapshot:
+  // the immutable snapshot keeps the saved values with Worker provenance.
+  const frozenSnapshot = workerPolicy;
+  const editedWorker = resolveEffectivePolicy(
+    { ...savedWorkerAdvancedPolicy, maxWorkerValidationRepairs: 0, maxDurationMs: null },
+    undefined,
+    global,
+    "prof-snapshot",
+    capability,
+  );
+  assert.equal(frozenSnapshot.values.maxWorkerValidationRepairs, 2,
+    "frozen Task snapshot keeps the saved repair allowance");
+  assert.equal(frozenSnapshot.values.maxDurationMs, 900000,
+    "frozen Task snapshot keeps the saved duration");
+  assert.equal(editedWorker.values.maxWorkerValidationRepairs, 0,
+    "later Worker edits affect only newly created Tasks");
+  assert.equal(editedWorker.values.maxDurationMs, null,
+    "unlimited stays explicit after a later edit");
+});
 
 test("Hub defaults newly created Workers to auto and preserves legacy profiles", async () => {
   const ctx = await makeHub();

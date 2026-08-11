@@ -771,13 +771,13 @@ async function buildReviewPacket(
   }
 
   const acceptanceCriteria =
-    candidate.spec.version === 2
+    candidate.spec.version !== 1
       ? [...candidate.spec.acceptance.criteria].slice(0, 20).map((c) => c.slice(0, 300))
       : [];
   const contractOutcome =
-    candidate.spec.version === 2
-      ? candidate.spec.contract.outcome.slice(0, 500)
-      : candidate.spec.goal.slice(0, 500);
+    candidate.spec.version === 1
+      ? candidate.spec.goal.slice(0, 500)
+      : candidate.spec.contract.outcome.slice(0, 500);
 
   return {
     schemaVersion: REVIEW_PACKET_SCHEMA_VERSION,

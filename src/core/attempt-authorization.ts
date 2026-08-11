@@ -87,12 +87,23 @@ function resolveKind(payload: Record<string, unknown>): AuthorizationKind {
   throw new Error("authorization history is corrupt: unknown grant kind");
 }
 
+function workerValidationRepairAttemptOrdinals(
+  attempts: readonly AttemptRecord[],
+): ReadonlySet<number> {
+  return new Set(
+    attempts
+      .filter((attempt) => attempt.executionKind === "worker-validation-repair")
+      .map((attempt) => attempt.ordinal),
+  );
+}
+
 /** Validate grant events and derive consumed / pending state by kind.
  *  Throws on corrupt evidence. Ordinals remain globally sequential across kinds. */
 function resolveGrantState(
   events: readonly { type: string; payload?: unknown; sequence: number }[],
   attemptOrdinals: Set<number>,
   configuredMaxAttempts: number,
+  workerRepairOrdinals: ReadonlySet<number> = new Set(),
 ): {
   extraConsumed: number;
   correctionConsumed: number;
@@ -219,21 +230,19 @@ function resolveGrantState(
   const grantsByOrdinal = new Map<number, ValidatedGrant>();
   for (const g of grants) grantsByOrdinal.set(g.targetOrdinal, g);
 
-  const extraAttemptOrdinals = [...attemptOrdinals]
+  const postBaseAttemptOrdinals = [...attemptOrdinals]
     .filter((o) => o > configuredMaxAttempts)
     .sort((a, b) => a - b);
 
-  // Every extra attempt must have a matching grant
-  for (const ordinal of extraAttemptOrdinals) {
-    if (!grantsByOrdinal.has(ordinal)) {
+  // Attempts after the base cap are contiguous, but Worker validation-repair
+  // Attempts occupy their own lineage and do not consume Main/extra grants.
+  for (let i = 0; i < postBaseAttemptOrdinals.length; i += 1) {
+    if (postBaseAttemptOrdinals[i] !== configuredMaxAttempts + 1 + i) {
       throw new Error("authorization history is corrupt: extra attempt without matching grant");
     }
-  }
-
-  // Ordinals must be globally sequential (no gaps)
-  for (let i = 0; i < extraAttemptOrdinals.length; i += 1) {
-    if (extraAttemptOrdinals[i] !== configuredMaxAttempts + 1 + i) {
-      throw new Error("authorization history is corrupt: non-sequential extra attempts");
+    const ordinal = postBaseAttemptOrdinals[i]!;
+    if (!workerRepairOrdinals.has(ordinal) && !grantsByOrdinal.has(ordinal)) {
+      throw new Error("authorization history is corrupt: extra attempt without matching grant");
     }
   }
 
@@ -284,7 +293,12 @@ export function resolvePendingGrantExecutionOptions(
   void maxExtraAttempts;
   const events = store.listEvents(taskId);
   const attemptOrdinals = new Set(store.listAttempts(taskId).map((a) => a.ordinal));
-  const { pendingGrant } = resolveGrantState(events, attemptOrdinals, configuredMaxAttempts);
+  const { pendingGrant } = resolveGrantState(
+    events,
+    attemptOrdinals,
+    configuredMaxAttempts,
+    workerValidationRepairAttemptOrdinals(store.listAttempts(taskId)),
+  );
   if (!pendingGrant) return null;
   // One canonical exact restart validator, shared by every pending-options
   // consumer. One-way delegation — restart validation never re-enters the
@@ -347,6 +361,9 @@ function latestInterruptedAttempt(
   const latest = attempts.reduce((left, right) => (
     right.ordinal > left.ordinal ? right : left
   ));
+  // Worker validation-repair has its own typed continuation authority. A
+  // generic restart grant must never resume or consume a repair round.
+  if (latest.executionKind === "worker-validation-repair") return null;
   if (latest.status !== "interrupted") return null;
   return { task, latest };
 }
@@ -414,7 +431,12 @@ export function resolvePendingRestartRecoveryGrant(
 ): AttemptExecutionOptions | null {
   const events = store.listEvents(taskId);
   const attemptOrdinals = new Set(store.listAttempts(taskId).map((a) => a.ordinal));
-  const { pendingGrant } = resolveGrantState(events, attemptOrdinals, configuredMaxAttempts);
+  const { pendingGrant } = resolveGrantState(
+    events,
+    attemptOrdinals,
+    configuredMaxAttempts,
+    workerValidationRepairAttemptOrdinals(store.listAttempts(taskId)),
+  );
   if (!pendingGrant || pendingGrant.kind !== "restart-recovery") return null;
   const { skip, authoritativeAttemptId } = revalidatePendingRestartGrant(
     store,
@@ -453,6 +475,7 @@ export function authorizeHandoffRestartRecovery(
     store.listEvents(taskId),
     attemptOrdinals,
     configuredMaxAttempts,
+    workerValidationRepairAttemptOrdinals(store.listAttempts(taskId)),
   );
   if (pendingGrant !== null) {
     if (
@@ -520,6 +543,7 @@ export function authorizeSystemRestartRecovery(
     store.listEvents(taskId),
     attemptOrdinals,
     configuredMaxAttempts,
+    workerValidationRepairAttemptOrdinals(store.listAttempts(taskId)),
   );
   if (pendingGrant !== null) {
     if (
@@ -627,7 +651,12 @@ export function resolvePendingCorrectionGrant(
 ): PendingMainCorrection | null {
   const events = store.listEvents(taskId);
   const attemptOrdinals = new Set(store.listAttempts(taskId).map((a) => a.ordinal));
-  const { pendingGrant } = resolveGrantState(events, attemptOrdinals, configuredMaxAttempts);
+  const { pendingGrant } = resolveGrantState(
+    events,
+    attemptOrdinals,
+    configuredMaxAttempts,
+    workerValidationRepairAttemptOrdinals(store.listAttempts(taskId)),
+  );
   if (!pendingGrant || pendingGrant.kind !== "correction") return null;
   return {
     executionOptions: {
@@ -698,7 +727,10 @@ export function authorizeExtraAttempt(
   const events = store.listEvents(taskId);
   const attemptOrdinals = new Set(attempts.map((a) => a.ordinal));
   const { extraConsumed, pendingGrant } = resolveGrantState(
-    events, attemptOrdinals, configuredMaxAttempts,
+    events,
+    attemptOrdinals,
+    configuredMaxAttempts,
+    workerValidationRepairAttemptOrdinals(attempts),
   );
 
   // Pending grant: recover idempotently or reject conflict
@@ -735,7 +767,10 @@ export function authorizeExtraAttempt(
     );
   }
   // Every earlier extra ordinal must also be terminal
-  const extraAttempts = attempts.filter((a) => a.ordinal > configuredMaxAttempts);
+  const extraAttempts = attempts.filter(
+    (a) => a.ordinal > configuredMaxAttempts
+      && a.executionKind !== "worker-validation-repair",
+  );
   if (extraAttempts.some((a) => a.status === "running")) {
     throw new Error(
       `Task ${taskId} has a non-terminal extra attempt; all earlier extra ordinals must finish before granting the next`,
@@ -877,7 +912,10 @@ export function authorizeMainCorrection(
   const events = store.listEvents(taskId);
   const attemptOrdinals = new Set(attempts.map((a) => a.ordinal));
   const { correctionConsumed, pendingGrant } = resolveGrantState(
-    events, attemptOrdinals, configuredMaxAttempts,
+    events,
+    attemptOrdinals,
+    configuredMaxAttempts,
+    workerValidationRepairAttemptOrdinals(attempts),
   );
 
   // Pending grant: recover idempotently or reject conflict

@@ -10,13 +10,13 @@ import {
 import { loadTaskSpec } from "./task.js";
 import { assessTaskQualityWithPolicy, effectiveQualityPolicyFromGlobal } from "./contract-quality.js";
 import { cloneDefaults, type TaskPolicy } from "./settings.js";
-import type { ContractTaskSpec, QualityReport } from "./types.js";
+import type { QualityReport, StructuredTaskSpec } from "./types.js";
 
 export interface WorkPlanItem {
   id: string;
   taskFile: string;
   dependsOn: string[];
-  task: ContractTaskSpec;
+  task: StructuredTaskSpec;
   quality: QualityReport;
 }
 
@@ -106,8 +106,8 @@ export async function loadWorkPlan(
           policy?.contractQuality ?? cloneDefaults().contractQuality,
         ),
     );
-    if (loaded.spec.version !== 2) {
-      issues.push(`Task ${item.id} uses legacy contract version 1`);
+    if (loaded.spec.version === 1) {
+      issues.push(`Task ${item.id} uses unsupported legacy contract version 1`);
       continue;
     }
     if (!quality.passed) {

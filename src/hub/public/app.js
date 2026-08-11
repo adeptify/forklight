@@ -400,8 +400,13 @@ function pageMeta(tab){
   return { title: tab, sub: "" };
 }
 function getTheme(){
+  try {
+    var stored = localStorage.getItem("fl-theme");
+    if(stored === "dark" || stored === "light") return stored;
+  } catch(_){}
   var attr = document.documentElement.getAttribute("data-theme");
   if(attr === "dark" || attr === "light") return attr;
+  if(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
   return "light";
 }
 function applyTheme(theme){
@@ -438,9 +443,21 @@ var S = {
    * choice set while a Core-filtered view is showing. */
   workFilterDraft: { project: "", columns: "", workerProfileId: "" },
   workFilter: {},
+  /* FL-112B: one semantic portfolio selection. This is presentation state
+   * only; Core remains the sole owner of lifecycle and ancestry truth. */
+  workSelection: null,
+  /* FL-112E3: the viewed phase is browser-only navigation. It is kept beside
+   * the selected Goal so a poll can rebuild the board without changing which
+   * phase the user is reading. No phase click calls a mutation or refresh. */
+  workViewedGoalId: null,
+  workViewedPlanId: null,
   /* projects holds exact project path values for the filter request; presentation
    * labels and omitted-internal count are derived at render time. */
   workFilterOptions: { projects: [], workers: [], omittedInternalProjects: 0 },
+  /* One-off history stays lazy; these two values keep an in-progress search
+   * field stable across evidence rebuilds without changing the server query. */
+  workOneOffSearch: "",
+  workOneOffSearchDraft: "",
   economics: null,
   economicsError: null,
   routingCoverage: null,
@@ -456,13 +473,28 @@ var S = {
   goalsError: null, statsError: null, settingsError: null, sampleError: null,
   hub: null,
   lastOk: 0, connected: false, hadOk: false, tab: "work",
-  detail: null, detailReturnFocus: null, timer: null, token: null,
+  detail: null, detailTaskId: null, detailReturnFocus: null, timer: null, token: null,
   taskCrumb: null,
   /* FL-109C2A: bounded presentation-only handoff chosen by drag or the
    * Move/Act chooser. Never submitted here; existing controls execute it. */
   pendingActionHandoff: null,
   batchInFlight: false, pendingRefresh: false,
   workerEditId: null, workerPreviewTimer: null, workerFormActive: false,
+  /* FL-116A: which settings groups are open plus the selected Worker survive a
+   * Worker page re-render (polling, language switch). workerDraft preserves the
+   * full unsaved form on any deliberate rWorker rebuild (language switch, tab
+   * return); workerPreviewRows holds the latest backend effective preview. */
+  workerOpenGroups: {},
+  workerDraft: null,
+  workerFormRendered: false,
+  /* Identifies the Worker whose form is currently in the DOM. This prevents
+   * an explicit row switch from capturing the previous Worker's draft and
+   * restoring it into the newly selected Worker. null is the create form. */
+  workerFormContextId: null,
+  workerRenderedTruthKey: null,
+  workerPreviewRows: null,
+  workerQualityPreviewRows: null,
+  workerSummariesRefresher: null,
   mrResult: null, mrDirty: false, mrEvaluating: false, mrDraft: null,
   mrTaskClass: "", mrTaskFamily: "", mrCompIntent: "", mrCompTriggers: "",
   mrCandidates: [],
@@ -484,9 +516,44 @@ var S = {
    * the last bounded failure key so the proposed preview stays readable. */
   outcomeConfirmingId: null,
   outcomeConfirmPendingId: null,
-  outcomeConfirmError: null
+  outcomeConfirmError: null,
+  /* FL-112E9: bounded created-work navigation intent. Consumes only the
+   * durable confirmation ids and the refreshed canonical WorkHierarchyView;
+   * never optimistic and never invents a card, parent, or success. */
+  outcomeCreatedNavigate: null,
+  /* Transient Task-drawer intent produced only after the created workspace
+   * (Independent Tasks) is selected and the canonical card is present. */
+  outcomeCreatedTaskDrawer: null,
+  /* FL-112A: last render-relevant Work truth snapshot (stable string). Used to
+   * skip Work DOM replacement when a poll changes only chrome/clock noise. */
+  workRenderSnapshot: null
 };
 var viewEl, detailEl, statusEl, footerEl, titleEl, subEl, topMetaEl, scrimEl;
+/* FL-112F: bounded, presentation-only Work context for a full browser reload.
+ * The raw record is read before the first fetch only as an intent. It is not
+ * applied until the canonical Work hierarchy has loaded and every id/option
+ * can be checked against that truth. */
+var WORK_READING_CONTEXT_KEY = "fl-work-reading-context";
+var WORK_READING_CONTEXT_VERSION = 1;
+var WORK_READING_CONTEXT_MAX_CHARS = 12000;
+var WORK_READING_CONTEXT_MAX_ID_CHARS = 180;
+var WORK_READING_CONTEXT_MAX_COLLAPSE = 48;
+var WORK_READING_CONTEXT_DISCLOSURES = [
+  "finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen",
+  "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen",
+  "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"
+];
+var WORK_READING_CONTEXT_TABS = [
+  "overview", "instruction", "process", "result", "checks", "actions", "more"
+];
+var workReadingContextPending = null;
+var workReadingContextApplied = false;
+var workReadingContextReady = false;
+var workReloadRestoreContext = null;
+var workReloadBoardScrollRestored = false;
+var workReloadDetailScrollTop = null;
+var workInitialSelectionNeedsFocus = false;
+var workBoardFocusRequest = null;
 /* Model-routing weight field identifiers shared by editor and result renderer. */
 var MR_WEIGHT_KEYS = [
   ["acceptedDelivery", "mrPolicyAcceptedDelivery", "mrPolicyAcceptedDeliveryHint"],
@@ -1071,16 +1138,26 @@ function refresh(){
     // Connected state follows the current health read, not retained data.
     if(!S.healthError) { S.lastOk = Date.now(); S.connected = true; S.hadOk = true; }
     else { S.connected = false; }
-    if((S.tab === "worker" && S.workerFormActive) || (S.tab === "work" && S.outcomeFormActive)){
-      updStatus();
-      setPageChrome();
+    /* Full-reload context is only applied after the canonical Work projection
+     * is available. A valid saved filter needs one follow-up read so the board
+     * and its ancestry come from the same Core-filtered truth. */
+    if(S.tab === "work" && workApplySavedReadingContext()){
+      S.pendingRefresh = true;
+      return;
+    }
+    if(S.tab === "worker" && S.workerFormActive){
+      /* Keep typing stable on ordinary polls, but rebuild from refreshed
+       * canonical Worker/readiness truth when that visible truth changes.
+       * rWorker captures and restores the unsaved draft plus open groups. */
+      if(workerVisibleTruthKey() !== S.workerRenderedTruthKey) render();
+      else { updStatus(); setPageChrome(); }
     } else {
       render();
     }
   }).catch(function(){
     if(!S.token){ showUnauthenticated(); return; }
     S.connected = false;
-    if((S.tab === "worker" && S.workerFormActive) || (S.tab === "work" && S.outcomeFormActive)){
+    if(S.tab === "worker" && S.workerFormActive){
       updStatus();
       setPageChrome();
     } else {
@@ -3604,7 +3681,7 @@ function rGoals(){
 
 /* --- Outcome composer + intake story (FL-109D2) --- */
 /* One calm place to describe the desired result first. The composer collects
- * user text and optional advanced fields, submits once through the
+ * user text and optional More options fields, submits once through the
  * authenticated Hub create bridge, and never decides a shape or creates work.
  * The intake story renders canonical pending/proposed/created D1/D3A truth
  * from the normal Work refresh path; the browser never invents lifecycle
@@ -3690,6 +3767,9 @@ function renderOutcomeSection(){
   var wrap = h("div", "outcome-section");
   wrap.setAttribute("data-fl-role", "outcome-section");
   wrap.appendChild(renderOutcomeComposer());
+  /* FL-112E9: the recorded result's journey stays adjacent to the composer.
+   * It never falls below the whole board; the selected intake is the primary
+   * journey and older intakes stay a bounded collapsed list. */
   wrap.appendChild(renderIntakeStory());
   return wrap;
 }
@@ -3709,12 +3789,13 @@ function renderOutcomeComposer(){
   var textarea = document.createElement("textarea");
   textarea.className = "outcome-textarea";
   textarea.setAttribute("data-fl-role", "outcome-text");
-  textarea.rows = 3;
+  textarea.rows = 2;
   textarea.placeholder = t("outcomePlaceholder");
   textarea.value = String(S.outcomeDraft.outcome || "");
   textarea.addEventListener("input", function(){
     S.outcomeDraft.outcome = textarea.value;
     S.outcomeFormActive = true;
+    workScheduleReadingContextSave();
   });
   field.appendChild(textarea);
   form.appendChild(field);
@@ -3726,6 +3807,7 @@ function renderOutcomeComposer(){
   summary.textContent = t("outcomeAdvanced");
   details.appendChild(summary);
   var advBody = h("div", "outcome-advanced-body");
+  advBody.appendChild(h("div", "outcome-more-options-hint", t("outcomeAdvancedHint")));
 
   var projWrap = h("label", "outcome-field", "");
   projWrap.appendChild(h("span", "outcome-label", t("outcomeProjectLabel")));
@@ -3738,6 +3820,7 @@ function renderOutcomeComposer(){
   projInput.addEventListener("input", function(){
     S.outcomeDraft.project = projInput.value;
     S.outcomeFormActive = true;
+    workScheduleReadingContextSave();
   });
   projWrap.appendChild(projInput);
   advBody.appendChild(projWrap);
@@ -3753,6 +3836,7 @@ function renderOutcomeComposer(){
   ctxText.addEventListener("input", function(){
     S.outcomeDraft.context = ctxText.value;
     S.outcomeFormActive = true;
+    workScheduleReadingContextSave();
   });
   ctxWrap.appendChild(ctxText);
   advBody.appendChild(ctxWrap);
@@ -3772,6 +3856,7 @@ function renderOutcomeComposer(){
   shapeSel.addEventListener("change", function(){
     S.outcomeDraft.requestedShape = shapeSel.value;
     S.outcomeFormActive = true;
+    workScheduleReadingContextSave();
   });
   shapeWrap.appendChild(shapeSel);
   advBody.appendChild(shapeWrap);
@@ -3806,6 +3891,36 @@ function renderOutcomeComposer(){
 
   return card;
 }
+/* FL-112E9: one plain four-step first-use journey. The browser never invents
+ * a shape, never starts work, and never confirms implicitly; each step explains
+ * what happened, who acts next, and that nothing starts before confirmation. */
+var OUTCOME_JOURNEY_KEYS = [
+  "outcomeJourneyStep1",
+  "outcomeJourneyStep2",
+  "outcomeJourneyStep3",
+  "outcomeJourneyStep4"
+];
+function outcomeJourneyCurrentIndex(intake){
+  if(!intake) return 0;
+  if(intake.status === "created") return 3;
+  if(intake.status === "proposed") return 2;
+  return 1; // pending
+}
+function renderOutcomeJourney(intake){
+  var current = outcomeJourneyCurrentIndex(intake);
+  var wrap = h("ol", "outcome-journey");
+  wrap.setAttribute("data-fl-role", "outcome-journey");
+  OUTCOME_JOURNEY_KEYS.forEach(function(key, idx){
+    var step = h("li", "outcome-journey-step"
+      + (idx === current ? " is-current" : "")
+      + (idx < current ? " is-done" : ""), t(key));
+    if(idx <= current){
+      step.setAttribute("aria-current", idx === current ? "step" : "false");
+    }
+    wrap.appendChild(step);
+  });
+  return wrap;
+}
 function renderIntakeStory(){
   var wrap = h("div", "outcome-story");
   wrap.setAttribute("data-fl-role", "outcome-story");
@@ -3834,28 +3949,58 @@ function renderIntakeStory(){
     return wrap;
   }
 
-  /* A missing or stale selected intake falls back to the canonical list
-   * without inventing completion: the detail simply does not render. */
-  var selected = null;
-  var rest = [];
-  intakes.forEach(function(item){
-    if(S.selectedIntakeId && item && item.id === S.selectedIntakeId) selected = item;
-    else rest.push(item);
-  });
+  /* One active intake is primary. A missing or stale selected intake falls
+   * back to the first canonical intake without inventing completion, and that
+   * primary is excluded from the older-history list so it renders once. */
+  var split = outcomeSelectPrimaryIntake(intakes, S.selectedIntakeId);
+  if(split.selected) wrap.appendChild(renderIntakeDetail(split.selected));
 
-  wrap.appendChild(h("div", "outcome-list-title", t("outcomeListTitle")));
-
-  if(selected) wrap.appendChild(renderIntakeDetail(selected));
-
-  if(rest.length){
-    var list = h("div", "outcome-intake-list");
-    list.setAttribute("data-fl-role", "outcome-intake-list");
-    rest.forEach(function(item){
-      list.appendChild(renderIntakeRow(item));
-    });
-    wrap.appendChild(list);
+  /* Older intakes stay a bounded, collapsed history list; never a second
+   * long feed beside the active journey. */
+  if(split.rest.length){
+    wrap.appendChild(renderOutcomeIntakeHistory(split.rest));
   }
   return wrap;
+}
+/* Presentation-only primary vs history split. Never changes canonical intake
+ * order or state; a stale selected id falls back to the first list item and
+ * that same item never appears again in the older-history remainder. */
+function outcomeSelectPrimaryIntake(intakes, selectedIntakeId){
+  var list = Array.isArray(intakes) ? intakes : [];
+  var selected = null;
+  var primaryId = selectedIntakeId || null;
+  if(primaryId){
+    for(var i = 0; i < list.length; i++){
+      if(list[i] && list[i].id === primaryId){
+        selected = list[i];
+        break;
+      }
+    }
+  }
+  if(!selected) selected = list[0] || null;
+  var rest = [];
+  for(var j = 0; j < list.length; j++){
+    if(!list[j]) continue;
+    if(selected && list[j].id === selected.id) continue;
+    rest.push(list[j]);
+  }
+  return { selected: selected, rest: rest };
+}
+function renderOutcomeIntakeHistory(intakes){
+  var details = document.createElement("details");
+  details.className = "outcome-history";
+  details.setAttribute("data-fl-role", "outcome-intake-history");
+  var summary = document.createElement("summary");
+  summary.className = "outcome-history-summary";
+  summary.setAttribute("data-fl-role", "outcome-history-toggle");
+  summary.textContent = t("outcomeHistoryCount", { count: String(intakes.length) });
+  details.appendChild(summary);
+  var body = h("div", "outcome-history-body");
+  intakes.forEach(function(item){
+    body.appendChild(renderIntakeRow(item));
+  });
+  details.appendChild(body);
+  return details;
 }
 function outcomeOutcomePreview(value){
   var text = String(value || "");
@@ -3910,6 +4055,8 @@ function renderPendingStory(intake){
   var card = h("div", "outcome-pending");
   card.setAttribute("data-fl-role", "outcome-pending");
 
+  card.appendChild(renderOutcomeJourney(intake));
+
   var head = h("div", "outcome-state-head");
   head.appendChild(h("span", "outcome-state-badge pending", t("outcomeStatusPending")));
   head.appendChild(h("span", "outcome-state-title", t("outcomePendingStatus")));
@@ -3923,8 +4070,10 @@ function renderPendingStory(intake){
   truth.appendChild(h("div", "outcome-truth-line", t("outcomePendingIntro")));
   card.appendChild(truth);
 
-  card.appendChild(h("div", "outcome-next-label", t("outcomePendingNext")));
-  card.appendChild(h("div", "outcome-next-body", t("outcomePendingNextBody")));
+  /* Who acts next: Main reviews the recorded result in the user's Main
+   * client. The exact handoff mechanics stay a secondary disclosure. */
+  card.appendChild(h("div", "outcome-next-label", t("outcomeJourneyNext")));
+  card.appendChild(h("div", "outcome-next-body", t("outcomePendingWhoNext")));
 
   card.appendChild(h("div", "outcome-next-label", t("outcomePendingContinue")));
   card.appendChild(h("div", "outcome-next-body", t("outcomePendingContinueBody")));
@@ -3933,7 +4082,19 @@ function renderPendingStory(intake){
    * pending intake is never mistaken for executing work. */
   card.appendChild(h("div", "outcome-truth-line dim", t("outcomePendingNoAuto")));
 
-  card.appendChild(renderIntakeHandoff(intake));
+  /* ID/copy mechanics behind a clear secondary disclosure, not the product
+   * flow. The user knows Main must review in their Main client first. */
+  var handoffDetails = document.createElement("details");
+  handoffDetails.className = "outcome-handoff-disclosure";
+  handoffDetails.setAttribute("data-fl-role", "outcome-handoff-disclosure");
+  var handoffSummary = document.createElement("summary");
+  handoffSummary.className = "outcome-handoff-disclosure-summary";
+  handoffSummary.textContent = t("outcomeHandoffTitle");
+  handoffDetails.appendChild(handoffSummary);
+  var handoffBody = h("div", "outcome-handoff-disclosure-body");
+  handoffBody.appendChild(renderIntakeHandoff(intake));
+  handoffDetails.appendChild(handoffBody);
+  card.appendChild(handoffDetails);
 
   card.appendChild(renderIntakeTechDetails(intake));
   return card;
@@ -3942,6 +4103,8 @@ function renderProposedPreview(intake){
   var card = h("div", "outcome-proposed");
   card.setAttribute("data-fl-role", "outcome-proposed");
   var proposal = intake.proposal || {};
+
+  card.appendChild(renderOutcomeJourney(intake));
 
   var head = h("div", "outcome-state-head");
   head.appendChild(h("span", "outcome-state-badge proposed", t("outcomeStatusProposed")));
@@ -3983,6 +4146,10 @@ function renderProposedPreview(intake){
   truth.setAttribute("data-fl-role", "outcome-not-confirmed");
   truth.appendChild(h("div", "outcome-truth-line", t("outcomeNotConfirmed")));
   card.appendChild(truth);
+
+  /* Who acts next is the user: one explicit review and confirmation action. */
+  card.appendChild(h("div", "outcome-next-label", t("outcomeJourneyNext")));
+  card.appendChild(h("div", "outcome-next-body", t("outcomeProposedWhoNext")));
 
   /* One clear primary confirmation action, only for a canonical proposed
    * intake. Choosing it opens a contained explicit step that repeats exactly
@@ -4103,6 +4270,11 @@ function outcomeConfirmSubmit(intake){
     S.outcomeConfirmingId = null;
     S.outcomeConfirmPendingId = null;
     S.outcomeConfirmError = null;
+    /* Keep the canonical created-navigation intent so the refreshed hierarchy
+     * (not this receipt alone) decides the exact workspace. Idempotent retries
+     * reuse the same receipt and cannot create a second graph or navigation. */
+    S.outcomeCreatedNavigate = outcomeCreatedNavigateFromConfirmation(created, data && data.receipt);
+    S.outcomeCreatedTaskDrawer = null;
     render();
     outcomeAnnounce(t("outcomeConfirmCreatedAnnounce"));
     outcomeFocusIntake(created.id);
@@ -4115,6 +4287,87 @@ function outcomeConfirmSubmit(intake){
     outcomeAnnounce(t(S.outcomeConfirmError));
   });
 }
+/* FL-112E9: created-work navigation intent.
+ * Consumes only the durable confirmation ids (goalId, planId, taskIds) and
+ * returns a bounded browser-side intent. It never invents a shape or parent;
+ * the exact workspace is decided later against the refreshed hierarchy. */
+function outcomeCreatedNavigateFromConfirmation(intake, receipt){
+  var confirmation = (intake && intake.confirmation) || receipt || {};
+  if(!intake || !intake.id) return null;
+  var shape = confirmation.shape || "";
+  var goalId = typeof confirmation.goalId === "string" && confirmation.goalId ? confirmation.goalId : "";
+  var planId = typeof confirmation.planId === "string" && confirmation.planId ? confirmation.planId : "";
+  var taskIds = Array.isArray(confirmation.taskIds)
+    ? confirmation.taskIds.filter(function(id){ return typeof id === "string" && id; })
+    : [];
+  if(shape === "goal" && goalId){
+    return { intakeId: String(intake.id), shape: "goal", goalId: goalId, planId: "", taskId: "" };
+  }
+  if(shape === "plan" && planId){
+    return { intakeId: String(intake.id), shape: "plan", goalId: "", planId: planId, taskId: "" };
+  }
+  if(shape === "task" && taskIds.length){
+    return { intakeId: String(intake.id), shape: "task", goalId: "", planId: "", taskId: taskIds[0] };
+  }
+  return null;
+}
+/* Whether the created intake's exact hierarchy identity is currently
+ * resolvable from WorkHierarchyView. Presentation only; never invents objects. */
+function outcomeCreatedIdentityResolvable(view, intake){
+  if(!intake || intake.status !== "created" || !view) return false;
+  var intent = outcomeCreatedNavigateFromConfirmation(intake, null);
+  if(!intent) return false;
+  if(intent.shape === "goal" && intent.goalId){
+    return workReadingGoalExists(view, intent.goalId);
+  }
+  if(intent.shape === "plan" && intent.planId){
+    return !!(view.independentPlans || []).find(function(item){
+      return item && String(item.planId || "") === String(intent.planId);
+    });
+  }
+  if(intent.shape === "task" && intent.taskId){
+    var card = workFindTaskCard(view, intent.taskId);
+    return !!(card && card.breadcrumb && !card.breadcrumb.goalId && !card.breadcrumb.planId);
+  }
+  return false;
+}
+/* Rebuild a bounded created-navigation intent from a canonical created intake
+ * when the previous transient intent was already consumed. Requires created
+ * status so expired non-created evidence never navigates. When the clicked
+ * intake does not match a pending intent, clear that prior intent first so a
+ * malformed confirmation cannot open another intake's workspace. */
+function outcomeEnsureCreatedNavigation(intake){
+  if(!intake || intake.status !== "created") return null;
+  var existing = S.outcomeCreatedNavigate;
+  if(existing && String(existing.intakeId || "") === String(intake.id || "")){
+    return existing;
+  }
+  /* Clicked created intake does not match the pending intent: drop the old
+   * one before deriving. Incomplete confirmation then leaves no intent. */
+  S.outcomeCreatedNavigate = null;
+  var rebuilt = outcomeCreatedNavigateFromConfirmation(intake, null);
+  if(rebuilt) S.outcomeCreatedNavigate = rebuilt;
+  return rebuilt;
+}
+/* Re-apply a created-navigation intent against canonical truth. When the
+ * previous intent was already consumed, rebuild it from the clicked created
+ * intake. If the identity is not visible yet, one ordinary refresh reads
+ * canonical truth; never optimistic and never invents a workspace. */
+function outcomeRetryCreatedNavigation(intake){
+  if(intake) outcomeEnsureCreatedNavigation(intake);
+  if(S.outcomeCreatedNavigate){
+    try {
+      var view = normalizeWorkHierarchy(S.workHierarchy);
+      if(workApplyCreatedNavigation(view)){
+        render();
+        return;
+      }
+    } catch(_){}
+  }
+  /* Identity not visible yet: one ordinary coalesced refresh. Polling is
+   * unchanged and this path never loops on its own. */
+  refresh();
+}
 /* Durable created result story. Answers what was created, what happened to
  * execution, and what to do next. Ids and receipt evidence stay under
  * Technical details; no optimistic card and no guessed execution status. */
@@ -4124,6 +4377,8 @@ function renderCreatedStory(intake){
   card.setAttribute("tabindex", "-1");
   var proposal = intake.proposal || {};
   var confirmation = intake.confirmation || {};
+
+  card.appendChild(renderOutcomeJourney(intake));
 
   var head = h("div", "outcome-state-head");
   head.appendChild(h("span", "outcome-state-badge created", t("outcomeStatusCreated")));
@@ -4143,19 +4398,33 @@ function renderCreatedStory(intake){
   card.appendChild(h("div", "outcome-next-label", t("outcomeCreatedExecution")));
   card.appendChild(h("div", "outcome-next-body", t("outcomeCreatedExecutionBody")));
 
-  card.appendChild(h("div", "outcome-next-label", t("outcomeCreatedNext")));
-  card.appendChild(h("div", "outcome-next-body", t("outcomeCreatedNextBody")));
+  /* Truthful pending-versus-ready copy is based on whether the exact
+   * hierarchy identity is currently resolvable, not on transient intent
+   * presence, so the story never claims the workspace is open when it is not. */
+  var hierarchyView = null;
+  try { hierarchyView = normalizeWorkHierarchy(S.workHierarchy); } catch(_){ hierarchyView = null; }
+  var identityVisible = outcomeCreatedIdentityResolvable(hierarchyView, intake);
 
-  var taskIds = Array.isArray(confirmation.taskIds)
-    ? confirmation.taskIds.filter(function(id){ return typeof id === "string"; })
-    : [];
-  if(taskIds.length > 0){
-    var openBtn = h("button", "btn outcome-created-open", t("outcomeCreatedOpenTask"));
-    openBtn.type = "button";
-    openBtn.setAttribute("data-fl-role", "outcome-created-open-task");
-    openBtn.addEventListener("click", function(){ showTask(taskIds[0]); });
-    card.appendChild(openBtn);
+  card.appendChild(h("div", "outcome-next-label", t("outcomeJourneyNext")));
+  card.appendChild(h("div", "outcome-next-body",
+    t(identityVisible ? "outcomeCreatedWhoNext" : "outcomeCreatedWhoNextPending")));
+
+  card.appendChild(h("div", "outcome-next-label", t("outcomeCreatedNext")));
+  card.appendChild(h("div", "outcome-next-body",
+    t(identityVisible ? "outcomeCreatedNextBody" : "outcomeCreatedNextBodyPending")));
+
+  /* Open the exact created workspace. This is never optimistic: it only
+   * navigates when the refreshed canonical hierarchy contains the created
+   * identity. Until then the truthful receipt stays with one primary action. */
+  if(!identityVisible){
+    card.appendChild(h("div", "outcome-created-not-visible dim",
+      t("outcomeCreatedNotVisible")));
   }
+  var openBtn = h("button", "btn outcome-created-open", t("outcomeCreatedOpenWorkspace"));
+  openBtn.type = "button";
+  openBtn.setAttribute("data-fl-role", "outcome-created-open-workspace");
+  openBtn.addEventListener("click", function(){ outcomeRetryCreatedNavigation(intake); });
+  card.appendChild(openBtn);
 
   card.appendChild(renderIntakeTechDetails(intake));
   return card;
@@ -4482,6 +4751,157 @@ function normalizeWorkHierarchy(data){
   }
   return data;
 }
+
+/* ---------------------------------------------------------------------------
+ * FL-112B workspace selection
+ *
+ * A Work page has one focused workspace at a time. These helpers operate only
+ * on canonical ids already present in WorkHierarchyView: no browser-created
+ * Goal, Plan, or parent is ever synthesized. The default order is meaningful
+ * for a person opening Work for the first time: active Goal, independent Plan,
+ * one-off inbox, then finished Goal history.
+ * ------------------------------------------------------------------------ */
+var WORKSPACE_SELECTION_KINDS = ["goal", "plan", "one-off"];
+function workMakeSelection(kind, id){
+  if(WORKSPACE_SELECTION_KINDS.indexOf(kind) < 0 || !id) return null;
+  return { kind: kind, id: String(id) };
+}
+function workSelectionKey(selection){
+  if(!selection || !selection.kind || !selection.id) return "";
+  return String(selection.kind) + ":" + String(selection.id);
+}
+function workSelectionEqual(left, right){
+  return workSelectionKey(left) !== "" && workSelectionKey(left) === workSelectionKey(right);
+}
+function workGoalIsTerminalStatusForSelection(goal){
+  return !!goal && (goal.status === "completed" || goal.status === "stopped" || goal.status === "failed");
+}
+function workSelectionExists(view, selection){
+  if(!view || !selection) return false;
+  if(selection.kind === "goal"){
+    return (view.goals || []).some(function(goal){ return String(goal.goalId || "") === String(selection.id); });
+  }
+  if(selection.kind === "plan"){
+    return (view.independentPlans || []).some(function(plan){ return String(plan.planId || "") === String(selection.id); });
+  }
+  return selection.kind === "one-off" && String(selection.id) === "inbox" && !!view.oneOffTasks;
+}
+function workDefaultSelection(view){
+  if(!view) return null;
+  var goals = view.goals || [];
+  var activeGoal = goals.find(function(goal){ return !workGoalIsTerminalStatusForSelection(goal); });
+  if(activeGoal && activeGoal.goalId) return workMakeSelection("goal", activeGoal.goalId);
+  var plan = (view.independentPlans || [])[0];
+  if(plan && plan.planId) return workMakeSelection("plan", plan.planId);
+  if(view.oneOffTasks) return workMakeSelection("one-off", "inbox");
+  var finishedGoal = goals.find(function(goal){ return workGoalIsTerminalStatusForSelection(goal); });
+  if(finishedGoal && finishedGoal.goalId) return workMakeSelection("goal", finishedGoal.goalId);
+  return null;
+}
+function workResolveSelection(view, current){
+  var requested = current && workMakeSelection(current.kind, current.id);
+  return workSelectionExists(view, requested) ? requested : workDefaultSelection(view);
+}
+/* FL-112E9: apply a pending created-work navigation intent against the
+ * refreshed canonical hierarchy only. Goal opens its Goal workspace; a
+ * standalone Plan opens its Plan workspace; a parentless Task selects
+ * Independent Tasks and opens its Task drawer with the canonical card. Missing
+ * or stale identities fail safely and the truthful created receipt stays. */
+function workApplyCreatedNavigation(view){
+  var intent = S.outcomeCreatedNavigate;
+  if(!intent || !view || !intent.intakeId) return false;
+  var intake = Array.isArray(S.intakes) ? S.intakes.find(function(item){
+    return item && String(item.id || "") === String(intent.intakeId);
+  }) : null;
+  if(!intake || intake.status !== "created"){
+    /* Stale identity: never navigate from a receipt without canonical truth. */
+    S.outcomeCreatedNavigate = null;
+    S.outcomeCreatedTaskDrawer = null;
+    return false;
+  }
+  if(intent.shape === "goal" && intent.goalId && workReadingGoalExists(view, intent.goalId)){
+    var goalSelection = workMakeSelection("goal", intent.goalId);
+    if(workSelectionEqual(S.workSelection, goalSelection)){
+      /* Idempotent retry: the exact workspace is already open. No duplicate
+       * navigation or focus jump; just consume the intent. */
+      S.outcomeCreatedNavigate = null;
+      return true;
+    }
+    S.workSelection = goalSelection;
+    S.workViewedGoalId = String(intent.goalId);
+    S.workViewedPlanId = null;
+    S.outcomeCreatedNavigate = null;
+    workBoardFocusRequest = { key: workSelectionKey(S.workSelection) };
+    return true;
+  }
+  if(intent.shape === "plan" && intent.planId){
+    var plan = (view.independentPlans || []).find(function(item){
+      return item && String(item.planId || "") === String(intent.planId);
+    });
+    if(plan){
+      var planSelection = workMakeSelection("plan", intent.planId);
+      S.outcomeCreatedNavigate = null;
+      if(workSelectionEqual(S.workSelection, planSelection)) return true;
+      S.workSelection = planSelection;
+      workBoardFocusRequest = { key: workSelectionKey(S.workSelection) };
+      return true;
+    }
+  }
+  if(intent.shape === "task" && intent.taskId){
+    var card = workFindTaskCard(view, intent.taskId);
+    /* Only a parentless one-off Task opens the Independent Tasks drawer; the
+     * canonical card's breadcrumb (never a guessed ancestor) feeds the drawer. */
+    if(card && !card.breadcrumb.goalId && !card.breadcrumb.planId){
+      var oneOffSelection = workMakeSelection("one-off", "inbox");
+      S.outcomeCreatedNavigate = null;
+      if(!workSelectionEqual(S.workSelection, oneOffSelection)){
+        S.workSelection = oneOffSelection;
+        workBoardFocusRequest = { key: workSelectionKey(S.workSelection) };
+      }
+      S.outcomeCreatedTaskDrawer = { taskId: String(intent.taskId), crumb: card.breadcrumb || null };
+      return true;
+    }
+  }
+  return false;
+}
+/* After the created workspace mounts, open the exact parentless Task drawer
+ * with the canonical card. Missing cards fail safely without invented ancestry. */
+function workOpenCreatedTaskDrawer(view){
+  var intent = S.outcomeCreatedTaskDrawer;
+  if(!intent) return;
+  S.outcomeCreatedTaskDrawer = null;
+  if(!view || !intent.taskId || !workReadingTaskExists(view, intent.taskId)) return;
+  var card = workFindTaskCard(view, intent.taskId);
+  showTask(intent.taskId, (card && card.breadcrumb) || null);
+}
+function workSelectWorkspace(kind, id){
+  var next = workMakeSelection(kind, id);
+  if(!next || workSelectionEqual(S.workSelection, next)) return;
+  S.workSelection = next;
+  workBoardFocusRequest = { key: workSelectionKey(next) };
+  if(next.kind === "goal"){
+    S.workViewedGoalId = next.id;
+    S.workViewedPlanId = null;
+  }
+  workActionChooserReset();
+  workPendingHandoffReset();
+  hideDetail();
+  render();
+  /* On a stacked narrow layout, the portfolio can contain a long Finished
+   * history. A deliberate selection should reveal the selected workspace,
+   * while background refreshes continue to preserve the reader's position. */
+  try {
+    if(window.matchMedia && window.matchMedia("(max-width: 900px)").matches){
+      var focused = viewEl && viewEl.querySelector('[data-fl-role="work-focus"]');
+      if(focused){
+        focused.setAttribute("tabindex", "-1");
+        try { focused.focus({ preventScroll: true }); } catch(_){ focused.focus(); }
+        focused.scrollIntoView({ block: "start" });
+      }
+    }
+  } catch(_){}
+  workScheduleReadingContextSave();
+}
 /* Collapse state is tab-local and bounded: boolean entries keyed by technical
  * id live only in sessionStorage (localStorage stays reserved for the theme).
  * Missing key = smart default; explicit true/false always wins over the default.
@@ -4492,12 +4912,33 @@ function workCollapseLoad(){
     var raw = sessionStorage.getItem("fl-work-collapse");
     if(!raw) return {};
     var parsed = JSON.parse(raw);
-    if(parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    if(parsed && typeof parsed === "object" && !Array.isArray(parsed)){
+      var bounded = {};
+      Object.keys(parsed).sort().slice(0, WORK_READING_CONTEXT_MAX_COLLAPSE).forEach(function(key){
+        if(/^[A-Za-z0-9:_-]+$/.test(key) && typeof parsed[key] === "boolean"){
+          bounded[key] = parsed[key];
+        }
+      });
+      return bounded;
+    }
   } catch(_){}
   return {};
 }
 function workCollapseSave(collapse){
-  try { sessionStorage.setItem("fl-work-collapse", JSON.stringify(collapse)); } catch(_){}
+  try {
+    var bounded = {};
+    if(collapse && typeof collapse === "object"){
+      Object.keys(collapse).sort().slice(0, WORK_READING_CONTEXT_MAX_COLLAPSE).forEach(function(key){
+        if(/^[A-Za-z0-9:_-]+$/.test(key) && typeof collapse[key] === "boolean"){
+          bounded[key] = collapse[key];
+        }
+      });
+    }
+    var serialized = JSON.stringify(bounded);
+    if(serialized.length <= WORK_READING_CONTEXT_MAX_CHARS){
+      sessionStorage.setItem("fl-work-collapse", serialized);
+    }
+  } catch(_){}
 }
 /* Columns that mean live or upcoming work rather than pure terminal history. */
 var WORK_LIVE_COLUMN_CODES = [
@@ -4774,7 +5215,8 @@ function appendWorkLaneNarrative(facts, summary, opts){
   })));
 }
 /* Terminal Goals share one counted, collapsed, lazy disclosure so history
- * stays reachable without dominating the first paint. */
+ * stays reachable without dominating the first paint. History is a portfolio
+ * list only; selecting an entry opens its one focused workspace. */
 function renderWorkFinishedGoals(goals){
   var details = document.createElement("details");
   details.className = "work-finished-group";
@@ -4787,18 +5229,65 @@ function renderWorkFinishedGoals(goals){
   var body = h("div", "work-finished-body");
   body.setAttribute("data-fl-role", "work-finished-body");
   var filled = false;
+  /* Single production materializer: user toggle and FL-112A restore both use
+   * this path so nested Goal/Plan/Task nodes exist before focus returns. */
   function ensureFinishedBody(){
     if(filled) return;
     filled = true;
     goals.forEach(function(goal){
-      body.appendChild(renderWorkGoalLane(goal));
+      body.appendChild(renderWorkHistoryOption(goal));
     });
   }
   details.addEventListener("toggle", function(){
     if(details.open) ensureFinishedBody();
   });
+  /* Continuity restore calls the same ensure the toggle path uses. */
+  details._workEnsureFinishedBody = ensureFinishedBody;
   details.appendChild(body);
   return details;
+}
+function workGoalTaskCount(goal){
+  var count = 0;
+  (goal && goal.plans || []).forEach(function(plan){ count += workColumnsCardCount(plan && plan.columns); });
+  return count;
+}
+function workPlanTaskCount(plan){
+  return workColumnsCardCount(plan && plan.columns);
+}
+function workGoalNeedsAttention(goal){
+  var summary = goal && goal.summary;
+  return workGoalDecisionCount(goal) > 0
+    || workLaneHasRealBlocker(summary && summary.blocker, summary && summary.blockerMessage);
+}
+function workPortfolioCue(summary, opts){
+  opts = opts || {};
+  if(!summary) return t("workNoNext");
+  if(opts.completedNoDecision) return t("workNoFurtherAction");
+  var next = workLaneNextActionText(summary, opts);
+  return next || t("workNoNext");
+}
+function renderWorkHistoryOption(goal){
+  var button = h("button", "work-history-option");
+  button.type = "button";
+  button.setAttribute("data-fl-role", "work-workspace-option");
+  button.setAttribute("data-workspace-kind", "goal");
+  button.setAttribute("data-workspace-id", String(goal.goalId || ""));
+  var selected = workSelectionEqual(S.workSelection, workMakeSelection("goal", goal.goalId));
+  button.setAttribute("aria-pressed", selected ? "true" : "false");
+  if(selected) button.setAttribute("aria-current", "true");
+  button.addEventListener("click", function(){ workSelectWorkspace("goal", goal.goalId); });
+  var head = h("span", "work-history-option-head");
+  head.appendChild(h("span", "work-history-option-name", goal.name || t("workUntitledGoal")));
+  if(goal.status) head.appendChild(badge(goal.status));
+  button.appendChild(head);
+  var summary = goal.summary || {};
+  button.appendChild(h("span", "work-history-option-cue", workPortfolioCue(summary, {
+    completedNoDecision: goal.status === "completed" && workGoalDecisionCount(goal) === 0
+  })));
+  button.appendChild(h("span", "work-history-option-meta", t("workPortfolioTaskCount", {
+    count: String(workGoalTaskCount(goal))
+  })));
+  return button;
 }
 function workOneOffCardCount(view){
   var count = 0;
@@ -5026,6 +5515,7 @@ function workCardDragStart(card, el, e){
     sourceColumn: card.column
   };
   el.classList.add("work-card-dragging");
+  el.setAttribute("aria-grabbed", "true");
   if(e.dataTransfer){
     /* copy intent, never move the canonical card in the DOM */
     e.dataTransfer.effectAllowed = "copy";
@@ -5033,7 +5523,10 @@ function workCardDragStart(card, el, e){
   }
 }
 function workCardDragEnd(el){
-  if(el) el.classList.remove("work-card-dragging");
+  if(el){
+    el.classList.remove("work-card-dragging");
+    el.setAttribute("aria-grabbed", "false");
+  }
   workDrag = null;
   workDragSuppressClick = true;
   var boardEl = document.querySelector(".work-board");
@@ -5268,13 +5761,112 @@ function workActionChooserItem(card, btn, code, entry){
   });
   return row;
 }
+function workColumnTone(code){
+  if(code === "running" || code === "waiting-verification") return "active";
+  if(code === "waiting-user-decision") return "attention";
+  if(code === "completed") return "done";
+  if(code === "stopped-failed") return "failed";
+  return "queued";
+}
+/* A new board should lead with work that can inform the next decision. The
+ * array changes neither Core order nor card placement; it only chooses the
+ * first contained horizontal viewport for a genuinely new selection. */
+var WORK_RELEVANT_COLUMN_PRIORITY = [
+  "waiting-user-decision",
+  "stopped-failed",
+  "waiting-verification",
+  "running",
+  "completed",
+  "ready",
+  "not-started"
+];
+function workRelevantColumnCode(columns){
+  for(var i = 0; i < WORK_RELEVANT_COLUMN_PRIORITY.length; i++){
+    var code = WORK_RELEVANT_COLUMN_PRIORITY[i];
+    if(columns && ((Array.isArray(columns[code]) && columns[code].length)
+      || (typeof columns[code] === "number" && columns[code] > 0))) return code;
+  }
+  return null;
+}
+function workFocusRelevantColumn(){
+  if(!viewEl) return false;
+  try {
+    var board = viewEl.querySelector('[data-fl-role="work-board"]');
+    if(!board) return false;
+    var head = board.querySelector('[data-fl-role="work-col-head"]');
+    if(!head) return false;
+    var counts = {};
+    var cells = head.querySelectorAll('[data-column]');
+    for(var i = 0; i < cells.length; i++){
+      var code = cells[i].getAttribute("data-column");
+      var count = Number(cells[i].getAttribute("data-card-count"));
+      if(code && Number.isFinite(count) && count > 0) counts[code] = count;
+    }
+    var targetCode = workRelevantColumnCode(counts);
+    if(!targetCode) return false;
+    var target = head.querySelector('[data-column="' + targetCode + '"]');
+    if(!target) return false;
+    var left = typeof target.offsetLeft === "number" ? target.offsetLeft : 0;
+    board.scrollLeft = Math.max(0, left - 8);
+    return true;
+  } catch(_){
+    return false;
+  }
+}
+function workMaybeFocusRelevantColumn(){
+  if(!workBoardFocusRequest) return;
+  var request = workBoardFocusRequest;
+  workBoardFocusRequest = null;
+  if(workReloadBoardScrollRestored){
+    workReloadBoardScrollRestored = false;
+    return;
+  }
+  if(request.key && request.key !== workSelectionKey(S.workSelection)) return;
+  if(workFocusRelevantColumn()) workScheduleReadingContextSave();
+}
+function workCardStateClass(code){
+  if(code === "waiting-user-decision") return "is-attention";
+  if(code === "stopped-failed") return "is-failed";
+  return "";
+}
+function workMarkSelectedCard(taskId){
+  if(!viewEl || !viewEl.querySelectorAll) return;
+  try {
+    var cards = viewEl.querySelectorAll('[data-fl-role="work-card"]');
+    for(var i = 0; i < cards.length; i++){
+      var selected = !!taskId && cards[i].getAttribute("data-task-id") === String(taskId);
+      cards[i].classList.toggle("is-selected", selected);
+      if(selected) cards[i].setAttribute("aria-current", "true");
+      else cards[i].removeAttribute("aria-current");
+    }
+  } catch(_){ }
+}
+/* Cards are the scan surface. Keep one truthful line below the state badge;
+ * dependencies, Worker identity, and unlock edges remain in Task Detail. */
+function workCardPrimaryLine(card){
+  var blockers = (card && card.blockers) || [];
+  for(var i = 0; i < blockers.length; i++){
+    var blockerLabel = workSafeCardBlockerLabel(card, blockers[i]);
+    if(blockerLabel) return t("workCardBlocker", { text: blockerLabel });
+  }
+  var next = workNarrativeText(card && card.nextActionMessage,
+    card && card.nextAction || t("workNoNext"));
+  return next || t("workNoNext");
+}
 function renderWorkCard(card){
   var el = h("div", "work-card");
   el.setAttribute("data-fl-role", "work-card");
   el.setAttribute("data-task-id", card.taskId || "");
+  el.setAttribute("data-column", card.column || "");
   el.setAttribute("tabindex", "0");
   el.setAttribute("role", "button");
   el.setAttribute("aria-label", card.name || t("taskUntitled"));
+  var stateClass = workCardStateClass(card.column);
+  if(stateClass) el.classList.add(stateClass);
+  if(S.detailTaskId && String(S.detailTaskId) === String(card.taskId || "")){
+    el.classList.add("is-selected");
+    el.setAttribute("aria-current", "true");
+  }
 
   /* Pointer drag is offered only when the Core policy names a requestable or
    * needs-input destination. The card stays in its canonical column; drag only
@@ -5284,6 +5876,7 @@ function renderWorkCard(card){
   if(actionable){
     el.classList.add("is-actionable");
     el.setAttribute("draggable", "true");
+    el.setAttribute("aria-grabbed", "false");
     el.addEventListener("dragstart", function(e){ workCardDragStart(card, el, e); });
     el.addEventListener("dragend", function(){ workCardDragEnd(el); });
   }
@@ -5300,44 +5893,807 @@ function renderWorkCard(card){
     if(e.key === "Enter" || e.key === " "){ e.preventDefault(); showTask(card.taskId, card.breadcrumb); }
   });
 
-  el.appendChild(h("div", "work-card-name", card.name || t("taskUntitled")));
-  el.appendChild(h("div", "work-card-reason", workPlacementLabel(card.placementReason)));
-  (card.blockers || []).slice(0, 3).forEach(function(b){
-    el.appendChild(h("div", "work-card-meta work-card-blocker", t("workCardBlocker", { text: b.label })));
-  });
-  // Unlock edges are named only when the destination Task has a real name;
-  // a bare item id is never shown as card copy.
-  (card.namedRequiredBy || []).slice(0, 2).forEach(function(nb){
-    if(nb.taskName) el.appendChild(h("div", "work-card-meta work-card-unlocks", t("workCardUnlocks", { text: nb.taskName })));
-  });
-  var workerLabel = workWorkerLabel(card.workerProfileId);
-  if(workerLabel) el.appendChild(h("div", "work-card-meta work-card-worker", t("workCardWorker", { worker: workerLabel })));
-  var cardNext = workNarrativeText(card.nextActionMessage, card.nextAction || t("workNoNext"));
-  if(!cardNext) cardNext = t("workNoNext");
-  el.appendChild(h("div", "work-card-next", t("workCardNext", { text: cardNext })));
+  var cardHead = h("div", "work-card-head");
+  cardHead.appendChild(h("div", "work-card-name", card.name || t("taskUntitled")));
+  cardHead.appendChild(h("span", "work-card-status tone-" + workColumnTone(card.column),
+    workColumnLabel(card.column)));
+  el.appendChild(cardHead);
+  el.appendChild(h("div", "work-card-next", workCardPrimaryLine(card)));
   if(hasPolicy) el.appendChild(renderWorkMoveActControl(card));
   return el;
 }
-function renderWorkColumns(columns){
-  var grid = h("div", "work-col-grid work-lane-row");
-  grid.setAttribute("data-fl-role", "work-lane-row");
-  WORK_COLUMN_CODES.forEach(function(code){
-    var cell = h("div", "work-cell");
-    cell.setAttribute("data-column", code);
-    cell.appendChild(h("div", "work-cell-head", workColumnLabel(code)));
-    var cards = (columns && columns[code]) || [];
-    var list = h("div", "work-cell-cards");
-    list.setAttribute("data-fl-role", "work-cell-cards");
-    list.setAttribute("data-column", code);
-    if(cards.length === 0){
-      list.appendChild(h("div", "work-cell-empty", t("workColumnEmpty")));
-    } else {
-      cards.forEach(function(card){ list.appendChild(renderWorkCard(card)); });
+function workSafeCardBlockerLabel(card, blocker){
+  if(!blocker || !blocker.label) return "";
+  var label = String(blocker.label);
+  var edges = card && card.namedDependencies || [];
+  for(var i = 0; i < edges.length; i++){
+    var edge = edges[i];
+    if(!edge) continue;
+    if(edge.itemId === label || edge.taskId === label){
+      return edge.taskName || "";
     }
-    cell.appendChild(list);
-    grid.appendChild(cell);
+  }
+  return label;
+}
+function workColumnCodesWithCards(columns, requestedCodes){
+  var codes = Array.isArray(requestedCodes) && requestedCodes.length
+    ? requestedCodes : WORK_COLUMN_CODES;
+  return codes.filter(function(code){
+    return ((columns && columns[code]) || []).length > 0;
   });
-  return grid;
+}
+function workRenderColumnCell(columns, code, emptyRail){
+  var cards = (columns && columns[code]) || [];
+  var cell = h("div", "work-cell tone-" + workColumnTone(code)
+    + (cards.length === 0 ? " is-empty" : "")
+    + (emptyRail ? " work-empty-state" : ""));
+  cell.setAttribute("data-column", code);
+  cell.setAttribute("data-card-count", String(cards.length));
+  cell.setAttribute("role", "group");
+  cell.setAttribute("aria-label", workColumnLabel(code));
+  var cellHead = h("div", "work-cell-head");
+  cellHead.appendChild(h("span", "work-cell-title", workColumnLabel(code)));
+  cellHead.appendChild(h("span", "work-cell-count", String(cards.length)));
+  cell.appendChild(cellHead);
+  var list = h("div", "work-cell-cards");
+  list.setAttribute("data-fl-role", "work-cell-cards");
+  list.setAttribute("data-column", code);
+  if(cards.length === 0){
+    var empty = h("div", "work-cell-empty", t("workColumnEmpty"));
+    empty.setAttribute("data-empty-for", code);
+    list.appendChild(empty);
+  } else {
+    cards.forEach(function(card){ list.appendChild(renderWorkCard(card)); });
+  }
+  cell.appendChild(list);
+  return cell;
+}
+/* Active states get the available width. Empty states remain real drop targets
+ * in a compact labeled rail, so a sparse phase never looks like seven blank
+ * cards and no canonical state disappears. */
+function renderWorkColumns(columns, requestedCodes){
+  var codes = Array.isArray(requestedCodes) && requestedCodes.length
+    ? requestedCodes : WORK_COLUMN_CODES;
+  var activeCodes = workColumnCodesWithCards(columns, codes);
+  var emptyCodes = codes.filter(function(code){ return activeCodes.indexOf(code) < 0; });
+  var wrap = h("div", "work-column-set");
+  wrap.setAttribute("data-fl-role", "work-column-set");
+  wrap.setAttribute("data-column-total", String(codes.length));
+  wrap.setAttribute("data-column-active", String(activeCodes.length));
+  if(activeCodes.length){
+    var grid = h("div", "work-col-grid work-lane-row");
+    grid.setAttribute("data-fl-role", "work-lane-row");
+    grid.setAttribute("data-column-count", String(activeCodes.length));
+    activeCodes.forEach(function(code){
+      grid.appendChild(workRenderColumnCell(columns, code, false));
+    });
+    wrap.appendChild(grid);
+  }
+  if(emptyCodes.length){
+    var rail = h("div", "work-empty-state-rail");
+    rail.setAttribute("data-fl-role", "work-empty-state-rail");
+    rail.setAttribute("aria-label", t("workEmptyStateRail", { count: String(emptyCodes.length) }));
+    emptyCodes.forEach(function(code){
+      rail.appendChild(workRenderColumnCell(columns, code, true));
+    });
+    wrap.appendChild(rail);
+  }
+  return wrap;
+}
+
+/* ---------------------------------------------------------------------------
+ * FL-112B focused workspaces
+ *
+ * The portfolio rail is navigation and summary. Only the selected canonical
+ * Goal, independent Plan, or one-off inbox receives a Task board. Goal and
+ * Plan ancestry is therefore visible without repeating the same sparse board
+ * several times down the page.
+ * ------------------------------------------------------------------------ */
+function workSummaryWhat(summary){
+  var value = workNarrativeText(summary && summary.whatCompletedMessage,
+    summary && summary.whatCompleted || t("workNoneYet"));
+  return value || t("workNoneYet");
+}
+function workSummaryBlocker(summary){
+  if(!summary || !workLaneHasRealBlocker(summary.blocker, summary.blockerMessage)){
+    return t("workNoBlocker");
+  }
+  return workNarrativeText(summary.blockerMessage, summary.blocker) || t("workNoBlocker");
+}
+function workSummaryNext(summary, opts){
+  var value = workLaneNextActionText(summary || {}, opts || {});
+  return value || t("workNoNext");
+}
+function renderWorkStoryFact(label, value, tone){
+  var fact = h("div", "work-story-fact" + (tone ? " is-" + tone : ""));
+  fact.appendChild(h("div", "work-story-label", label));
+  fact.appendChild(h("div", "work-story-value", value));
+  return fact;
+}
+function renderWorkStory(summary, decisionText, opts){
+  opts = opts || {};
+  var story = h("div", "work-story");
+  story.setAttribute("data-fl-role", "work-story");
+  story.appendChild(renderWorkStoryFact(t("workStoryFinished"), workSummaryWhat(summary)));
+  story.appendChild(renderWorkStoryFact(t("workStoryBlocker"), workSummaryBlocker(summary),
+    workLaneHasRealBlocker(summary && summary.blocker, summary && summary.blockerMessage) ? "attention" : "quiet"));
+  story.appendChild(renderWorkStoryFact(t("workStoryNext"), workSummaryNext(summary, opts)));
+  story.appendChild(renderWorkStoryFact(t("workStoryDecision"), decisionText || t("workNoDecision"),
+    decisionText && decisionText !== t("workNoDecision") ? "attention" : "quiet"));
+  return story;
+}
+function workPlanDependencyFacts(plan){
+  var waiting = [];
+  var named = [];
+  WORK_COLUMN_CODES.forEach(function(code){
+    ((plan && plan.columns && plan.columns[code]) || []).forEach(function(card){
+      (card.namedDependencies || []).forEach(function(edge){
+        /* Named edges are the safe source for this phase explanation. A
+         * missing task name stays omitted instead of exposing an item id. */
+        if(!edge || !edge.taskName) return;
+        if(edge.state === "waiting" && waiting.indexOf(edge.taskName) < 0){
+          waiting.push(edge.taskName);
+        }
+        if(named.indexOf(edge.taskName) < 0) named.push(edge.taskName);
+      });
+    });
+  });
+  return { waiting: waiting.slice(0, 3), named: named.slice(0, 3) };
+}
+function workGoalCurrentIndex(goal){
+  var plans = (goal && goal.plans) || [];
+  if(!goal || !goal.currentPlanId) return -1;
+  for(var i = 0; i < plans.length; i++){
+    if(String(plans[i].planId || "") === String(goal.currentPlanId)) return i;
+  }
+  return -1;
+}
+/* Phase labels come from Core's ordered plans and currentPlanId. They never
+ * inspect Task columns to decide readiness, so browsing a future phase cannot
+ * make any Task look executable. */
+function workGoalPhaseState(goal, index){
+  /* A terminal Goal has no live phase to schedule. Even if an older payload
+   * still carries a currentPlanId, every phase is historical for browsing. */
+  if(workGoalIsTerminalStatusForSelection(goal)) return "history";
+  var currentIndex = workGoalCurrentIndex(goal);
+  if(currentIndex >= 0){
+    if(index < currentIndex) return "completed";
+    if(index === currentIndex) return "current";
+    return "upcoming";
+  }
+  return index === 0 ? "unknown" : "upcoming";
+}
+function workPhaseStateLabel(state){
+  var keys = {
+    completed: "workPhaseStatusCompleted",
+    current: "workPhaseStatusCurrent",
+    upcoming: "workPhaseStatusUpcoming",
+    history: "workPhaseStatusHistory",
+    unknown: "workPhaseStatusUnknown"
+  };
+  return t(keys[state] || keys.unknown);
+}
+function workGoalViewedPlan(goal){
+  var plans = (goal && goal.plans) || [];
+  var viewedId = S.workViewedGoalId === String(goal && goal.goalId || "")
+    ? S.workViewedPlanId : null;
+  if(viewedId){
+    for(var i = 0; i < plans.length; i++){
+      if(String(plans[i].planId || "") === String(viewedId)) return plans[i];
+    }
+    /* The phase disappeared from the latest canonical projection. Forget the
+     * stale presentation key so the next render uses Core's current/history
+     * fallback instead of pointing at an absent board. */
+    S.workViewedPlanId = null;
+  }
+  return workGoalCurrentPlan(goal);
+}
+/* Stable phase projection boundary retained for Work tests and callers. The
+ * ordered array is Core's order; currentPlan is only a display fallback and
+ * never reorders phases or derives readiness from Task columns. */
+function workGoalPhasePlans(goal){
+  var plans = (goal && goal.plans) || [];
+  var currentPlan = workGoalCurrentPlan(goal);
+  var viewedPlan = workGoalViewedPlan(goal);
+  return {
+    plans: plans,
+    currentPlan: currentPlan,
+    viewedPlan: viewedPlan
+  };
+}
+/* Resolve the Plan actually visible for a selected Goal: an explicitly viewed
+ * phase when present, otherwise the canonical current/last phase. Save and
+ * board-key logic share this single source so a default (non-clicked) terminal
+ * phase is stored and matched identically across a hard reload. */
+function workEffectiveGoalPlan(goal){
+  return workGoalViewedPlan(goal) || workGoalCurrentPlan(goal);
+}
+function workSelectGoalPhase(goalId, planId){
+  var view;
+  try { view = normalizeWorkHierarchy(S.workHierarchy); } catch(_){ return; }
+  var goal = (view.goals || []).find(function(item){
+    return String(item.goalId || "") === String(goalId || "");
+  });
+  if(!goal) return;
+  var plan = (goal.plans || []).find(function(item){
+    return String(item.planId || "") === String(planId || "");
+  });
+  if(!plan) return;
+  S.workViewedGoalId = String(goal.goalId || "");
+  S.workViewedPlanId = String(plan.planId || "");
+  workBoardFocusRequest = { key: workSelectionKey(S.workSelection) };
+  /* Presentation-only phase navigation. It starts no request, advance, or
+   * Task action; Core remains the only lifecycle authority. */
+  render();
+  workScheduleReadingContextSave();
+}
+function renderWorkPhaseOption(goal, plan, index, selected){
+  var plans = (goal && goal.plans) || [];
+  var state = workGoalPhaseState(goal, index);
+  var item = h("li", "work-phase-item");
+  var button = h("button", "work-phase-option" + (selected ? " is-selected" : ""));
+  button.type = "button";
+  button.setAttribute("data-fl-role", "work-phase-option");
+  button.setAttribute("data-goal-id", String(goal.goalId || ""));
+  button.setAttribute("data-plan-id", String(plan.planId || ""));
+  button.setAttribute("aria-pressed", selected ? "true" : "false");
+  if(selected) button.setAttribute("aria-current", "step");
+  button.setAttribute("aria-label", t("workPhaseOptionAria", {
+    number: String(index + 1),
+    total: String(plans.length),
+    name: plan.name || t("workUntitledPlan"),
+    status: workPhaseStateLabel(state)
+  }));
+  button.addEventListener("click", function(){
+    workSelectGoalPhase(goal.goalId, plan.planId);
+  });
+
+  var top = h("span", "work-phase-option-top");
+  top.appendChild(h("span", "work-phase-number", t("workPhaseNumber", {
+    number: String(index + 1), total: String(plans.length)
+  })));
+  top.appendChild(h("span", "work-phase-status is-" + state, workPhaseStateLabel(state)));
+  button.appendChild(top);
+  button.appendChild(h("span", "work-phase-option-name", plan.name || t("workUntitledPlan")));
+  if(plan.objective){
+    button.appendChild(h("span", "work-phase-option-objective", plan.objective));
+  }
+  var progress = plan.summary && plan.summary.progress || {};
+  button.appendChild(h("span", "work-phase-option-progress", t("workPhaseProgress", {
+    completed: String(progress.completed || 0),
+    total: String(progress.total || 0)
+  })));
+  item.appendChild(button);
+  return item;
+}
+function renderWorkCurrentPhase(goal, viewedPlan){
+  var section = h("section", "work-phase-context");
+  section.setAttribute("data-fl-role", "work-current-phase");
+  section.setAttribute("aria-labelledby", "work-phase-navigator-title");
+  var phaseProjection = workGoalPhasePlans(goal);
+  var plans = phaseProjection.plans || [];
+  var navigatorTitle = h("h3", "work-section-heading", t("workPhaseNavigatorTitle"));
+  navigatorTitle.id = "work-phase-navigator-title";
+  section.appendChild(navigatorTitle);
+  section.appendChild(h("p", "work-phase-navigator-hint", t("workPhaseNavigatorHint")));
+  if(!plans.length){
+    section.appendChild(h("div", "work-phase-empty", t("workCurrentPhaseEmpty")));
+    return section;
+  }
+
+  var selectedPlan = viewedPlan || phaseProjection.viewedPlan;
+  var selectedIndex = plans.indexOf(selectedPlan);
+  if(selectedIndex < 0) selectedIndex = 0;
+  var list = h("ol", "work-phase-list");
+  list.setAttribute("data-fl-role", "work-phase-list");
+  plans.forEach(function(plan, index){
+    list.appendChild(renderWorkPhaseOption(goal, plan, index, index === selectedIndex));
+  });
+  section.appendChild(list);
+
+  /* Keep the first ordered Plan as a safe empty/malformed fallback. The
+   * selected Plan replaces it only when it exists in Core's ordered array. */
+  var plan = (plans || [])[0];
+  if(selectedPlan && plans.indexOf(selectedPlan) >= 0) plan = selectedPlan;
+  if(!plan) plan = phaseProjection.currentPlan;
+  var state = workGoalPhaseState(goal, selectedIndex);
+  var selected = h("div", "work-viewed-phase");
+  selected.setAttribute("data-fl-role", "work-viewed-phase");
+  var title = h("div", "work-phase-title-row");
+  title.appendChild(h("h3", "work-phase-name", plan.name || t("workUntitledPlan")));
+  title.appendChild(h("span", "work-phase-badge is-" + state, workPhaseStateLabel(state)));
+  selected.appendChild(title);
+  if(plan.objective) selected.appendChild(h("div", "work-phase-objective", plan.objective));
+  var progress = plan.summary && plan.summary.progress || {};
+  var facts = h("div", "work-phase-facts");
+  facts.appendChild(h("span", "work-phase-fact", t("workPhaseTaskCount", {
+    completed: String(progress.completed || 0), total: String(progress.total || 0)
+  })));
+  var dep = workPlanDependencyFacts(plan);
+  if(state === "current"){
+    facts.appendChild(h("span", "work-phase-fact", dep.waiting.length
+      ? t("workPhaseDependenciesWaiting", { count: String(dep.waiting.length) })
+      : t("workPhaseDependencyRule")));
+  }
+  selected.appendChild(facts);
+  if(dep.waiting.length && state !== "upcoming"){
+    selected.appendChild(h("div", "work-phase-dependency-note", t("workPhaseDependencyNames", {
+      names: dep.waiting.join(", ")
+    })));
+  } else if(dep.named.length && state === "current"){
+    selected.appendChild(h("div", "work-phase-dependency-note", t("workPhaseDependencyPrerequisites", {
+      names: dep.named.join(", ")
+    })));
+  }
+  var stateHint = state === "upcoming"
+    ? t("workPhaseFutureReadOnly")
+    : (state === "history" || state === "completed"
+      ? t("workPhaseHistoryReadOnly")
+      : (state === "unknown" ? t("workPhaseUnknownHint") : t("workPhaseCurrentHint")));
+  selected.appendChild(h("div", "work-phase-view-hint", stateHint));
+  section.appendChild(selected);
+  return section;
+}
+function renderWorkTaskBoard(columns, titleKey, hintKey, opts){
+  opts = opts || {};
+  var section = h("section", "work-task-board");
+  section.setAttribute("data-fl-role", "work-task-board");
+  if(opts.planId) section.setAttribute("data-plan-id", String(opts.planId));
+  var heading = h("div", "work-task-board-heading");
+  var headingTitle = h("h2", "work-task-board-title", t(titleKey || "workTasksTitle"));
+  headingTitle.id = "work-task-board-title";
+  section.setAttribute("aria-labelledby", headingTitle.id);
+  if(opts.phaseName){
+    headingTitle.appendChild(h("span", "work-task-board-phase", opts.phaseName));
+  }
+  heading.appendChild(headingTitle);
+  var hint = opts.phaseState === "upcoming"
+    ? t("workGoalTasksFutureHint")
+    : (opts.phaseState === "unknown"
+      ? t("workPhaseUnknownHint") : t(hintKey || "workTasksHint"));
+  heading.appendChild(h("div", "work-task-board-hint", hint));
+  section.appendChild(heading);
+  var board = h("div", "work-board");
+  board.setAttribute("data-fl-role", "work-board");
+  board.setAttribute("data-board-overflow", "contained");
+  board.setAttribute("aria-label", opts.phaseName
+    ? t("workTaskBoardAria", { phase: opts.phaseName }) : t("workTasksTitle"));
+  board.addEventListener("dragover", workBoardDragOver);
+  board.addEventListener("drop", workBoardDrop);
+  board.addEventListener("dragleave", function(){ workClearDropHighlights(board); });
+  var activeCodes = workColumnCodesWithCards(columns || {}, WORK_COLUMN_CODES);
+  if(activeCodes.length){
+    var headRow = h("div", "work-col-grid work-col-head");
+    headRow.setAttribute("data-fl-role", "work-col-head");
+    headRow.setAttribute("data-column-count", String(activeCodes.length));
+    activeCodes.forEach(function(code){
+      var cell = h("div", "work-cell work-cell-headcell tone-" + workColumnTone(code));
+      cell.setAttribute("data-column", code);
+      cell.setAttribute("data-card-count", String(((columns && columns[code]) || []).length));
+      cell.appendChild(h("span", "work-cell-title", workColumnLabel(code)));
+      cell.appendChild(h("span", "work-cell-count", String(((columns && columns[code]) || []).length)));
+      headRow.appendChild(cell);
+    });
+    board.appendChild(headRow);
+  }
+  board.appendChild(renderWorkColumns(columns || {}));
+  section.appendChild(board);
+  return section;
+}
+/* FL-112E2: browser consumes the Core-projected currentPlanId to choose the
+ * focused phase board. It never computes phase readiness. When no current Plan
+ * remains (terminal Goal), the last phase serves completed-history inspection. */
+function workGoalCurrentPlan(goal){
+  /* FL-112E3: keep empty-Goal safety while exposing the stable source boundary
+   * goal.plans || [] that the browser-side selector always consumes. */
+  var plans = goal ? (goal.plans || []) : [];
+  var current = null;
+  var terminal = workGoalIsTerminalStatusForSelection(goal);
+  if(!terminal && goal && goal.currentPlanId){
+    for(var i = 0; i < plans.length; i++){
+      if(String(plans[i].planId || "") === String(goal.currentPlanId)){
+        current = plans[i];
+        break;
+      }
+    }
+  }
+  /* Core omits currentPlanId for terminal Goals. The last ordered Plan is a
+   * safe history view in that case; an active Goal with malformed/missing
+   * current truth falls back to the first phase without changing readiness. */
+  if(!current && plans.length > 0){
+    current = terminal ? plans[plans.length - 1] : plans[0];
+  }
+  return current;
+}
+/* Narrow-only bridge to the one existing New work composer. Scrolls and
+ * focuses the already-mounted outcome targets; never submits, rewrites,
+ * refreshes, or invents a second composer. Missing targets are a safe no-op. */
+function workRevealNewEntry(){
+  var section = document.querySelector('[data-fl-role="outcome-section"]');
+  var text = document.querySelector('[data-fl-role="outcome-text"]');
+  if(!section && !text) return;
+  var scrollTarget = section || text;
+  if(scrollTarget && scrollTarget.scrollIntoView){
+    try { scrollTarget.scrollIntoView({ block: "start" }); }
+    catch(_){
+      try { scrollTarget.scrollIntoView(true); } catch(__){}
+    }
+  }
+  if(text && typeof text.focus === "function"){
+    try { text.focus({ preventScroll: true }); }
+    catch(_){
+      try { text.focus(); } catch(__){}
+    }
+  }
+}
+function renderWorkContextHeader(view, selection){
+  var header = h("section", "work-context-header");
+  header.setAttribute("data-fl-role", "work-context-header");
+  var path = t("workContextOneOffPath");
+  var hint = t("workContextOneOffHint");
+  if(selection && selection.kind === "goal"){
+    path = t("workContextGoalPath");
+    hint = t("workContextGoalHint");
+  } else if(selection && selection.kind === "plan"){
+    path = t("workContextPlanPath");
+    hint = t("workContextPlanHint");
+  }
+  var head = h("div", "work-context-head");
+  var titles = h("div", "work-context-titles");
+  titles.appendChild(h("div", "work-context-title", t("workContextTitle")));
+  titles.appendChild(h("div", "work-context-path", path));
+  head.appendChild(titles);
+  /* Narrow screens only: desktop already sees the rail composer. The action
+   * reuses the localized New work label and targets the one mounted composer. */
+  var newBtn = h("button", "btn work-context-new-entry", t("workNewEntryLabel"));
+  newBtn.type = "button";
+  newBtn.setAttribute("data-fl-role", "work-context-new-entry");
+  newBtn.addEventListener("click", function(){ workRevealNewEntry(); });
+  head.appendChild(newBtn);
+  header.appendChild(head);
+  header.appendChild(h("p", "work-context-hint", hint));
+  return header;
+}
+function renderWorkGoalSummary(goal, decisionCount){
+  var details = document.createElement("details");
+  details.className = "work-goal-summary";
+  details.setAttribute("data-fl-role", "work-goal-summary");
+  details.setAttribute("data-goal-id", String(goal.goalId || ""));
+  var collapse = workCollapse || {};
+  var key = "focused-goal:" + String(goal.goalId || "");
+  details.open = workLaneExpanded(collapse, "focused-goal", goal.goalId, true);
+  var summary = h("summary", "work-goal-summary-summary");
+  summary.appendChild(h("span", "work-goal-summary-title", t("workGoalSummaryTitle")));
+  summary.appendChild(h("span", "work-goal-summary-hint", t("workGoalSummaryHint")));
+  details.appendChild(summary);
+  var body = h("div", "work-goal-summary-body");
+  body.appendChild(renderWorkStory(goal.summary || {}, decisionCount > 0
+    ? t("workDecisionCount", { count: String(decisionCount) })
+    : t("workNoDecision"), {
+      completedNoDecision: goal.status === "completed" && decisionCount === 0
+    }));
+  details.appendChild(body);
+  details.addEventListener("toggle", function(){
+    if(!workCollapse) workCollapse = {};
+    workCollapse[key] = details.open;
+    workCollapseSave(workCollapse);
+  });
+  return details;
+}
+function renderWorkFocusedGoal(goal){
+  var focus = h("section", "work-focus");
+  focus.setAttribute("data-fl-role", "work-focus");
+  focus.setAttribute("data-workspace-kind", "goal");
+  focus.setAttribute("data-workspace-id", String(goal.goalId || ""));
+  var header = h("header", "work-focus-header");
+  var titleRow = h("div", "work-focus-title-row");
+  titleRow.appendChild(h("span", "work-focus-type", t("workGoalType")));
+  titleRow.appendChild(h("h2", "work-focus-title", goal.name || t("workUntitledGoal")));
+  if(goal.status) titleRow.appendChild(badge(goal.status));
+  header.appendChild(titleRow);
+  if(goal.objective) header.appendChild(h("p", "work-focus-objective", goal.objective));
+  header.appendChild(h("p", "work-focus-ancestry", t("workGoalWorkspaceHint")));
+  focus.appendChild(header);
+  var decisionCount = workGoalDecisionCount(goal);
+  focus.appendChild(renderWorkGoalSummary(goal, decisionCount));
+  var viewedPlan = workGoalViewedPlan(goal) || workGoalCurrentPlan(goal);
+  focus.appendChild(renderWorkCurrentPhase(goal, viewedPlan));
+  if(viewedPlan){
+    var viewedIndex = (goal.plans || []).indexOf(viewedPlan);
+    focus.appendChild(renderWorkTaskBoard(viewedPlan.columns || {},
+      "workPhaseTasksTitle", "workGoalTasksHint", {
+        planId: viewedPlan.planId,
+        phaseName: viewedPlan.name || t("workUntitledPlan"),
+        phaseState: workGoalPhaseState(goal, viewedIndex < 0 ? 0 : viewedIndex)
+      }));
+  } else {
+    focus.appendChild(stateMsg("empty", t("workCurrentPhaseEmpty")));
+  }
+  return focus;
+}
+function renderWorkFocusedPlan(plan){
+  var focus = h("section", "work-focus");
+  focus.setAttribute("data-fl-role", "work-focus");
+  focus.setAttribute("data-workspace-kind", "plan");
+  focus.setAttribute("data-workspace-id", String(plan.planId || ""));
+  var header = h("header", "work-focus-header");
+  var titleRow = h("div", "work-focus-title-row");
+  titleRow.appendChild(h("h2", "work-focus-title", plan.name || t("workUntitledPlan")));
+  titleRow.appendChild(h("span", "work-focus-type", t("workIndependentPlanBadge")));
+  header.appendChild(titleRow);
+  if(plan.objective) header.appendChild(h("p", "work-focus-objective", plan.objective));
+  header.appendChild(h("p", "work-focus-ancestry", t("workIndependentPlanHint")));
+  focus.appendChild(header);
+  var summary = plan.summary || {};
+  var decisionCount = ((plan.columns && plan.columns["waiting-user-decision"]) || []).length;
+  focus.appendChild(renderWorkStory(summary, decisionCount > 0
+    ? t("workDecisionCount", { count: String(decisionCount) })
+    : t("workNoDecision")));
+  focus.appendChild(renderWorkTaskBoard(plan.columns || {}, "workPlanTasksTitle", "workPlanTasksHint"));
+  return focus;
+}
+var WORK_ONE_OFF_GROUPS = [
+  { key: "current", codes: ["not-started", "ready", "running", "waiting-verification"], title: "workOneOffCurrentTitle", hint: "workOneOffCurrentHint", limit: 24 },
+  { key: "attention", codes: ["waiting-user-decision", "stopped-failed"], title: "workOneOffAttentionTitle", hint: "workOneOffAttentionHint", limit: 24 },
+  { key: "history", codes: ["completed"], title: "workOneOffHistoryTitle", hint: "workOneOffHistoryHint", limit: 20 }
+];
+function workOneOffGroupCount(lane, codes){
+  var count = 0;
+  (codes || []).forEach(function(code){ count += ((lane && lane.columns && lane.columns[code]) || []).length; });
+  return count;
+}
+function renderWorkOneOffGroup(lane, definition){
+  var query = definition.key === "history"
+    ? String(S.workOneOffSearch || "").trim().toLocaleLowerCase()
+    : "";
+  var sourceColumns = {};
+  definition.codes.forEach(function(code){
+    var cards = ((lane && lane.columns && lane.columns[code]) || []);
+    sourceColumns[code] = query ? cards.filter(function(card){
+      return workOneOffCardMatches(card, query);
+    }) : cards;
+  });
+  var filteredLane = { columns: sourceColumns };
+  var total = workOneOffGroupCount(filteredLane, definition.codes);
+  var details = document.createElement("details");
+  details.className = "work-oneoff-status-group work-oneoff-status-" + definition.key;
+  details.setAttribute("data-fl-role", "work-oneoff-" + definition.key);
+  var defaultOpen = definition.key !== "history" && total > 0;
+  details.open = defaultOpen;
+  var summary = document.createElement("summary");
+  summary.className = "work-oneoff-status-summary";
+  summary.setAttribute("data-fl-role", "work-oneoff-" + definition.key + "-toggle");
+  summary.appendChild(h("span", "work-oneoff-status-title", t(definition.title)));
+  summary.appendChild(h("span", "work-oneoff-status-count", String(total)));
+  details.appendChild(summary);
+  var body = h("div", "work-oneoff-status-body");
+  var filled = false;
+  function fill(limit){
+    if(filled && limit !== "all") return;
+    filled = true;
+    body.textContent = "";
+    var columns = {};
+    var omitted = 0;
+    var remaining = limit === "all" ? Infinity : definition.limit;
+    definition.codes.forEach(function(code){
+      var all = sourceColumns[code] || [];
+      columns[code] = limit === "all" ? all : all.slice(0, Math.max(0, remaining));
+      if(limit !== "all"){
+        omitted += Math.max(0, all.length - columns[code].length);
+        remaining = Math.max(0, remaining - columns[code].length);
+      }
+    });
+    body.appendChild(h("div", "work-oneoff-status-hint", t(definition.hint, {
+      count: String(total)
+    })));
+    if(total > 0) body.appendChild(renderWorkColumns(columns, definition.codes));
+    else body.appendChild(h("div", "work-oneoff-status-empty",
+      query ? t("workOneOffHistoryNoMatches") : t("workColumnEmpty")));
+    if(omitted > 0 && limit !== "all"){
+      var more = h("button", "btn sm work-oneoff-show-more", t("workOneOffShowMore", {
+        count: String(omitted)
+      }));
+      more.type = "button";
+      more.addEventListener("click", function(){
+        fill("all");
+        /* The old button is replaced by the full list; keep keyboard focus in
+         * the bounded work area rather than on a detached node. */
+        body.setAttribute("tabindex", "-1");
+        body.focus();
+      });
+      body.appendChild(more);
+    }
+  }
+  function ensure(){ if(!filled) fill("bounded"); }
+  details.addEventListener("toggle", function(){ if(details.open) ensure(); });
+  if(defaultOpen) ensure();
+  details.appendChild(body);
+  return details;
+}
+function workOneOffCardMatches(card, query){
+  if(!query) return true;
+  var parts = [card && card.name, card && card.nextAction, card && card.nextActionMessage];
+  (card && card.blockers || []).forEach(function(blocker){
+    parts.push(workSafeCardBlockerLabel(card, blocker));
+  });
+  return parts.filter(Boolean).join(" ").toLocaleLowerCase().indexOf(query) >= 0;
+}
+function renderWorkOneOffSearch(){
+  var form = document.createElement("form");
+  form.className = "work-oneoff-search";
+  form.setAttribute("data-fl-role", "work-oneoff-search");
+  form.setAttribute("aria-label", t("workOneOffSearchLabel"));
+  var label = h("label", "work-oneoff-search-field", "");
+  label.appendChild(h("span", "work-oneoff-search-label", t("workOneOffSearchLabel")));
+  var input = document.createElement("input");
+  input.type = "search";
+  input.maxLength = 120;
+  input.className = "work-oneoff-search-input";
+  input.setAttribute("data-fl-role", "work-oneoff-search-input");
+  input.setAttribute("aria-label", t("workOneOffSearchLabel"));
+  input.placeholder = t("workOneOffSearchPlaceholder");
+  input.value = String(S.workOneOffSearchDraft || "");
+  input.addEventListener("input", function(){
+    S.workOneOffSearchDraft = input.value.slice(0, 120);
+    workScheduleReadingContextSave();
+  });
+  label.appendChild(input);
+  form.appendChild(label);
+  var actions = h("div", "work-oneoff-search-actions");
+  var submit = h("button", "btn sm", t("workOneOffSearchApply"));
+  submit.type = "submit";
+  actions.appendChild(submit);
+  var clear = h("button", "btn sm", t("workOneOffSearchClear"));
+  clear.type = "button";
+  clear.addEventListener("click", function(){
+    S.workOneOffSearch = "";
+    S.workOneOffSearchDraft = "";
+    workScheduleReadingContextSave();
+    render();
+  });
+  actions.appendChild(clear);
+  form.appendChild(actions);
+  form.addEventListener("submit", function(e){
+    e.preventDefault();
+    S.workOneOffSearch = String(S.workOneOffSearchDraft || "").trim().slice(0, 120);
+    S.workOneOffSearchDraft = S.workOneOffSearch;
+    workScheduleReadingContextSave();
+    render();
+  });
+  return form;
+}
+function renderWorkOneOffSummary(current, attention, history){
+  var summary = h("div", "work-story work-oneoff-summary");
+  summary.setAttribute("data-fl-role", "work-oneoff-summary");
+  summary.appendChild(renderWorkStoryFact(t("workOneOffCurrentTitle"), String(current)));
+  summary.appendChild(renderWorkStoryFact(t("workOneOffAttentionTitle"), String(attention),
+    attention > 0 ? "attention" : "quiet"));
+  summary.appendChild(renderWorkStoryFact(t("workOneOffHistoryTitle"), String(history), "quiet"));
+  summary.appendChild(renderWorkStoryFact(t("workOneOffStandaloneBadge"), t("workOneOffNoParent"), "quiet"));
+  return summary;
+}
+function renderWorkFocusedOneOff(lane){
+  var focus = h("section", "work-focus");
+  focus.setAttribute("data-fl-role", "work-focus");
+  focus.setAttribute("data-workspace-kind", "one-off");
+  focus.setAttribute("data-workspace-id", "inbox");
+  var header = h("header", "work-focus-header");
+  var titleRow = h("div", "work-focus-title-row");
+  titleRow.appendChild(h("h2", "work-focus-title", t("workIndependentTasks")));
+  titleRow.appendChild(h("span", "work-focus-type", t("workOneOffStandaloneBadge")));
+  header.appendChild(titleRow);
+  header.appendChild(h("p", "work-focus-objective", t("workOneOffWorkspaceHint")));
+  focus.appendChild(header);
+  var current = workOneOffGroupCount(lane, WORK_ONE_OFF_GROUPS[0].codes);
+  var attention = workOneOffGroupCount(lane, WORK_ONE_OFF_GROUPS[1].codes);
+  var history = workOneOffGroupCount(lane, WORK_ONE_OFF_GROUPS[2].codes);
+  focus.appendChild(renderWorkOneOffSearch());
+  focus.appendChild(renderWorkOneOffSummary(current, attention, history));
+  var groups = h("div", "work-oneoff-status-groups");
+  groups.setAttribute("data-fl-role", "work-oneoff-groups");
+  WORK_ONE_OFF_GROUPS.forEach(function(definition){
+    groups.appendChild(renderWorkOneOffGroup(lane, definition));
+  });
+  if(current === 0 && attention === 0){
+    groups.insertBefore(h("div", "work-oneoff-empty-note", t("workOneOffNoCurrent")), groups.firstChild);
+  }
+  focus.appendChild(groups);
+  return focus;
+}
+function renderWorkWorkspaceOption(kind, id, name, cue, count, selected, status){
+  var button = h("button", "work-portfolio-option" + (selected ? " is-selected" : ""));
+  button.type = "button";
+  button.setAttribute("data-fl-role", "work-workspace-option");
+  button.setAttribute("data-workspace-kind", kind);
+  button.setAttribute("data-workspace-id", String(id || ""));
+  button.setAttribute("aria-pressed", selected ? "true" : "false");
+  if(selected) button.setAttribute("aria-current", "true");
+  button.addEventListener("click", function(){ workSelectWorkspace(kind, id); });
+  var head = h("span", "work-portfolio-option-head");
+  head.appendChild(h("span", "work-portfolio-option-name", name));
+  if(status) head.appendChild(badge(status));
+  button.appendChild(head);
+  button.appendChild(h("span", "work-portfolio-option-cue", cue));
+  button.appendChild(h("span", "work-portfolio-option-meta", t("workPortfolioTaskCount", {
+    count: String(count)
+  })));
+  return button;
+}
+function renderWorkPortfolioGroup(title, items, emptyText){
+  var group = h("section", "work-portfolio-group");
+  group.appendChild(h("h3", "work-portfolio-group-title", title));
+  if(items && items.length) items.forEach(function(item){ group.appendChild(item); });
+  else if(emptyText) group.appendChild(h("p", "work-portfolio-empty", emptyText));
+  return group;
+}
+function renderWorkNewEntry(){
+  var entry = h("section", "work-new-entry");
+  entry.setAttribute("data-fl-role", "work-new-entry");
+  entry.setAttribute("aria-label", t("workNewEntryLabel"));
+  entry.appendChild(renderOutcomeSection());
+  entry.appendChild(renderWorkShapeGuide());
+  return entry;
+}
+function renderWorkPortfolio(view, selection){
+  var rail = h("aside", "work-portfolio");
+  rail.setAttribute("data-fl-role", "work-portfolio");
+  rail.setAttribute("aria-label", t("workPortfolioLabel"));
+  rail.appendChild(h("h2", "work-portfolio-title", t("workPortfolioTitle")));
+  rail.appendChild(h("p", "work-portfolio-hint", t("workPortfolioHint")));
+  rail.appendChild(renderWorkNewEntry());
+  var activeGoals = (view.goals || []).filter(function(goal){ return !workGoalIsTerminalStatusForSelection(goal); });
+  activeGoals.sort(function(a, b){ return Number(workGoalNeedsAttention(b)) - Number(workGoalNeedsAttention(a)); });
+  function goalOptions(goals){
+    return goals.map(function(goal){
+      return renderWorkWorkspaceOption("goal", goal.goalId, goal.name || t("workUntitledGoal"),
+        workPortfolioCue(goal.summary, { completedNoDecision: false }), workGoalTaskCount(goal),
+        workSelectionEqual(selection, workMakeSelection("goal", goal.goalId)), goal.status);
+    });
+  }
+  rail.appendChild(renderWorkPortfolioGroup(t("workPortfolioGoals"), goalOptions(activeGoals),
+    t("workPortfolioNoActiveGoals")));
+  var independent = view.independentPlans || [];
+  rail.appendChild(renderWorkPortfolioGroup(t("workPortfolioPlans"), independent.map(function(plan){
+    return renderWorkWorkspaceOption("plan", plan.planId, plan.name || t("workUntitledPlan"),
+      workPortfolioCue(plan.summary), workPlanTaskCount(plan),
+      workSelectionEqual(selection, workMakeSelection("plan", plan.planId)));
+  }), t("workPortfolioNoIndependentPlans")));
+  var oneOffItems = [];
+  if(view.oneOffTasks){
+    var oneOffCount = workOneOffCardCount(view);
+    oneOffItems.push(renderWorkWorkspaceOption("one-off", "inbox", t("workIndependentTasks"),
+      workPortfolioCue(view.oneOffTasks.summary), oneOffCount,
+      workSelectionEqual(selection, workMakeSelection("one-off", "inbox"))));
+  }
+  rail.appendChild(renderWorkPortfolioGroup(t("workPortfolioOneOff"), oneOffItems,
+    t("workPortfolioNoIndependentTasks")));
+  var finishedGoals = (view.goals || []).filter(function(goal){ return workGoalIsTerminalStatusForSelection(goal); });
+  rail.appendChild(renderWorkFinishedGoals(finishedGoals));
+  return rail;
+}
+function renderWorkFocusedWorkspace(view, selection){
+  if(!selection) return stateMsg("empty", t("workEmpty"));
+  if(selection.kind === "goal"){
+    var goal = (view.goals || []).find(function(item){ return String(item.goalId || "") === String(selection.id); });
+    if(goal) return renderWorkFocusedGoal(goal);
+  } else if(selection.kind === "plan"){
+    var plan = (view.independentPlans || []).find(function(item){ return String(item.planId || "") === String(selection.id); });
+    if(plan) return renderWorkFocusedPlan(plan);
+  } else if(selection.kind === "one-off" && view.oneOffTasks){
+    return renderWorkFocusedOneOff(view.oneOffTasks);
+  }
+  return stateMsg("empty", t("workSelectionUnavailable"));
+}
+function renderWorkWorkbench(view, selection){
+  var layout = h("div", "workbench-layout");
+  layout.setAttribute("data-fl-role", "workbench-layout");
+  layout.appendChild(renderWorkPortfolio(view, selection));
+  var focused = h("div", "work-focused-column");
+  focused.appendChild(renderWorkContextHeader(view, selection));
+  focused.appendChild(renderWorkFocusedWorkspace(view, selection));
+  focused.appendChild(renderWorkAdvanced(view, selection));
+  layout.appendChild(focused);
+  return layout;
 }
 function renderWorkPlanLane(plan, isIndependent){
   var planId = plan.planId || "";
@@ -5357,6 +6713,7 @@ function renderWorkPlanLane(plan, isIndependent){
   toggle.setAttribute("data-fl-role", "work-plan-toggle");
   toggle.addEventListener("click", function(){
     workToggleLane(workCollapse, "plan", planId, toggle, defaultExpanded);
+    workScheduleReadingContextSave();
   });
 
   var nameWrap = h("div", "work-lane-head");
@@ -5401,6 +6758,7 @@ function renderWorkGoalLane(goal){
   toggle.setAttribute("data-fl-role", "work-goal-toggle");
   toggle.addEventListener("click", function(){
     workToggleLane(workCollapse, "goal", goalId, toggle, defaultExpanded);
+    workScheduleReadingContextSave();
   });
 
   var nameWrap = h("div", "work-lane-head");
@@ -5481,6 +6839,7 @@ function renderWorkOneOffLane(lane){
   toggle.addEventListener("click", function(){
     var next = workToggleLane(workCollapse, "one-off", "tasks", toggle, defaultExpanded);
     if(next) ensureOneOffBody();
+    workScheduleReadingContextSave();
   });
 
   wrap.appendChild(toggle);
@@ -5488,8 +6847,22 @@ function renderWorkOneOffLane(lane){
   return wrap;
 }
 function renderWorkFilters(){
-  var bar = h("div", "work-filters");
+  var bar = document.createElement("details");
+  bar.className = "work-filters";
   bar.setAttribute("data-fl-role", "work-filters");
+  var summary = document.createElement("summary");
+  summary.className = "work-filters-summary";
+  summary.setAttribute("data-fl-role", "work-filters-toggle");
+  var appliedCount = 0;
+  var applied = S.workFilter || {};
+  if(applied.project) appliedCount += 1;
+  if(applied.columns && applied.columns.length) appliedCount += 1;
+  if(applied.workerProfileId) appliedCount += 1;
+  summary.appendChild(h("span", "work-filters-summary-title", t("workFilterSummary")));
+  summary.appendChild(h("span", "work-filters-summary-hint", appliedCount
+    ? t("workFilterAppliedCount", { count: String(appliedCount) })
+    : t("workFilterSummaryHint")));
+  bar.appendChild(summary);
   var form = document.createElement("form");
   form.className = "work-filters-form";
   form.setAttribute("data-fl-role", "work-filter-form");
@@ -5518,7 +6891,10 @@ function renderWorkFilters(){
   });
   projSel.value = draft.project;
   // Draft-only updates on change: no request fires until Apply.
-  projSel.addEventListener("change", function(){ S.workFilterDraft.project = projSel.value; });
+  projSel.addEventListener("change", function(){
+    S.workFilterDraft.project = projSel.value;
+    workScheduleReadingContextSave();
+  });
   projWrap.appendChild(projSel);
   if(presented.omittedInternalCount > 0){
     var omitNote = h("div", "work-filter-note dim fs11", t("workFilterInternalProjectsOmitted", {
@@ -5535,7 +6911,10 @@ function renderWorkFilters(){
   colSel.appendChild(workOption("", t("workFilterAllColumns")));
   WORK_COLUMN_CODES.forEach(function(code){ colSel.appendChild(workOption(code, workColumnLabel(code))); });
   colSel.value = draft.columns;
-  colSel.addEventListener("change", function(){ S.workFilterDraft.columns = colSel.value; });
+  colSel.addEventListener("change", function(){
+    S.workFilterDraft.columns = colSel.value;
+    workScheduleReadingContextSave();
+  });
   colWrap.appendChild(colSel);
 
   var workerWrap = h("label", "work-filter-field", "");
@@ -5546,7 +6925,10 @@ function renderWorkFilters(){
   var workerIds = S.workFilterOptions.workers.length ? S.workFilterOptions.workers : workWorkerOptionsFromView();
   workerIds.forEach(function(wid){ workerSel.appendChild(workOption(wid, workWorkerOptionLabel(wid))); });
   workerSel.value = draft.workerProfileId;
-  workerSel.addEventListener("change", function(){ S.workFilterDraft.workerProfileId = workerSel.value; });
+  workerSel.addEventListener("change", function(){
+    S.workFilterDraft.workerProfileId = workerSel.value;
+    workScheduleReadingContextSave();
+  });
   workerWrap.appendChild(workerSel);
 
   var actions = h("div", "work-filter-actions");
@@ -5579,25 +6961,218 @@ function workApplyFilter(project, columns, workerProfileId){
   if(columns) f.columns = [columns];
   if(workerProfileId) f.workerProfileId = workerProfileId;
   S.workFilter = f;
+  workScheduleReadingContextSave();
   refresh();
 }
 function workResetFilter(){
   S.workFilterDraft = { project: "", columns: "", workerProfileId: "" };
   S.workFilter = {};
+  workScheduleReadingContextSave();
   refresh();
 }
-/* Legacy task-file submission stays reachable behind an explicit Advanced
- * action; outcome-first creation arrives in FL-109D and replaces it as the
- * primary intake path. */
-function renderWorkAdvanced(){
+function workCardsFromColumns(columns){
+  var cards = [];
+  WORK_COLUMN_CODES.forEach(function(code){
+    ((columns && columns[code]) || []).forEach(function(card){ cards.push(card); });
+  });
+  return cards;
+}
+function workSelectedWorkspaceData(view, selection){
+  if(!view || !selection) return { kind: null, cards: [] };
+  if(selection.kind === "goal"){
+    var goal = (view.goals || []).find(function(item){
+      return String(item.goalId || "") === String(selection.id || "");
+    });
+    var phase = goal ? workGoalViewedPlan(goal) : null;
+    return {
+      kind: "goal",
+      goal: goal || null,
+      phase: phase || null,
+      cards: phase ? workCardsFromColumns(phase.columns) : []
+    };
+  }
+  if(selection.kind === "plan"){
+    var plan = (view.independentPlans || []).find(function(item){
+      return String(item.planId || "") === String(selection.id || "");
+    });
+    return { kind: "plan", plan: plan || null, cards: plan ? workCardsFromColumns(plan.columns) : [] };
+  }
+  var oneOff = view.oneOffTasks || null;
+  return { kind: "one-off", oneOff: oneOff, cards: oneOff ? workCardsFromColumns(oneOff.columns) : [] };
+}
+function workExpertWorkerProfile(card){
+  var id = card && card.workerProfileId;
+  var profiles = S.hub && S.hub.workerProfiles && S.hub.workerProfiles.profiles;
+  if(!id || !Array.isArray(profiles)) return null;
+  return profiles.find(function(profile){ return String(profile.id || "") === String(id); }) || null;
+}
+function workExpertEffortText(value){
+  var keys = {
+    low: "workersEffortLow",
+    medium: "workersEffortMedium",
+    high: "workersEffortHigh",
+    xhigh: "workersEffortXHigh",
+    max: "workersEffortMax"
+  };
+  return keys[value] ? t(keys[value]) : t("workExpertInherited");
+}
+function workExpertWorkerTuning(profile){
+  if(!profile) return t("workExpertTuningUnavailable");
+  var advanced = profile.advancedPolicy && typeof profile.advancedPolicy === "object"
+    ? profile.advancedPolicy : {};
+  var parts = [];
+  var effort = workExpertEffortText(profile.effort);
+  parts.push(t("workExpertTuningEffort", { value: String(effort) }));
+  var budget = profile.maxBudgetUsd === null
+    ? t("workExpertUnlimited")
+    : (profile.maxBudgetUsd === undefined ? t("workExpertInherited") : String(profile.maxBudgetUsd));
+  parts.push(t("workExpertTuningBudget", { value: budget }));
+  var noProgress = advanced.noProgressTimeoutMs !== undefined
+    ? advanced.noProgressTimeoutMs : profile.noProgressTimeoutMs;
+  if(noProgress !== undefined){
+    parts.push(t("workExpertTuningNoProgress", {
+      value: noProgress === null
+        ? t("workExpertUnlimited") : readableDuration(noProgress)
+    }));
+  }
+  if(advanced.baseMaxAttempts !== undefined || advanced.maxExtraAttempts !== undefined){
+    parts.push(t("workExpertTuningAttempts", {
+      base: advanced.baseMaxAttempts === undefined ? t("workExpertInherited") : String(advanced.baseMaxAttempts),
+      extra: advanced.maxExtraAttempts === undefined ? t("workExpertInherited") : String(advanced.maxExtraAttempts)
+    }));
+  }
+  if(advanced.maxAdaptationRounds !== undefined){
+    parts.push(t("workExpertTuningAdaptation", { value: String(advanced.maxAdaptationRounds) }));
+  }
+  if(profile.contractQuality && typeof profile.contractQuality === "object"
+    && profile.contractQuality.mode){
+    parts.push(t("workExpertTuningQuality", { value: String(profile.contractQuality.mode) }));
+  }
+  return parts.join(" · ");
+}
+function renderWorkExpertTaskRecord(card){
+  var record = h("section", "work-expert-task");
+  var head = h("div", "work-expert-task-head");
+  head.appendChild(h("strong", "work-expert-task-name", card.name || t("taskUntitled")));
+  head.appendChild(h("span", "work-expert-task-status", workColumnLabel(card.column)));
+  record.appendChild(head);
+  var facts = h("div", "work-expert-task-facts");
+  facts.appendChild(hd("div", "work-expert-row", [
+    h("span", "work-expert-label", t("workExpertTaskId")),
+    h("code", "work-expert-value", String(card.taskId || "-"))
+  ]));
+  facts.appendChild(hd("div", "work-expert-row", [
+    h("span", "work-expert-label", t("workExpertProvider")),
+    h("span", "work-expert-value", String(card.provider || "-") + " / " + String(card.model || "-"))
+  ]));
+  facts.appendChild(hd("div", "work-expert-row", [
+    h("span", "work-expert-label", t("workExpertRuntime")),
+    h("span", "work-expert-value", String(card.runtime || "-"))
+  ]));
+  var profile = workExpertWorkerProfile(card);
+  facts.appendChild(hd("div", "work-expert-row", [
+    h("span", "work-expert-label", t("workExpertWorker")),
+    h("span", "work-expert-value", String(card.workerProfileId || t("workExpertNotRecorded")))
+  ]));
+  facts.appendChild(hd("div", "work-expert-row work-expert-tuning-row", [
+    h("span", "work-expert-label", t("workExpertTuning")),
+    h("span", "work-expert-value", workExpertWorkerTuning(profile))
+  ]));
+  var policy = card.actionPolicy && card.actionPolicy.destinations;
+  var policyCount = policy && typeof policy === "object" ? Object.keys(policy).length : 0;
+  facts.appendChild(hd("div", "work-expert-row", [
+    h("span", "work-expert-label", t("workExpertPolicy")),
+    h("span", "work-expert-value", policyCount
+      ? t("workExpertPolicyRecorded", { count: String(policyCount) })
+      : t("workExpertPolicyUnavailable"))
+  ]));
+  record.appendChild(facts);
+  var actions = h("div", "work-expert-actions");
+  var openTask = h("button", "btn sm", t("workExpertOpenTask"));
+  openTask.type = "button";
+  openTask.setAttribute("data-fl-role", "work-expert-open-task");
+  openTask.addEventListener("click", function(){
+    taskDetailActiveTab = "more";
+    showTask(card.taskId, card.breadcrumb);
+  });
+  actions.appendChild(openTask);
+  if(profile && profile.id){
+    var openWorker = h("button", "btn sm", t("workExpertOpenWorker"));
+    openWorker.type = "button";
+    openWorker.setAttribute("data-fl-role", "work-expert-open-worker");
+    openWorker.addEventListener("click", function(){ switchTab("worker"); });
+    actions.appendChild(openWorker);
+  }
+  record.appendChild(actions);
+  return record;
+}
+/* Technical evidence is deliberately local and closed. It reads only the
+ * existing Work projection and opens existing Task/Worker surfaces; it has no
+ * mutation path and never changes authority or a Core-owned policy. */
+function renderWorkAdvanced(view, selection){
   var details = document.createElement("details");
-  details.className = "work-advanced";
+  details.className = "work-expert-details work-advanced";
   details.setAttribute("data-fl-role", "work-advanced");
+  details.setAttribute("data-work-role", "expert-details");
   var summary = document.createElement("summary");
-  summary.textContent = t("workAdvancedTitle");
+  var summaryText = h("span", "work-expert-summary-text");
+  summaryText.appendChild(h("span", "work-expert-summary-title", t("workExpertDetailsTitle")));
+  summaryText.appendChild(h("span", "work-expert-summary-hint", t("workExpertDetailsShort")));
+  summary.appendChild(summaryText);
   details.appendChild(summary);
   var body = h("div", "work-advanced-body");
-  body.appendChild(h("div", "summary-line dim mb-8", t("workAdvancedHint")));
+  body.appendChild(h("div", "work-expert-purpose", t("workExpertDetailsHint")));
+  var data = workSelectedWorkspaceData(view, selection);
+  var facts = h("div", "work-expert-facts");
+  if(data.goal){
+    facts.appendChild(hd("div", "work-expert-row", [
+      h("span", "work-expert-label", t("workExpertGoalId")),
+      h("code", "work-expert-value", String(data.goal.goalId || "-"))
+    ]));
+    if(data.phase){
+      facts.appendChild(hd("div", "work-expert-row", [
+        h("span", "work-expert-label", t("workExpertPhaseId")),
+        h("code", "work-expert-value", String(data.phase.planId || "-"))
+      ]));
+    }
+  }
+  if(data.plan && data.plan.planId){
+    facts.appendChild(hd("div", "work-expert-row", [
+      h("span", "work-expert-label", t("workExpertPhaseId")),
+      h("code", "work-expert-value", String(data.plan.planId))
+    ]));
+  }
+  if(data.oneOff){
+    facts.appendChild(hd("div", "work-expert-row", [
+      h("span", "work-expert-label", t("workExpertScope")),
+      h("span", "work-expert-value", t("workExpertOneOffScope"))
+    ]));
+  }
+  if(data.cards && data.cards.length){
+    facts.appendChild(hd("div", "work-expert-row", [
+      h("span", "work-expert-label", t("workExpertRawEvidence")),
+      h("span", "work-expert-value", t("workExpertRawEvidenceHint"))
+    ]));
+  }
+  if(facts.childNodes.length) body.appendChild(facts);
+  var taskRecords = h("div", "work-expert-task-list");
+  taskRecords.setAttribute("data-fl-role", "work-expert-task-list");
+  var selectedCard = null;
+  if(S.detailTaskId){
+    selectedCard = (data.cards || []).find(function(card){
+      return String(card.taskId || card.id || "") === String(S.detailTaskId);
+    }) || null;
+  }
+  if(selectedCard){
+    taskRecords.appendChild(renderWorkExpertTaskRecord(selectedCard));
+    body.appendChild(taskRecords);
+  }
+  if(!selectedCard){
+    body.appendChild(h("div", "work-expert-empty", data.kind === "one-off"
+      ? t("workExpertOneOffHint") : t("workExpertSelectTaskHint")));
+  }
+  var legacyHint = h("div", "work-expert-legacy-hint", t("workExpertLegacyHint"));
+  body.appendChild(legacyHint);
   var openLegacy = h("button", "btn sm", t("workAdvancedOpenSubmit"));
   openLegacy.type = "button";
   openLegacy.setAttribute("data-fl-role", "work-advanced-submit");
@@ -5606,17 +7181,1143 @@ function renderWorkAdvanced(){
   details.appendChild(body);
   return details;
 }
-/* The single Work surface: Goal and Plan are context lanes, Task cards alone
- * occupy the seven columns. Loading/failure/stale states are decided by
- * pageEvidenceState; an unsupported projection fails visibly here. */
+
+/* -------------------------------------------------------------------------
+ * FL-112F session-only Work reading context
+ *
+ * This adapter deliberately stores a small allow-list rather than cloning
+ * Work or Task data. Project filters are represented by their visible option
+ * label, never by the underlying path. Every value is bounded here and then
+ * checked against the newly loaded canonical hierarchy before use.
+ * ------------------------------------------------------------------------- */
+function workReadingSafeString(value, max){
+  if(typeof value !== "string") return "";
+  if(value.length > (max || WORK_READING_CONTEXT_MAX_ID_CHARS)) return "";
+  if(/[^\S\r\n]/.test(value.charAt(0)) || /[\u0000-\u001f\u007f]/.test(value)) return "";
+  return value;
+}
+function workReadingSafeNumber(value){
+  if(typeof value !== "number" || !Number.isFinite(value)) return 0;
+  if(value < 0 || value > 50000000) return 0;
+  return Math.floor(value);
+}
+function workReadingOptionalNumber(value){
+  if(typeof value !== "number" || !Number.isFinite(value)) return null;
+  if(value < 0 || value > 50000000) return null;
+  return Math.floor(value);
+}
+function workReadingSafeFilterPart(value, max){
+  if(typeof value !== "string") return "";
+  if(value === "") return "";
+  if(/^(?:[A-Za-z]:[\\/]|[\\/]|~[\\/])/.test(value)) return "";
+  return workReadingSafeString(value, max);
+}
+function workReadingNormalizeFilter(raw){
+  var out = { projectLabel: "", column: "", workerProfileId: "" };
+  if(!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  out.projectLabel = workReadingSafeFilterPart(raw.projectLabel, 160);
+  if(typeof raw.column === "string" && WORK_COLUMN_CODES.indexOf(raw.column) >= 0){
+    out.column = raw.column;
+  }
+  out.workerProfileId = workReadingSafeFilterPart(raw.workerProfileId, WORK_READING_CONTEXT_MAX_ID_CHARS);
+  return out;
+}
+function workReadingNormalizeRecord(raw){
+  if(!raw || typeof raw !== "object" || Array.isArray(raw)
+    || raw.version !== WORK_READING_CONTEXT_VERSION) return null;
+  var record = {
+    version: WORK_READING_CONTEXT_VERSION,
+    workspace: null,
+    phase: null,
+    disclosures: {},
+    collapse: {},
+    detail: { open: false, taskId: "", tab: "overview" },
+    filters: { applied: workReadingNormalizeFilter(null), draft: workReadingNormalizeFilter(null) },
+    search: { oneOff: "", draft: "" },
+    scroll: { contentTop: 0, contentLeft: 0, detailTop: 0, board: null },
+    focusKey: "",
+    outcome: null,
+    selectedIntakeId: "",
+    confirmingIntakeId: "",
+    createdNavigate: null
+  };
+  if(raw.workspace && typeof raw.workspace === "object" && !Array.isArray(raw.workspace)){
+    var workspaceId = workReadingSafeString(raw.workspace.id);
+    if((raw.workspace.kind === "goal" || raw.workspace.kind === "plan"
+      || raw.workspace.kind === "one-off") && workspaceId){
+      record.workspace = { kind: raw.workspace.kind, id: workspaceId };
+    }
+  }
+  if(raw.phase && typeof raw.phase === "object" && !Array.isArray(raw.phase)){
+    var phaseGoalId = workReadingSafeString(raw.phase.goalId);
+    var phasePlanId = workReadingSafeString(raw.phase.planId);
+    if(phaseGoalId && phasePlanId) record.phase = { goalId: phaseGoalId, planId: phasePlanId };
+  }
+  if(raw.disclosures && typeof raw.disclosures === "object" && !Array.isArray(raw.disclosures)){
+    WORK_READING_CONTEXT_DISCLOSURES.forEach(function(key){
+      if(typeof raw.disclosures[key] === "boolean") record.disclosures[key] = raw.disclosures[key];
+    });
+  }
+  if(raw.collapse && typeof raw.collapse === "object" && !Array.isArray(raw.collapse)){
+    Object.keys(raw.collapse).filter(function(key){
+      return /^[A-Za-z0-9:_-]+$/.test(key)
+        && workReadingSafeString(key, WORK_READING_CONTEXT_MAX_ID_CHARS);
+    }).slice(0, WORK_READING_CONTEXT_MAX_COLLAPSE).forEach(function(key){
+      var safeKey = workReadingSafeString(key, WORK_READING_CONTEXT_MAX_ID_CHARS);
+      if(safeKey && /^[A-Za-z0-9:_-]+$/.test(safeKey) && typeof raw.collapse[key] === "boolean"){
+        record.collapse[safeKey] = raw.collapse[key];
+      }
+    });
+  }
+  if(raw.detail && typeof raw.detail === "object" && !Array.isArray(raw.detail)){
+    if(typeof raw.detail.open === "boolean") record.detail.open = raw.detail.open;
+    var detailId = workReadingSafeString(raw.detail.taskId);
+    if(detailId) record.detail.taskId = detailId;
+    if(typeof raw.detail.tab === "string" && WORK_READING_CONTEXT_TABS.indexOf(raw.detail.tab) >= 0){
+      record.detail.tab = raw.detail.tab;
+    }
+  }
+  if(raw.filters && typeof raw.filters === "object" && !Array.isArray(raw.filters)){
+    record.filters.applied = workReadingNormalizeFilter(raw.filters.applied);
+    record.filters.draft = workReadingNormalizeFilter(raw.filters.draft);
+  }
+  if(raw.search && typeof raw.search === "object" && !Array.isArray(raw.search)){
+    record.search.oneOff = workReadingSafeString(raw.search.oneOff, 120);
+    record.search.draft = workReadingSafeString(raw.search.draft, 120);
+  }
+  if(raw.scroll && typeof raw.scroll === "object" && !Array.isArray(raw.scroll)){
+    record.scroll.contentTop = workReadingSafeNumber(raw.scroll.contentTop);
+    record.scroll.contentLeft = workReadingSafeNumber(raw.scroll.contentLeft);
+    record.scroll.detailTop = workReadingSafeNumber(raw.scroll.detailTop);
+    if(raw.scroll.board && typeof raw.scroll.board === "object" && !Array.isArray(raw.scroll.board)){
+      var boardKey = workReadingSafeString(raw.scroll.board.key, 320);
+      var boardLeft = workReadingOptionalNumber(raw.scroll.board.left);
+      if(boardKey && boardLeft !== null){
+        record.scroll.board = {
+          key: boardKey,
+          left: boardLeft
+        };
+      }
+    }
+  }
+  record.focusKey = workReadingSafeString(raw.focusKey, 240);
+  /* FL-112E9: bounded outcome draft fields, the selected intake, the open
+   * confirmation step, and the created-navigation intent all survive a hard
+   * reload. Only bounded user draft text is stored; display copy is rehydrated
+   * from canonical truth. */
+  if(raw.outcome && typeof raw.outcome === "object" && !Array.isArray(raw.outcome)){
+    var draftOutcome = workReadingSafeString(raw.outcome.outcome, 2000);
+    var draftProject = workReadingSafeString(raw.outcome.project, 200);
+    var draftContext = workReadingSafeString(raw.outcome.context, 2000);
+    var draftShape = raw.outcome.requestedShape;
+    if(draftOutcome && ["auto", "task", "plan", "goal"].indexOf(draftShape) >= 0){
+      record.outcome = {
+        outcome: draftOutcome,
+        project: draftProject,
+        context: draftContext,
+        requestedShape: draftShape
+      };
+    }
+  }
+  var selectedIntakeId = workReadingSafeString(raw.selectedIntakeId, WORK_READING_CONTEXT_MAX_ID_CHARS);
+  if(selectedIntakeId) record.selectedIntakeId = selectedIntakeId;
+  var confirmingIntakeId = workReadingSafeString(raw.confirmingIntakeId, WORK_READING_CONTEXT_MAX_ID_CHARS);
+  if(confirmingIntakeId) record.confirmingIntakeId = confirmingIntakeId;
+  if(raw.createdNavigate && typeof raw.createdNavigate === "object" && !Array.isArray(raw.createdNavigate)){
+    var navIntakeId = workReadingSafeString(raw.createdNavigate.intakeId, WORK_READING_CONTEXT_MAX_ID_CHARS);
+    var navShape = raw.createdNavigate.shape;
+    if(navIntakeId && (navShape === "goal" || navShape === "plan" || navShape === "task")){
+      record.createdNavigate = {
+        intakeId: navIntakeId,
+        shape: navShape,
+        goalId: workReadingSafeString(raw.createdNavigate.goalId, WORK_READING_CONTEXT_MAX_ID_CHARS),
+        planId: workReadingSafeString(raw.createdNavigate.planId, WORK_READING_CONTEXT_MAX_ID_CHARS),
+        taskId: workReadingSafeString(raw.createdNavigate.taskId, WORK_READING_CONTEXT_MAX_ID_CHARS)
+      };
+    }
+  }
+  return record;
+}
+function workReadSessionContext(){
+  try {
+    if(typeof sessionStorage === "undefined") return null;
+    var raw = sessionStorage.getItem(WORK_READING_CONTEXT_KEY);
+    if(!raw) return null;
+    if(typeof raw !== "string" || raw.length > WORK_READING_CONTEXT_MAX_CHARS){
+      try { sessionStorage.removeItem(WORK_READING_CONTEXT_KEY); } catch(__){ }
+      return null;
+    }
+    var parsed;
+    try { parsed = JSON.parse(raw); } catch(_){
+      try { sessionStorage.removeItem(WORK_READING_CONTEXT_KEY); } catch(__){ }
+      return null;
+    }
+    var record = workReadingNormalizeRecord(parsed);
+    if(record) return record;
+    try { sessionStorage.removeItem(WORK_READING_CONTEXT_KEY); } catch(_){ }
+  } catch(_){ }
+  return null;
+}
+function workWriteSessionContext(record){
+  if(!record) return;
+  try {
+    if(typeof sessionStorage === "undefined") return;
+    var serialized = JSON.stringify(record);
+    if(serialized.length > WORK_READING_CONTEXT_MAX_CHARS) return;
+    sessionStorage.setItem(WORK_READING_CONTEXT_KEY, serialized);
+  } catch(_){ }
+}
+function workReadingProjectLabel(project){
+  if(typeof project !== "string" || !project) return "";
+  var projects = (S.workFilterOptions && S.workFilterOptions.projects) || [];
+  if(projects.indexOf(project) < 0) return "";
+  return workReadingSafeString(workProjectHumanLabel(project, projects), 160);
+}
+function workReadingFilterRecord(filter){
+  filter = filter || {};
+  var column = Array.isArray(filter.columns) ? filter.columns[0] : filter.columns;
+  return {
+    projectLabel: workReadingProjectLabel(filter.project),
+    column: WORK_COLUMN_CODES.indexOf(column) >= 0 ? column : "",
+    workerProfileId: workReadingSafeString(filter.workerProfileId, WORK_READING_CONTEXT_MAX_ID_CHARS)
+  };
+}
+function workReadingFilterSignature(filter){
+  filter = filter || {};
+  var cols = Array.isArray(filter.columns) ? filter.columns : [];
+  return String(filter.project || "") + "|" + String(cols[0] || "")
+    + "|" + String(filter.workerProfileId || "");
+}
+function workReadingProjectFromLabel(label){
+  if(!label) return "";
+  var projects = (S.workFilterOptions && S.workFilterOptions.projects) || [];
+  var matches = projects.filter(function(project){
+    return workProjectHumanLabel(project, projects) === label;
+  });
+  return matches.length === 1 ? matches[0] : "";
+}
+function workReadingFilterFromRecord(record){
+  record = workReadingNormalizeFilter(record);
+  var out = {};
+  var project = workReadingProjectFromLabel(record.projectLabel);
+  if(project) out.project = project;
+  if(record.column) out.columns = [record.column];
+  if(record.workerProfileId
+    && (S.workFilterOptions.workers || []).indexOf(record.workerProfileId) >= 0){
+    out.workerProfileId = record.workerProfileId;
+  }
+  return out;
+}
+function workReadingDraftFromRecord(record){
+  record = workReadingNormalizeFilter(record);
+  return {
+    project: workReadingProjectFromLabel(record.projectLabel),
+    columns: record.column || "",
+    workerProfileId: record.workerProfileId
+      && (S.workFilterOptions.workers || []).indexOf(record.workerProfileId) >= 0
+      ? record.workerProfileId : ""
+  };
+}
+/* Phase identity bound to the board scroll key: the explicit viewed Plan when
+ * the user clicked one, otherwise the effective canonical phase for the
+ * selected Goal. A terminal Goal showing its default last phase is therefore
+ * stored as a real phase, so a matching manual board scroll survives reload
+ * instead of being classified as a new phase. */
+function workEffectiveGoalPhaseId(){
+  if(!S.workSelection || S.workSelection.kind !== "goal") return "";
+  var phaseId = String(S.workViewedPlanId || "");
+  if(phaseId) return phaseId;
+  try {
+    var view = normalizeWorkHierarchy(S.workHierarchy);
+    var goal = (view.goals || []).find(function(item){
+      return String(item.goalId || "") === String(S.workSelection.id || "");
+    });
+    var plan = goal && workEffectiveGoalPlan(goal);
+    return String(plan && plan.planId || "");
+  } catch(_){ return ""; }
+}
+function workReadingBoardKey(){
+  return workSelectionKey(S.workSelection) + "|phase:" + workEffectiveGoalPhaseId();
+}
+function workReadingCollapseRecord(){
+  var out = {};
+  if(!workCollapse || typeof workCollapse !== "object") return out;
+  Object.keys(workCollapse).sort().slice(0, WORK_READING_CONTEXT_MAX_COLLAPSE).forEach(function(key){
+    if(/^[A-Za-z0-9:_-]+$/.test(key) && typeof workCollapse[key] === "boolean"){
+      out[key] = workCollapse[key];
+    }
+  });
+  return out;
+}
+function workBuildSessionContext(){
+  var captured = workCaptureWorkbenchContext();
+  var selection = S.workSelection && workReadingSafeString(S.workSelection.id)
+    ? { kind: S.workSelection.kind, id: workReadingSafeString(S.workSelection.id) } : null;
+  /* Persist the phase actually visible for a selected Goal, not just an
+   * explicitly clicked one. The effective phase matches the board-scroll key,
+   * so a reload restores the same phase before rWork compares selection state
+   * and the saved manual board position is not invalidated as a "change". */
+  var phase = null;
+  if(S.workSelection && S.workSelection.kind === "goal"){
+    var effectivePhaseId = workEffectiveGoalPhaseId();
+    if(effectivePhaseId){
+      phase = {
+        goalId: workReadingSafeString(S.workSelection.id),
+        planId: workReadingSafeString(effectivePhaseId)
+      };
+    }
+  }
+  var detailId = workReadingSafeString(captured.detailTaskId);
+  var detailTab = WORK_READING_CONTEXT_TABS.indexOf(captured.detailTab) >= 0
+    ? captured.detailTab : "overview";
+  var record = {
+    version: WORK_READING_CONTEXT_VERSION,
+    workspace: selection,
+    phase: phase,
+    disclosures: {},
+    collapse: workReadingCollapseRecord(),
+    detail: { open: !!captured.detailOpen && !!detailId, taskId: detailId, tab: detailTab },
+    filters: {
+      applied: workReadingFilterRecord(S.workFilter),
+      draft: workReadingFilterRecord(S.workFilterDraft)
+    },
+    search: {
+      oneOff: workReadingSafeString(S.workOneOffSearch, 120),
+      draft: workReadingSafeString(S.workOneOffSearchDraft, 120)
+    },
+    scroll: {
+      contentTop: workReadingSafeNumber(captured.contentScrollTop),
+      contentLeft: workReadingSafeNumber(captured.contentScrollLeft),
+      detailTop: workReadingSafeNumber(workReloadDetailScrollTop === null
+        ? captured.detailScrollTop : workReloadDetailScrollTop),
+      board: captured.boardScrollCaptured ? {
+        key: workReadingBoardKey(),
+        left: workReadingSafeNumber(captured.boardScrollLeft)
+      } : null
+    },
+    focusKey: workReadingSafeString(captured.focusKey, 240),
+    outcome: workReadingOutcomeRecord(),
+    selectedIntakeId: workReadingSafeString(S.selectedIntakeId || "", WORK_READING_CONTEXT_MAX_ID_CHARS),
+    confirmingIntakeId: workReadingSafeString(S.outcomeConfirmingId || "", WORK_READING_CONTEXT_MAX_ID_CHARS),
+    createdNavigate: workReadingCreatedNavigateRecord()
+  };
+  WORK_READING_CONTEXT_DISCLOSURES.forEach(function(key){
+    record.disclosures[key] = !!captured[key];
+  });
+  return record;
+}
+/* Bounded outcome draft record: only the user's bounded draft fields survive a
+ * reload; display copy and proposal facts are rehydrated from canonical truth. */
+function workReadingOutcomeRecord(){
+  var draft = S.outcomeDraft || {};
+  var outcome = workReadingSafeString(String(draft.outcome || ""), 2000);
+  if(!outcome) return null;
+  var requestedShape = draft.requestedShape;
+  if(["auto", "task", "plan", "goal"].indexOf(requestedShape) < 0) requestedShape = "auto";
+  return {
+    outcome: outcome,
+    project: workReadingSafeString(String(draft.project || ""), 200),
+    context: workReadingSafeString(String(draft.context || ""), 2000),
+    requestedShape: requestedShape
+  };
+}
+/* Bounded created-navigation intent. Only ids and one shape enum survive; the
+ * exact workspace is decided later against the refreshed hierarchy. */
+function workReadingCreatedNavigateRecord(){
+  var intent = S.outcomeCreatedNavigate;
+  if(!intent || !intent.intakeId) return null;
+  var shape = intent.shape;
+  if(["goal", "plan", "task"].indexOf(shape) < 0) return null;
+  return {
+    intakeId: workReadingSafeString(intent.intakeId, WORK_READING_CONTEXT_MAX_ID_CHARS),
+    shape: shape,
+    goalId: workReadingSafeString(intent.goalId || "", WORK_READING_CONTEXT_MAX_ID_CHARS),
+    planId: workReadingSafeString(intent.planId || "", WORK_READING_CONTEXT_MAX_ID_CHARS),
+    taskId: workReadingSafeString(intent.taskId || "", WORK_READING_CONTEXT_MAX_ID_CHARS)
+  };
+}
+function workPersistReadingContext(){
+  if(!workReadingContextReady || S.tab !== "work" || !S.workHierarchy) return;
+  try { workWriteSessionContext(workBuildSessionContext()); } catch(_){ }
+}
+function workScheduleReadingContextSave(){
+  /* Writes are intentionally synchronous and tiny: a browser reload can happen
+   * immediately after a disclosure/scroll interaction, and storage failures are
+   * already contained by the adapter. */
+  workPersistReadingContext();
+}
+function workReadingTaskExists(view, taskId){
+  if(!view || !taskId) return false;
+  var found = false;
+  workCollectCards(view, function(card){
+    if(String(card.taskId || card.id || "") === String(taskId)) found = true;
+  });
+  return found;
+}
+/* Return the exact canonical card for a validated Task id, or null. Used only
+ * to restore presentation input (the card's existing breadcrumb) for a reloaded
+ * Task drawer; no name or ancestry is ever persisted or invented. */
+function workFindTaskCard(view, taskId){
+  var found = null;
+  if(!view || !taskId) return found;
+  workCollectCards(view, function(card){
+    if(!found && String(card.taskId || card.id || "") === String(taskId)) found = card;
+  });
+  return found;
+}
+function workReadingGoalExists(view, goalId){
+  return !!view && (view.goals || []).some(function(goal){
+    return String(goal.goalId || "") === String(goalId || "");
+  });
+}
+function workReadingPlanExists(view, planId){
+  if(!view) return false;
+  if((view.independentPlans || []).some(function(plan){
+    return String(plan.planId || "") === String(planId || "");
+  })) return true;
+  return (view.goals || []).some(function(goal){
+    return (goal.plans || []).some(function(plan){
+      return String(plan.planId || "") === String(planId || "");
+    });
+  });
+}
+function workReadingPhaseExists(view, goalId, planId){
+  var goal = view && (view.goals || []).find(function(item){
+    return String(item.goalId || "") === String(goalId || "");
+  });
+  return !!(goal && (goal.plans || []).some(function(plan){
+    return String(plan.planId || "") === String(planId || "");
+  }));
+}
+function workReadingCollapseKeyExists(view, key){
+  var parts = String(key || "").split(":");
+  var kind = parts.shift();
+  var id = parts.join(":");
+  if(kind === "focused-goal") return workReadingGoalExists(view, id);
+  if(kind === "goal") return workReadingGoalExists(view, id);
+  if(kind === "plan") return workReadingPlanExists(view, id);
+  return kind === "one-off" && id === "tasks" && !!(view && view.oneOffTasks);
+}
+function workApplyReadingCollapse(view, record){
+  if(workCollapse === null) workCollapse = workCollapseLoad();
+  if(!record || !Object.prototype.hasOwnProperty.call(record, "collapse")) return;
+  var next = {};
+  Object.keys(record.collapse || {}).slice(0, WORK_READING_CONTEXT_MAX_COLLAPSE).forEach(function(key){
+    if(typeof record.collapse[key] === "boolean" && workReadingCollapseKeyExists(view, key)){
+      next[key] = record.collapse[key];
+    }
+  });
+  workCollapse = next;
+  workCollapseSave(workCollapse);
+}
+function workReadingFocusExists(view, key){
+  if(!key) return false;
+  if(key.indexOf("task:") === 0 || key.indexOf("action:") === 0){
+    return workReadingTaskExists(view, key.slice(key.indexOf(":") + 1));
+  }
+  if(key.indexOf("goal-toggle:") === 0){
+    return workReadingGoalExists(view, key.slice("goal-toggle:".length));
+  }
+  if(key.indexOf("plan-toggle:") === 0){
+    return workReadingPlanExists(view, key.slice("plan-toggle:".length));
+  }
+  if(key.indexOf("phase:") === 0){
+    var phase = key.slice("phase:".length).split(":");
+    return phase.length >= 2 && workReadingPhaseExists(view, phase.shift(), phase.join(":"));
+  }
+  if(key.indexOf("workspace:") === 0){
+    var workspace = key.slice("workspace:".length).split(":");
+    return workspace.length >= 2 && workSelectionExists(view, workMakeSelection(workspace.shift(), workspace.join(":")));
+  }
+  if(key.indexOf("intake-row:") === 0){
+    var intakeId = key.slice("intake-row:".length);
+    return Array.isArray(S.intakes) && S.intakes.some(function(item){ return String(item.id || "") === intakeId; });
+  }
+  return [
+    "goal-toggle", "oneoff-toggle", "finished-toggle", "filter-project", "filter-column",
+    "filter-worker", "filter-apply", "filter-reset", "outcome-text", "outcome-project",
+    "outcome-context", "outcome-shape", "outcome-submit", "outcome-advanced", "work-advanced",
+    "work-shape-guide-toggle", "work-filters-toggle", "oneoff-current-toggle",
+    "oneoff-attention-toggle", "oneoff-history-toggle", "oneoff-search", "page-story-toggle"
+  ].indexOf(key) >= 0;
+}
+function workReadingContextToContinuity(view, record){
+  var out = {
+    finishedOpen: false, advancedOpen: false, expertDetailsOpen: false, goalSummaryOpen: false,
+    filtersOpen: false, oneOffCurrentOpen: false, oneOffAttentionOpen: false,
+    oneOffHistoryOpen: false, shapeGuideOpen: false, pageStoryOpen: false,
+    outcomeAdvancedOpen: false, focusKey: null, contentScrollTop: 0, contentScrollLeft: 0,
+    boardScrollLeft: 0, boardScrollCaptured: false, detailOpen: false,
+    detailTaskId: null, detailTab: null, detailScrollTop: 0
+  };
+  if(!record) return out;
+  var disclosures = record.disclosures || {};
+  WORK_READING_CONTEXT_DISCLOSURES.forEach(function(key){
+    if(typeof disclosures[key] === "boolean") out[key] = disclosures[key];
+  });
+  out.contentScrollTop = workReadingSafeNumber(record.scroll && record.scroll.contentTop);
+  out.contentScrollLeft = workReadingSafeNumber(record.scroll && record.scroll.contentLeft);
+  out.detailScrollTop = workReadingSafeNumber(record.scroll && record.scroll.detailTop);
+  if(record.scroll && record.scroll.board && record.scroll.board.key === workReadingBoardKey()){
+    out.boardScrollLeft = workReadingSafeNumber(record.scroll.board.left);
+    out.boardScrollCaptured = true;
+    workReloadBoardScrollRestored = true;
+  }
+  if(record.focusKey && workReadingFocusExists(view, record.focusKey)) out.focusKey = record.focusKey;
+  if(record.detail && record.detail.open && workReadingTaskExists(view, record.detail.taskId)){
+    out.detailOpen = true;
+    out.detailTaskId = record.detail.taskId;
+    out.detailTab = WORK_READING_CONTEXT_TABS.indexOf(record.detail.tab) >= 0
+      ? record.detail.tab : "overview";
+  }
+  return out;
+}
+function workApplySavedReadingContext(){
+  if(workReadingContextApplied) return false;
+  var view;
+  try { view = normalizeWorkHierarchy(S.workHierarchy); } catch(_){ return false; }
+  workReadingContextApplied = true;
+  var record = workReadingContextPending;
+  workReadingContextPending = null;
+  workReadingContextReady = true;
+  workReloadBoardScrollRestored = false;
+  S.workViewedGoalId = null;
+  S.workViewedPlanId = null;
+  workRefreshFilterOptions(view);
+  if(!record){
+    S.workSelection = null;
+    S.workOneOffSearch = "";
+    S.workOneOffSearchDraft = "";
+    workInitialSelectionNeedsFocus = true;
+    return false;
+  }
+  var validWorkspace = !!(record.workspace
+    && workSelectionExists(view, workMakeSelection(record.workspace.kind, record.workspace.id)));
+  if(validWorkspace){
+    S.workSelection = workMakeSelection(record.workspace.kind, record.workspace.id);
+  } else {
+    S.workSelection = null;
+  }
+  workInitialSelectionNeedsFocus = !validWorkspace;
+  if(validWorkspace && S.workSelection.kind === "goal" && record.phase
+    && String(record.phase.goalId) === String(S.workSelection.id)
+    && workReadingPhaseExists(view, record.phase.goalId, record.phase.planId)){
+    S.workViewedGoalId = String(record.phase.goalId);
+    S.workViewedPlanId = String(record.phase.planId);
+  }
+  workApplyReadingCollapse(view, record);
+  var savedApplied = workReadingFilterFromRecord(record.filters && record.filters.applied);
+  var savedDraft = workReadingDraftFromRecord(record.filters && record.filters.draft);
+  S.workFilter = savedApplied;
+  S.workFilterDraft = savedDraft;
+  S.workOneOffSearch = workReadingSafeString(record.search && record.search.oneOff, 120);
+  S.workOneOffSearchDraft = workReadingSafeString(record.search && record.search.draft, 120);
+  /* FL-112E9: restore the bounded outcome draft, the selected intake, the open
+   * confirmation step, and any valid created-navigation intent. Every value is
+   * checked against the canonical intake list before it becomes visible. */
+  if(record.outcome){
+    var restoredDraft = {
+      outcome: record.outcome.outcome,
+      project: record.outcome.project || "",
+      context: record.outcome.context || "",
+      requestedShape: record.outcome.requestedShape || "auto"
+    };
+    if(!S.outcomeDraft || !String(S.outcomeDraft.outcome || "").trim()){
+      S.outcomeDraft = restoredDraft;
+    }
+  }
+  var restoredSelectedIntake = "";
+  if(record.selectedIntakeId && Array.isArray(S.intakes) && S.intakes.some(function(item){
+    return item && String(item.id || "") === String(record.selectedIntakeId);
+  })){
+    restoredSelectedIntake = record.selectedIntakeId;
+  }
+  S.selectedIntakeId = restoredSelectedIntake || null;
+  var restoredConfirming = "";
+  if(record.confirmingIntakeId && Array.isArray(S.intakes) && S.intakes.some(function(item){
+    return item && String(item.id || "") === String(record.confirmingIntakeId)
+      && item.status === "proposed";
+  })){
+    restoredConfirming = record.confirmingIntakeId;
+  }
+  S.outcomeConfirmingId = restoredConfirming || null;
+  S.outcomeConfirmError = null;
+  S.outcomeCreatedNavigate = null;
+  if(record.createdNavigate){
+    /* The created-intake must still be canonical created truth; otherwise the
+     * stale intent is discarded and the created story's retry action stays. */
+    var navIntake = Array.isArray(S.intakes) ? S.intakes.find(function(item){
+      return item && String(item.id || "") === String(record.createdNavigate.intakeId);
+    }) : null;
+    if(navIntake && navIntake.status === "created"){
+      S.outcomeCreatedNavigate = {
+        intakeId: record.createdNavigate.intakeId,
+        shape: record.createdNavigate.shape,
+        goalId: record.createdNavigate.goalId || "",
+        planId: record.createdNavigate.planId || "",
+        taskId: record.createdNavigate.taskId || ""
+      };
+    }
+  }
+  S.outcomeCreatedTaskDrawer = null;
+  workReloadRestoreContext = workReadingContextToContinuity(view, record);
+  return workReadingFilterSignature(savedApplied) !== workReadingFilterSignature({});
+}
+function workRestoreSavedTaskDetail(view){
+  var ctx = workReloadRestoreContext;
+  if(!ctx) return;
+  workReloadRestoreContext = null;
+  if(!ctx.detailOpen || !ctx.detailTaskId || !workReadingTaskExists(view, ctx.detailTaskId)) return;
+  workReloadDetailScrollTop = workReadingSafeNumber(ctx.detailScrollTop);
+  taskDetailActiveTab = WORK_READING_CONTEXT_TABS.indexOf(ctx.detailTab) >= 0
+    ? ctx.detailTab : "overview";
+  /* Rebuild the canonical Goal > Plan > Task breadcrumb from the exact matching
+   * hierarchy card already present in WorkHierarchyView. A stale Task falls
+   * back through showTask without any invented ancestry. */
+  var card = workFindTaskCard(view, ctx.detailTaskId);
+  showTask(ctx.detailTaskId, card && card.breadcrumb);
+}
+function workRestoreReadingAfterRender(view, continuity){
+  /* Poll continuity remains the first path. A validated reload record is then
+   * allowed to restore its own board/page position, and only after that can a
+   * one-shot new-board focus run. */
+  workRestoreWorkbenchContext(continuity);
+  if(workReloadRestoreContext){
+    workRestoreWorkbenchContext(workReloadRestoreContext);
+    workRestoreSavedTaskDetail(view);
+  }
+  /* A freshly confirmed parentless Task opens its drawer only after the
+   * Independent Tasks workspace has mounted with the canonical card. */
+  workOpenCreatedTaskDrawer(view);
+  workMaybeFocusRelevantColumn();
+  workReloadBoardScrollRestored = false;
+  workPersistReadingContext();
+}
+
+/* =========================================================================
+ * FL-112A Work refresh continuity (boundary)
+ * Consumes: Work hierarchy + intakes, visible tab/render state, live fetch
+ *   results, open disclosures, Goal/Plan expansion (sessionStorage), focus,
+ *   scroll, and S-backed filters/drafts.
+ * Produces: keep-or-refresh decision; equivalent surviving Work context after
+ *   a real evidence rerender.
+ * Boundaries:
+ *   - Never suppress a real evidence change (status, next action, structure).
+ *   - Do not invent server state, credentials, or browser history.
+ *   - No optimistic Task movement; missing restore targets fail safely.
+ *   - Language changes and explicit operations still re-render Work.
+ *   - Polling/fetch/lifecycle contracts stay unchanged for other pages.
+ * ========================================================================= */
+
+/* Pure clock / projection noise that must not force a Work DOM rebuild.
+ * *At / *AtMs suffixes cover ordinary timestamps without listing raw dual-clock
+ * field names as object-literal labels. Extra non-suffix names stay private. */
+var WORK_TRUTH_VOLATILE_EXTRA = ["asOf", "serverTime", "now"];
+function workIsVolatileTruthKey(key){
+  if(!key) return false;
+  if(WORK_TRUTH_VOLATILE_EXTRA.indexOf(key) >= 0) return true;
+  if(/AtMs$/.test(key)) return true;
+  // Timestamp fields end in At; keep non-time keys like "format".
+  if(/At$/.test(key)) return true;
+  return false;
+}
+/* Deep clone with sorted keys and volatile timestamps stripped so identical
+ * polls that only churn clocks compare equal. Depth-bounded; never throws. */
+function workStableTruthClone(value, depth){
+  if(depth > 40) return null;
+  if(value === null || value === undefined) return value;
+  var typ = typeof value;
+  if(typ === "number" || typ === "boolean" || typ === "string") return value;
+  if(typ !== "object") return String(value);
+  if(Array.isArray(value)){
+    var arr = [];
+    for(var i = 0; i < value.length; i++){
+      arr.push(workStableTruthClone(value[i], depth + 1));
+    }
+    return arr;
+  }
+  var keys = Object.keys(value).sort();
+  var out = {};
+  for(var k = 0; k < keys.length; k++){
+    var key = keys[k];
+    if(workIsVolatileTruthKey(key)) continue;
+    out[key] = workStableTruthClone(value[key], depth + 1);
+  }
+  return out;
+}
+/* Bounded visible-truth snapshot for the Work surface. Excludes wall-clock
+ * chrome (footer "updated at") and relative-time churn. Includes language so
+ * a locale switch is never suppressed. */
+function workVisibleTruthSnapshot(){
+  var lang = "zh";
+  try {
+    if(window.ForklightI18n && typeof window.ForklightI18n.getLang === "function"){
+      lang = window.ForklightI18n.getLang() || "zh";
+    }
+  } catch(_){}
+  var payload = {
+    lang: lang,
+    selection: workSelectionKey(S.workSelection),
+    viewedGoal: S.workViewedGoalId || null,
+    viewedPlan: S.workViewedPlanId || null,
+    filter: workStableTruthClone(S.workFilter || {}, 0),
+    oneOffSearch: String(S.workOneOffSearch || ""),
+    hierarchy: workStableTruthClone(S.workHierarchy, 0),
+    hierarchyError: S.workHierarchyError || null,
+    intakes: workStableTruthClone(S.intakes, 0),
+    intakesError: S.intakesError || null,
+    /* FL-112E9: browser-only outcome journey state must force a rebuild when it
+     * changes (opening the confirm step, selecting an intake, or queuing the
+     * created-workspace navigation) without persisting display content. */
+    selectedIntakeId: S.selectedIntakeId || null,
+    confirmingIntakeId: S.outcomeConfirmingId || null,
+    createdNavigate: workStableTruthClone(S.outcomeCreatedNavigate, 0),
+    createdTaskDrawer: workStableTruthClone(S.outcomeCreatedTaskDrawer, 0)
+  };
+  try {
+    return JSON.stringify(payload);
+  } catch(_){
+    return "unserializable";
+  }
+}
+/* True when the current #fl-view still holds a live Work mount (not another
+ * page and not a loading/unavailable placeholder that wiped the board). */
+function workDomIsLive(){
+  if(!viewEl) return false;
+  try {
+    return !!(viewEl.querySelector('[data-fl-role="work-board"]')
+      || viewEl.querySelector('[data-fl-role="workbench-layout"]')
+      || viewEl.querySelector('[data-fl-role="work-filters"]')
+      || viewEl.querySelector('[data-fl-role="outcome-section"]')
+      || viewEl.querySelector('[data-fl-role="work-hierarchy-error"]'));
+  } catch(_){
+    return false;
+  }
+}
+/* Keep Work DOM when presentation truth is unchanged and the mount is live. */
+function workShouldRetainDom(){
+  if((S.tab || "work") !== "work") return false;
+  if(!workDomIsLive()) return false;
+  if(S.workRenderSnapshot == null) return false;
+  try {
+    return workVisibleTruthSnapshot() === S.workRenderSnapshot;
+  } catch(_){
+    return false;
+  }
+}
+/* Semantic focus key: Task/Goal/Plan/control identity, never DOM position. */
+function workSemanticFocusKey(el){
+  if(!el || !el.getAttribute) return null;
+  var role = el.getAttribute("data-fl-role");
+  if(role === "work-card"){
+    var taskId = el.getAttribute("data-task-id");
+    return taskId ? ("task:" + taskId) : null;
+  }
+  if(role === "work-goal-toggle"){
+    var goalLane = el.closest ? el.closest("[data-goal-id]") : null;
+    var goalId = goalLane && goalLane.getAttribute("data-goal-id");
+    return goalId ? ("goal-toggle:" + goalId) : "goal-toggle";
+  }
+  if(role === "work-plan-toggle"){
+    var planLane = el.closest ? el.closest("[data-plan-id]") : null;
+    var planId = planLane && planLane.getAttribute("data-plan-id");
+    return planId ? ("plan-toggle:" + planId) : "plan-toggle";
+  }
+  if(role === "work-oneoff-toggle") return "oneoff-toggle";
+  if(role === "work-oneoff-search") return "oneoff-search";
+  if(role === "work-filters-toggle") return "work-filters-toggle";
+  if(role === "work-oneoff-current-toggle") return "oneoff-current-toggle";
+  if(role === "work-oneoff-attention-toggle") return "oneoff-attention-toggle";
+  if(role === "work-oneoff-history-toggle") return "oneoff-history-toggle";
+  if(role === "work-finished-toggle") return "finished-toggle";
+  if(role === "work-phase-option"){
+    return "phase:" + String(el.getAttribute("data-goal-id") || "")
+      + ":" + String(el.getAttribute("data-plan-id") || "");
+  }
+  if(role === "work-workspace-option"){
+    return "workspace:" + String(el.getAttribute("data-workspace-kind") || "")
+      + ":" + String(el.getAttribute("data-workspace-id") || "");
+  }
+  if(role === "work-filter-project") return "filter-project";
+  if(role === "work-filter-column") return "filter-column";
+  if(role === "work-filter-worker") return "filter-worker";
+  if(role === "work-filter-apply") return "filter-apply";
+  if(role === "work-filter-reset") return "filter-reset";
+  if(role === "outcome-text") return "outcome-text";
+  if(role === "outcome-project") return "outcome-project";
+  if(role === "outcome-context") return "outcome-context";
+  if(role === "outcome-shape") return "outcome-shape";
+  if(role === "outcome-submit") return "outcome-submit";
+  if(role === "outcome-advanced") return "outcome-advanced";
+  if(role === "work-advanced") return "work-advanced";
+  if(role === "work-shape-guide-toggle") return "work-shape-guide-toggle";
+  if(role === "page-story-disclosure-toggle") return "page-story-toggle";
+  if(role === "work-action-move" || role === "work-action-btn"){
+    var actCard = el.closest ? el.closest("[data-task-id]") : null;
+    var actId = actCard && actCard.getAttribute("data-task-id");
+    return actId ? ("action:" + actId) : null;
+  }
+  if(role === "outcome-intake-row"){
+    var intakeId = el.getAttribute("data-intake-id");
+    return intakeId ? ("intake-row:" + intakeId) : null;
+  }
+  if(el.parentElement && viewEl && viewEl.contains(el.parentElement)){
+    return workSemanticFocusKey(el.parentElement);
+  }
+  return null;
+}
+function workFindFocusTarget(key){
+  if(!key || !viewEl) return null;
+  try {
+    if(key.indexOf("task:") === 0){
+      var tid = key.slice(5);
+      var cards = viewEl.querySelectorAll('[data-fl-role="work-card"]');
+      for(var i = 0; i < cards.length; i++){
+        if(cards[i].getAttribute("data-task-id") === tid) return cards[i];
+      }
+      return null;
+    }
+    if(key.indexOf("goal-toggle:") === 0){
+      var gid = key.slice("goal-toggle:".length);
+      var goals = viewEl.querySelectorAll('[data-fl-role="work-goal-lane"]');
+      for(var g = 0; g < goals.length; g++){
+        if(goals[g].getAttribute("data-goal-id") === gid){
+          return goals[g].querySelector('[data-fl-role="work-goal-toggle"]');
+        }
+      }
+      return null;
+    }
+    if(key.indexOf("plan-toggle:") === 0){
+      var pid = key.slice("plan-toggle:".length);
+      var plans = viewEl.querySelectorAll('[data-fl-role="work-plan-lane"]');
+      for(var p = 0; p < plans.length; p++){
+        if(plans[p].getAttribute("data-plan-id") === pid){
+          return plans[p].querySelector('[data-fl-role="work-plan-toggle"]');
+        }
+      }
+      return null;
+    }
+    if(key.indexOf("action:") === 0){
+      var aid = key.slice(7);
+      var actCards = viewEl.querySelectorAll('[data-fl-role="work-card"]');
+      for(var a = 0; a < actCards.length; a++){
+        if(actCards[a].getAttribute("data-task-id") === aid){
+          return actCards[a].querySelector('[data-fl-role="work-action-move"]')
+            || actCards[a].querySelector('[data-fl-role="work-action-btn"]');
+        }
+      }
+      return null;
+    }
+    if(key.indexOf("phase:") === 0){
+      var phaseParts = key.slice("phase:".length).split(":");
+      var phaseOptions = viewEl.querySelectorAll('[data-fl-role="work-phase-option"]');
+      for(var ph = 0; ph < phaseOptions.length; ph++){
+        if(phaseOptions[ph].getAttribute("data-goal-id") === phaseParts[0]
+          && phaseOptions[ph].getAttribute("data-plan-id") === phaseParts.slice(1).join(":")){
+          return phaseOptions[ph];
+        }
+      }
+      return null;
+    }
+    if(key.indexOf("workspace:") === 0){
+      var workspaceParts = key.slice("workspace:".length).split(":");
+      var workspaceOptions = viewEl.querySelectorAll('[data-fl-role="work-workspace-option"]');
+      for(var w = 0; w < workspaceOptions.length; w++){
+        if(workspaceOptions[w].getAttribute("data-workspace-kind") === workspaceParts[0]
+          && workspaceOptions[w].getAttribute("data-workspace-id") === workspaceParts.slice(1).join(":")){
+          return workspaceOptions[w];
+        }
+      }
+      return null;
+    }
+    if(key.indexOf("intake-row:") === 0){
+      var iid = key.slice("intake-row:".length);
+      var rows = viewEl.querySelectorAll('[data-fl-role="outcome-intake-row"]');
+      for(var r = 0; r < rows.length; r++){
+        if(rows[r].getAttribute("data-intake-id") === iid) return rows[r];
+      }
+      return null;
+    }
+    var roleMap = {
+      "oneoff-toggle": "work-oneoff-toggle",
+      "oneoff-search": "work-oneoff-search-input",
+      "finished-toggle": "work-finished-toggle",
+      "filter-project": "work-filter-project",
+      "filter-column": "work-filter-column",
+      "filter-worker": "work-filter-worker",
+      "filter-apply": "work-filter-apply",
+      "filter-reset": "work-filter-reset",
+      "outcome-text": "outcome-text",
+      "outcome-project": "outcome-project",
+      "outcome-context": "outcome-context",
+      "outcome-shape": "outcome-shape",
+      "outcome-submit": "outcome-submit",
+      "outcome-advanced": "outcome-advanced",
+      "work-advanced": "work-advanced",
+      "work-shape-guide-toggle": "work-shape-guide-toggle",
+      "work-filters-toggle": "work-filters-toggle",
+      "oneoff-current-toggle": "work-oneoff-current-toggle",
+      "oneoff-attention-toggle": "work-oneoff-attention-toggle",
+      "oneoff-history-toggle": "work-oneoff-history-toggle",
+      "page-story-toggle": "page-story-disclosure-toggle"
+    };
+    var role = roleMap[key];
+    if(role) return viewEl.querySelector('[data-fl-role="' + role + '"]');
+  } catch(_){}
+  return null;
+}
+/* The page scroll host is main.content (not window). */
+function workContentScrollEl(){
+  try {
+    return document.querySelector("main.content") || document.querySelector(".content");
+  } catch(_){
+    return null;
+  }
+}
+/* Materialize the lazy Finished-work body through the same ensure the toggle
+ * path installs. Safe no-op when the disclosure is closed or already filled. */
+function workMaterializeOpenFinishedBody(finished){
+  if(!finished || !finished.open) return;
+  try {
+    var ensure = finished._workEnsureFinishedBody;
+    if(typeof ensure === "function") ensure();
+  } catch(_){}
+}
+/* Capture meaningful Work context before a required rerender. */
+function workCaptureWorkbenchContext(){
+  var ctx = {
+    finishedOpen: false,
+    advancedOpen: false,
+    expertDetailsOpen: false,
+    goalSummaryOpen: false,
+    filtersOpen: false,
+    oneOffCurrentOpen: false,
+    oneOffAttentionOpen: false,
+    oneOffHistoryOpen: false,
+    shapeGuideOpen: false,
+    pageStoryOpen: false,
+    outcomeAdvancedOpen: false,
+    focusKey: null,
+    contentScrollTop: 0,
+    contentScrollLeft: 0,
+    boardScrollLeft: 0,
+    boardScrollCaptured: false,
+    detailOpen: false,
+    detailTaskId: null,
+    detailTab: null,
+    detailScrollTop: 0
+  };
+  if(!viewEl) return ctx;
+  try {
+    var finished = viewEl.querySelector('[data-fl-role="work-finished-group"]');
+    if(finished) ctx.finishedOpen = !!finished.open;
+    var expert = viewEl.querySelector('[data-work-role="expert-details"]')
+      || viewEl.querySelector('[data-fl-role="work-advanced"]');
+    if(expert){
+      ctx.advancedOpen = !!expert.open;
+      ctx.expertDetailsOpen = !!expert.open;
+    }
+    var goalSummary = viewEl.querySelector('[data-fl-role="work-goal-summary"]');
+    if(goalSummary) ctx.goalSummaryOpen = !!goalSummary.open;
+    var filters = viewEl.querySelector('[data-fl-role="work-filters"]');
+    if(filters) ctx.filtersOpen = !!filters.open;
+    var oneOffCurrent = viewEl.querySelector('[data-fl-role="work-oneoff-current"]');
+    if(oneOffCurrent) ctx.oneOffCurrentOpen = !!oneOffCurrent.open;
+    var oneOffAttention = viewEl.querySelector('[data-fl-role="work-oneoff-attention"]');
+    if(oneOffAttention) ctx.oneOffAttentionOpen = !!oneOffAttention.open;
+    var oneOffHistory = viewEl.querySelector('[data-fl-role="work-oneoff-history"]');
+    if(oneOffHistory) ctx.oneOffHistoryOpen = !!oneOffHistory.open;
+    var story = viewEl.querySelector('[data-fl-role="page-story-disclosure"]');
+    if(story) ctx.pageStoryOpen = !!story.open;
+    var oadv = viewEl.querySelector('[data-fl-role="outcome-advanced"]');
+    if(oadv) ctx.outcomeAdvancedOpen = !!oadv.open;
+    var shapeGuide = viewEl.querySelector('[data-fl-role="work-shape-guide"]');
+    if(shapeGuide) ctx.shapeGuideOpen = !!shapeGuide.open;
+    var board = viewEl.querySelector('[data-fl-role="work-board"]');
+    if(board){
+      ctx.boardScrollCaptured = true;
+      ctx.boardScrollLeft = board.scrollLeft || 0;
+    }
+    var content = workContentScrollEl();
+    if(content){
+      ctx.contentScrollTop = content.scrollTop || 0;
+      ctx.contentScrollLeft = content.scrollLeft || 0;
+    }
+    ctx.detailOpen = !!S.detail;
+    ctx.detailTaskId = S.detailTaskId || null;
+    if(typeof taskDetailActiveTab !== "undefined") ctx.detailTab = taskDetailActiveTab || null;
+    if(typeof detailEl !== "undefined" && detailEl){
+      ctx.detailScrollTop = detailEl.scrollTop || 0;
+    }
+    var ae = document.activeElement;
+    if(ae && viewEl.contains(ae)) ctx.focusKey = workSemanticFocusKey(ae);
+  } catch(_){}
+  return ctx;
+}
+/* Restore surviving context by stable semantic keys. Production order:
+ * open Finished → materialize lazy body → other disclosures → scroll → focus.
+ * Missing targets are ignored; never throws into the render path. */
+function workRestoreWorkbenchContext(ctx){
+  if(!ctx || !viewEl) return;
+  try {
+    var hasCaptured = function(key){
+      return Object.prototype.hasOwnProperty.call(ctx, key);
+    };
+    /* 1. Finished disclosure first so nested Goal/Plan/Task can mount. */
+    var finished = viewEl.querySelector('[data-fl-role="work-finished-group"]');
+    if(finished && hasCaptured("finishedOpen")){
+      finished.open = false;
+      if(ctx.finishedOpen){
+        finished.open = true;
+        /* Same ensure the user-toggle path uses (filled guard makes it idempotent). */
+        workMaterializeOpenFinishedBody(finished);
+      }
+    }
+    /* 2. Other native disclosures. */
+    var expert = viewEl.querySelector('[data-work-role="expert-details"]')
+      || viewEl.querySelector('[data-fl-role="work-advanced"]');
+    if(expert){
+      var expertOpen = Object.prototype.hasOwnProperty.call(ctx, "expertDetailsOpen")
+        ? ctx.expertDetailsOpen : ctx.advancedOpen;
+      if(expertOpen !== undefined) expert.open = !!expertOpen;
+    }
+    var goalSummary = viewEl.querySelector('[data-fl-role="work-goal-summary"]');
+    if(goalSummary && Object.prototype.hasOwnProperty.call(ctx, "goalSummaryOpen")){
+      goalSummary.open = !!ctx.goalSummaryOpen;
+    }
+    var filters = viewEl.querySelector('[data-fl-role="work-filters"]');
+    if(filters && hasCaptured("filtersOpen")){
+      filters.open = !!ctx.filtersOpen;
+    }
+    [
+      ["work-oneoff-current", "oneOffCurrentOpen"],
+      ["work-oneoff-attention", "oneOffAttentionOpen"],
+      ["work-oneoff-history", "oneOffHistoryOpen"]
+    ].forEach(function(entry){
+      var disclosure = viewEl.querySelector('[data-fl-role="' + entry[0] + '"]');
+      if(disclosure && hasCaptured(entry[1])){
+        disclosure.open = !!ctx[entry[1]];
+        if(disclosure.open){
+          var body = disclosure.querySelector(".work-oneoff-status-body");
+          if(body && !body.childNodes.length){
+            var event = document.createEvent("Event");
+            event.initEvent("toggle", false, false);
+            disclosure.dispatchEvent(event);
+          }
+        }
+      }
+    });
+    var story = viewEl.querySelector('[data-fl-role="page-story-disclosure"]');
+    if(story && hasCaptured("pageStoryOpen")){
+      story.open = !!ctx.pageStoryOpen;
+    }
+    var oadv = viewEl.querySelector('[data-fl-role="outcome-advanced"]');
+    if(oadv && hasCaptured("outcomeAdvancedOpen")){
+      oadv.open = !!ctx.outcomeAdvancedOpen;
+    }
+    var shapeGuide = viewEl.querySelector('[data-fl-role="work-shape-guide"]');
+    if(shapeGuide && hasCaptured("shapeGuideOpen")){
+      shapeGuide.open = !!ctx.shapeGuideOpen;
+    }
+    /* 3. Scroll hosts: main.content page scroll, then board horizontal. */
+    var content = workContentScrollEl();
+    if(content){
+      content.scrollTop = ctx.contentScrollTop || 0;
+      content.scrollLeft = ctx.contentScrollLeft || 0;
+    }
+    var board = viewEl.querySelector('[data-fl-role="work-board"]');
+    var focusPending = typeof workBoardFocusRequest !== "undefined" && !!workBoardFocusRequest;
+    var canRestoreBoard = !focusPending
+      && ctx.boardScrollCaptured !== false;
+    if(board && canRestoreBoard && typeof ctx.boardScrollLeft === "number"){
+      board.scrollLeft = ctx.boardScrollLeft || 0;
+    }
+    if(ctx.detailOpen && S.detail && typeof detailEl !== "undefined" && detailEl){
+      detailEl.hidden = false;
+      if(typeof scrimEl !== "undefined" && scrimEl) scrimEl.hidden = false;
+      if(ctx.detailTaskId) S.detailTaskId = ctx.detailTaskId;
+      if(ctx.detailTab && typeof taskDetailActiveTab !== "undefined"){
+        taskDetailActiveTab = ctx.detailTab;
+      }
+      if(typeof ctx.detailScrollTop === "number") detailEl.scrollTop = ctx.detailScrollTop;
+    }
+    /* 4. Focus only after lazy Finished body materialization. */
+    if(ctx.focusKey){
+      var target = workFindFocusTarget(ctx.focusKey);
+      if(target && typeof target.focus === "function"){
+        try {
+          target.focus({ preventScroll: true });
+        } catch(_){
+          try { target.focus(); } catch(__){}
+        }
+      }
+    }
+  } catch(_){}
+}
+function workRememberRenderSnapshot(){
+  try {
+    S.workRenderSnapshot = workVisibleTruthSnapshot();
+  } catch(_){
+    S.workRenderSnapshot = null;
+  }
+}
+
+/* Compact first-visit explanation for the Work surface. It names the three
+ * durable shapes and the real Main proposal/confirmation boundary without
+ * teaching a generic input-process-output story. */
+function renderWorkShapeGuide(){
+  var guide = document.createElement("details");
+  guide.className = "work-shape-guide";
+  guide.open = true;
+  guide.setAttribute("data-fl-role", "work-shape-guide");
+  var summary = document.createElement("summary");
+  summary.className = "work-shape-guide-summary";
+  summary.setAttribute("data-fl-role", "work-shape-guide-toggle");
+  var head = h("span", "work-shape-guide-head");
+  head.appendChild(h("span", "work-shape-guide-title", t("workShapeGuideTitle")));
+  head.appendChild(h("span", "work-shape-guide-hint", t("workShapeGuideHint")));
+  summary.appendChild(head);
+  guide.appendChild(summary);
+  var body = h("div", "work-shape-guide-body");
+  var rules = h("div", "work-shape-rules");
+  [
+    ["Task", "workShapeTaskRule"],
+    ["Plan", "workShapePlanRule"],
+    ["Goal", "workShapeGoalRule"]
+  ].forEach(function(item){
+    var rule = h("div", "work-shape-rule");
+    rule.appendChild(h("strong", "work-shape-rule-name", item[0]));
+    rule.appendChild(h("span", "work-shape-rule-text", t(item[1])));
+    rules.appendChild(rule);
+  });
+  body.appendChild(rules);
+  body.appendChild(h("p", "work-shape-flow", t("workShapeProposalFlow")));
+  guide.appendChild(body);
+  return guide;
+}
+
+/* The single Work surface: the rail is navigation, and only the selected
+ * canonical workspace receives a Task board. Loading/failure/stale states are decided by
+ * pageEvidenceState; an unsupported projection fails visibly here.
+ * FL-112A: capture → rebuild → restore so real evidence updates do not wipe
+ * history/More-options disclosures, focus, or scroll. */
 function rWork(){
+  var continuity = workCaptureWorkbenchContext();
   viewEl.textContent = "";
-  if(!S.hadOk){ showDisconnected(); return; }
-  /* FL-108B composition: primary outcome action, compact help, filters, then
-   * the canonical board so real work is reachable early at a desktop viewport. */
-  viewEl.appendChild(renderOutcomeSection());
-  viewEl.appendChild(renderPageStory("work"));
-  viewEl.appendChild(renderWorkFilters());
+  if(!S.hadOk){
+    showDisconnected();
+    workRememberRenderSnapshot();
+    return;
+  }
+  /* FL-112B composition: the intro band holds the compact outcome intake and
+   * shape rules for empty Work. With real Work the same entry lives in the
+   * portfolio rail, beside workspace navigation, so optional filters never
+   * lead the reading surface. */
+  var intro = h("div", "work-intro");
+  intro.setAttribute("data-fl-role", "work-intro");
+  intro.setAttribute("aria-label", t("workNewEntryLabel"));
+  intro.appendChild(renderOutcomeSection());
+  intro.appendChild(renderWorkShapeGuide());
 
   var view;
   try {
@@ -5626,11 +8327,54 @@ function rWork(){
     errBox.setAttribute("data-fl-role", "work-hierarchy-error");
     errBox.appendChild(document.createTextNode(t("workUnsupportedHierarchy")));
     viewEl.appendChild(errBox);
+    workRestoreWorkbenchContext(continuity);
+    workRememberRenderSnapshot();
     return;
   }
 
   if(workCollapse === null) workCollapse = workCollapseLoad();
   workRefreshFilterOptions(view);
+  var previousSelection = S.workSelection;
+  S.workSelection = workResolveSelection(view, S.workSelection);
+  var selectionChanged = !workSelectionEqual(previousSelection, S.workSelection);
+  var phaseChanged = false;
+  if(S.workSelection && S.workSelection.kind === "goal"
+    && String(S.workViewedGoalId || "") !== String(S.workSelection.id || "")){
+    S.workViewedGoalId = String(S.workSelection.id || "");
+    S.workViewedPlanId = null;
+    phaseChanged = true;
+  } else if(S.workSelection && S.workSelection.kind === "goal"
+    && S.workViewedPlanId
+    && !workReadingPhaseExists(view, S.workSelection.id, S.workViewedPlanId)){
+    /* A saved or polled phase can disappear independently of its Goal. Clear
+     * only that browser navigation key and let the Goal's canonical fallback
+     * choose the next readable phase. */
+    S.workViewedPlanId = null;
+    phaseChanged = true;
+  } else if(!S.workSelection || S.workSelection.kind !== "goal"){
+    /* A Goal that disappeared must not leave a stale phase selection waiting
+     * for a later poll. Selection fallback is the only safe recovery. */
+    S.workViewedGoalId = null;
+    S.workViewedPlanId = null;
+  }
+  if((selectionChanged || phaseChanged || workInitialSelectionNeedsFocus)
+    && S.workSelection && !workBoardFocusRequest){
+    /* A fallback is a genuinely new reading surface. Any old board position
+     * belongs to the disappeared workspace/phase and must not suppress the
+     * one-shot relevant-column reveal. */
+    if(selectionChanged || phaseChanged){
+      workReloadBoardScrollRestored = false;
+      if(workReloadRestoreContext) workReloadRestoreContext.boardScrollCaptured = false;
+    }
+    workBoardFocusRequest = { key: workSelectionKey(S.workSelection) };
+    workInitialSelectionNeedsFocus = false;
+  }
+
+  /* FL-112E9: apply pending created-work navigation only against the refreshed
+   * canonical hierarchy. Never optimistic; missing identity stays retryable. */
+  if(S.outcomeCreatedNavigate){
+    workApplyCreatedNavigation(view);
+  }
 
   var applied = view.filter && view.filter.applied;
   var activeFilter = !!(applied && (applied.project || applied.columns || applied.workerProfileId));
@@ -5641,70 +8385,33 @@ function rWork(){
     || oneOffCount > 0;
 
   if(!hasAny){
+    /* No real Work yet: creation stays the primary action, then shape rules,
+     * filters, an honest empty state, and the legacy Task file entry. The
+     * outcome section already holds the composer and its adjacent intake
+     * journey, so nothing falls below the reading surface. */
+    viewEl.appendChild(intro);
+    viewEl.appendChild(renderWorkFilters());
     viewEl.appendChild(stateMsg("empty", activeFilter ? t("workFilterNoMatches") : t("workEmpty")));
-    viewEl.appendChild(renderWorkAdvanced());
+    viewEl.appendChild(renderWorkAdvanced(view, S.workSelection));
+    workRestoreReadingAfterRender(view, continuity);
+    workRememberRenderSnapshot();
     return;
   }
-
-  var board = h("div", "work-board");
-  board.setAttribute("data-fl-role", "work-board");
-  /* Delegated drag handling: every .work-cell in every lane (including the
-   * header row) is an explicit drop target. Feedback and the handoff decision
-   * come only from the dragged card's Core actionPolicy. */
-  board.addEventListener("dragover", workBoardDragOver);
-  board.addEventListener("drop", workBoardDrop);
-  board.addEventListener("dragleave", function(){ workClearDropHighlights(board); });
-
-  var headRow = h("div", "work-col-grid work-col-head");
-  headRow.setAttribute("data-fl-role", "work-col-head");
-  WORK_COLUMN_CODES.forEach(function(code){
-    var cell = h("div", "work-cell work-cell-headcell");
-    cell.setAttribute("data-column", code);
-    cell.appendChild(h("span", "work-cell-title", workColumnLabel(code)));
-    headRow.appendChild(cell);
-  });
-  board.appendChild(headRow);
-
-  /* Presentation partition only: already-filtered Goals keep canonical objects.
-   * Active/non-terminal lanes lead; terminal Goals share one lazy disclosure. */
-  var activeGoals = [];
-  var terminalGoals = [];
-  (view.goals || []).forEach(function(goal){
-    if(workGoalIsTerminalStatus(goal && goal.status)) terminalGoals.push(goal);
-    else activeGoals.push(goal);
-  });
-  activeGoals.forEach(function(goal){
-    board.appendChild(renderWorkGoalLane(goal));
-  });
-  if(terminalGoals.length){
-    board.appendChild(renderWorkFinishedGoals(terminalGoals));
-  }
-
-  var independent = view.independentPlans || [];
-  if(independent.length){
-    var indepGroup = h("div", "work-independent-group");
-    indepGroup.setAttribute("data-fl-role", "work-independent-plans");
-    indepGroup.appendChild(h("div", "work-group-title", t("workIndependentPlans")));
-    independent.forEach(function(plan){
-      indepGroup.appendChild(renderWorkPlanLane(plan, true));
-    });
-    board.appendChild(indepGroup);
-  }
-
-  if(view.oneOffTasks && oneOffCount > 0){
-    var oneOffGroup = h("div", "work-oneoff-group");
-    oneOffGroup.setAttribute("data-fl-role", "work-oneoff-tasks");
-    /* Title lives on the accessible disclosure toggle so the lane summary,
-     * count, and expand control stay one keyboard-operable control. */
-    oneOffGroup.appendChild(renderWorkOneOffLane(view.oneOffTasks));
-    board.appendChild(oneOffGroup);
-  }
-
-  viewEl.appendChild(board);
-  viewEl.appendChild(renderWorkAdvanced());
+  /* Real Work first: the rail carries one compact New work entry (composer plus
+   * the active intake journey) while the selected workspace owns the canvas.
+   * Filters remain optional and old intake history stays a collapsed list
+   * inside that same entry. */
+  viewEl.appendChild(renderWorkWorkbench(view, S.workSelection));
+  viewEl.appendChild(renderWorkFilters());
+  /* Restore open history/More-options/filter disclosures, focus, and scroll
+   * before rebinding the Move/Act chooser to replacement controls. The
+   * semantic restore helper delegates workRestoreWorkbenchContext(continuity)
+   * after the replacement board has mounted. */
+  workRestoreReadingAfterRender(view, continuity);
   /* A poll re-render replaced every Move/Act control; keep the open chooser's
    * origin truthful and its focus return working against the new controls. */
   workActionRebindChooser();
+  workRememberRenderSnapshot();
 }
 
 /* Task Detail breadcrumb. Renders only parents that actually exist in the
@@ -6775,9 +9482,11 @@ function renderPageStory(page){
     row.appendChild(content);
     flow.appendChild(row);
   });
-  /* Work only: keep every purpose/input/process/output/next sentence, but put
-   * them behind a closed-by-default disclosure so the board is not pushed below
-   * the fold. Other pages keep the always-open page story. */
+  /* Work and Workers: the generic four-step story is collapsed so the actual
+   * surface leads the first screen. Work hides the whole story behind one
+   * disclosure; Workers keeps the one-line purpose (the single user outcome)
+   * visible and collapses only the four-step flow. Other pages keep the
+   * always-open page story. */
   if(page === "work"){
     card.className = "guide-card page-story page-story-work";
     var details = document.createElement("details");
@@ -6793,6 +9502,23 @@ function renderPageStory(page){
     body.appendChild(flow);
     details.appendChild(body);
     card.appendChild(details);
+    return card;
+  }
+  if(page === "workers"){
+    card.className = "guide-card page-story page-story-workers";
+    card.appendChild(purpose);
+    var workersDetails = document.createElement("details");
+    workersDetails.className = "page-story-disclosure";
+    workersDetails.setAttribute("data-fl-role", "page-story-disclosure");
+    var workersSummary = document.createElement("summary");
+    workersSummary.className = "page-story-disclosure-summary";
+    workersSummary.setAttribute("data-fl-role", "page-story-disclosure-toggle");
+    workersSummary.textContent = t("pageStoryWorkersHow");
+    workersDetails.appendChild(workersSummary);
+    var workersBody = h("div", "page-story-disclosure-body");
+    workersBody.appendChild(flow);
+    workersDetails.appendChild(workersBody);
+    card.appendChild(workersDetails);
     return card;
   }
   card.appendChild(purpose);
@@ -6830,7 +9556,8 @@ var ADV_FIELD_LABELS = {
   changeBudgetMode: "workersAdvChangeBudgetMode",
   maxAdaptationRounds: "workersAdvMaxAdaptationRounds",
   maxMainCorrections: "workersAdvMaxMainCorrections",
-  maxMainReverifications: "workersAdvMaxMainReverifications"
+  maxMainReverifications: "workersAdvMaxMainReverifications",
+  maxWorkerValidationRepairs: "workersAdvMaxValidationRepairs"
 };
 var ADV_MODE_FIELDS = ["fileLimitMode", "changedLineLimitMode", "completionMode", "changeBudgetMode"];
 var ADV_BLANK_NULL_FIELDS = ["maxDurationMs", "observedTokenCeiling", "noProgressTimeoutMs", "fileLimit", "changedLineLimit"];
@@ -6862,8 +9589,65 @@ var ADV_GROUP_ORDER = [
   { title: "completionMode", fields: ["completionMode", "changeBudgetMode"] },
   { title: "maxAdaptationRounds", fields: ["maxAdaptationRounds"] },
   { title: "maxMainCorrections", fields: ["maxMainCorrections"] },
-  { title: "maxMainReverifications", fields: ["maxMainReverifications"] }
+  { title: "maxMainReverifications", fields: ["maxMainReverifications"] },
+  { title: "maxWorkerValidationRepairs", fields: ["maxWorkerValidationRepairs"] }
 ];
+/* FL-116A: which editor group owns each advanced-policy group. "stops" is stop
+ * conditions and scale; "recovery" is the finite repair/verification
+ * mechanisms. The buckets are presentation only; every field keeps its
+ * canonical value and the shared server-side resolver stays authoritative. */
+var ADV_GROUP_BUCKETS = {
+  maxDurationMs: "stops",
+  observedTokenCeiling: "stops",
+  noProgressTimeoutMs: "stops",
+  workerStopGraceMs: "stops",
+  fileLimit: "stops",
+  changedLineLimit: "stops",
+  baseMaxAttempts: "stops",
+  maxExtraAttempts: "stops",
+  maxConcurrency: "stops",
+  completionMode: "recovery",
+  changeBudgetMode: "recovery",
+  maxAdaptationRounds: "recovery",
+  maxMainCorrections: "recovery",
+  maxMainReverifications: "recovery",
+  maxWorkerValidationRepairs: "recovery"
+};
+/* Fail-loud mapping guard: every AdvancedPolicy group must belong to an editor
+ * bucket ("stops" or "recovery"). If a future group is added without a bucket,
+ * the page throws at load instead of silently dropping the control. */
+(function workerValidateGroupBucketCoverage(){
+  ADV_GROUP_ORDER.forEach(function(group){
+    if(!ADV_GROUP_BUCKETS[group.title]){
+      throw new Error("FL-116A: AdvancedPolicy group " + group.title + " has no editor bucket");
+    }
+  });
+})();
+/* Duration fields are edited as readable value + unit pairs on the normal path
+ * while the backend millisecond contract is preserved exactly on save and
+ * readback. Inherit/unlimited semantics stay unchanged. */
+var ADV_DURATION_FIELDS = ["maxDurationMs", "noProgressTimeoutMs", "workerStopGraceMs"];
+var ADV_DURATION_UNITS = [
+  ["hours", "workersDurationHoursUnit"],
+  ["minutes", "workersDurationMinutesUnit"],
+  ["seconds", "workersDurationSecondsUnit"],
+  ["ms", "workersDurationMsUnit"]
+];
+function msDurationParts(ms){
+  if(typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return { value: "", unit: "minutes" };
+  if(ms % 3600000 === 0) return { value: String(ms / 3600000), unit: "hours" };
+  if(ms % 60000 === 0) return { value: String(ms / 60000), unit: "minutes" };
+  if(ms % 1000 === 0) return { value: String(ms / 1000), unit: "seconds" };
+  return { value: String(ms), unit: "ms" };
+}
+function durationPartsToMs(value, unit){
+  var raw = String(value == null ? "" : value).trim();
+  if(raw === "") return undefined;
+  var n = Number(raw);
+  if(!Number.isFinite(n) || n < 0) return undefined;
+  var factor = unit === "hours" ? 3600000 : unit === "minutes" ? 60000 : unit === "seconds" ? 1000 : 1;
+  return Math.round(n * factor);
+}
 
 /* Contract Quality field labels, bound to the shared 8-field validator. */
 var QUALITY_FIELD_LABELS = {
@@ -6921,12 +9705,46 @@ function pricingRouteLabel(route){
   return route;
 }
 
-function buildAdvancedFields(){
+function buildAdvancedFields(bucket){
   var container = h("div", "advanced-fields");
   var developmentDefaults = advancedDevelopmentDefaults();
   ADV_GROUP_ORDER.forEach(function(group){
+    if(bucket && ADV_GROUP_BUCKETS[group.title] !== bucket) return;
     var row = h("div", "advanced-row");
     group.fields.forEach(function(field){
+      /* The finite validation-repair allowance is a select (inherit / off /
+       * one / custom) plus a custom count input. Plain copy explains that the
+       * value is a limited allowance, never an endless loop. */
+      if(field === "maxWorkerValidationRepairs"){
+        var repLab = h("label", "", t(ADV_FIELD_LABELS[field]));
+        var repSel = h("select", "");
+        repSel.setAttribute("data-repair-mode", "true");
+        [
+          ["inherit", "workersAdvRepairInherit"],
+          ["off", "workersAdvRepairOff"],
+          ["one", "workersAdvRepairOne"],
+          ["custom", "workersAdvRepairCustom"]
+        ].forEach(function(pair){
+          var o = document.createElement("option");
+          o.value = pair[0]; o.textContent = t(pair[1]); repSel.appendChild(o);
+        });
+        repSel.value = "inherit";
+        repLab.appendChild(repSel);
+        var repInput = h("input", "");
+        repInput.type = "number";
+        repInput.setAttribute("data-repair-value", "true");
+        repInput.min = "2"; repInput.step = "1";
+        repInput.placeholder = t("workersAdvRepairCustomPh");
+        repInput.disabled = true;
+        repLab.appendChild(repInput);
+        var repHint = h("div", "summary-line dim fs11 mt-4", t("workersAdvMaxValidationRepairsHint"));
+        repLab.appendChild(repHint);
+        repSel.addEventListener("change", function(){
+          repInput.disabled = repSel.value !== "custom";
+        });
+        row.appendChild(repLab);
+        return;
+      }
       var lab = h("label", "", t(ADV_FIELD_LABELS[field]));
       if(ADV_MODE_FIELDS.indexOf(field) >= 0){
         var sel = buildPolicyModeSelect(null);
@@ -6937,6 +9755,32 @@ function buildAdvancedFields(){
           ? "warn"
           : "hard";
         lab.appendChild(sel);
+      } else if(ADV_DURATION_FIELDS.indexOf(field) >= 0){
+        /* Readable duration adapter: value + unit pair on the normal path, exact
+         * backend milliseconds preserved by durationPartsToMs on collect. */
+        var wrap = h("div", "duration-field");
+        wrap.setAttribute("data-adv-duration", field);
+        var vInp = h("input", "");
+        vInp.type = "number";
+        vInp.setAttribute("data-adv-duration-value", field);
+        vInp.min = "0"; vInp.step = "1";
+        vInp.placeholder = ADV_BLANK_NULL_FIELDS.indexOf(field) >= 0
+          ? t("workersBlankUnlimited") : t("workersBlankInherit");
+        var uSel = h("select", "");
+        uSel.setAttribute("data-adv-duration-unit", field);
+        ADV_DURATION_UNITS.forEach(function(pair){
+          var o = document.createElement("option");
+          o.value = pair[0]; o.textContent = t(pair[1]); uSel.appendChild(o);
+        });
+        uSel.value = "minutes";
+        if(developmentDefaults[field] !== undefined){
+          var parts = msDurationParts(developmentDefaults[field]);
+          vInp.value = parts.value;
+          uSel.value = parts.unit;
+        }
+        wrap.appendChild(vInp);
+        wrap.appendChild(uSel);
+        lab.appendChild(wrap);
       } else {
         var inp = h("input", "");
         inp.type = "number";
@@ -6997,6 +9841,45 @@ function collectAdvancedPatch(){
       }
     }
   });
+  /* Readable duration pairs map back to the exact backend millisecond contract.
+   * A blank value keeps the field's inherit (omitted) or unlimited (null)
+   * semantics unchanged. */
+  $$("[data-adv-duration]").forEach(function(wrap){
+    var field = wrap.getAttribute("data-adv-duration");
+    if(!field) return;
+    var vInp = wrap.querySelector("[data-adv-duration-value]");
+    var uSel = wrap.querySelector("[data-adv-duration-unit]");
+    var ms = durationPartsToMs(vInp ? vInp.value : "", uSel ? uSel.value : "minutes");
+    if(ms === undefined){
+      if(ADV_BLANK_NULL_FIELDS.indexOf(field) >= 0){
+        patch[field] = null;
+      }
+    } else {
+      patch[field] = ms;
+    }
+  });
+  /* The finite validation-repair allowance control: inherit omits the field so
+   * the Worker inherits the global default; off writes 0; one writes 1; custom
+   * writes the typed finite count. */
+  var repairMode = document.querySelector("[data-repair-mode]");
+  if(repairMode){
+    var mode = repairMode.value;
+    if(mode === "off"){
+      patch.maxWorkerValidationRepairs = 0;
+    } else if(mode === "one"){
+      patch.maxWorkerValidationRepairs = 1;
+    } else if(mode === "custom"){
+      var repairInput = document.querySelector("[data-repair-value]");
+      var rawRepair = repairInput ? repairInput.value.trim() : "";
+      if(rawRepair !== ""){
+        var numRepair = Number(rawRepair);
+        if(!Number.isNaN(numRepair) && Number.isFinite(numRepair)
+            && Number.isInteger(numRepair) && numRepair >= 0){
+          patch.maxWorkerValidationRepairs = numRepair;
+        }
+      }
+    }
+  }
   return patch;
 }
 
@@ -7015,6 +9898,59 @@ function hydrateAdvancedFields(container, advancedPolicy){
       el.value = String(val);
     }
   });
+  container.querySelectorAll("[data-adv-duration]").forEach(function(wrap){
+    var field = wrap.getAttribute("data-adv-duration");
+    if(!field) return;
+    var val = advancedPolicy[field];
+    var parts = msDurationParts(typeof val === "number" ? val : null);
+    var vInp = wrap.querySelector("[data-adv-duration-value]");
+    var uSel = wrap.querySelector("[data-adv-duration-unit]");
+    if(vInp) vInp.value = parts.value;
+    if(uSel) uSel.value = parts.unit;
+  });
+  var repairMode = container.querySelector("[data-repair-mode]");
+  if(!repairMode) return;
+  var repairInput = container.querySelector("[data-repair-value]");
+  var repairVal = advancedPolicy.maxWorkerValidationRepairs;
+  if(repairVal === undefined){
+    repairMode.value = "inherit";
+    if(repairInput){ repairInput.value = ""; repairInput.disabled = true; }
+  } else if(repairVal === 0){
+    repairMode.value = "off";
+    if(repairInput){ repairInput.value = ""; repairInput.disabled = true; }
+  } else if(repairVal === 1){
+    repairMode.value = "one";
+    if(repairInput){ repairInput.value = ""; repairInput.disabled = true; }
+  } else {
+    repairMode.value = "custom";
+    if(repairInput){ repairInput.value = String(repairVal); repairInput.disabled = false; }
+  }
+}
+
+/* Readable value for a finite validation-repair allowance. */
+function validationRepairCountText(value){
+  if(value === 0) return t("workersAdvRepairValueOff");
+  if(value === 1) return t("workersAdvRepairValueOne");
+  if(typeof value === "number" && Number.isSafeInteger(value) && value > 1){
+    return t("workersAdvRepairValueCount", { count: String(value) });
+  }
+  return "-";
+}
+
+/* Plain-language consequence for the preview row: names inherit vs override and
+ * the finite nature without forcing policy provenance vocabulary. */
+function validationRepairConsequenceText(row){
+  var value = row && row.value;
+  if(value === 0){
+    return t("workersAdvRepairConsequenceZero");
+  }
+  var count = typeof value === "number" ? String(value) : "1";
+  var sourceKey = row.source === "task"
+    ? "workersAdvRepairConsequenceTask"
+    : row.source === "worker"
+      ? "workersAdvRepairConsequenceWorker"
+      : "workersAdvRepairConsequenceGlobal";
+  return t(sourceKey, { count: count });
 }
 
 function buildQualityFields(){
@@ -7175,7 +10111,12 @@ function fetchWorkerPreview(runtime){
     var prof = (S.hub && S.hub.workerProfiles && S.hub.workerProfiles.profiles || []).find(function(p){
       return p.id === S.workerEditId;
     });
-    if(prof && prof.advancedPolicy) existingPolicy = prof.advancedPolicy;
+    if(prof && prof.advancedPolicy){
+      existingPolicy = Object.assign({}, prof.advancedPolicy);
+      // The finite validation-repair control is fully described by the draft:
+      // an explicit "inherit" choice must not be shadowed by the saved value.
+      delete existingPolicy.maxWorkerValidationRepairs;
+    }
   }
   var draft = collectAdvancedPatch();
   var draftQuality = collectQualityPatch();
@@ -7183,10 +10124,144 @@ function fetchWorkerPreview(runtime){
   if(Object.keys(existingPolicy).length > 0) body.existingAdvancedPolicy = existingPolicy;
   postJSON("/api/worker-advanced-preview", body)
     .then(function(res){
-      renderWorkerPreview(res.preview || []);
-      renderQualityPreview(res.previewQualityPolicy || []);
+      S.workerPreviewRows = res.preview || [];
+      S.workerQualityPreviewRows = res.previewQualityPolicy || [];
+      renderWorkerPreview(S.workerPreviewRows);
+      renderQualityPreview(S.workerQualityPreviewRows);
+      if(typeof S.workerSummariesRefresher === "function") S.workerSummariesRefresher();
     })
-    .catch(function(){ renderWorkerPreview([]); renderQualityPreview([]); });
+    .catch(function(){
+      S.workerPreviewRows = [];
+      S.workerQualityPreviewRows = [];
+      renderWorkerPreview([]); renderQualityPreview([]);
+    });
+}
+
+/* FL-116A draft continuity: capture the full unsaved form before a deliberate
+ * rWorker rebuild (language switch, tab return) so no value is lost. The
+ * collectors and stable control ids read the live form; nothing is saved. */
+function workerCaptureDraftFromDom(){
+  var form = viewEl.querySelector("form.configure-form");
+  if(!form) return null;
+  var v = function(id){ var el = form.querySelector("#" + id); return el ? el.value : ""; };
+  /* Semantic patches below are what save consumes. The ordered control image
+   * additionally preserves intentionally blank values and exact select modes
+   * across a presentation-only rebuild; it never leaves the browser. */
+  var controlValues = Array.prototype.map.call(
+    form.querySelectorAll("input, select, textarea"),
+    function(el){
+      return {
+        tag: el.tagName,
+        type: el.type || "",
+        value: el.value,
+        checked: !!el.checked
+      };
+    }
+  );
+  var draft = {
+    label: v("fl-wp-label"),
+    workerId: v("fl-wp-id"),
+    runtime: v("fl-wp-runtime"),
+    model: v("fl-wp-model"),
+    effort: v("fl-wp-effort"),
+    executionPreference: v("fl-wp-execution"),
+    budgetMode: v("fl-wp-budget-mode"),
+    budget: v("fl-wp-budget"),
+    networkMode: v("fl-wp-network-mode"),
+    networkHttp: v("fl-wp-network-http"),
+    networkHttps: v("fl-wp-network-https"),
+    networkNoProxy: v("fl-wp-network-noproxy"),
+    pricingRoute: collectPricingRouteField(form),
+    advancedPolicy: collectAdvancedPatch(),
+    contractQuality: collectQualityPatch(),
+    openGroups: Object.assign({}, S.workerOpenGroups),
+    controlValues: controlValues
+  };
+  return draft;
+}
+
+/* Replay only when the rebuilt form has the exact same control shape. This is
+ * deliberately fail-closed: a future editor structure change falls back to
+ * the semantic restore instead of assigning a value to the wrong control. */
+function workerReplayCapturedControls(form, draft){
+  if(!form || !draft || !Array.isArray(draft.controlValues)) return false;
+  var controls = Array.prototype.slice.call(form.querySelectorAll("input, select, textarea"));
+  if(controls.length !== draft.controlValues.length) return false;
+  for(var i = 0; i < controls.length; i++){
+    var saved = draft.controlValues[i];
+    var current = controls[i];
+    if(!saved || current.tagName !== saved.tag || (current.type || "") !== saved.type) return false;
+  }
+  for(var j = 0; j < controls.length; j++){
+    var value = draft.controlValues[j];
+    var control = controls[j];
+    if(control.tagName === "SELECT"){
+      if(Array.prototype.some.call(control.options || [], function(option){ return option.value === value.value; })){
+        control.value = value.value;
+      }
+    } else {
+      control.value = value.value;
+    }
+    if(control.type === "checkbox" || control.type === "radio") control.checked = value.checked;
+  }
+  return true;
+}
+
+/* Beginner consequence labels avoid the technical field-name parentheticals
+ * (ms, blank = unlimited) so the plain-language summary stays readable. */
+var WORKER_CONSEQUENCE_LABELS = {
+  maxDurationMs: "workersConsequenceMaxDuration",
+  observedTokenCeiling: "workersConsequenceTokenCeiling",
+  noProgressTimeoutMs: "workersConsequenceNoProgress",
+  fileLimit: "workersConsequenceFileLimit",
+  changedLineLimit: "workersConsequenceLineLimit"
+};
+function workerConsequenceFieldLabel(field){
+  var key = WORKER_CONSEQUENCE_LABELS[field];
+  return key ? t(key) : (t(ADV_FIELD_LABELS[field]) || field);
+}
+function workerPreviewConsequences(rows){
+  var out = [];
+  rows.forEach(function(r){
+    if(r.field === "maxWorkerValidationRepairs"){
+      out.push(validationRepairConsequenceText(r));
+      return;
+    }
+    if(r.unlimited){
+      out.push(t("workersPreviewUnlimitedLine", { setting: workerConsequenceFieldLabel(r.field) }));
+      return;
+    }
+    if(r.value === null || r.value === undefined) return;
+    if(r.field === "maxDurationMs"){
+      out.push(t("workersPreviewDurationLine", { value: readableDuration(r.value) }));
+    } else if(r.field === "noProgressTimeoutMs"){
+      out.push(t("workersPreviewNoProgressLine", { value: readableDuration(r.value) }));
+    } else if(r.field === "observedTokenCeiling"){
+      out.push(t("workersPreviewTokenLine", { count: String(r.value) }));
+    } else if(r.field === "fileLimit"){
+      out.push(t("workersPreviewFileLine", { count: String(r.value) }));
+    } else if(r.field === "changedLineLimit"){
+      out.push(t("workersPreviewLineLine", { count: String(r.value) }));
+    } else if(r.field === "maxConcurrency"){
+      out.push(t("workersPreviewConcurrencyLine", { count: String(r.value) }));
+    } else if(r.field === "baseMaxAttempts"){
+      var extraRow = rows.find(function(x){ return x.field === "maxExtraAttempts"; });
+      var extra = extraRow && typeof extraRow.value === "number" ? extraRow.value : 0;
+      out.push(t(extra > 0 ? "workersPreviewAttemptsLine" : "workersPreviewAttemptsNoExtraLine", {
+        base: String(r.value),
+        extra: String(extra)
+      }));
+    } else if(r.field === "maxMainCorrections"){
+      out.push(t("workersPreviewMainCorrectionsLine", { count: String(r.value) }));
+    } else if(r.field === "maxMainReverifications"){
+      out.push(t("workersPreviewReverifyLine", { count: String(r.value) }));
+    } else if(r.field === "maxAdaptationRounds"){
+      out.push(t(r.value === 0 ? "workersPreviewAdaptationOffLine" : "workersPreviewAdaptationLine", {
+        count: String(r.value)
+      }));
+    }
+  });
+  return out;
 }
 
 function renderWorkerPreview(rows){
@@ -7199,6 +10274,22 @@ function renderWorkerPreview(rows){
     panel.appendChild(h("div", "summary-line dim", t("workersPreviewEmpty")));
     return;
   }
+  /* Beginner view: a plain-language consequence summary consuming the
+   * backend-owned effective values. Raw field names, source provenance, and
+   * enforcement phases stay under the technical disclosure below. */
+  var consequences = workerPreviewConsequences(rows);
+  if(consequences.length){
+    var summaryBox = h("div", "preview-consequences");
+    consequences.forEach(function(s){
+      summaryBox.appendChild(h("div", "summary-line fs11 preview-consequence", s));
+    });
+    panel.appendChild(summaryBox);
+  }
+  /* Complete source/enforcement table remains under a technical disclosure. */
+  var tech = h("details", "advanced-disclosure preview-tech");
+  var techSummary = h("summary", "", t("workersAdvancedToggle"));
+  tech.appendChild(techSummary);
+  tech.appendChild(h("div", "summary-line dim fs11 mt-4 mb-4", t("workersPreviewTechnical")));
   var tbl = h("table", "preview-table");
   var thd = h("thead", "");
   var tr = h("tr", "");
@@ -7213,7 +10304,9 @@ function renderWorkerPreview(rows){
     var rtr = h("tr", "");
     rtr.appendChild(h("td", "preview-field", t(ADV_FIELD_LABELS[r.field]) || r.field));
     var valStr;
-    if(r.unlimited){
+    if(r.field === "maxWorkerValidationRepairs"){
+      valStr = validationRepairCountText(r.value);
+    } else if(r.unlimited){
       valStr = t("workersPreviewUnlimited");
       rtr.classList.add("preview-unlimited");
     } else if(r.enforcementPhase === "unsupported" && r.field === "observedTokenCeiling"){
@@ -7224,6 +10317,8 @@ function renderWorkerPreview(rows){
     } else if(ADV_MODE_FIELDS.indexOf(r.field) >= 0){
       valStr = policyModeLabel(r.value);
     } else {
+      /* Technical disclosure keeps the exact backend value (durations in ms);
+       * the readable time-unit summary lives on the closed settings groups. */
       valStr = String(r.value);
     }
     rtr.appendChild(h("td", "preview-val", valStr));
@@ -7249,7 +10344,8 @@ function renderWorkerPreview(rows){
     tbody.appendChild(rtr);
   });
   tbl.appendChild(tbody);
-  panel.appendChild(tbl);
+  tech.appendChild(tbl);
+  panel.appendChild(tech);
 }
 
 function renderQualityPreview(rows){
@@ -7262,6 +10358,24 @@ function renderQualityPreview(rows){
     panel.appendChild(h("div", "summary-line dim", t("workersPreviewEmpty")));
     return;
   }
+  /* Beginner view: one plain consequence from the backend-owned quality
+   * preview. The full source table stays under a technical disclosure. */
+  var modeRow = rows.filter(function(r){ return r.field === "mode"; })[0];
+  if(modeRow){
+    var modeLabel = qualityModeLabel(modeRow.value);
+    var overrideCount = rows.filter(function(r){
+      return r.field !== "mode" && r.value !== null && r.value !== undefined;
+    }).length;
+    panel.appendChild(h("div", "summary-line fs11 preview-consequence",
+      t("workersQualityPreviewConsequence", {
+        mode: modeLabel,
+        overrides: String(overrideCount)
+      })));
+  }
+  var tech = h("details", "advanced-disclosure preview-tech");
+  var techSummary = h("summary", "", t("workersAdvancedToggle"));
+  tech.appendChild(techSummary);
+  tech.appendChild(h("div", "summary-line dim fs11 mt-4 mb-4", t("workersPreviewTechnical")));
   var tbl = h("table", "preview-table");
   var thd = h("thead", "");
   var tr = h("tr", "");
@@ -7277,13 +10391,7 @@ function renderQualityPreview(rows){
     rtr.appendChild(h("td", "preview-field", fieldLabel));
     var valStr;
     if(r.field === "mode"){
-      var modeLabels = {
-        "hard": t("workersQualityModeHard"),
-        "warn": t("workersQualityModeWarn"),
-        "score": t("workersQualityModeScore"),
-        "off": t("workersQualityModeOff")
-      };
-      valStr = modeLabels[r.value] || String(r.value);
+      valStr = qualityModeLabel(r.value);
     } else if(r.value === null){
       valStr = t("workersPreviewUnlimited");
       rtr.classList.add("preview-unlimited");
@@ -7303,7 +10411,8 @@ function renderQualityPreview(rows){
     tbody.appendChild(rtr);
   });
   tbl.appendChild(tbody);
-  panel.appendChild(tbl);
+  tech.appendChild(tbl);
+  panel.appendChild(tech);
 }
 
 function rModel(){
@@ -8380,6 +11489,46 @@ function workerReadinessFor(workerId){
   return rows.find(function(row){ return row && row.workerId === workerId; }) || null;
 }
 
+/* A bounded presentation signature for everything the saved Worker rail and
+ * selected editor consume. Ordinary health polls do not rebuild the form;
+ * real profile, catalog, default, or readiness changes do. */
+function workerVisibleTruthKey(){
+  var hub = S.hub || {};
+  var wp = hub.workerProfiles || { defaultProfileId: "", profiles: [] };
+  var profiles = (wp.profiles || []).map(function(profile){
+    return {
+      id: profile.id,
+      label: profile.label,
+      runtime: profile.runtime,
+      modelConfigId: profile.modelConfigId,
+      model: profile.model,
+      effort: profile.effort,
+      executionPreference: profile.executionPreference,
+      maxBudgetUsd: profile.maxBudgetUsd,
+      noProgressTimeoutMs: profile.noProgressTimeoutMs,
+      pricingRoute: profile.pricingRoute,
+      networkPolicy: profile.networkPolicy,
+      advancedPolicy: profile.advancedPolicy,
+      contractQuality: profile.contractQuality
+    };
+  });
+  var models = ((hub.modelCatalog && hub.modelCatalog.models) || []).map(function(model){
+    return {
+      id: model.id,
+      label: model.label,
+      provider: model.provider,
+      model: model.model,
+      supportedEfforts: model.supportedEfforts
+    };
+  });
+  return JSON.stringify({
+    defaultProfileId: wp.defaultProfileId || "",
+    profiles: profiles,
+    models: models,
+    readiness: hub.workerReadiness || []
+  });
+}
+
 function workerConnectionStory(readiness, networkMode){
   var mode = networkMode === "direct" || networkMode === "custom-proxy" ? networkMode : "inherit";
   var reason = readiness && readiness.reason ? readiness.reason : "model-invalid";
@@ -8477,6 +11626,15 @@ function networkPolicySummary(policy){
 }
 
 function rWorker(){
+  /* FL-116A draft continuity: capture the full unsaved form before any
+   * deliberate rebuild (language switch, tab return, or direct render) so no
+   * value is lost. Server-owned readiness/list data still refreshes on the
+   * next poll; nothing is autosaved. */
+  if(S.workerFormRendered && S.workerFormActive && S.workerFormContextId === S.workerEditId){
+    var capturedDraft = workerCaptureDraftFromDom();
+    if(capturedDraft) S.workerDraft = capturedDraft;
+  }
+  S.workerFormRendered = false;
   viewEl.textContent = "";
   flashError("");
   viewEl.appendChild(renderPageStory("workers"));
@@ -8499,6 +11657,11 @@ function rWorker(){
     return t(names[effort] || "workersValueInherited");
   };
   var list = wp.profiles || [];
+  if(S.workerEditId && !list.some(function(profile){ return profile.id === S.workerEditId; })){
+    S.workerEditId = null;
+    S.workerFormActive = false;
+    S.workerDraft = null;
+  }
   var split = hd("div", "configure-split");
   var listCol = hd("div", "configure-list");
   if(!list.length){
@@ -8507,23 +11670,30 @@ function rWorker(){
   list.forEach(function(prof){
     var isDef = prof.id === wp.defaultProfileId;
     var isEditing = S.workerEditId === prof.id;
-    var cardEl = h("div", "card profile-card");
+    var cardEl = h("div", "card profile-card worker-row" + (isEditing ? " is-editing is-selected" : ""));
+    cardEl.setAttribute("data-fl-role", "worker-row");
+    cardEl.setAttribute("data-worker-row-id", prof.id);
+    cardEl.setAttribute("role", isEditing ? "group" : "button");
+    if(isEditing){
+      cardEl.setAttribute("aria-current", "true");
+    } else {
+      cardEl.setAttribute("tabindex", "0");
+      cardEl.setAttribute("aria-pressed", "false");
+    }
     var modelLine = prof.modelConfigId ? modelLabel(prof.modelConfigId) : (prof.model || "?");
     var modelTechnical = modelTechnicalLabel(prof.modelConfigId, prof);
     var badges = [];
     if(isDef) badges.push(h("span", "badge badge-ok", t("workersBadgeDefault")));
     else badges.push(h("span", "badge badge-dim", t("workersBadgeWorker")));
     if(isEditing) badges.push(h("span", "badge badge-info", t("workersEditBadge")));
-    var badgeWrap = hd("div", "", badges);
+    var badgeWrap = hd("div", "worker-row-badges", badges);
     cardEl.appendChild(cardHead(prof.label, "", badgeWrap));
     var advanced = prof.advancedPolicy || {};
-    var purpose = isDef ? t("workersCardDefaultPurpose") : t("workersCardReusablePurpose");
     var story = h("div", "profile-story");
-    story.appendChild(h("div", "profile-story-purpose", purpose));
 
     /* One connection conclusion: status badge plus one plain-language sentence.
      * The pure helper combines canonical readiness with only the frozen network
-     * mode, so the default card never repeats a generic route caveat and never
+     * mode, so the default row never repeats a generic route caveat and never
      * exposes proxy URLs. */
     var readiness = workerReadinessFor(prof.id);
     if(readiness){
@@ -8554,7 +11724,10 @@ function rWorker(){
     })));
     cardEl.appendChild(story);
 
-    /* Execution behavior and limits stay available under one disclosure. */
+    /* Only the selected Worker exposes management details. Unselected rows are
+     * genuinely compact selectors: no repeated policy, technical inventory,
+     * or action strip competes with the primary editor. */
+    if(isEditing){
     var behavior = h("div", "journey-list");
     var budgetText = prof.maxBudgetUsd === null
       ? t("workersCardBudgetUnlimited")
@@ -8628,20 +11801,12 @@ function rWorker(){
     routeLine.appendChild(document.createTextNode(" · " + t("workersPricingRouteBillingOnly")));
     technical.appendChild(routeLine);
     technical.appendChild(h("div", "journey-list-item dim fs11", t("workersNetworkCardNotProof")));
-    cardEl.appendChild(journeyDisclosure(t("workersCardTechnicalDetails"), technical));
-    var actions = h("div", "actions");
-    var editBtn = h("button", "btn sm " + (isEditing ? "primary" : ""), t("workersEdit"));
-    editBtn.type = "button";
-    editBtn.addEventListener("click", function(){
-      S.workerEditId = isEditing ? null : prof.id;
-      S.workerFormActive = !isEditing;
-      render();
-    });
-    actions.appendChild(editBtn);
+    var actions = h("div", "actions worker-row-actions");
     if(!isDef){
       var defBtn = h("button", "btn sm", t("workersSetDefault"));
       defBtn.type = "button";
-      defBtn.addEventListener("click", function(){
+      defBtn.addEventListener("click", function(ev){
+        ev.stopPropagation();
         postJSON("/api/worker-profiles", { action: "setDefault", id: prof.id })
           .then(function(){ toast(t("workersDefaultSet") + prof.id); return refresh(); })
           .catch(function(e){ flashError(t("operationFailed"), e && e.message); });
@@ -8651,7 +11816,8 @@ function rWorker(){
     if(list.length > 1){
       var rm = h("button", "btn sm danger", t("workersRemove"));
       rm.type = "button";
-      rm.addEventListener("click", function(){
+      rm.addEventListener("click", function(ev){
+        ev.stopPropagation();
         if(!window.confirm(t("workersRemoveConfirm", { id: prof.id }))) return;
         postJSON("/api/worker-profiles", { action: "remove", id: prof.id })
           .then(function(){ toast(t("workersRemoved") + prof.id); return refresh(); })
@@ -8659,7 +11825,28 @@ function rWorker(){
       });
       actions.appendChild(rm);
     }
-    cardEl.appendChild(actions);
+    if(actions.childNodes.length){ technical.appendChild(actions); }
+    cardEl.appendChild(journeyDisclosure(t("workersCardTechnicalDetails"), technical));
+    }
+    /* Selecting a row makes it the single primary editing context. Explicit
+     * selection always discards any earlier unsaved draft for another Worker. */
+    cardEl.addEventListener("click", function(){
+      if(isEditing) return;
+      S.workerDraft = null;
+      S.workerEditId = prof.id;
+      S.workerFormActive = true;
+      render();
+    });
+    cardEl.addEventListener("keydown", function(e){
+      if(e.key === "Enter" || e.key === " "){
+        e.preventDefault();
+        if(isEditing) return;
+        S.workerDraft = null;
+        S.workerEditId = prof.id;
+        S.workerFormActive = true;
+        render();
+      }
+    });
     listCol.appendChild(cardEl);
   });
 
@@ -8671,14 +11858,283 @@ function rWorker(){
   }
   var isEdit = editingProfile !== undefined && editingProfile !== null;
   form.appendChild(h("div", "card-title", isEdit ? t("workersFormTitle") + " - " + editingProfile.id : t("workersFormTitle")));
-  function field(id, label, type, val, ph){
+
+  /* Group container helper: one decision flow per native disclosure. The closed
+   * summary carries a short effective-value line; open state survives a Worker
+   * page re-render through S.workerOpenGroups. */
+  function workerGroup(groupKey, title){
+    var d = document.createElement("details");
+    d.className = "settings-group worker-group";
+    d.setAttribute("data-fl-role", "worker-group");
+    d.setAttribute("data-worker-group", groupKey);
+    var s = document.createElement("summary");
+    s.className = "settings-group-summary";
+    s.setAttribute("data-fl-role", "worker-group-toggle");
+    s.appendChild(h("span", "settings-group-title", title));
+    var detailSpan = h("span", "settings-group-detail", "");
+    detailSpan.setAttribute("data-worker-group-detail", groupKey);
+    s.appendChild(detailSpan);
+    d.appendChild(s);
+    var saved = S.workerOpenGroups && S.workerOpenGroups[groupKey];
+    if(saved !== undefined && saved !== null){
+      d.open = !!saved;
+    } else if(groupKey === "identity"){
+      d.open = true;
+    }
+    d.addEventListener("toggle", function(){
+      S.workerFormActive = true;
+      if(!S.workerOpenGroups) S.workerOpenGroups = {};
+      S.workerOpenGroups[groupKey] = d.open;
+      workerRefreshSummaries();
+      if(d.open && selR.value && (groupKey === "stops" || groupKey === "recovery" || groupKey === "contract")){
+        scheduleWorkerPreview(selR.value);
+      }
+    });
+    return d;
+  }
+  function workerGroupBody(group){
+    var body = h("div", "settings-group-body");
+    group.appendChild(body);
+    return body;
+  }
+  function workerRefreshGroupDetail(group, text){
+    var span = group.querySelector("[data-worker-group-detail]");
+    if(span) span.textContent = text;
+  }
+  function workerAdvText(field){
+    var el = document.querySelector('[data-adv="' + field + '"]');
+    return el ? el.value.trim() : "";
+  }
+  function workerDurationText(field){
+    var wrap = document.querySelector('[data-adv-duration="' + field + '"]');
+    if(!wrap) return "";
+    var v = wrap.querySelector("[data-adv-duration-value]");
+    var u = wrap.querySelector("[data-adv-duration-unit]");
+    if(!v || !v.value || v.value.trim() === "") return "";
+    var ms = durationPartsToMs(v.value, u ? u.value : "minutes");
+    return ms !== undefined ? readableDuration(ms) : "";
+  }
+  function workerRepairText(){
+    var mode = document.querySelector("[data-repair-mode]");
+    if(!mode) return "";
+    var val = mode.value;
+    if(val === "off") return t("workersAdvRepairValueOff");
+    if(val === "one") return t("workersAdvRepairValueOne");
+    if(val === "custom"){
+      var inp = document.querySelector("[data-repair-value]");
+      var raw = inp ? inp.value.trim() : "";
+      if(raw !== "") return t("workersAdvRepairValueCount", { count: raw });
+      return t("workersAdvRepairCustom");
+    }
+    return "";
+  }
+  function workerIdentitySummary(){
+    var modelName = selM.value ? modelLabel(selM.value) : t("workersModelFirst");
+    var mode;
+    if(selEx.value === "native-goal" && selR.value !== "codex-cli"){
+      mode = t("workersExecutionUnsupportedNativeGoal");
+    } else if(selEx.value){
+      mode = executionPreferenceLabel(selEx.value);
+    } else {
+      mode = t("workersExecutionInherited");
+    }
+    return modelName + " · " + runtimeDisplayName(selR.value) + " · " + mode;
+  }
+  function workerPreviewRow(field){
+    var rows = S.workerPreviewRows || [];
+    return rows.find(function(r){ return r && r.field === field; }) || null;
+  }
+  /* Closed-group summaries are driven by the latest backend effective preview
+   * (S.workerPreviewRows) so they can never drift from policy truth. Draft
+   * values are only a fallback before the first preview arrives. */
+  function workerStopsSummary(){
+    var parts = [];
+    var maxDurRow = workerPreviewRow("maxDurationMs");
+    if(maxDurRow){
+      if(maxDurRow.unlimited) parts.push(t("workersGroupMaxDurationSummary", { value: t("workersPreviewUnlimited") }));
+      else if(typeof maxDurRow.value === "number") parts.push(t("workersGroupMaxDurationSummary", { value: readableDuration(maxDurRow.value) }));
+    } else {
+      var maxDur = workerDurationText("maxDurationMs");
+      if(maxDur) parts.push(t("workersGroupMaxDurationSummary", { value: maxDur }));
+    }
+    var progRow = workerPreviewRow("noProgressTimeoutMs");
+    if(progRow){
+      if(progRow.unlimited) parts.push(t("workersGroupNoProgressSummary", { value: t("workersPreviewUnlimited") }));
+      else if(typeof progRow.value === "number") parts.push(t("workersGroupNoProgressSummary", { value: readableDuration(progRow.value) }));
+    } else {
+      var progress = workerDurationText("noProgressTimeoutMs");
+      if(progress) parts.push(t("workersGroupNoProgressSummary", { value: progress }));
+    }
+    var tokenRow = workerPreviewRow("observedTokenCeiling");
+    if(tokenRow && typeof tokenRow.value === "number"){
+      parts.push(t("workersGroupTokenSummary", { value: String(tokenRow.value) }));
+    } else if(tokenRow && tokenRow.unlimited){
+      parts.push(t("workersGroupTokenSummary", { value: t("workersPreviewUnlimited") }));
+    }
+    var fileRow = workerPreviewRow("fileLimit");
+    if(fileRow && typeof fileRow.value === "number"){
+      parts.push(t("workersGroupFileSummary", { value: String(fileRow.value) }));
+    } else if(fileRow && fileRow.unlimited){
+      parts.push(t("workersGroupFileSummary", { value: t("workersPreviewUnlimited") }));
+    }
+    var lineRow = workerPreviewRow("changedLineLimit");
+    if(lineRow && typeof lineRow.value === "number"){
+      parts.push(t("workersGroupLineSummary", { value: String(lineRow.value) }));
+    } else if(lineRow && lineRow.unlimited){
+      parts.push(t("workersGroupLineSummary", { value: t("workersPreviewUnlimited") }));
+    }
+    var concRow = workerPreviewRow("maxConcurrency");
+    if(concRow && typeof concRow.value === "number"){
+      parts.push(t("workersGroupConcurrencySummary", { count: String(concRow.value) }));
+    } else {
+      var conc = workerAdvText("maxConcurrency");
+      if(conc) parts.push(t("workersGroupConcurrencySummary", { count: conc }));
+    }
+    return parts.join(" · ") || t("workersGroupInheritedSummary");
+  }
+  function workerRecoverySummary(){
+    var parts = [];
+    var repairRow = workerPreviewRow("maxWorkerValidationRepairs");
+    if(repairRow){
+      parts.push(validationRepairConsequenceText(repairRow));
+    } else {
+      var repair = workerRepairText();
+      if(repair) parts.push(repair);
+    }
+    var corrRow = workerPreviewRow("maxMainCorrections");
+    if(corrRow && typeof corrRow.value === "number"){
+      parts.push(t("workersGroupMainCorrectionsSummary", { count: String(corrRow.value) }));
+    } else {
+      var corrections = workerAdvText("maxMainCorrections");
+      if(corrections !== "") parts.push(t("workersGroupMainCorrectionsSummary", { count: corrections }));
+    }
+    var revRow = workerPreviewRow("maxMainReverifications");
+    if(revRow && typeof revRow.value === "number"){
+      parts.push(t("workersGroupReverifySummary", { count: String(revRow.value) }));
+    } else {
+      var reverify = workerAdvText("maxMainReverifications");
+      if(reverify !== "") parts.push(t("workersGroupReverifySummary", { count: reverify }));
+    }
+    var adaptRow = workerPreviewRow("maxAdaptationRounds");
+    if(adaptRow && typeof adaptRow.value === "number"){
+      parts.push(t(adaptRow.value === 0 ? "workersGroupAdaptationOffSummary" : "workersGroupAdaptationSummary", {
+        count: String(adaptRow.value)
+      }));
+    }
+    return parts.join(" · ") || t("workersGroupInheritedSummary");
+  }
+  function workerConnectionSummary(){
+    var route = networkPolicySummary(selNet.value === "inherit"
+      ? null
+      : (selNet.value === "direct" ? { mode: "direct" } : { mode: "custom-proxy" }));
+    var pricingSel = form.querySelector("#fl-wp-pricing-route");
+    if(pricingSel && pricingSel.value){
+      return route + " · " + t("workersPricingRouteCardLabel") + ": " + pricingRouteLabel(pricingSel.value);
+    }
+    return route;
+  }
+  function workerContractSummary(){
+    var qrows = S.workerQualityPreviewRows;
+    if(Array.isArray(qrows) && qrows.length){
+      var modeRow = qrows.find(function(r){ return r.field === "mode"; });
+      var overrides = qrows.filter(function(r){
+        return r.field !== "mode" && r.value !== null && r.value !== undefined;
+      }).length;
+      return t("workersQualitySummaryOn", {
+        mode: qualityModeLabel(modeRow ? modeRow.value : ""),
+        overrides: String(overrides)
+      });
+    }
+    var patch = collectQualityPatch();
+    if(Object.keys(patch).length === 0) return t("workersQualitySummaryOff");
+    var mode = qualityModeLabel(patch.mode || "");
+    var count = Object.keys(patch).length - (patch.mode ? 1 : 0);
+    return t("workersQualitySummaryOn", { mode: mode, overrides: String(count) });
+  }
+  function workerRefreshSummaries(){
+    if(!identityGroup || !stopsGroup || !recoveryGroup || !connectionGroup || !contractGroup) return;
+    workerRefreshGroupDetail(identityGroup, workerIdentitySummary());
+    workerRefreshGroupDetail(stopsGroup, workerStopsSummary());
+    workerRefreshGroupDetail(recoveryGroup, workerRecoverySummary());
+    workerRefreshGroupDetail(connectionGroup, workerConnectionSummary());
+    workerRefreshGroupDetail(contractGroup, workerContractSummary());
+    if(typeof syncResolvedHint === "function") syncResolvedHint();
+  }
+  function workerPreviewWanted(){
+    return (stopsGroup && stopsGroup.open)
+      || (recoveryGroup && recoveryGroup.open)
+      || (contractGroup && contractGroup.open);
+  }
+  function workerSchedulePreviewIfNeeded(){
+    S.workerFormActive = true;
+    if(workerPreviewWanted() && selR.value) scheduleWorkerPreview(selR.value);
+  }
+  /* Restore a captured unsaved draft into the freshly rebuilt form. This is a
+   * pure presentation restore: values map back through the same collectors and
+   * adapters that save uses, so nothing is invented and nothing is saved. */
+  function workerRestoreDraft(){
+    var draft = S.workerDraft;
+    if(!draft) return;
+    var setVal = function(id, val){
+      var el = form.querySelector("#" + id);
+      if(el) el.value = val;
+    };
+    var selectOption = function(sel, val){
+      if(sel && val != null && sel.querySelector('option[value="' + val + '"]')){
+        sel.value = val;
+        return true;
+      }
+      return false;
+    };
+    setVal("fl-wp-label", draft.label != null ? draft.label : "");
+    if(!isEdit) setVal("fl-wp-id", draft.workerId != null ? draft.workerId : "");
+    if(draft.runtime) selectOption(selR, draft.runtime);
+    syncCompatibleModels(draft.model || "");
+    selectOption(selM, draft.model);
+    syncModelEfforts(draft.effort != null ? draft.effort : "");
+    selectOption(selEf, draft.effort);
+    if(draft.budgetMode) selectOption(budgetMode, draft.budgetMode);
+    setVal("fl-wp-budget", draft.budget != null ? draft.budget : "");
+    syncBudgetInput();
+    selectOption(selEx, draft.executionPreference);
+    syncExecutionHint();
+    if(draft.networkMode) selectOption(selNet, draft.networkMode);
+    setVal("fl-wp-network-http", draft.networkHttp != null ? draft.networkHttp : "");
+    setVal("fl-wp-network-https", draft.networkHttps != null ? draft.networkHttps : "");
+    setVal("fl-wp-network-noproxy", draft.networkNoProxy != null ? draft.networkNoProxy : "");
+    syncNetworkFields();
+    if(draft.advancedPolicy && Object.keys(draft.advancedPolicy).length){
+      hydrateAdvancedFields(stopsBody, draft.advancedPolicy);
+      hydrateAdvancedFields(recoveryBody, draft.advancedPolicy);
+    }
+    if(draft.contractQuality && Object.keys(draft.contractQuality).length){
+      hydrateQualityFields(contractBody, draft.contractQuality);
+    }
+    if(draft.pricingRoute){
+      var pricingSel = form.querySelector("#fl-wp-pricing-route");
+      if(pricingSel && pricingSel.querySelector('option[value="' + draft.pricingRoute + '"]')){
+        pricingSel.value = draft.pricingRoute;
+      }
+    }
+    if(draft.openGroups){
+      S.workerOpenGroups = draft.openGroups;
+    }
+    workerReplayCapturedControls(form, draft);
+    S.workerFormActive = true;
+  }
+
+  function field(id, label, type, val, ph, container){
     var lab = h("label", "", label);
     var inp = h("input", "");
     inp.type = type || "text"; inp.id = id; inp.value = val || "";
     if(ph) inp.placeholder = ph;
-    lab.appendChild(inp); form.appendChild(lab);
+    lab.appendChild(inp); (container || form).appendChild(lab);
     return inp;
   }
+
+  /* --- Identity and execution --- */
+  var identityGroup = workerGroup("identity", t("workersGroupIdentity"));
+  var identityBody = workerGroupBody(identityGroup);
   var idIn;
   if(isEdit){
     idIn = h("input", "");
@@ -8692,20 +12148,22 @@ function rWorker(){
     idReadonly.value = editingProfile.id;
     idReadonly.readOnly = true;
     idLab.appendChild(idReadonly);
-    form.appendChild(idLab);
+    identityBody.appendChild(idLab);
   } else {
-    idIn = field("fl-wp-id", t("workersId"), "text", "", "e.g. cheap-ds");
+    idIn = field("fl-wp-id", t("workersId"), "text", "", "e.g. cheap-ds", identityBody);
   }
-  var labIn = field("fl-wp-label", t("workersLabel"), "text", isEdit ? (editingProfile.label || "") : "", "");
+  var labIn = field("fl-wp-label", t("workersLabel"), "text", isEdit ? (editingProfile.label || "") : "", "", identityBody);
   var labR = h("label", "", t("workersRuntime"));
   var selR = h("select", "");
+  selR.id = "fl-wp-runtime";
   [["claude-code",t("workersRuntimeClaude")],["grok-build",t("workersRuntimeGrok")],["codex-cli",t("workersRuntimeCodex")]].forEach(function(pair){
     var o = document.createElement("option"); o.value = pair[0]; o.textContent = pair[1]; selR.appendChild(o);
   });
   if(isEdit && editingProfile.runtime) selR.value = editingProfile.runtime;
-  labR.appendChild(selR); form.appendChild(labR);
+  labR.appendChild(selR); identityBody.appendChild(labR);
   var labM = h("label", "", t("workersModel"));
   var selM = h("select", "");
+  selM.id = "fl-wp-model";
   function syncCompatibleModels(preferredId){
     var previous = preferredId || selM.value;
     var compatible = models.filter(function(mc){
@@ -8731,8 +12189,8 @@ function rWorker(){
     if(compatible.some(function(mc){ return mc.id === previous; })) selM.value = previous;
   }
   syncCompatibleModels(isEdit ? editingProfile.modelConfigId : "");
-  labM.appendChild(selM); form.appendChild(labM);
-  form.appendChild(h("div", "hint-inline dim fs11", t("workersModelCompatibilityHint")));
+  labM.appendChild(selM); identityBody.appendChild(labM);
+  identityBody.appendChild(h("div", "hint-inline dim fs11", t("workersModelCompatibilityHint")));
   var budgetModeLab = h("label", "", t("workersBudgetMode"));
   var budgetMode = h("select", "");
   budgetMode.id = "fl-wp-budget-mode";
@@ -8750,8 +12208,8 @@ function rWorker(){
       ? "unlimited"
       : (typeof editingProfile.maxBudgetUsd === "number" ? "limited" : "inherit"))
     : "inherit";
-  budgetModeLab.appendChild(budgetMode); form.appendChild(budgetModeLab);
-  var budgetIn = field("fl-wp-budget", t("workersBudget"), "number", isEdit && typeof editingProfile.maxBudgetUsd === "number" ? String(editingProfile.maxBudgetUsd) : "", "0.5");
+  budgetModeLab.appendChild(budgetMode); identityBody.appendChild(budgetModeLab);
+  var budgetIn = field("fl-wp-budget", t("workersBudget"), "number", isEdit && typeof editingProfile.maxBudgetUsd === "number" ? String(editingProfile.maxBudgetUsd) : "", "0.5", identityBody);
   budgetIn.step = "0.01"; budgetIn.min = "0.01";
   function syncBudgetInput(){
     budgetIn.disabled = budgetMode.value !== "limited";
@@ -8760,6 +12218,7 @@ function rWorker(){
   syncBudgetInput();
   var labEf = h("label", "", t("workersEffort"));
   var selEf = h("select", "");
+  selEf.id = "fl-wp-effort";
   var effortPairs = [["",t("inherit")],["low",t("workersEffortLow")],["medium",t("workersEffortMedium")],
     ["high",t("workersEffortHigh")],["xhigh",t("workersEffortXHigh")],["max",t("workersEffortMax")]];
   function syncModelEfforts(preferred){
@@ -8779,7 +12238,7 @@ function rWorker(){
     else selEf.value = options[0] || "";
   }
   syncModelEfforts(isEdit ? (editingProfile.effort || "") : "medium");
-  labEf.appendChild(selEf); form.appendChild(labEf);
+  labEf.appendChild(selEf); identityBody.appendChild(labEf);
   var labEx = h("label", "", t("workersExecutionLabel"));
   var selEx = h("select", "");
   selEx.id = "fl-wp-execution";
@@ -8804,25 +12263,65 @@ function rWorker(){
     // New Workers default to auto.
     selEx.value = "auto";
   }
-  labEx.appendChild(selEx); form.appendChild(labEx);
+  labEx.appendChild(selEx); identityBody.appendChild(labEx);
   var execHint = h("div", "hint-inline dim fs11", t("workersExecutionAutoHint"));
-  form.appendChild(execHint);
+  identityBody.appendChild(execHint);
+  var resolvedHint = h("div", "hint-inline dim fs11 resolved-hint", "");
+  identityBody.appendChild(resolvedHint);
+  /* Each execution choice explains its own real behavior: auto resolves by
+   * Runtime proof, forced native Goal requires proof, single-run never reuses
+   * auto copy. The resolved line below only reads backend readiness for the
+   * unchanged saved Runtime so no capability is invented in the browser. */
   function syncExecutionHint(){
     if(selEx.value === "native-goal" && selR.value !== "codex-cli"){
       execHint.textContent = t("workersExecutionUnsupportedNativeGoal");
+      execHint.classList.add("is-blocked");
+    } else if(selEx.value === "native-goal"){
+      execHint.textContent = t("workersExecutionNativeGoalHint");
+      execHint.classList.remove("is-blocked");
+    } else if(selEx.value === "single-run"){
+      execHint.textContent = t("workersExecutionSingleRunHint");
+      execHint.classList.remove("is-blocked");
     } else {
       execHint.textContent = t("workersExecutionAutoHint");
+      execHint.classList.remove("is-blocked");
     }
   }
-  selEx.addEventListener("change", syncExecutionHint);
-  selR.addEventListener("change", syncExecutionHint);
+  function syncResolvedHint(){
+    var text = workerResolvedModeForSelection();
+    resolvedHint.textContent = text;
+    resolvedHint.hidden = !text;
+  }
+  function workerResolvedModeForSelection(){
+    if(!S.workerEditId) return "";
+    var savedProf = list.find(function(p){ return p.id === S.workerEditId; });
+    if(!savedProf || savedProf.runtime !== selR.value) return "";
+    var readiness = workerReadinessFor(S.workerEditId);
+    return readiness ? resolvedExecutionModeText(readiness) : "";
+  }
+  selEx.addEventListener("change", function(){ syncExecutionHint(); workerRefreshSummaries(); });
+  selR.addEventListener("change", function(){ syncExecutionHint(); syncResolvedHint(); });
   syncExecutionHint();
-  var advDetails = h("details", "advanced-disclosure");
-  var advSummary = h("summary", "", t("workersAdvancedToggle"));
-  advDetails.appendChild(advSummary);
-  var advBody = h("div", "advanced-body");
-  advBody.appendChild(h("div", "summary-line dim mb-8", t("workersAdvancedClosed")));
-  /* --- Network route (FL-107): inherit / direct / credential-free custom proxy --- */
+  syncResolvedHint();
+
+  /* --- Stop conditions and scale --- */
+  var stopsGroup = workerGroup("stops", t("workersGroupStops"));
+  var stopsBody = workerGroupBody(stopsGroup);
+  stopsBody.appendChild(buildAdvancedFields("stops"));
+
+  /* --- Recovery and verification --- */
+  var recoveryGroup = workerGroup("recovery", t("workersGroupRecovery"));
+  var recoveryBody = workerGroupBody(recoveryGroup);
+  var narrative = h("div", "recovery-narrative");
+  narrative.appendChild(h("div", "summary-line dim fs11", t("workersRecoveryNarrative")));
+  narrative.appendChild(h("div", "summary-line dim fs11 mt-4", t("workersRecoverySeparateNote")));
+  recoveryBody.appendChild(narrative);
+  recoveryBody.appendChild(policyModeNote());
+  recoveryBody.appendChild(buildAdvancedFields("recovery"));
+
+  /* --- Connection and evidence --- */
+  var connectionGroup = workerGroup("connection", t("workersGroupConnection"));
+  var connectionBody = workerGroupBody(connectionGroup);
   var netRow = h("div", "advanced-row");
   var netLab = h("label", "", t("workersNetworkLabel"));
   var selNet = h("select", "");
@@ -8856,8 +12355,8 @@ function rWorker(){
   var netHttps = netHttpsField.input;
   var netNoProxy = netNoProxyField.input;
   var netHint = h("div", "hint-inline dim fs11", t("workersNetworkInheritHint"));
-  advBody.appendChild(netRow);
-  advBody.appendChild(netHint);
+  connectionBody.appendChild(netRow);
+  connectionBody.appendChild(netHint);
   if(isEdit && editingProfile.networkPolicy){
     var netPolicy = editingProfile.networkPolicy;
     if(netPolicy.mode === "direct"){
@@ -8888,46 +12387,73 @@ function rWorker(){
   }
   selNet.addEventListener("change", syncNetworkFields);
   syncNetworkFields();
-  advBody.appendChild(policyModeNote());
-  var advFields = buildAdvancedFields();
-  advBody.appendChild(advFields);
   var routeRow = h("div", "advanced-row");
   routeRow.appendChild(buildPricingRouteField());
-  advBody.appendChild(routeRow);
+  connectionBody.appendChild(routeRow);
+
+  /* --- Task-contract clarity --- */
+  var contractGroup = workerGroup("contract", t("workersGroupContract"));
+  contractGroup.classList.add("quality-disclosure");
+  contractGroup.setAttribute("aria-label", t("workersQualityGroup"));
+  var contractBody = workerGroupBody(contractGroup);
+  contractBody.appendChild(h("div", "summary-line dim mb-8", t("workersQualityGroupHint")));
+  contractBody.appendChild(buildQualityFields());
+
+  /* Hydrate saved values into the grouped editor. */
   if(isEdit){
     var policyForEditor = Object.assign({}, editingProfile.advancedPolicy || {});
     if(policyForEditor.noProgressTimeoutMs === undefined && editingProfile.noProgressTimeoutMs !== undefined){
       policyForEditor.noProgressTimeoutMs = editingProfile.noProgressTimeoutMs;
     }
-    hydrateAdvancedFields(advBody, policyForEditor);
-    hydratePricingRouteField(advBody, editingProfile);
+    hydrateAdvancedFields(stopsBody, policyForEditor);
+    hydrateAdvancedFields(recoveryBody, policyForEditor);
+    hydratePricingRouteField(connectionBody, editingProfile);
+    hydrateQualityFields(contractBody, editingProfile.contractQuality);
   } else {
-    hydratePricingRouteField(advBody, null);
+    hydratePricingRouteField(connectionBody, null);
   }
-  var previewPanel = h("div", "card preview-panel");
+  /* A captured unsaved draft overrides saved values after hydration so any
+   * deliberate rWorker rebuild (language switch, tab return) keeps the draft. */
+  if(S.workerDraft){
+    workerRestoreDraft();
+  }
+
+  form.appendChild(identityGroup);
+  form.appendChild(stopsGroup);
+  form.appendChild(recoveryGroup);
+  form.appendChild(connectionGroup);
+  form.appendChild(contractGroup);
+
+  /* Effective values before save: backend-owned previews with a plain-language
+   * consequence summary first; the full source/enforcement table stays under a
+   * technical disclosure. The preview regions are flat sections, not nested
+   * cards, so they follow the existing hierarchy. */
+  var previewRegion = h("div", "worker-preview-region");
+  var previewPanel = h("div", "preview-panel");
   previewPanel.id = "fl-worker-preview";
   previewPanel.appendChild(h("div", "summary-line dim", t("workersPreviewEmpty")));
-  advBody.appendChild(previewPanel);
-  advDetails.appendChild(advBody);
-  form.appendChild(advDetails);
-
-  /* --- Contract Quality disclosure --- */
-  var qualDetails = h("details", "advanced-disclosure quality-disclosure");
-  var qualSummary = h("summary", "", t("workersQualityGroup"));
-  qualDetails.appendChild(qualSummary);
-  var qualBody = h("div", "advanced-body");
-  qualBody.appendChild(h("div", "summary-line dim mb-8", t("workersQualityGroupHint")));
-  var qualFields = buildQualityFields();
-  qualBody.appendChild(qualFields);
-  if(isEdit){
-    hydrateQualityFields(qualBody, editingProfile.contractQuality);
-  }
-  var qualPreviewPanel = h("div", "card preview-panel");
+  previewRegion.appendChild(previewPanel);
+  var qualPreviewPanel = h("div", "preview-panel");
   qualPreviewPanel.id = "fl-quality-preview";
   qualPreviewPanel.appendChild(h("div", "summary-line dim", t("workersPreviewEmpty")));
-  qualBody.appendChild(qualPreviewPanel);
-  qualDetails.appendChild(qualBody);
-  form.appendChild(qualDetails);
+  previewRegion.appendChild(qualPreviewPanel);
+  form.appendChild(previewRegion);
+
+  /* Fixed safety rules: explanatory and never editable. The flexible limits
+   * above cannot weaken these. */
+  var safety = h("div", "safety-rules worker-safety");
+  safety.setAttribute("data-fl-role", "worker-safety");
+  safety.appendChild(h("div", "card-title mb-4", t("workersSafetyTitle")));
+  safety.appendChild(h("div", "summary-line dim fs11", t("workersSafetyIntro")));
+  [
+    t("workersSafetyWorkspace"),
+    t("workersSafetyCommit"),
+    t("workersSafetyVerification"),
+    t("workersSafetyIntegration")
+  ].forEach(function(rule){
+    safety.appendChild(h("div", "summary-line fs11 safety-rule", rule));
+  });
+  form.appendChild(safety);
 
   var saveLabel = isEdit ? t("workersSave") : t("workersSave");
   form.appendChild(formActions(saveLabel, null, {
@@ -8939,6 +12465,10 @@ function rWorker(){
     flashError("");
     if(!selM.value){
       flashError(t("workersModelFirst"));
+      return;
+    }
+    if(selEx.value === "native-goal" && selR.value !== "codex-cli"){
+      flashError(t("workersExecutionUnsupportedNativeGoal"));
       return;
     }
     var profile = {
@@ -8986,60 +12516,55 @@ function rWorker(){
         toast(t("workersSaved") + profile.id);
         S.workerEditId = null;
         S.workerFormActive = false;
+        S.workerOpenGroups = {};
+        S.workerDraft = null;
+        S.workerFormRendered = false;
         return refresh();
       })
       .catch(function(e){ flashError(t("operationFailed"), e && e.message); });
   });
 
-  advDetails.addEventListener("toggle", function(){
-    S.workerFormActive = true;
-    if(advDetails.open){
-      advSummary.textContent = t("workersAdvancedOpen");
-      var firstInput = advBody.querySelector("[data-adv]");
-      if(firstInput) firstInput.focus();
-      scheduleWorkerPreview(selR.value);
-    } else {
-      advSummary.textContent = t("workersAdvancedToggle");
-    }
-  });
-
-  qualDetails.addEventListener("toggle", function(){
-    S.workerFormActive = true;
-    if(qualDetails.open){
-      qualSummary.textContent = t("workersQualityGroupOpen");
-      scheduleWorkerPreview(selR.value);
-    } else {
-      qualSummary.textContent = t("workersQualityGroup");
-    }
-  });
-
-  var changeHandler = function(){
-    if(advDetails.open && selR.value){
-      scheduleWorkerPreview(selR.value);
-    }
-  };
-  advBody.addEventListener("input", changeHandler);
-  advBody.addEventListener("change", changeHandler);
-  var qualChangeHandler = function(e){
+  /* Live preview and summary updates: policy bodies schedule the backend-owned
+   * effective preview; any form interaction preserves the active draft. */
+  stopsBody.addEventListener("input", workerSchedulePreviewIfNeeded);
+  stopsBody.addEventListener("change", workerSchedulePreviewIfNeeded);
+  recoveryBody.addEventListener("input", workerSchedulePreviewIfNeeded);
+  recoveryBody.addEventListener("change", workerSchedulePreviewIfNeeded);
+  connectionBody.addEventListener("input", workerSchedulePreviewIfNeeded);
+  connectionBody.addEventListener("change", workerSchedulePreviewIfNeeded);
+  contractBody.addEventListener("input", function(e){
     if(e && e.target && e.target.getAttribute("data-quality-max-mode")){
       syncQualityMaximumInput(e.target);
     }
-    if(qualDetails.open && selR.value){
-      scheduleWorkerPreview(selR.value);
+    workerSchedulePreviewIfNeeded();
+  });
+  contractBody.addEventListener("change", function(e){
+    if(e && e.target && e.target.getAttribute("data-quality-max-mode")){
+      syncQualityMaximumInput(e.target);
     }
-  };
-  qualBody.addEventListener("input", qualChangeHandler);
-  qualBody.addEventListener("change", qualChangeHandler);
-  form.addEventListener("input", function(){ S.workerFormActive = true; });
-  form.addEventListener("change", function(){ S.workerFormActive = true; });
+    workerSchedulePreviewIfNeeded();
+  });
+  form.addEventListener("input", function(){ S.workerFormActive = true; workerRefreshSummaries(); });
+  form.addEventListener("change", function(){ S.workerFormActive = true; workerRefreshSummaries(); });
   selR.addEventListener("change", function(){
     syncCompatibleModels("");
     syncModelEfforts(undefined);
-    if(advDetails.open && selR.value){
+    syncExecutionHint();
+    if(workerPreviewWanted() && selR.value){
       scheduleWorkerPreview(selR.value);
     }
+    workerRefreshSummaries();
   });
-  selM.addEventListener("change", function(){ syncModelEfforts(undefined); });
+  selM.addEventListener("change", function(){
+    syncModelEfforts(undefined);
+    workerRefreshSummaries();
+  });
+  budgetMode.addEventListener("change", workerRefreshSummaries);
+  selEx.addEventListener("change", workerRefreshSummaries);
+  selNet.addEventListener("change", function(){
+    syncNetworkFields();
+    workerRefreshSummaries();
+  });
 
   if(isEdit){
     form.appendChild(h("div", "summary-line dim fs11 mt-8", t("workersEditing", { id: editingProfile.id })));
@@ -9047,6 +12572,16 @@ function rWorker(){
   split.appendChild(listCol);
   split.appendChild(form);
   viewEl.appendChild(split);
+  workerRefreshSummaries();
+  if(isEdit && selR.value){
+    scheduleWorkerPreview(selR.value);
+  }
+  /* The page renderer is now a live Worker form: the next rebuild may capture
+   * the unsaved draft, and the backend preview can refresh the summaries. */
+  S.workerSummariesRefresher = workerRefreshSummaries;
+  S.workerFormRendered = true;
+  S.workerFormContextId = S.workerEditId;
+  S.workerRenderedTruthKey = workerVisibleTruthKey();
 
   var foot = hd("div", "grid-2 mt-8");
   var hs = hubSettings();
@@ -9254,8 +12789,15 @@ var LEGACY_TAB_REDIRECT = {
 /* The legacy task-file submission page stays reachable behind the Work page's
  * explicit Advanced action (not peer navigation). */
 function switchTab(name, opts){
+  if(S.tab === "work") workPersistReadingContext();
   var effective = (opts && opts.legacy && LEGACY_TAB_REDIRECT[name]) ? name
     : (LEGACY_TAB_REDIRECT[name] || name);
+  /* FL-116A draft continuity: capture the unsaved Worker form before the page
+   * is replaced so returning to the Worker tab restores it. */
+  if(S.tab === "worker" && S.workerFormRendered && S.workerFormActive){
+    var leavingDraft = workerCaptureDraftFromDom();
+    if(leavingDraft) S.workerDraft = leavingDraft;
+  }
   $$("#fl-tabs button").forEach(function(b){
     var tab = b.getAttribute("data-tab");
     var active = tab === effective
@@ -9263,7 +12805,7 @@ function switchTab(name, opts){
     b.classList.toggle("active", active);
   });
   S.tab = effective;
-  if(S.tab !== "worker") S.workerFormActive = false;
+  if(S.tab !== "worker"){ S.workerFormActive = false; S.workerFormRendered = false; }
   if(S.tab !== "work") S.outcomeFormActive = false;
   hideDetail();
   /* The Work board is being replaced; the open Move/Act chooser must not dangle
@@ -9654,15 +13196,16 @@ function rDelivery(){
 
 
 /* --- Adaptation panel (Task-scoped, terminal-only, bounded) --- */
-/*  Excludes maxAdaptationRounds, maxMainCorrections, and maxMainReverifications: these are immutable
- *  root caps chosen in Worker Advanced settings before Task creation, and are
- *  never editable on an existing Task. */
+/*  Excludes maxAdaptationRounds, maxMainCorrections, maxMainReverifications,
+ *  and maxWorkerValidationRepairs: these are immutable root caps chosen in
+ *  Worker Advanced settings before Task creation, and are never editable on an
+ *  existing Task. */
 /* Derive the Task adaptation inventory from the same field inventory used by
  * Worker Advanced settings. A newly added flexible Worker field therefore
- * cannot silently disappear from this panel. Immutable loop / correction caps
- * are the only deliberate exclusions. */
+ * cannot silently disappear from this panel. Immutable loop / correction /
+ * validation-repair caps are the only deliberate exclusions. */
 var ADAPT_FIELDS = Object.keys(ADV_FIELD_LABELS)
-  .filter(function(field){ return field !== "maxAdaptationRounds" && field !== "maxMainCorrections" && field !== "maxMainReverifications"; })
+  .filter(function(field){ return field !== "maxAdaptationRounds" && field !== "maxMainCorrections" && field !== "maxMainReverifications" && field !== "maxWorkerValidationRepairs"; })
   .map(function(field){
     var mode = ADV_MODE_FIELDS.indexOf(field) >= 0
       ? "mode"
@@ -10088,7 +13631,10 @@ function hideDetail(){
   detailEl.hidden = true;
   detailEl.textContent = "";
   if(scrimEl){ scrimEl.hidden = true; }
+  workReloadDetailScrollTop = null;
   S.detail = null;
+  S.detailTaskId = null;
+  workMarkSelectedCard(null);
   /* Closing the drawer is an explicit close for any pending-action handoff. */
   workPendingHandoffReset();
   var target = S.detailReturnFocus;
@@ -10098,6 +13644,7 @@ function hideDetail(){
     var activeTab = $("#fl-tabs button.active");
     if(activeTab) activeTab.focus();
   }
+  workScheduleReadingContextSave();
 }
 function loadingDetail(msg){
   if(!S.detail) S.detailReturnFocus = document.activeElement;
@@ -10113,8 +13660,12 @@ function showDetail(frag){
   detailEl.textContent = "";
   detailEl.appendChild(frag);
   S.detail = true;
+  var restoredScrollTop = workReloadDetailScrollTop;
+  workReloadDetailScrollTop = null;
+  if(restoredScrollTop !== null) detailEl.scrollTop = restoredScrollTop;
   var close = detailEl.querySelector(".detail-close");
   if(close) close.focus();
+  if(restoredScrollTop !== null) workPersistReadingContext();
 }
 function closeBtn(){
   var b = h("button", "detail-close", t("close"));
@@ -11565,6 +15116,7 @@ function renderCandidateReuse(task){
 }
 
 function reverificationStatusLabel(status){
+  if(status === "no-candidate") return t("taskReverifyStatusNoCandidate");
   return status === "passed" ? t("taskReverifyStatusPassed") : t("taskReverifyStatusFailed");
 }
 
@@ -11581,7 +15133,10 @@ function reverifyRejectionLabel(category){
     "allowance-exhausted": "taskReverifyRejectAllowanceExhausted",
     "no-main-revise": "taskReverifyRejectNoMainRevise",
     "reviewed-revision-mismatch": "taskReverifyRejectReviewedRevisionMismatch",
-    "already-integrated": "taskReverifyRejectAlreadyIntegrated"
+    "already-integrated": "taskReverifyRejectAlreadyIntegrated",
+    "runtime-not-started": "taskReverifyRejectRuntimeNotStarted",
+    "runtime-auth-failed": "taskReverifyRejectRuntimeAuthFailed",
+    "runtime-policy-limit": "taskReverifyRejectRuntimePolicyLimit"
   };
   return t(map[category] || "taskReverifyRejectTaskNotFailed");
 }
@@ -11883,7 +15438,9 @@ function renderCandidateReverification(task){
   var card = h("div", "card form-card candidate-reverification-card");
   card.setAttribute("data-fl-role", "candidate-reverification");
   card.appendChild(h("div", "card-title mb-4", t("taskReverifyJourneyTitle")));
-  card.appendChild(h("div", "summary-line dim mb-8", t("taskReverifyJourneyIntro")));
+  card.appendChild(h("div", "summary-line dim mb-8", rv.path === "runtime-workspace"
+    ? t("taskReverifyRuntimeJourneyIntro")
+    : t("taskReverifyJourneyIntro")));
   card.appendChild(h("div", "summary-line", t("taskReverifyJourneyOutcome", {
     status: reverificationStatusLabel(rv.status)
   })));
@@ -12003,6 +15560,155 @@ function renderAttentionResolutionSection(task, j){
   return section;
 }
 
+/* Plain-language current verified-delivery stage from the server's canonical
+ * deliveryJourney codes. The browser translates closed codes only. */
+function deliveryJourneyStageText(dj){
+  if(!dj || !dj.stage) return t("journeyStageUnknown");
+  if(dj.stage === "repairing" && dj.repair){
+    return t("journeyStageRepairing", {
+      round: String(dj.repair.round),
+      total: String(dj.repair.total)
+    });
+  }
+  var key = {
+    implementing: "journeyStageImplementing",
+    "worker-finished": "journeyStageWorkerFinished",
+    verifying: "journeyStageVerifying",
+    repairing: "journeyStageRepairing",
+    "awaiting-main-review": "journeyStageAwaitingMainReview",
+    "main-accepted": "journeyStageMainAccepted",
+    stopped: "journeyStageStopped",
+    queued: "journeyStageQueued",
+    unknown: "journeyStageUnknown"
+  }[dj.stage];
+  return t(key || "journeyStageUnknown");
+}
+function deliveryJourneyActorText(dj){
+  if(!dj || !dj.nextActor) return "";
+  var key = {
+    worker: "journeyActorWorker",
+    verifier: "journeyActorVerifier",
+    main: "journeyActorMain",
+    user: "journeyActorUser",
+    none: "journeyActorNone"
+  }[dj.nextActor];
+  return key ? t(key) : "";
+}
+/* Plain-language label for a closed repair stop reason (no internal
+ * vocabulary by default). */
+function repairStopReasonLabel(reason){
+  if(!reason) return "";
+  var key = {
+    "eligible": "journeyRepairReasonEligible",
+    "allowance-disabled": "journeyRepairReasonAllowanceDisabled",
+    "allowance-exhausted": "journeyRepairReasonAllowanceExhausted",
+    "round-in-progress": "journeyRepairReasonRoundInProgress",
+    "conflicting-history": "journeyRepairReasonConflictingHistory",
+    "worker-did-not-return-normally": "journeyRepairReasonWorkerNotNormal",
+    "non-behavior-failure": "journeyRepairReasonNonBehavior",
+    "contract-infeasible": "journeyRepairReasonContractInfeasible",
+    "verification-infrastructure": "journeyRepairReasonVerificationInfrastructure",
+    "candidate-missing": "journeyRepairReasonCandidateMissing",
+    "candidate-not-bound": "journeyRepairReasonCandidateNotBound",
+    "source-failed": "journeyRepairReasonSourceFailed",
+    "policy-failed": "journeyRepairReasonPolicyFailed",
+    "no-changed-evidence": "journeyRepairReasonNoChangedEvidence",
+    "runtime-not-resumable": "journeyRepairReasonRuntimeNotResumable",
+    "repeated-evidence": "journeyRepairReasonRepeatedEvidence",
+    "verification-passed": "journeyRepairReasonVerificationPassed"
+  }[reason];
+  return key ? t(key) : t("journeyRepairReasonUnknown");
+}
+function repairRoundStateLabel(state, terminalOutcome){
+  if(state === "terminal"){
+    return t(terminalOutcome === "passed"
+      ? "journeyRepairOutcomePassed"
+      : terminalOutcome === "stopped"
+        ? "journeyRepairOutcomeStopped"
+        : "journeyRepairOutcomeFailed");
+  }
+  return t(state === "started" ? "journeyRepairRoundStateStarted" : "journeyRepairRoundStateAuthorized");
+}
+function repairSourceLabel(source){
+  return t(source === "task"
+    ? "journeyRepairSourceTask"
+    : source === "worker"
+      ? "journeyRepairSourceWorker"
+      : "journeyRepairSourceGlobal");
+}
+function repairAllowanceValueText(vr){
+  if(!vr || !vr.enabled) return t("journeyRepairValueOff");
+  return t("journeyRepairValueCount", { count: String(vr.allowance.max) });
+}
+/* Finite validation-repair journey section. Primary copy is plain language;
+ * exact round/event facts stay inside progressive technical disclosure. */
+function renderValidationRepairSection(task, j){
+  var vr = j && j.validationRepair;
+  if(!vr) return null;
+  var section = h("div", "journey-section");
+  section.setAttribute("data-fl-role", "journey-repair");
+  section.appendChild(h("div", "journey-section-title", t("journeyRepairTitle")));
+  var body = h("div", "journey-section-body");
+  body.appendChild(h("div", "summary-line",
+    t("journeyRepairAllowance", {
+      value: repairAllowanceValueText(vr),
+      source: repairSourceLabel(vr.allowance.source)
+    })));
+  var stopped = task.status === "failed" || task.status === "interrupted";
+  if(vr.inProgress){
+    var activeRound = (vr.rounds || []).filter(function(r){ return r.state !== "terminal"; })[0];
+    body.appendChild(h("div", "journey-field journey-repair-active",
+      t("journeyRepairInProgress", {
+        round: String(activeRound ? activeRound.round : vr.allowance.consumed + 1),
+        total: String(vr.allowance.max)
+      })));
+  } else if(vr.allowance.consumed > 0 && vr.allowance.remaining === 0){
+    body.appendChild(h("div", "summary-line dim", t("journeyRepairExhausted", {
+      total: String(vr.allowance.max)
+    })));
+  } else if(vr.allowance.consumed > 0){
+    body.appendChild(h("div", "summary-line dim", t("journeyRepairConsumed", {
+      consumed: String(vr.allowance.consumed),
+      total: String(vr.allowance.max)
+    })));
+  } else if(!vr.enabled && stopped){
+    body.appendChild(h("div", "summary-line dim", t("journeyRepairDisabled")));
+  }
+  if(vr.skipped && vr.skipped.length){
+    vr.skipped.forEach(function(s){
+      body.appendChild(h("div", "summary-line dim journey-repair-skipped",
+        t("journeyRepairSkipped", { reason: repairStopReasonLabel(s.reason) })));
+    });
+  }
+  if(vr.rounds && vr.rounds.length){
+    var roundsBody = h("div", "journey-check-list");
+    vr.rounds.forEach(function(r){
+      var rrow = h("div", "journey-check-row");
+      rrow.appendChild(h("span", "badge " + (
+        r.state === "terminal"
+          ? (r.terminalOutcome === "passed" ? "badge-ok" : "badge-err")
+          : "badge-info"
+      ), repairRoundStateLabel(r.state, r.terminalOutcome)));
+      rrow.appendChild(document.createTextNode("  " + t("journeyRepairRoundLabel", {
+        round: String(r.round),
+        ordinal: String(r.targetAttemptOrdinal !== undefined ? r.targetAttemptOrdinal : "?")
+      })));
+      if(r.terminalReason){
+        rrow.appendChild(document.createTextNode("  " + repairStopReasonLabel(r.terminalReason)));
+      }
+      if(r.authorizationEventSequence !== undefined){
+        rrow.appendChild(document.createTextNode("  " + t("journeyRepairEventSequence", {
+          sequence: String(r.authorizationEventSequence)
+        })));
+      }
+      roundsBody.appendChild(rrow);
+    });
+    body.appendChild(journeyDisclosure(t("journeyRepairDetails"), roundsBody));
+  }
+  section.appendChild(body);
+  return section;
+}
+
 /* Collaboration journey renderer: presents the Task as a readable
  * Main-to-Worker process in evidence order. Each section is backed by
  * the safe journey projection from the server - never raw prompts,
@@ -12014,13 +15720,32 @@ function renderTaskJourney(task){
   panel.setAttribute("data-fl-role", "task-journey");
   panel.appendChild(h("div", "card-title mb-4", t("journeyTitle")));
 
-  // Show the live state before history, inputs, evidence, and outcomes.
+  // Show the current verified-delivery stage (plain language) before history,
+  // inputs, evidence, and outcomes. The live stage stays as a secondary
+  // technical disclosure so internal runtime vocabulary is not the default.
   var current = h("div", "journey-section");
   current.setAttribute("data-fl-role", "journey-current");
   current.appendChild(h("div", "journey-section-title", t("journeyCurrentState")));
+  var dj = j && j.deliveryJourney;
   var detailLive = taskLiveStage(task);
-  current.appendChild(h("div", "journey-section-body journey-field",
-    detailLive ? liveStageDetailText(detailLive) : taskProgressSummary(task)));
+  if(dj && dj.stage){
+    current.appendChild(h("div", "journey-section-body journey-field journey-delivery-stage",
+      deliveryJourneyStageText(dj)));
+    var actorText = deliveryJourneyActorText(dj);
+    if(actorText){
+      current.appendChild(h("div", "dim fs11 journey-delivery-actor", actorText));
+    }
+    if(dj.stage === "repairing" && dj.repair){
+      current.appendChild(h("div", "dim fs11", t("journeyStageRepairHint")));
+    }
+    if(detailLive){
+      current.appendChild(journeyDisclosure(t("journeyStageLiveDetail"),
+        h("div", "journey-field dim", liveStageDetailText(detailLive))));
+    }
+  } else {
+    current.appendChild(h("div", "journey-section-body journey-field",
+      detailLive ? liveStageDetailText(detailLive) : taskProgressSummary(task)));
+  }
   var currentProgress = task.progress || (task.decision && task.decision.progress);
   var detailDual = dualClockPlainText(currentProgress);
   if(detailDual){
@@ -12202,6 +15927,11 @@ function renderTaskJourney(task){
   }
   verif.appendChild(vBody);
   panel.appendChild(verif);
+
+  // 3b. Finite validation-repair (allowance, in-progress round, exhausted or
+  // ineligible stop). Only rendered when canonical repair evidence exists.
+  var repairSection = renderValidationRepairSection(task, j);
+  if(repairSection) panel.appendChild(repairSection);
 
   // 4. Final delivery
   var delivery = h("div", "journey-section");
@@ -13283,6 +17013,7 @@ function renderTaskTabShell(tabs, activeId){
 
     btn.addEventListener("click", function(){
       taskDetailActiveTab = tab.id;
+      workScheduleReadingContextSave();
       buttons.forEach(function(b, i){
         var on = tabs[i].id === tab.id;
         b.classList.toggle("is-active", on);
@@ -14272,7 +18003,10 @@ function renderAttentionResolutionControls(task){
 }
 
 function showTask(id, crumb){
+  S.detailTaskId = String(id || "");
+  workMarkSelectedCard(S.detailTaskId);
   S.taskCrumb = resolveTaskBreadcrumb(S.taskCrumb, id, crumb);
+  workScheduleReadingContextSave();
   loadingDetail(t("taskDetailLoading"));
   fetchJSON("/api/ops/tasks/" + encodeURIComponent(id)).then(function(task){
     var f = fr();
@@ -14483,7 +18217,9 @@ function showTask(id, crumb){
     sup.appendChild(reverifyReasonLab);
     var reverifyBtn = h("button", "btn sm", t("taskReverify"));
     reverifyBtn.type = "button";
-    reverifyBtn.title = t("taskReverifyHint");
+    reverifyBtn.title = (elig && elig.eligiblePath === "runtime-workspace")
+      ? t("taskReverifyRuntimeHint")
+      : t("taskReverifyHint");
     var reverifyEligible = !!(elig && elig.eligible);
     if(elig){
       if(elig.eligible){
@@ -15260,6 +18996,17 @@ function render(){
     viewEl.appendChild(stateMsg("empty", t("reconnecting")));
     return;
   }
+  // FL-112A: identical Work presentation truth keeps the live Work DOM so
+  // polling updates connection chrome without a hard page-like rebuild.
+  // Real hierarchy/intake/filter/language changes still fall through to rWork.
+  if(tab === "work" && workShouldRetainDom()){
+    if(!S.detail){
+      detailEl.hidden = true;
+      detailEl.textContent = "";
+      if(scrimEl) scrimEl.hidden = true;
+    }
+    return;
+  }
   // "ready" and "stale" both render normally; retained evidence is shown
   // while updStatus already indicates the stale dot in the status bar.
   // overview remains a bounded compatibility branch only (redirected by switchTab).
@@ -15295,6 +19042,7 @@ function init(){
   subEl = document.getElementById("fl-page-sub");
   topMetaEl = document.getElementById("fl-top-meta");
   scrimEl = document.getElementById("fl-scrim");
+  workReadingContextPending = workReadSessionContext();
   if(!S.token){ showUnauthenticated(); return; }
   $$("#fl-tabs button").forEach(function(btn){
     btn.addEventListener("click", function(){
@@ -15303,6 +19051,22 @@ function init(){
   });
   document.addEventListener("keydown", function(e){
     if(e.key==="Escape"&&S.detail) hideDetail();
+  });
+  /* Native disclosures, the contained board, the real page scroll host, and
+   * semantic focus are all presentation state. Capture them after interaction
+   * so a reload has the latest reading place without storing content. */
+  document.addEventListener("toggle", function(e){
+    if(viewEl && e.target && viewEl.contains(e.target)) workScheduleReadingContextSave();
+  }, true);
+  document.addEventListener("scroll", function(e){
+    var content = workContentScrollEl();
+    if(e.target === content || e.target === detailEl
+      || (viewEl && e.target && viewEl.contains(e.target))){
+      workScheduleReadingContextSave();
+    }
+  }, true);
+  document.addEventListener("focusin", function(e){
+    if(viewEl && e.target && viewEl.contains(e.target)) workScheduleReadingContextSave();
   });
   if(scrimEl){
     scrimEl.addEventListener("click", function(){ if(S.detail) hideDetail(); });
@@ -15332,9 +19096,29 @@ function init(){
      * clear any pending-action handoff so a re-render cannot mislabel it. */
     workActionChooserReset();
     workPendingHandoffReset();
+    /* Language is an explicit full-page rebuild. Capture the live Worker draft
+     * here, before any translated chrome or form nodes are replaced, then mark
+     * the old DOM consumed so rWorker restores this exact draft only once. */
+    var languageDraft = null;
+    if(S.tab === "worker" && S.workerFormRendered && S.workerFormActive){
+      languageDraft = workerCaptureDraftFromDom();
+      if(languageDraft) S.workerDraft = languageDraft;
+      S.workerFormRendered = false;
+    }
     applyChromeI18n();
     setPageChrome();
     if(S.token) render();
+    /* A language change is synchronous and presentation-only. Replay the exact
+     * live controls after translated DOM exists so intentionally blank inputs
+     * and unsaved labels cannot fall back to saved profile values. */
+    if(languageDraft && S.tab === "worker"){
+      var translatedForm = viewEl.querySelector("form.configure-form");
+      if(workerReplayCapturedControls(translatedForm, languageDraft)){
+        S.workerDraft = languageDraft;
+        S.workerFormActive = true;
+        if(typeof S.workerSummariesRefresher === "function") S.workerSummariesRefresher();
+      }
+    }
   };
   applyChromeI18n();
   setPageChrome();

@@ -2,9 +2,10 @@ import type { StateStore } from "../state/store.js";
 import { isoTimestamp as timestamp } from "./time.js";
 
 /**
- * Closed vocabulary of why Main explicitly closes a failed/interrupted Task
- * after the real-world problem has been handled. Pure codes - they never
- * carry a review reason, prompt, path, command, error body, or free text.
+ * Closed vocabulary of why Main explicitly closes handled attention: a
+ * failed/interrupted Task or a succeeded Task with no delivered outcome that
+ * no longer needs operational action. Pure codes - they never carry a review
+ * reason, prompt, path, command, error body, or free text.
  */
 export const TASK_RESOLUTION_REASONS = [
   "environment-recovered",
@@ -30,10 +31,10 @@ export function isTaskResolutionReason(value: unknown): value is TaskResolutionR
 
 /**
  * Latest privacy-safe attention-resolution state for one Task, derived only
- * from durable ordered events. `resolved` closes the failure to History;
- * `reopened` returns the unchanged failed/interrupted Task to Now. Malformed
- * or unknown resolution evidence fails open to Now, so a Task can never be
- * hidden in History by corrupt or forged evidence.
+ * from durable ordered events. `resolved` closes handled attention to History;
+ * `reopened` returns the unchanged Task to its evidence-derived Now placement.
+ * Malformed or unknown resolution evidence fails open to Now, so a Task can
+ * never be hidden in History by corrupt or forged evidence.
  */
 export type TaskResolutionState =
   | { status: "none" }
@@ -181,13 +182,14 @@ export function latestTaskResolutionState(
 }
 
 /**
- * Main resolves a failed/interrupted Task as handled. Validates authority
- * (explicit confirm), eligibility (terminal failed/interrupted, no running
- * Attempt, no delivered outcome), appends one immutable resolve event, and
- * returns the latest state. The exact same resolve request is idempotent
- * (existing=true, no duplicate event); a conflicting resolve fails closed
- * until Main reopens the Task. Never changes machine status, delivery truth,
- * review truth, or statistics.
+ * Main resolves a handled Task as closed attention: a failed/interrupted Task
+ * or a succeeded Task with no delivered outcome and no running Attempt.
+ * Validates authority (explicit confirm), eligibility (terminal
+ * failed/interrupted/succeeded, no running Attempt, no delivered outcome),
+ * appends one immutable resolve event, and returns the latest state. The exact
+ * same resolve request is idempotent (existing=true, no duplicate event); a
+ * conflicting resolve fails closed until Main reopens the Task. Never changes
+ * machine status, delivery truth, review truth, or statistics.
  *
  * `delivered` is the caller-computed delivery truth (delivered/activated/
  * repaired-delivered). It is required so the Core can fail closed without
@@ -201,7 +203,8 @@ export function resolveTaskResolution(
     note?: string;
     evidenceTaskId?: string;
     confirm: true;
-    delivered?: boolean;
+    /** Caller-owned delivery truth; required with no Core default. */
+    delivered: boolean;
   },
 ): { existing: boolean; state: TaskResolutionState } {
   if (input.confirm !== true) {
@@ -238,7 +241,14 @@ export function resolveTaskResolution(
   }
 
   const task = store.getTask(taskId);
-  if (task.status !== "failed" && task.status !== "interrupted") {
+  // Succeeded is eligible ONLY when the caller-computed delivered truth is
+  // false (checked below) and no Attempt is running. Delivered/activated/
+  // verified-repaired Tasks stay ineligible and are never hidden in History.
+  if (
+    task.status !== "failed"
+    && task.status !== "interrupted"
+    && task.status !== "succeeded"
+  ) {
     throw new Error(`Task ${taskId} cannot be resolved from status ${task.status}`);
   }
   if (task.currentAttemptId !== undefined) {
@@ -277,7 +287,7 @@ export function resolveTaskResolution(
     taskId,
     undefined,
     "task.resolution.completed",
-    "Main resolved the handled failure",
+    "Main resolved the handled attention",
     payload,
   );
   return {
@@ -287,10 +297,11 @@ export function resolveTaskResolution(
 }
 
 /**
- * Main explicitly reopens a handled failure, appending one immutable reopen
- * event. The unchanged failed/interrupted Task returns to Now. Exact replay
- * is idempotent; nothing to reopen, a delivered outcome, or a conflicting
- * reopen fails closed before writing any event.
+ * Main explicitly reopens resolved attention, appending one immutable reopen
+ * event. The unchanged failed/interrupted or succeeded-not-delivered Task
+ * returns to its evidence-derived Now placement. Exact replay is idempotent;
+ * nothing to reopen, a delivered outcome, or a conflicting reopen fails closed
+ * before writing any event.
  *
  * `delivered` is the caller-computed delivery truth; reopening a Task that
  * later reached delivery is rejected so handled copy can never outrank a real
@@ -299,7 +310,12 @@ export function resolveTaskResolution(
 export function reopenTaskResolution(
   store: StateStore,
   taskId: string,
-  input: { note?: string; confirm: true; delivered?: boolean },
+  input: {
+    note?: string;
+    confirm: true;
+    /** Caller-owned delivery truth; required with no Core default. */
+    delivered: boolean;
+  },
 ): { existing: boolean; state: TaskResolutionState } {
   if (input.confirm !== true) {
     throw new Error("reopen requires explicit confirm: true");
@@ -313,7 +329,11 @@ export function reopenTaskResolution(
     if (trimmed.length > 0) note = trimmed;
   }
   const task = store.getTask(taskId);
-  if (task.status !== "failed" && task.status !== "interrupted") {
+  if (
+    task.status !== "failed"
+    && task.status !== "interrupted"
+    && task.status !== "succeeded"
+  ) {
     throw new Error(`Task ${taskId} cannot be reopened from status ${task.status}`);
   }
   const events = store.listEvents(taskId);
@@ -337,7 +357,7 @@ export function reopenTaskResolution(
     taskId,
     undefined,
     "task.resolution.reopened",
-    "Main reopened the handled failure",
+    "Main reopened the handled attention",
     payload,
   );
   return {

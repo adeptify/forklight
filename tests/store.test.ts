@@ -4,11 +4,22 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import {
+  buildCreatedOutcomeIntake,
+  buildOutcomeIntakeConfirmationReceipt,
+  buildProposedOutcomeIntake,
+  createOutcomeIntakeRecord,
+  normalizeOutcomeIntakeCreate,
+  normalizeOutcomeIntakePropose,
+} from "../src/core/outcome-intake.js";
 import { buildTaskRecord } from "../src/core/runner.js";
 import { parseTaskSpec } from "../src/core/task.js";
 import { createRedactedExchangeMeasurement } from "../src/core/token-efficiency.js";
 import type {
   DependencyRecord,
+  GoalMilestoneRecord,
+  GoalPlanAssociation,
+  GoalRecord,
   PlanItemRecord,
   PlanRecord,
   TaskRecord,
@@ -1668,5 +1679,715 @@ test("optional review lookup: undefined means no row only, never hides accepted/
   assert.deepEqual(store.getDirectCodexSampleReview("smp-os1"), r1);
   assert.deepEqual(store.getDirectCodexSampleReview("smp-os2"), r2);
 
+  store.close();
+});
+
+// --- FL-112E1: durable ordered Goal–Plan associations ----------------------
+
+function goalFixture(planId: string, timestamp: string): {
+  goal: GoalRecord;
+  milestones: GoalMilestoneRecord[];
+  plan: PlanRecord;
+  items: PlanItemRecord[];
+  task: TaskRecord;
+} {
+  const task = queuedTask(`task-${planId}`, timestamp);
+  const plan: PlanRecord = {
+    id: planId,
+    name: `Plan ${planId}`,
+    objective: `Objective ${planId}`,
+    planFile: `/tmp/${planId}.yaml`,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const items: PlanItemRecord[] = [
+    {
+      id: "item-0",
+      planId: plan.id,
+      taskId: task.id,
+      itemIndex: 0,
+      taskFile: task.taskFile,
+    },
+  ];
+  const goal: GoalRecord = {
+    id: `goal-for-${planId}`,
+    version: 1,
+    name: `Goal ${planId}`,
+    objective: `Goal objective ${planId}`,
+    planId: plan.id,
+    goalFile: `/tmp/goal-${planId}.json`,
+    policy: {
+      maxDurationMs: null,
+      noProgressTimeoutMs: null,
+      maxCorrectionRounds: 1,
+      maxReviewRounds: 1,
+      maxNoNewEvidenceCycles: 1,
+    },
+    status: "running",
+    reasonCode: "none",
+    reason: "progressing",
+    evidenceDigest: "c".repeat(64),
+    evidenceAt: timestamp,
+    counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const milestones: GoalMilestoneRecord[] = [
+    {
+      goalId: goal.id,
+      itemId: "item-0",
+      taskId: task.id,
+      gate: "machine",
+      itemIndex: 0,
+      satisfied: false,
+      reasonCode: "waiting-machine",
+      reason: "waiting",
+      updatedAt: timestamp,
+    },
+  ];
+  return { goal, milestones, plan, items, task };
+}
+
+test("legacy goals.plan_id backfills ordinal-zero association idempotently", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-gpa-legacy-"));
+  const databasePath = path.join(home, "forklight.sqlite");
+  const timestamp = "2026-08-01T00:00:00.000Z";
+  const planId = "legacy-primary-plan";
+  const goalId = "legacy-goal-1";
+  const taskId = "legacy-task-1";
+
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      record_json TEXT NOT NULL
+    );
+    CREATE TABLE plans (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      plan_file TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      record_json TEXT NOT NULL
+    );
+    CREATE TABLE goals (
+      id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL UNIQUE REFERENCES plans(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      record_json TEXT NOT NULL
+    );
+  `);
+  const task = queuedTask(taskId, timestamp);
+  const plan: PlanRecord = {
+    id: planId,
+    name: "Legacy plan",
+    objective: "Primary only",
+    planFile: "/tmp/legacy-plan.yaml",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const goal: GoalRecord = {
+    id: goalId,
+    version: 1,
+    name: "Legacy goal",
+    objective: "One plan",
+    planId,
+    goalFile: "/tmp/legacy-goal.json",
+    policy: {
+      maxDurationMs: null,
+      noProgressTimeoutMs: null,
+      maxCorrectionRounds: 1,
+      maxReviewRounds: 1,
+      maxNoNewEvidenceCycles: 1,
+    },
+    status: "running",
+    reasonCode: "none",
+    reason: "progressing",
+    evidenceDigest: "d".repeat(64),
+    evidenceAt: timestamp,
+    counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  legacy.prepare(
+    "INSERT INTO tasks (id, status, updated_at, record_json) VALUES (?, ?, ?, ?)",
+  ).run(task.id, task.status, task.updatedAt, JSON.stringify(task));
+  legacy.prepare(
+    "INSERT INTO plans (id, name, objective, plan_file, created_at, updated_at, record_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(plan.id, plan.name, plan.objective, plan.planFile, plan.createdAt, plan.updatedAt, JSON.stringify(plan));
+  legacy.prepare(
+    "INSERT INTO goals (id, plan_id, status, created_at, updated_at, record_json) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(goal.id, goal.planId, goal.status, goal.createdAt, goal.updatedAt, JSON.stringify(goal));
+  legacy.close();
+
+  const first = new StateStore(home);
+  const associations = first.listGoalPlanAssociations(goalId);
+  assert.equal(associations.length, 1);
+  assert.deepEqual(associations[0], {
+    goalId,
+    planId,
+    ordinal: 0,
+    createdAt: timestamp,
+  });
+  assert.equal(first.getGoalByPlanId(planId)?.id, goalId);
+  assert.equal(first.getGoal(goalId).planId, planId);
+  first.close();
+
+  const second = new StateStore(home);
+  const again = second.listGoalPlanAssociations(goalId);
+  assert.equal(again.length, 1);
+  assert.equal(again[0]!.ordinal, 0);
+  assert.equal(again[0]!.planId, planId);
+  // Direct row count proves no duplication on reopen.
+  const raw = new DatabaseSync(databasePath);
+  const count = raw.prepare(
+    "SELECT COUNT(*) AS n FROM goal_plan_associations WHERE goal_id = ?",
+  ).get(goalId) as { n: number };
+  assert.equal(count.n, 1);
+  raw.close();
+  second.close();
+});
+
+test("createPlanExecutionWithGoal inserts primary association; attach appends ordered later Plans", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-gpa-attach-"));
+  const timestamp = "2026-08-02T00:00:00.000Z";
+  const store = new StateStore(home);
+  const primary = goalFixture("primary-plan", timestamp);
+  store.createPlanExecutionWithGoal(
+    [{ task: primary.task, creationEvent: { summary: "created", payload: {} } }],
+    primary.plan,
+    primary.items,
+    [],
+    primary.goal,
+    primary.milestones,
+  );
+
+  const primaryAssociations = store.listGoalPlanAssociations(primary.goal.id);
+  assert.equal(primaryAssociations.length, 1);
+  assert.equal(primaryAssociations[0]!.planId, "primary-plan");
+  assert.equal(primaryAssociations[0]!.ordinal, 0);
+  assert.equal(store.getGoalByPlanId("primary-plan")?.id, primary.goal.id);
+
+  const laterTask = queuedTask("task-later-plan", timestamp);
+  const laterPlan: PlanRecord = {
+    id: "later-plan",
+    name: "Later phase",
+    objective: "Second phase",
+    planFile: "/tmp/later-plan.yaml",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  store.createTask(laterTask);
+  store.createPlanGraph(
+    laterPlan,
+    [{
+      id: "later-item",
+      planId: laterPlan.id,
+      taskId: laterTask.id,
+      itemIndex: 0,
+      taskFile: laterTask.taskFile,
+    }],
+    [],
+  );
+
+  const attached = store.attachPlanToGoal(primary.goal.id, laterPlan.id);
+  assert.equal(attached.ordinal, 1);
+  assert.equal(attached.planId, laterPlan.id);
+
+  const ordered = store.listGoalPlanAssociations(primary.goal.id);
+  assert.deepEqual(
+    ordered.map((row) => ({ planId: row.planId, ordinal: row.ordinal })),
+    [
+      { planId: "primary-plan", ordinal: 0 },
+      { planId: "later-plan", ordinal: 1 },
+    ],
+  );
+  assert.equal(store.getGoalByPlanId("later-plan")?.id, primary.goal.id);
+  assert.equal(store.getGoalByTaskId(laterTask.id)?.id, primary.goal.id);
+  // Legacy primary field unchanged.
+  assert.equal(store.getGoal(primary.goal.id).planId, "primary-plan");
+
+  store.close();
+});
+
+test("attachPlanToGoal fails closed on missing rows, duplicate ownership, and re-association", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-gpa-fail-"));
+  const timestamp = "2026-08-03T00:00:00.000Z";
+  const store = new StateStore(home);
+  const first = goalFixture("goal-a-plan", timestamp);
+  const second = goalFixture("goal-b-plan", timestamp);
+  // Distinct goal ids from fixture (derived from plan id).
+  store.createPlanExecutionWithGoal(
+    [{ task: first.task, creationEvent: { summary: "created", payload: {} } }],
+    first.plan,
+    first.items,
+    [],
+    first.goal,
+    first.milestones,
+  );
+  store.createPlanExecutionWithGoal(
+    [{ task: second.task, creationEvent: { summary: "created", payload: {} } }],
+    second.plan,
+    second.items,
+    [],
+    second.goal,
+    second.milestones,
+  );
+
+  const freeTask = queuedTask("task-free-plan", timestamp);
+  const freePlan: PlanRecord = {
+    id: "free-plan",
+    name: "Free",
+    objective: "Unowned",
+    planFile: "/tmp/free.yaml",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  store.createTask(freeTask);
+  store.createPlanGraph(
+    freePlan,
+    [{
+      id: "free-item",
+      planId: freePlan.id,
+      taskId: freeTask.id,
+      itemIndex: 0,
+      taskFile: freeTask.taskFile,
+    }],
+    [],
+  );
+
+  assert.throws(() => store.attachPlanToGoal("missing-goal", freePlan.id), /Unknown ForkLight goal/);
+  assert.throws(() => store.attachPlanToGoal(first.goal.id, "missing-plan"), /Unknown ForkLight plan/);
+  assert.throws(
+    () => store.attachPlanToGoal(first.goal.id, first.plan.id),
+    /already associated/,
+  );
+  assert.throws(
+    () => store.attachPlanToGoal(first.goal.id, second.plan.id),
+    /already owned by goal/,
+  );
+
+  // Successful attach then re-attach fails without mutating order.
+  store.attachPlanToGoal(first.goal.id, freePlan.id);
+  assert.throws(
+    () => store.attachPlanToGoal(first.goal.id, freePlan.id),
+    /already associated/,
+  );
+  assert.throws(
+    () => store.attachPlanToGoal(second.goal.id, freePlan.id),
+    /already owned by goal/,
+  );
+  assert.deepEqual(
+    store.listGoalPlanAssociations(first.goal.id).map((row) => row.planId),
+    ["goal-a-plan", "free-plan"],
+  );
+  assert.deepEqual(
+    store.listGoalPlanAssociations(second.goal.id).map((row) => row.planId),
+    ["goal-b-plan"],
+  );
+  assert.throws(() => store.listGoalPlanAssociations("missing-goal"), /Unknown ForkLight goal/);
+
+  store.close();
+});
+
+// --- FL-112E2: plan-qualified milestone identity + atomic multi-phase Goals ---
+
+function multiPhaseGoalFixture(planIds: string[], timestamp: string): {
+  goal: GoalRecord;
+  milestones: GoalMilestoneRecord[];
+  plans: PlanRecord[];
+  itemsByPlan: PlanItemRecord[][];
+  dependenciesByPlan: DependencyRecord[][];
+  associations: GoalPlanAssociation[];
+  registrationsByPlan: Array<Array<{ task: TaskRecord; creationEvent: { summary: string; payload?: unknown } }>>;
+} {
+  const goal: GoalRecord = {
+    id: `goal-for-${planIds[0]}`,
+    version: 1,
+    name: `Goal ${planIds[0]}`,
+    objective: `Goal objective ${planIds[0]}`,
+    planId: planIds[0]!,
+    goalFile: `/tmp/goal-${planIds[0]}.json`,
+    policy: {
+      maxDurationMs: null,
+      noProgressTimeoutMs: null,
+      maxCorrectionRounds: 1,
+      maxReviewRounds: 1,
+      maxNoNewEvidenceCycles: 1,
+    },
+    status: "running",
+    reasonCode: "none",
+    reason: "progressing",
+    evidenceDigest: "c".repeat(64),
+    evidenceAt: timestamp,
+    counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const plans: PlanRecord[] = [];
+  const itemsByPlan: PlanItemRecord[][] = [];
+  const dependenciesByPlan: DependencyRecord[][] = [];
+  const registrationsByPlan: Array<Array<{ task: TaskRecord; creationEvent: { summary: string; payload?: unknown } }>> = [];
+  const milestones: GoalMilestoneRecord[] = [];
+  const associations: GoalPlanAssociation[] = [];
+
+  planIds.forEach((planId, index) => {
+    const task = queuedTask(`task-${planId}`, timestamp);
+    const plan: PlanRecord = {
+      id: planId,
+      name: `Plan ${planId}`,
+      objective: `Objective ${planId}`,
+      planFile: `/tmp/${planId}.yaml`,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const items: PlanItemRecord[] = [{
+      id: "item-1",
+      planId,
+      taskId: task.id,
+      itemIndex: 0,
+      taskFile: task.taskFile,
+    }];
+    plans.push(plan);
+    itemsByPlan.push(items);
+    dependenciesByPlan.push([]);
+    registrationsByPlan.push([{ task, creationEvent: { summary: `Task created: ${task.name}`, payload: {} } }]);
+    associations.push({ goalId: goal.id, planId, ordinal: index, createdAt: timestamp });
+    milestones.push({
+      goalId: goal.id,
+      planId,
+      itemId: "item-1",
+      taskId: task.id,
+      gate: "machine",
+      itemIndex: 0,
+      satisfied: false,
+      reasonCode: "waiting-machine",
+      reason: "waiting",
+      updatedAt: timestamp,
+    });
+  });
+
+  return {
+    goal,
+    milestones,
+    plans,
+    itemsByPlan,
+    dependenciesByPlan,
+    associations,
+    registrationsByPlan,
+  };
+}
+
+test("legacy goal milestone rows migrate to plan-qualified identity", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-gm-migrate-"));
+  const databasePath = path.join(home, "forklight.sqlite");
+  const timestamp = "2026-08-05T00:00:00.000Z";
+  const planId = "legacy-mp-plan";
+  const goalId = "legacy-mp-goal";
+  const taskId = "legacy-mp-task";
+
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      record_json TEXT NOT NULL
+    );
+    CREATE TABLE plans (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      plan_file TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      record_json TEXT NOT NULL
+    );
+    CREATE TABLE goals (
+      id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL UNIQUE REFERENCES plans(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      record_json TEXT NOT NULL
+    );
+    CREATE TABLE goal_milestones (
+      goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+      item_id TEXT NOT NULL,
+      task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+      gate TEXT NOT NULL,
+      item_index INTEGER NOT NULL,
+      satisfied INTEGER NOT NULL DEFAULT 0,
+      record_json TEXT NOT NULL,
+      PRIMARY KEY (goal_id, item_id),
+      UNIQUE (goal_id, item_index)
+    );
+  `);
+  const task = queuedTask(taskId, timestamp);
+  const plan: PlanRecord = {
+    id: planId,
+    name: "Legacy mp plan",
+    objective: "Primary",
+    planFile: "/tmp/legacy-mp.yaml",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const goal: GoalRecord = {
+    id: goalId,
+    version: 1,
+    name: "Legacy mp goal",
+    objective: "One plan",
+    planId,
+    goalFile: "/tmp/legacy-mp-goal.json",
+    policy: {
+      maxDurationMs: null,
+      noProgressTimeoutMs: null,
+      maxCorrectionRounds: 1,
+      maxReviewRounds: 1,
+      maxNoNewEvidenceCycles: 1,
+    },
+    status: "running",
+    reasonCode: "none",
+    reason: "progressing",
+    evidenceDigest: "e".repeat(64),
+    evidenceAt: timestamp,
+    counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const milestoneRecord = {
+    goalId,
+    itemId: "item-1",
+    taskId,
+    gate: "machine",
+    itemIndex: 0,
+    satisfied: false,
+    reasonCode: "waiting-machine",
+    reason: "waiting",
+    updatedAt: timestamp,
+  };
+  legacy.prepare("INSERT INTO tasks (id, status, updated_at, record_json) VALUES (?, ?, ?, ?)")
+    .run(task.id, task.status, task.updatedAt, JSON.stringify(task));
+  legacy.prepare(
+    "INSERT INTO plans (id, name, objective, plan_file, created_at, updated_at, record_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(plan.id, plan.name, plan.objective, plan.planFile, plan.createdAt, plan.updatedAt, JSON.stringify(plan));
+  legacy.prepare(
+    "INSERT INTO goals (id, plan_id, status, created_at, updated_at, record_json) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(goal.id, goal.planId, goal.status, goal.createdAt, goal.updatedAt, JSON.stringify(goal));
+  legacy.prepare(
+    `INSERT INTO goal_milestones (goal_id, item_id, task_id, gate, item_index, satisfied, record_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(goalId, "item-1", taskId, "machine", 0, 0, JSON.stringify(milestoneRecord));
+  legacy.close();
+
+  const migrated = new StateStore(home);
+  const milestones = migrated.getGoalMilestones(goalId);
+  assert.equal(milestones.length, 1);
+  assert.equal(milestones[0]!.planId, planId);
+  assert.equal(milestones[0]!.itemId, "item-1");
+  assert.deepEqual(
+    migrated.listGoalPlanAssociations(goalId).map((row) => row.planId),
+    [planId],
+  );
+  migrated.close();
+
+  // Re-open is idempotent and never duplicates rows.
+  const again = new StateStore(home);
+  assert.equal(again.getGoalMilestones(goalId)[0]!.planId, planId);
+  const raw = new DatabaseSync(databasePath);
+  const count = raw.prepare(
+    "SELECT COUNT(*) AS n FROM goal_milestones WHERE goal_id = ?",
+  ).get(goalId) as { n: number };
+  assert.equal(count.n, 1);
+  raw.close();
+  again.close();
+});
+
+test("createGoalPhasesExecution commits every phase graph and plan-qualified milestone", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-gpe-commit-"));
+  const timestamp = "2026-08-06T00:00:00.000Z";
+  const store = new StateStore(home);
+  const fixture = multiPhaseGoalFixture(["plan-a", "plan-b"], timestamp);
+  store.createGoalPhasesExecution(fixture);
+
+  assert.equal(store.listTasks().length, 2);
+  assert.deepEqual(store.listPlans().map((p) => p.id).sort(), ["plan-a", "plan-b"]);
+  assert.deepEqual(
+    store.listGoalPlanAssociations(fixture.goal.id).map((row) => row.planId),
+    ["plan-a", "plan-b"],
+  );
+  const milestones = store.getGoalMilestones(fixture.goal.id);
+  assert.equal(milestones.length, 2);
+  assert.equal(milestones[0]!.planId, "plan-a");
+  assert.equal(milestones[1]!.planId, "plan-b");
+  assert.equal(milestones[0]!.itemId, "item-1");
+  assert.equal(milestones[1]!.itemId, "item-1");
+  assert.equal(store.getGoal(fixture.goal.id).planId, "plan-a");
+
+  // Duplicate local item ids stay addressable by Plan + item.
+  const planAMilestone = store.getGoalMilestone(fixture.goal.id, "item-1", "plan-a")!;
+  const planBMilestone = store.getGoalMilestone(fixture.goal.id, "item-1", "plan-b")!;
+  assert.equal(planAMilestone.planId, "plan-a");
+  assert.equal(planBMilestone.planId, "plan-b");
+  assert.notEqual(planAMilestone.taskId, planBMilestone.taskId);
+  store.close();
+});
+
+test("createGoalPhasesExecution rolls back every row when a later phase fails", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-gpe-rollback-"));
+  const timestamp = "2026-08-06T00:00:00.000Z";
+  const store = new StateStore(home);
+  const fixture = multiPhaseGoalFixture(["plan-a", "plan-b"], timestamp);
+  // Phase two reuses the phase-one Task to force a relational UNIQUE failure
+  // after phase one has already been inserted inside the transaction.
+  const phaseOneTask = fixture.registrationsByPlan[0]![0]!.task;
+  fixture.registrationsByPlan[1] = [{
+    task: phaseOneTask,
+    creationEvent: { summary: "duplicate", payload: {} },
+  }];
+  fixture.itemsByPlan[1] = [{
+    id: "item-1",
+    planId: "plan-b",
+    taskId: phaseOneTask.id,
+    itemIndex: 0,
+    taskFile: phaseOneTask.taskFile,
+  }];
+  // The phase-two milestone must reference the reused Task so semantic
+  // validation passes and the conflict surfaces only during insert.
+  fixture.milestones[1] = { ...fixture.milestones[1]!, taskId: phaseOneTask.id };
+
+  assert.throws(() => store.createGoalPhasesExecution(fixture), /UNIQUE constraint failed/);
+  assert.deepEqual(store.listTasks(), []);
+  assert.deepEqual(store.listPlans(), []);
+  assert.deepEqual(store.listGoals(), []);
+  assert.deepEqual(store.getPlanItems("plan-a"), []);
+  assert.deepEqual(store.getDependencies("plan-a"), []);
+  assert.equal(store.getGoalMilestones(fixture.goal.id).length, 0);
+  store.close();
+});
+
+test("createGoalPhasesExecution rejects missing or duplicate milestone coverage per Plan item", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-gpe-coverage-"));
+  const timestamp = "2026-08-06T00:00:00.000Z";
+
+  // Missing: phase-two item has no plan-qualified milestone.
+  {
+    const store = new StateStore(home);
+    const fixture = multiPhaseGoalFixture(["plan-a", "plan-b"], timestamp);
+    fixture.milestones = [fixture.milestones[0]!];
+    assert.throws(
+      () => store.createGoalPhasesExecution(fixture),
+      /Plan item item-1 is missing a goal milestone gate/,
+    );
+    assert.deepEqual(store.listPlans(), []);
+    assert.deepEqual(store.listGoals(), []);
+    store.close();
+  }
+
+  // Duplicate: phase-one item gets a second identical milestone.
+  {
+    const store = new StateStore(home);
+    const fixture = multiPhaseGoalFixture(["plan-a", "plan-b"], timestamp);
+    fixture.milestones = [
+      ...fixture.milestones,
+      { ...fixture.milestones[0]!, itemId: "item-1" },
+    ];
+    assert.throws(
+      () => store.createGoalPhasesExecution(fixture),
+      /Plan item item-1 has duplicate goal milestone gates/,
+    );
+    assert.deepEqual(store.listPlans(), []);
+    assert.deepEqual(store.listGoals(), []);
+    store.close();
+  }
+});
+
+test("createOutcomeIntakeConfirmation rejects multi-phase registration graph mismatch before mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-outcome-phase-graph-mismatch-"));
+  const store = new StateStore(home);
+  const timestamp = "2026-08-07T00:00:00.000Z";
+  const fixture = multiPhaseGoalFixture(["phase-a-plan", "phase-b-plan"], timestamp);
+  const flatRegistrations = fixture.registrationsByPlan.flat();
+  // Receipt and flat registrations agree, but the ordered phase graph is
+  // reordered so insertion-facing identity diverges from the receipt surface.
+  const reorderedByPlan = [
+    fixture.registrationsByPlan[1]!,
+    fixture.registrationsByPlan[0]!,
+  ];
+  const proposed = buildProposedOutcomeIntake(
+    createOutcomeIntakeRecord(
+      normalizeOutcomeIntakeCreate({ outcome: "Phase graph identity guard" }),
+      "intake-phase-graph",
+      timestamp,
+    ),
+    normalizeOutcomeIntakePropose({
+      intakeId: "intake-phase-graph",
+      expectedRevision: 1,
+      shape: "goal",
+      reason: "Two ordered phases",
+      artifactPath: fixture.goal.goalFile,
+    }),
+    {
+      artifactDigest: "d".repeat(64),
+      facts: {
+        shape: "goal",
+        displayName: fixture.goal.name,
+        objective: fixture.goal.objective,
+        taskCount: 2,
+        goalVersion: 2,
+      },
+    },
+    "2026-08-07T00:00:01.000Z",
+  );
+  store.createOutcomeIntake(proposed);
+  const receipt = buildOutcomeIntakeConfirmationReceipt({
+    intakeId: "intake-phase-graph",
+    proposalRevision: 2,
+    artifactDigest: "d".repeat(64),
+    shape: "goal",
+    taskIds: flatRegistrations.map(({ task }) => task.id),
+    planId: fixture.plans[0]!.id,
+    goalId: fixture.goal.id,
+    confirmedAt: "2026-08-07T00:00:02.000Z",
+  });
+  const created = buildCreatedOutcomeIntake(proposed, receipt, "2026-08-07T00:00:02.000Z");
+
+  assert.throws(
+    () => store.createOutcomeIntakeConfirmation({
+      intakeId: "intake-phase-graph",
+      expectedRevision: 2,
+      updatedIntake: created,
+      registrations: flatRegistrations,
+      goal: fixture.goal,
+      milestones: fixture.milestones,
+      goalPhases: {
+        registrationsByPlan: reorderedByPlan,
+        plans: fixture.plans,
+        itemsByPlan: fixture.itemsByPlan,
+        dependenciesByPlan: fixture.dependenciesByPlan,
+        associations: fixture.associations,
+      },
+    }),
+    /ordered phase registrations/,
+  );
+
+  // Fail closed: zero Task, Plan, Goal, milestone, event, or receipt mutation.
+  assert.deepEqual(store.listTasks(), []);
+  assert.deepEqual(store.listPlans(), []);
+  assert.deepEqual(store.listGoals(), []);
+  assert.equal(store.getGoalMilestones(fixture.goal.id).length, 0);
+  assert.equal(store.listEvents(flatRegistrations[0]!.task.id).length, 0);
+  assert.equal(store.listEvents(flatRegistrations[1]!.task.id).length, 0);
+  const intake = store.getOutcomeIntake("intake-phase-graph");
+  assert.equal(intake.status, "proposed");
+  assert.equal(intake.revision, 2);
+  assert.equal(intake.confirmation, undefined);
   store.close();
 });

@@ -14,6 +14,7 @@ import {
 } from "../core/network-policy.js";
 import {
   buildWorkerPrompt,
+  workerValidationRepairProtocolLines,
   workerPromptAppendicesForTask,
   type WorkerHardBoundaryPolicy,
 } from "../core/task.js";
@@ -213,7 +214,7 @@ export function codexWorkspaceToolLines(allowEdits: boolean): string[] {
       : "- Use that sandboxed command tool for product file work only inside this frozen Task workspace to inspect and search; do not edit product files.",
     `- Workspace sandbox mode: ${allowEdits ? "workspace-write" : "read-only"}; command network is disabled; global /tmp is excluded while task-private temporary storage remains for runtime needs only.`,
     "- Web, apps, MCP servers, nested agents, and approval escalation are disabled.",
-    "- Do not integrate source, commit, push, run acceptance commands yourself, or add product writable roots outside the Task workspace.",
+    "- Do not integrate source, commit, push, or add product writable roots outside the Task workspace.",
   ];
 }
 
@@ -222,8 +223,13 @@ function codexToolLines(task: TaskRecord): string[] {
 }
 
 /** Runtime-aware hard-boundary policy for both Codex execution paths. */
-export function codexHardBoundaryPolicy(allowEdits: boolean): WorkerHardBoundaryPolicy {
-  return { kind: "codex-workspace-command", allowEdits };
+export function codexHardBoundaryPolicy(
+  allowEdits: boolean,
+  nativeGoal = false,
+): WorkerHardBoundaryPolicy {
+  return nativeGoal
+    ? { kind: "codex-native-goal-command", allowEdits }
+    : { kind: "codex-workspace-command", allowEdits };
 }
 
 function codexCheckpointLines(): string[] {
@@ -290,6 +296,7 @@ export async function runCodexWorker(
     workerPromptAppendicesForTask(task, {
       toolLines: codexToolLines(task),
       checkpointLines: codexCheckpointLines(),
+      validationRepairLines: workerValidationRepairProtocolLines(task.spec.acceptance.commands, "codex"),
       hardBoundaryPolicy: codexHardBoundaryPolicy(task.spec.worker.allowEdits),
     }),
   );

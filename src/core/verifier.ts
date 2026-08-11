@@ -270,13 +270,18 @@ export async function executeVerificationPass(
 
   const changeBudgetMode = resolveChangeBudgetMode(task);
   let changeBudget: VerificationResult["changeBudget"];
-  if (task.spec.version === 2) {
+  const budget = task.spec.version === 2
+    ? task.spec.contract.changeBudget
+    : task.spec.version === 3 && task.spec.contract.coding !== undefined
+      ? task.spec.contract.coding.changeBudget
+      : undefined;
+  if (budget !== undefined) {
     const withinBudget =
-      diffMeasure.filesChanged <= task.spec.contract.changeBudget.maxFiles
-      && diffMeasure.changedLines <= task.spec.contract.changeBudget.maxDiffLines;
+      diffMeasure.filesChanged <= budget.maxFiles
+      && diffMeasure.changedLines <= budget.maxDiffLines;
     changeBudget = {
       ...diffMeasure,
-      ...task.spec.contract.changeBudget,
+      ...budget,
       withinBudget,
       mode: changeBudgetMode,
       effect: modeEffect(changeBudgetMode, !withinBudget),

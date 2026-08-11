@@ -6,6 +6,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { parseTaskSpec } from "../src/core/task.js";
+import {
+  defaultAdvancedPolicyFields,
+  defaultEnforcementCapability,
+  deriveEffectivePolicyForTaskCreation,
+} from "../src/core/advanced-policy.js";
 import { cloneDefaults, SettingsService } from "../src/core/settings.js";
 import {
   defaultWorkerProfiles,
@@ -881,4 +886,75 @@ test("default Worker Profile defaults to auto execution", () => {
     profiles.profiles.find((profile) => profile.id === "default")?.executionPreference,
     "auto",
   );
+});
+
+// --- Finite validation-repair allowance freezes into new Tasks ---
+
+test("Worker validation-repair override round-trips and freezes into a new Task policy", async () => {
+  const settings = cloneDefaults();
+  const catalog = settings.modelCatalog;
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "repair-three",
+    label: "Repair three",
+    runtime: "claude-code",
+    modelConfigId: "deepseek-flash",
+    advancedPolicy: { maxWorkerValidationRepairs: 3 },
+  }, catalog);
+  const profile = profiles.profiles.find((p) => p.id === "repair-three");
+  assert.equal(profile?.advancedPolicy?.maxWorkerValidationRepairs, 3);
+
+  const globalDefaults = defaultAdvancedPolicyFields();
+  const frozen = deriveEffectivePolicyForTaskCreation({
+    workerProfile: profile,
+    globalDefaults,
+    enforcementCapability: defaultEnforcementCapability(),
+  });
+  assert.equal(frozen.values.maxWorkerValidationRepairs, 3);
+  assert.equal(frozen.provenance.maxWorkerValidationRepairs, "worker");
+
+  // Persistence round-trip: saving and reloading keeps the finite override.
+  const home = await mkdtemp(path.join(tmpdir(), "fl-repair-persist-"));
+  const store = new StateStore(home);
+  try {
+    const service = new SettingsService(store);
+    service.update({ workerProfiles: profiles });
+    const reloaded = new SettingsService(store).get();
+    const saved = reloaded.workerProfiles.profiles.find((p) => p.id === "repair-three");
+    assert.equal(saved?.advancedPolicy?.maxWorkerValidationRepairs, 3);
+  } finally {
+    store.close();
+  }
+});
+
+test("a Worker without a validation-repair override inherits the global default", () => {
+  const settings = cloneDefaults();
+  const profile = settings.workerProfiles.profiles[0];
+  const globalDefaults = defaultAdvancedPolicyFields();
+  const frozen = deriveEffectivePolicyForTaskCreation({
+    workerProfile: profile,
+    globalDefaults,
+    enforcementCapability: defaultEnforcementCapability(),
+  });
+  assert.equal(frozen.values.maxWorkerValidationRepairs, 1);
+  assert.equal(frozen.provenance.maxWorkerValidationRepairs, "global");
+});
+
+test("zero validation-repair override disables automatic repair for new Tasks", () => {
+  const settings = cloneDefaults();
+  const catalog = settings.modelCatalog;
+  const profiles = upsertWorkerProfile(settings.workerProfiles, {
+    id: "repair-off",
+    label: "Repair off",
+    runtime: "claude-code",
+    modelConfigId: "deepseek-flash",
+    advancedPolicy: { maxWorkerValidationRepairs: 0 },
+  }, catalog);
+  const profile = profiles.profiles.find((p) => p.id === "repair-off");
+  const frozen = deriveEffectivePolicyForTaskCreation({
+    workerProfile: profile,
+    globalDefaults: defaultAdvancedPolicyFields(),
+    enforcementCapability: defaultEnforcementCapability(),
+  });
+  assert.equal(frozen.values.maxWorkerValidationRepairs, 0);
+  assert.equal(frozen.provenance.maxWorkerValidationRepairs, "worker");
 });

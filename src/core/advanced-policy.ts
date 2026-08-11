@@ -43,6 +43,7 @@ const POLICY_FIELDS: readonly (keyof AdvancedPolicyFields)[] = [
   "maxAdaptationRounds",
   "maxMainCorrections",
   "maxMainReverifications",
+  "maxWorkerValidationRepairs",
 ];
 
 const NULLABLE_FIELDS: ReadonlySet<keyof AdvancedPolicyFields> = new Set([
@@ -64,6 +65,7 @@ const NON_NEGATIVE_INTEGER_FIELDS: ReadonlySet<keyof AdvancedPolicyFields> = new
   "maxAdaptationRounds",
   "maxMainCorrections",
   "maxMainReverifications",
+  "maxWorkerValidationRepairs",
 ]);
 
 const POLICY_MODE_FIELDS: ReadonlySet<keyof AdvancedPolicyFields> = new Set([
@@ -99,6 +101,7 @@ export function defaultAdvancedPolicyFields(): AdvancedPolicyFields {
     maxAdaptationRounds: 0,
     maxMainCorrections: 1,
     maxMainReverifications: 1,
+    maxWorkerValidationRepairs: 1,
   };
 }
 
@@ -426,6 +429,7 @@ export function resolveTaskEffectivePolicy(
   globalDefaults.workerStopGraceMs = settings.execution.workerStopGraceMs;
   globalDefaults.baseMaxAttempts = settings.execution.maxAttempts;
   globalDefaults.maxExtraAttempts = settings.execution.maxExtraAttempts;
+  globalDefaults.maxWorkerValidationRepairs = settings.execution.maxWorkerValidationRepairs;
   globalDefaults.maxConcurrency = settings.execution.maxConcurrency;
   globalDefaults.completionMode = settings.completionPolicy.noChangeMode;
   globalDefaults.changeBudgetMode = settings.completionPolicy.changeBudgetMode;
@@ -534,6 +538,20 @@ export function maxMainReverificationsFromSnapshot(
 ): number {
   if (snapshot === undefined) return legacyMax;
   return snapshot.values.maxMainReverifications;
+}
+
+/** Derive the finite same-Worker validation-repair allowance. Legacy Tasks
+ * without an immutable policy snapshot deliberately retain zero automatic
+ * repair rather than inheriting the new default. */
+export function maxWorkerValidationRepairsFromSnapshot(
+  snapshot: EffectivePolicySnapshot | undefined,
+  legacyMax = 0,
+): number {
+  if (snapshot === undefined) return legacyMax;
+  const value = (snapshot.values as Partial<AdvancedPolicyFields>).maxWorkerValidationRepairs;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : legacyMax;
 }
 
 /** Derive the no-progress timeout from an effective policy snapshot.

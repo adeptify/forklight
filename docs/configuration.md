@@ -35,6 +35,7 @@ Governs Worker runtime behavior and cost ceilings.
 | `defaultMaxBudgetUsd` | 0.50 | Per-task spend limit when the task omits one |
 | `maximumBudgetUsd` | 20 | Hard cap — no single-task budget may exceed this value |
 | `maxAttempts` | 3 | Maximum attempts per task before the daemon refuses resume |
+| `maxWorkerValidationRepairs` | 1 | Default finite same-Worker automatic repair rounds after an independently verified behavior failure (0 disables) |
 | `workerStopGraceMs` | 10,000 | Grace period for SIGINT before SIGKILL |
 
 ### Worker Advanced policy
@@ -56,16 +57,24 @@ default.
 | `maxExtraAttempts` | 1 | Explicit extra Attempts; separate from Main recovery paths |
 | `maxMainCorrections` | 1 | Main-authorized same-candidate Worker repairs; 0 disables |
 | `maxMainReverifications` | 1 | Main-authorized full check reruns with no Worker or new Attempt; 0 disables |
+| `maxWorkerValidationRepairs` | 1 | Finite same-Worker automatic repair rounds after a failed build or test; 0 disables |
 | `maxConcurrency` | 2 | Per-profile scheduling cap, intersected with the global cap |
 | `completionMode` | `hard` | Editable no-change completion policy |
 | `changeBudgetMode` | `hard` | Contract change-budget enforcement policy |
 | `maxAdaptationRounds` | 0 | Bounded successor-policy rounds; 0 disables |
 
-The two Main recovery caps and `maxAdaptationRounds` are authority/loop caps.
-They may be configured before Task creation, but Task adaptation cannot enlarge
-them after execution begins. Reverify-only records local command duration and
-Main exchange separately; its zero Worker Tokens must not be presented as a
-measured full-restart saving without an equivalent paired baseline.
+The two Main recovery caps, `maxWorkerValidationRepairs`, and
+`maxAdaptationRounds` are authority/loop caps. They may be configured before
+Task creation, but Task adaptation cannot enlarge them after execution begins.
+`maxWorkerValidationRepairs` is a limited allowance, not an endless loop: after
+each repair round ForkLight independently reruns the complete original
+acceptance suite, and when the allowance is used up Main decides the next step.
+A failed auth, provider, network, timeout, source, policy, verifier-infrastructure
+or capture condition never consumes a repair round; the Task stops with a clear
+next action instead of an automatic retry. Reverify-only records local command
+duration and Main exchange separately; its zero Worker Tokens must not be
+presented as a measured full-restart saving without an equivalent paired
+baseline.
 
 ### modelRouting
 

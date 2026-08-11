@@ -18,6 +18,8 @@ export interface HubSettingsView {
   maximumBudgetUsd: number;
   maxConcurrency: number;
   noProgressTimeoutMs: number;
+  /** Global default finite same-Worker validation-repair allowance. */
+  maxWorkerValidationRepairs: number;
   defaultEffort: ForkLightSettings["execution"]["defaultEffort"];
   /** Effective default model/endpoint for the selected default provider. */
   defaultModel: string;
@@ -97,6 +99,7 @@ export function viewHubSettings(settings: ForkLightSettings): HubSettingsView {
     maximumBudgetUsd: settings.execution.maximumBudgetUsd,
     maxConcurrency: settings.execution.maxConcurrency,
     noProgressTimeoutMs: settings.execution.noProgressTimeoutMs,
+    maxWorkerValidationRepairs: settings.execution.maxWorkerValidationRepairs,
     defaultEffort: settings.execution.defaultEffort,
     defaultModel: pd.defaultModel,
     defaultEndpoint: pd.defaultEndpoint,

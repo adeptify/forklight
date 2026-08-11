@@ -53,6 +53,8 @@ export interface ExecutionSettings {
   maxAttempts: number;
   /** Maximum additional Attempts beyond maxAttempts that require explicit Main authorization (default 1, 0 disables). */
   maxExtraAttempts: number;
+  /** Maximum same-Worker validation-repair rounds for new Tasks (default 1, 0 disables). */
+  maxWorkerValidationRepairs: number;
   workerStopGraceMs: number;
 }
 
@@ -236,6 +238,7 @@ const DEFAULTS: ForkLightSettings = {
     maximumBudgetUsd: 20,
     maxAttempts: 3,
     maxExtraAttempts: 1,
+    maxWorkerValidationRepairs: 1,
     workerStopGraceMs: 10_000,
   },
   competition: {
@@ -440,7 +443,7 @@ const KNOWN_SECTIONS: Record<string, readonly string[]> = {
   execution: [
     "maxConcurrency", "noProgressTimeoutMs", "defaultEffort",
     "defaultProvider", "defaultRuntime", "defaultMaxBudgetUsd", "maximumBudgetUsd",
-    "maxAttempts", "maxExtraAttempts", "workerStopGraceMs",
+    "maxAttempts", "maxExtraAttempts", "maxWorkerValidationRepairs", "workerStopGraceMs",
   ],
   competition: [
     "minCandidates", "maxCandidates", "tieThreshold", "rankingWeights",
@@ -658,6 +661,7 @@ function validateSettingsDocument(doc: Record<string, unknown>): ForkLightSettin
   }
   assertPositiveInteger(ex.maxAttempts, "execution.maxAttempts");
   assertNonNegativeInteger(ex.maxExtraAttempts, "execution.maxExtraAttempts");
+  assertNonNegativeInteger(ex.maxWorkerValidationRepairs, "execution.maxWorkerValidationRepairs");
   assertPositiveInteger(ex.workerStopGraceMs, "execution.workerStopGraceMs");
   assert(ex.workerStopGraceMs >= 100, "execution.workerStopGraceMs must be at least 100 ms");
 

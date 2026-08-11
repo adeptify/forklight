@@ -10,7 +10,14 @@
  * Terminal success is an exact current-Turn join: Goal complete, Turn
  * completion, and canonical final output (camelCase agentMessage with
  * final_answer, or narrowly contained legacy phase:null) must all carry the
- * active Turn id. turn/start same-burst notifications are race-buffered until
+ * active Turn id. A typed Main-correction unit admitted across a proven
+ * completed Goal — and a system-restart recovery of that same durably-bound
+ * in-progress unit — closes the same exact current-Turn join with its own
+ * canonical final output alone: the persisted Goal was already authoritatively
+ * complete before the correction Turn, so the real app-server emits no repeated
+ * Goal-complete notification and none is required (correction-only terminal
+ * authority). Ordinary Goal success always still requires the exact current-Turn
+ * Goal-complete gate. turn/start same-burst notifications are race-buffered until
  * the Turn binding is durable, then replayed in order. Active Turn identity is
  * correlated from the turn/start response and any one unambiguous same-Thread
  * turn/started announcement observed in that race (real app-servers may use a
@@ -42,6 +49,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { noProgressFromSnapshot, stopGraceFromSnapshot } from "../core/advanced-policy.js";
+import { resolveWorkerValidationRepairHistory } from "../core/worker-validation-repair.js";
 import { workerNetworkPolicyMode } from "../core/network-policy.js";
 import { currentBuildIdentity } from "../core/build-identity.js";
 import {
@@ -49,7 +57,11 @@ import {
   RUNTIME_ACTIVITY_LIVENESS,
   withActivityEvidence,
 } from "../core/runtime-activity.js";
-import { buildWorkerPrompt, workerPromptAppendicesForTask } from "../core/task.js";
+import {
+  buildWorkerPrompt,
+  workerPromptAppendicesForTask,
+  workerValidationRepairProtocolLines,
+} from "../core/task.js";
 import { cloneDefaults } from "../core/settings.js";
 import type {
   AttemptTokenUsage,
@@ -88,6 +100,11 @@ function isContinuableGoalStatus(status: string): boolean {
   return status === "active";
 }
 
+/** Strict positive safe-integer check for the durable correction grant identity. */
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
 function stableGoalFailureReason(status: string): string {
   switch (status) {
     case "blocked": return "Codex native Goal reported blocked and cannot continue";
@@ -113,8 +130,11 @@ function buildGoalObjective(spec: TaskSpec): string {
 }
 
 function codexGoalToolLines(task: TaskRecord): string[] {
+  const workspaceLines = codexWorkspaceToolLines(task.spec.worker.allowEdits);
+  const selfCheck = "- This Goal must use the workspace-sandboxed command tool to self-check every original acceptance command in order after the final edit; ForkLight independently reruns the unchanged suite.";
   return [
-    ...codexWorkspaceToolLines(task.spec.worker.allowEdits),
+    ...workspaceLines.slice(0, -1),
+    selfCheck,
     "- Project instructions from operator config are disabled for this Goal.",
     "- This is a Runtime-native Goal: it owns the bounded end-to-end implementation.",
     "- ForkLight still owns the workspace boundary, independent acceptance, no-progress stop, finite correction/retry authority, and return to Main.",
@@ -208,6 +228,20 @@ interface CodexGoalBinding {
   threadId: string;
   objective: string;
   turnId?: string;
+  /** True once a fresh Main-correction execution unit is durably active on
+   *  this Thread. A daemon restart during the correction recovers exactly
+   *  this unit and never starts another or replays the completed original
+   *  Goal. */
+  correctionUnit?: boolean;
+  /** Authorization event sequence of the correction grant that started this
+   *  fresh unit. Restart recovery validates it against the consumed grant so
+   *  bound-correction identity drift fails closed before any model work. */
+  authorizationEventSequence?: number;
+  /** True while one Worker-validation repair round is bound to this exact
+   *  Thread. A new exact next-round authorization may replace the marker;
+   *  ordinary resume never may. */
+  repairUnit?: boolean;
+  validationRepairRound?: number;
   updatedAt: string;
 }
 
@@ -224,6 +258,11 @@ async function readGoalBinding(bindingPath: string): Promise<CodexGoalBinding> {
   } catch {
     throw new Error("Codex native Goal binding is malformed; refusing to resume");
   }
+  return parseCodexGoalBinding(parsed);
+}
+
+/** Pure strict parser used by the Runtime and malformed-binding regressions. */
+export function parseCodexGoalBinding(parsed: unknown): CodexGoalBinding {
   const binding = parsed as Record<string, unknown>;
   if (
     binding === null
@@ -236,11 +275,76 @@ async function readGoalBinding(bindingPath: string): Promise<CodexGoalBinding> {
   ) {
     throw new Error("Codex native Goal binding is invalid; refusing to resume");
   }
+  const allowedKeys = new Set([
+    "schemaVersion",
+    "threadId",
+    "objective",
+    "turnId",
+    "correctionUnit",
+    "authorizationEventSequence",
+    "repairUnit",
+    "validationRepairRound",
+    "updatedAt",
+  ]);
+  if (Object.keys(binding).some((key) => !allowedKeys.has(key))) {
+    throw new Error("Codex native Goal binding is invalid; refusing to resume");
+  }
+  const hasCorrectionUnit = Object.prototype.hasOwnProperty.call(binding, "correctionUnit");
+  const hasRepairUnit = Object.prototype.hasOwnProperty.call(binding, "repairUnit");
+  const hasAuthorizationSequence = Object.prototype.hasOwnProperty.call(
+    binding,
+    "authorizationEventSequence",
+  );
+  const hasRepairRound = Object.prototype.hasOwnProperty.call(binding, "validationRepairRound");
+  if (hasCorrectionUnit && hasRepairUnit) {
+    throw new Error("Codex native Goal binding is invalid; refusing to resume");
+  }
+  if (hasAuthorizationSequence !== (hasCorrectionUnit || hasRepairUnit)) {
+    throw new Error("Codex native Goal binding is invalid; refusing to resume");
+  }
+  if (hasRepairRound !== hasRepairUnit) {
+    throw new Error("Codex native Goal binding is invalid; refusing to resume");
+  }
+  if (hasCorrectionUnit && (
+    binding.correctionUnit !== true
+    || !isPositiveSafeInteger(binding.authorizationEventSequence)
+    || hasRepairRound
+  )) {
+    throw new Error("Codex native Goal binding is invalid; refusing to resume");
+  }
+  if (hasRepairUnit && (
+    binding.repairUnit !== true
+    || !isPositiveSafeInteger(binding.authorizationEventSequence)
+    || !isPositiveSafeInteger(binding.validationRepairRound)
+  )) {
+    throw new Error("Codex native Goal binding is invalid; refusing to resume");
+  }
+  if (Object.prototype.hasOwnProperty.call(binding, "turnId")
+    && (typeof binding.turnId !== "string" || binding.turnId.length === 0)) {
+    throw new Error("Codex native Goal binding is invalid; refusing to resume");
+  }
+  if (Object.prototype.hasOwnProperty.call(binding, "updatedAt")
+    && (typeof binding.updatedAt !== "string" || binding.updatedAt.length === 0)) {
+    throw new Error("Codex native Goal binding is invalid; refusing to resume");
+  }
   return {
     schemaVersion: 1,
     threadId: binding.threadId,
     objective: binding.objective,
     ...(typeof binding.turnId === "string" ? { turnId: binding.turnId } : {}),
+    ...(hasCorrectionUnit
+      ? {
+          correctionUnit: true,
+          authorizationEventSequence: binding.authorizationEventSequence as number,
+        }
+      : {}),
+    ...(hasRepairUnit
+      ? {
+          repairUnit: true,
+          authorizationEventSequence: binding.authorizationEventSequence as number,
+          validationRepairRound: binding.validationRepairRound as number,
+        }
+      : {}),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -558,7 +662,8 @@ export async function runCodexNativeGoal(
     workerPromptAppendicesForTask(task, {
       toolLines: codexGoalToolLines(task),
       checkpointLines: codexGoalCheckpointLines(),
-      hardBoundaryPolicy: codexHardBoundaryPolicy(task.spec.worker.allowEdits),
+      validationRepairLines: workerValidationRepairProtocolLines(task.spec.acceptance.commands, "codex"),
+      hardBoundaryPolicy: codexHardBoundaryPolicy(task.spec.worker.allowEdits, true),
     }),
   );
   await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {
@@ -608,6 +713,15 @@ export async function runCodexNativeGoal(
     let currentTurnId: string | undefined;
     let currentTurnGoalComplete = false;
     let currentTurnCompleted = false;
+    /** Correction-only terminal authority: set exactly once when a typed
+     *  Main-correction unit is admitted across a proven completed Goal, and
+     *  restored when a system restart recovers that same durably-bound
+     *  in-progress unit (the persisted Goal is still complete). Lets the exact
+     *  current-Turn completion plus its own canonical final output close the
+     *  Worker without a duplicate post-correction Goal-complete notification.
+     *  Never created by ordinary resume, restart without the bound correction
+     *  unit, stale status, or malformed identity. */
+    let correctionTerminalAuthority = false;
     /** True once the active Turn emitted completed, failed, or interrupted.
      *  Distinct post-activation turn/started may promote only after this. */
     let currentTurnEnded = false;
@@ -783,11 +897,18 @@ export async function runCodexNativeGoal(
 
     /** Success requires the exact current-Turn Goal complete, Turn completion,
      *  and canonical final output. Goal complete alone is never sufficient.
-     *  During turn/start buffer replay this only records gates; the join runs
-     *  once after the full batch so later usage/evidence is not skipped. */
+     *  A bound Main-correction unit admitted across a proven completed Goal may
+     *  close on the exact current-Turn completion plus its own canonical final
+     *  output alone: the persisted Goal was already authoritatively complete
+     *  before the correction Turn, so no repeated Goal-complete notification is
+     *  required. Ordinary Goal success still requires the exact current-Turn
+     *  Goal-complete gate. During turn/start buffer replay this only records
+     *  gates; the join runs once after the full batch so later usage/evidence is
+     *  not skipped. */
     const tryJoinTerminalSuccess = (): void => {
       if (outcome !== undefined || replayingTurnStartBuffer) return;
-      if (!currentTurnGoalComplete || !currentTurnCompleted || finalResultText === undefined) {
+      const goalCompleteGate = correctionTerminalAuthority || currentTurnGoalComplete;
+      if (!goalCompleteGate || !currentTurnCompleted || finalResultText === undefined) {
         return;
       }
       store.addEvent(task.id, attempt.id, "worker.completed", "Codex native Goal completed", {
@@ -944,6 +1065,28 @@ export async function runCodexNativeGoal(
           threadId: bound.threadId,
           objective: bound.objective,
           turnId: promoteTo,
+          // A continuation Turn inside a fresh Main-correction unit must keep
+          // its durable correction identity so a daemon restart still recovers
+          // that exact unit and never starts another or replays the original.
+          ...(bound.correctionUnit === true
+            ? {
+                correctionUnit: true,
+                ...(bound.authorizationEventSequence === undefined
+                  ? {}
+                  : { authorizationEventSequence: bound.authorizationEventSequence }),
+              }
+            : {}),
+          ...(bound.repairUnit === true
+            ? {
+                repairUnit: true,
+                ...(bound.authorizationEventSequence === undefined
+                  ? {}
+                  : { authorizationEventSequence: bound.authorizationEventSequence }),
+                ...(bound.validationRepairRound === undefined
+                  ? {}
+                  : { validationRepairRound: bound.validationRepairRound }),
+              }
+            : {}),
           updatedAt: new Date().toISOString(),
         };
         // Open the continuation buffer before the awaited write so same-burst
@@ -1209,7 +1352,11 @@ export async function runCodexNativeGoal(
           // Completed Turn is progress while other terminal gates are still
           // open; it never invents empty success by itself.
           scheduleWatchdog();
-          if (!currentTurnGoalComplete || finalResultText === undefined) {
+          // A bound correction unit on a proven completed Goal needs no repeated
+          // Goal-complete gate: an exact completed Turn with its own canonical
+          // final output is terminal, so "is continuing" would be untruthful.
+          const correctionTurnIsTerminal = correctionTerminalAuthority && finalResultText !== undefined;
+          if ((!currentTurnGoalComplete || finalResultText === undefined) && !correctionTurnIsTerminal) {
             store.addEvent(task.id, attempt.id, "worker.message", "Codex native Goal finished a Turn and is continuing", withActivityEvidence({
               activityKind: "goal-continuing",
               threadId: binding?.threadId,
@@ -1439,6 +1586,92 @@ export async function runCodexNativeGoal(
             fail("Codex native Goal binding objective drifted from the frozen Task Contract; refusing to resume", "codex-goal-identity-drift");
             return;
           }
+          const validationRepairIntent = hooks.validationRepairIntent;
+          if (validationRepairIntent !== undefined) {
+            let repairHistory: ReturnType<typeof resolveWorkerValidationRepairHistory>;
+            try {
+              repairHistory = resolveWorkerValidationRepairHistory(store.listEvents(task.id));
+            } catch {
+              fail("Codex native Goal validation-repair authorization history is corrupt; refusing to resume", "codex-goal-validation-repair-identity");
+              return;
+            }
+            const currentRepair = repairHistory.find(
+              (entry) => entry.round === validationRepairIntent.round,
+            );
+            const previousRepair = validationRepairIntent.round > 1
+              ? repairHistory.find((entry) => entry.round === validationRepairIntent.round - 1)
+              : undefined;
+            if (
+              currentRepair === undefined
+              || currentRepair.authorizationEventSequence !== validationRepairIntent.authorizationEventSequence
+              || currentRepair.taskId !== task.id
+              || currentRepair.attemptId !== validationRepairIntent.attemptId
+              || currentRepair.attemptId !== attempt.id
+              || currentRepair.targetAttemptOrdinal !== attempt.ordinal
+              || currentRepair.workerIdentity.provider !== task.spec.provider.name
+              || currentRepair.workerIdentity.model !== task.spec.provider.model
+              || currentRepair.workerIdentity.runtime !== task.spec.runtime.name
+              || currentRepair.workerIdentity.effort !== task.spec.runtime.effort
+              || currentRepair.workerIdentity.workerProfileId !== task.spec.workerProfileId
+              || currentRepair.state === "terminal"
+              || (validationRepairIntent.round > 1
+                && (previousRepair === undefined
+                  || previousRepair.state !== "terminal"
+                  || previousRepair.terminalOutcome !== "failed"))
+            ) {
+              // The adapter independently checks the durable coordinator
+              // lineage so a forged/stale typed intent cannot cross a Goal
+              // boundary even when invoked outside the normal Daemon path.
+              fail("Codex native Goal validation-repair authorization is stale, skipped, or already terminal", "codex-goal-validation-repair-identity");
+              return;
+            }
+          }
+          if (validationRepairIntent !== undefined && durable.correctionUnit === true) {
+            fail("Codex native Goal repair identity conflicts with a bound Main correction unit", "codex-goal-identity-drift");
+            return;
+          }
+          if (durable.repairUnit === true) {
+            const boundRepairRound = durable.validationRepairRound;
+              const sameRepairRound = validationRepairIntent !== undefined
+                && boundRepairRound !== undefined
+                && validationRepairIntent.round === boundRepairRound
+                && validationRepairIntent.attemptId === attempt.id
+                && durable.authorizationEventSequence === validationRepairIntent.authorizationEventSequence;
+              const nextRepairRound = validationRepairIntent !== undefined
+                && boundRepairRound !== undefined
+                && validationRepairIntent.round === boundRepairRound + 1
+                && validationRepairIntent.attemptId === attempt.id
+                && durable.authorizationEventSequence !== validationRepairIntent.authorizationEventSequence;
+            if (
+              validationRepairIntent === undefined
+              || boundRepairRound === undefined
+              || (!sameRepairRound && !nextRepairRound)
+            ) {
+              // Ordinary resume, stale authorization, skipped round, and
+              // conflicting identity all fail before thread/resume or model
+              // work. The persisted Thread and objective are never replaced.
+              fail("Codex native Goal validation-repair binding is not the exact authorized round", "codex-goal-validation-repair-identity");
+              return;
+            }
+          } else if (
+            validationRepairIntent !== undefined
+            && (validationRepairIntent.round !== 1 || durable.correctionUnit === true)
+          ) {
+            fail("Codex native Goal validation-repair round is stale or skipped", "codex-goal-validation-repair-identity");
+            return;
+          }
+          // Bound-correction identity: once a fresh Main-correction unit is
+          // durably active on this Thread, every recovery must either carry the
+          // exact grant that started it (Main correction path) or resume that
+          // same active unit after a system restart. A different grant, Thread,
+          // or objective never starts another unit or repeats the completed
+          // original Goal.
+          if (durable.correctionUnit === true && hooks.correctionIntent !== undefined) {
+            if (durable.authorizationEventSequence !== hooks.correctionIntent.authorizationEventSequence) {
+              fail("Codex native Goal correction identity drifted from its authorized grant", "codex-goal-identity-drift");
+              return;
+            }
+          }
           // Allow same-Thread cumulative usage to be preserved during identity
           // validation without granting Goal/Turn/final authority early.
           resumeExpectedThreadId = durable.threadId;
@@ -1467,46 +1700,305 @@ export async function runCodexNativeGoal(
             fail("Codex native Goal identity drift: persisted Goal objective does not match the frozen Task objective", "codex-goal-identity-drift");
             return;
           }
-          if (persistedStatus === undefined || !isContinuableGoalStatus(persistedStatus)) {
-            fail(`Codex native Goal cannot continue from status ${persistedStatus ?? "unknown"}`, "codex-goal-not-continuable");
-            return;
+          const correctionIntent = hooks.correctionIntent;
+          const isComplete = persistedStatus === "complete";
+          const isContinuable = persistedStatus !== undefined && isContinuableGoalStatus(persistedStatus);
+          if (!isContinuable) {
+            // An explicitly authorized Main correction may cross only a prior
+            // complete Goal. Ordinary resume carries no correction intent and
+            // must fail closed here. A durable correction-unit marker forbids
+            // starting a second unit, but a system-restart recovery of that
+            // exact in-progress unit (no new typed intent) resumes the same unit.
+            if (isComplete && durable.repairUnit === true) {
+              const repairIntent = validationRepairIntent;
+              if (
+                repairIntent === undefined
+                || durable.validationRepairRound === undefined
+              ) {
+                fail("Codex native Goal validation-repair binding is invalid; refusing to resume", "codex-goal-validation-repair-identity");
+                return;
+              }
+              const sameRound = repairIntent.round === durable.validationRepairRound;
+              const nextRound = repairIntent.round === durable.validationRepairRound + 1;
+              if (
+                (!sameRound && !nextRound)
+                || (sameRound && durable.authorizationEventSequence !== repairIntent.authorizationEventSequence)
+                || (nextRound && durable.authorizationEventSequence === repairIntent.authorizationEventSequence)
+              ) {
+                fail("Codex native Goal validation-repair round is stale or skipped", "codex-goal-validation-repair-identity");
+                return;
+              }
+              goalStatus = persistedStatus;
+              correctionTerminalAuthority = true;
+              binding = {
+                schemaVersion: 1,
+                threadId: durable.threadId,
+                objective,
+                repairUnit: true,
+                authorizationEventSequence: repairIntent.authorizationEventSequence,
+                validationRepairRound: repairIntent.round,
+                updatedAt: new Date().toISOString(),
+              };
+              await writeGoalBinding(bindingPath, binding);
+              scheduleWatchdog();
+              if (pendingResumeUsage !== undefined) {
+                latestUsage = pendingResumeUsage;
+                pendingResumeUsage = undefined;
+              }
+              resumeExpectedThreadId = undefined;
+              store.addEvent(task.id, attempt.id, "worker.resumed", sameRound
+                ? "Codex native Goal recovered the exact Worker validation-repair round on the exact Thread"
+                : "Codex native Goal started the exact next Worker validation-repair round on the exact Thread", {
+                  model: task.spec.provider.model,
+                  provider: task.spec.provider.name,
+                  runtime: task.spec.runtime.name,
+                  effort: task.spec.runtime.effort,
+                  executionMode: "native-goal",
+                  isolation: "codex-app-server",
+                  authMode: "local-sign-in",
+                  threadId: binding.threadId,
+                  goalStatus: persistedStatus,
+                  correctionFeedbackIncluded: Boolean(hooks.feedback),
+                  repairUnit: true,
+                  validationRepairRound: repairIntent.round,
+                  networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
+                });
+              hooks.onEvent?.({
+                type: "worker.resumed",
+                summary: sameRound
+                  ? "Codex native Goal recovered the exact Worker validation-repair round on the exact Thread"
+                  : "Codex native Goal started the exact next Worker validation-repair round on the exact Thread",
+              });
+            } else if (isComplete && durable.correctionUnit === true) {
+              if (correctionIntent !== undefined) {
+                // A second explicit Main correction on an already-active
+                // completed unit is rejected: never starts a second unit or
+                // repeats the completed original.
+                fail(`Codex native Goal cannot continue from status ${persistedStatus ?? "unknown"}`, "codex-goal-not-continuable");
+                return;
+              }
+              // Restart recovery of the exact in-progress correction unit: the
+              // durable binding already pins the grant identity, so no new grant
+              // is consumed and no second unit is created. Restore the same unit
+              // and its correction terminal authority — the persisted Goal is
+              // still authoritatively complete, so the exact new Turn plus its
+              // own canonical final output close the Worker without a repeated
+              // Goal-complete notification.
+              const recoveredSequence = durable.authorizationEventSequence;
+              if (!isPositiveSafeInteger(recoveredSequence)) {
+                fail("Codex native Goal correction binding is invalid; refusing to resume", "codex-goal-binding-invalid");
+                return;
+              }
+              goalStatus = persistedStatus;
+              correctionTerminalAuthority = true;
+              binding = {
+                schemaVersion: 1,
+                threadId: durable.threadId,
+                objective,
+                correctionUnit: true,
+                authorizationEventSequence: recoveredSequence,
+                updatedAt: new Date().toISOString(),
+              };
+              await writeGoalBinding(bindingPath, binding);
+              scheduleWatchdog();
+              if (pendingResumeUsage !== undefined) {
+                latestUsage = pendingResumeUsage;
+                pendingResumeUsage = undefined;
+              }
+              resumeExpectedThreadId = undefined;
+              store.addEvent(task.id, attempt.id, "worker.resumed", "Codex native Goal recovered the in-progress Main correction unit on the exact Thread", {
+                model: task.spec.provider.model,
+                provider: task.spec.provider.name,
+                runtime: task.spec.runtime.name,
+                effort: task.spec.runtime.effort,
+                executionMode: "native-goal",
+                isolation: "codex-app-server",
+                authMode: "local-sign-in",
+                threadId: binding.threadId,
+                goalStatus: persistedStatus,
+                correctionFeedbackIncluded: Boolean(hooks.feedback),
+                correctionUnit: true,
+                // Privacy-safe: mode-level evidence only; proxy values never reach events.
+                networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
+              });
+              hooks.onEvent?.({
+                type: "worker.resumed",
+                summary: "Codex native Goal recovered the in-progress Main correction unit on the exact Thread",
+              });
+            } else if (
+              isComplete
+              && validationRepairIntent !== undefined
+              && durable.repairUnit !== true
+              && durable.correctionUnit !== true
+            ) {
+              if (validationRepairIntent.round !== 1) {
+                fail("Codex native Goal validation-repair round is stale or skipped", "codex-goal-validation-repair-identity");
+                return;
+              }
+              // First validation-repair round: reuse the exact completed Goal
+              // Thread, durably bind the new typed authorization, and grant
+              // terminal authority only to this exact fresh Turn.
+              goalStatus = persistedStatus;
+              correctionTerminalAuthority = true;
+              binding = {
+                schemaVersion: 1,
+                threadId: durable.threadId,
+                objective,
+                repairUnit: true,
+                authorizationEventSequence: validationRepairIntent.authorizationEventSequence,
+                validationRepairRound: validationRepairIntent.round,
+                updatedAt: new Date().toISOString(),
+              };
+              await writeGoalBinding(bindingPath, binding);
+              scheduleWatchdog();
+              if (pendingResumeUsage !== undefined) {
+                latestUsage = pendingResumeUsage;
+                pendingResumeUsage = undefined;
+              }
+              resumeExpectedThreadId = undefined;
+              store.addEvent(task.id, attempt.id, "worker.resumed", "Codex native Goal started the first Worker validation-repair round on the exact Thread", {
+                model: task.spec.provider.model,
+                provider: task.spec.provider.name,
+                runtime: task.spec.runtime.name,
+                effort: task.spec.runtime.effort,
+                executionMode: "native-goal",
+                isolation: "codex-app-server",
+                authMode: "local-sign-in",
+                threadId: binding.threadId,
+                goalStatus: persistedStatus,
+                correctionFeedbackIncluded: Boolean(hooks.feedback),
+                repairUnit: true,
+                validationRepairRound: validationRepairIntent.round,
+                networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
+              });
+              hooks.onEvent?.({
+                type: "worker.resumed",
+                summary: "Codex native Goal started the first Worker validation-repair round on the exact Thread",
+              });
+            } else if (isComplete && correctionIntent !== undefined && durable.correctionUnit !== true) {
+              // Reuse the exact durable Thread but start one fresh bounded
+              // app-server execution unit. The prior completed Goal/Turn remain
+              // immutable history — the completed Goal status is never relabeled
+              // or reset. The fresh unit is a new Turn on the same Thread; the
+              // durable binding pins the correction identity BEFORE the first
+              // model Turn so a daemon restart recovers exactly one truthful
+              // execution and never repeats the original.
+              goalStatus = persistedStatus;
+              // Authority is explicit and bound to this admission: a typed
+              // correction crossed a proven completed Goal on the exact Thread.
+              // Only this one fresh unit may join on its exact Turn without a
+              // repeated Goal-complete notification.
+              correctionTerminalAuthority = true;
+              binding = {
+                schemaVersion: 1,
+                threadId: durable.threadId,
+                objective,
+                correctionUnit: true,
+                authorizationEventSequence: correctionIntent.authorizationEventSequence,
+                updatedAt: new Date().toISOString(),
+              };
+              await writeGoalBinding(bindingPath, binding);
+              scheduleWatchdog();
+              if (pendingResumeUsage !== undefined) {
+                latestUsage = pendingResumeUsage;
+                pendingResumeUsage = undefined;
+              }
+              resumeExpectedThreadId = undefined;
+              store.addEvent(task.id, attempt.id, "worker.resumed", "Codex native Goal started a fresh Main correction unit on the exact Thread", {
+                model: task.spec.provider.model,
+                provider: task.spec.provider.name,
+                runtime: task.spec.runtime.name,
+                effort: task.spec.runtime.effort,
+                executionMode: "native-goal",
+                isolation: "codex-app-server",
+                authMode: "local-sign-in",
+                threadId: binding.threadId,
+                goalStatus: persistedStatus,
+                correctionFeedbackIncluded: Boolean(hooks.feedback),
+                correctionUnit: true,
+                // Privacy-safe: mode-level evidence only; proxy values never reach events.
+                networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
+              });
+              hooks.onEvent?.({
+                type: "worker.resumed",
+                summary: "Codex native Goal started a fresh Main correction unit on the exact Thread",
+              });
+            } else {
+              fail(`Codex native Goal cannot continue from status ${persistedStatus ?? "unknown"}`, "codex-goal-not-continuable");
+              return;
+            }
+          } else {
+            if (
+              validationRepairIntent !== undefined
+              && (
+                durable.repairUnit !== true
+                || durable.validationRepairRound !== validationRepairIntent.round
+                || durable.authorizationEventSequence !== validationRepairIntent.authorizationEventSequence
+              )
+            ) {
+              fail("Codex native Goal validation-repair round cannot resume an active Goal", "codex-goal-validation-repair-identity");
+              return;
+            }
+            goalStatus = persistedStatus;
+            // Identity is confirmed: promote and clear the latest preserved
+            // cumulative snapshot BEFORE the awaited durable write so a newer
+            // bound same-Thread snapshot arriving during that write replaces it
+            // rather than being overwritten by an older pending value.
+            if (pendingResumeUsage !== undefined) {
+              latestUsage = pendingResumeUsage;
+              pendingResumeUsage = undefined;
+            }
+            resumeExpectedThreadId = undefined;
+            // Ordinary resume re-writes the exact binding. A durably active
+            // correction unit keeps its marker and grant identity so restart
+            // recovery continues that exact unit rather than starting another.
+            binding = {
+              schemaVersion: 1,
+              threadId: durable.threadId,
+              objective,
+              ...(durable.correctionUnit === true
+                ? {
+                    correctionUnit: true,
+                    ...(durable.authorizationEventSequence === undefined
+                      ? {}
+                      : { authorizationEventSequence: durable.authorizationEventSequence }),
+                  }
+                : {}),
+              ...(durable.repairUnit === true
+                ? {
+                    repairUnit: true,
+                    ...(durable.authorizationEventSequence === undefined
+                      ? {}
+                      : { authorizationEventSequence: durable.authorizationEventSequence }),
+                    ...(durable.validationRepairRound === undefined
+                      ? {}
+                      : { validationRepairRound: durable.validationRepairRound }),
+                  }
+                : {}),
+              updatedAt: new Date().toISOString(),
+            };
+            await writeGoalBinding(bindingPath, binding);
+            scheduleWatchdog();
+            store.addEvent(task.id, attempt.id, "worker.resumed", "Codex native Goal resumed the exact Thread", {
+              model: task.spec.provider.model,
+              provider: task.spec.provider.name,
+              runtime: task.spec.runtime.name,
+              effort: task.spec.runtime.effort,
+              executionMode: "native-goal",
+              isolation: "codex-app-server",
+              authMode: "local-sign-in",
+              threadId: binding.threadId,
+              goalStatus: persistedStatus,
+              correctionFeedbackIncluded: Boolean(hooks.feedback),
+              ...(durable.correctionUnit === true ? { correctionUnit: true } : {}),
+              // Privacy-safe: mode-level evidence only; proxy values never reach events.
+              networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
+            });
+            hooks.onEvent?.({
+              type: "worker.resumed",
+              summary: "Codex native Goal resumed the exact Thread",
+            });
           }
-          goalStatus = persistedStatus;
-          // Identity is confirmed: promote and clear the latest preserved
-          // cumulative snapshot BEFORE the awaited durable write so a newer
-          // bound same-Thread snapshot arriving during that write replaces it
-          // rather than being overwritten by an older pending value.
-          if (pendingResumeUsage !== undefined) {
-            latestUsage = pendingResumeUsage;
-            pendingResumeUsage = undefined;
-          }
-          resumeExpectedThreadId = undefined;
-          binding = {
-            schemaVersion: 1,
-            threadId: durable.threadId,
-            objective,
-            updatedAt: new Date().toISOString(),
-          };
-          await writeGoalBinding(bindingPath, binding);
-          scheduleWatchdog();
-          store.addEvent(task.id, attempt.id, "worker.resumed", "Codex native Goal resumed the exact Thread", {
-            model: task.spec.provider.model,
-            provider: task.spec.provider.name,
-            runtime: task.spec.runtime.name,
-            effort: task.spec.runtime.effort,
-            executionMode: "native-goal",
-            isolation: "codex-app-server",
-            authMode: "local-sign-in",
-            threadId: binding.threadId,
-            goalStatus: persistedStatus,
-            correctionFeedbackIncluded: Boolean(hooks.feedback),
-            // Privacy-safe: mode-level evidence only; proxy values never reach events.
-            networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
-          });
-          hooks.onEvent?.({
-            type: "worker.resumed",
-            summary: "Codex native Goal resumed the exact Thread",
-          });
         } else {
           // Canonical thread/start fields only: cwd/model/approvalPolicy/sandbox.
           // The former `workspace` field is ignored by installed Codex 0.146.0

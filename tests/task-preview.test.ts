@@ -1389,3 +1389,129 @@ test("forced native-goal preview fails closed on an unsupported Runtime", async 
     /native-goal/,
   );
 });
+
+// --- M1: version-3 domain-neutral contract background in the safe preview ---
+
+/** Version-3 domain-neutral (non-Coding) Task Contract. No modules, call chain,
+ *  or change budget — the background is the first-class content. */
+function minimalContextContractYaml(overrides: { purpose?: string } = {}): string {
+  const purpose = overrides.purpose ?? "Decide which retention lever to pull first.";
+  return `version: 3
+name: Context Preview Contract
+project: ./project
+worker:
+  focusPaths: [research-notes]
+contract:
+  outcome: A research report recommending the first retention lever with evidence.
+  background:
+    purpose: ${purpose}
+    audience: Product leadership and the retention squad.
+    currentSituation: Churn rose eight percent in the last quarter with no confirmed root cause.
+    parentGoalPlan: Goal retention-2026, plan item three.
+    priorDecisions:
+      - Research before changing the onboarding flow.
+    suppliedInputs:
+      - Churn cohort export from 2026-07.
+    downstreamUse: The report sets the quarter retention roadmap.
+    workerAuthority:
+      - Read the supplied cohort and ticket files only.
+    returnToMain:
+      - Recommend the first root cause to act on.
+  inScope:
+    - Analyze churn cohorts and ticket themes.
+  outOfScope:
+    - Implementing any change.
+  executionSteps:
+    - Read the cohort export and ticket sample.
+    - Draft prioritized recommendations.
+  deliverables:
+    - A concise research report.
+  scenarios:
+    - name: Conflicting evidence
+      given: Cohort and tickets point to different causes
+      when: the report is drafted
+      then: both causes surface with an explicit decision request
+    - name: Small sample
+      given: Evidence is thin
+      when: recommendations are written
+      then: confidence is stated per recommendation
+  risks:
+    - Small samples may not generalize.
+acceptance:
+  criteria:
+    - The report names one retention lever with evidence.
+  commands:
+    - "true"
+`;
+}
+
+async function writeContextPreviewFixture(
+  options: { purpose?: string } = {},
+): Promise<{ root: string; taskFile: string; project: string }> {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-v3-preview-"));
+  const project = path.join(root, "project");
+  await mkdir(project);
+  const taskFile = path.join(root, "task.yaml");
+  await writeFile(taskFile, minimalContextContractYaml(options));
+  return { root, taskFile, project };
+}
+
+test("version 3 preview carries the exact Main-approved background", async () => {
+  const { taskFile } = await writeContextPreviewFixture();
+  const preview = await buildTaskAdmissionPreview(taskFile, cloneDefaults());
+  assert.equal(preview.taskName, "Context Preview Contract");
+  assert.deepEqual(preview.background, {
+    purpose: "Decide which retention lever to pull first.",
+    audience: "Product leadership and the retention squad.",
+    currentSituation: "Churn rose eight percent in the last quarter with no confirmed root cause.",
+    parentGoalPlan: "Goal retention-2026, plan item three.",
+    priorDecisions: ["Research before changing the onboarding flow."],
+    suppliedInputs: ["Churn cohort export from 2026-07."],
+    downstreamUse: "The report sets the quarter retention roadmap.",
+    workerAuthority: ["Read the supplied cohort and ticket files only."],
+    returnToMain: ["Recommend the first root cause to act on."],
+  });
+  assert.equal(preview.quality.passed, true);
+  assert.equal("project" in preview, false);
+  assert.equal("taskFile" in preview, false);
+});
+
+test("version 3 human preview renders the background block in reading order", async () => {
+  const { taskFile } = await writeContextPreviewFixture();
+  const preview = await buildTaskAdmissionPreview(taskFile, cloneDefaults());
+  const human = formatTaskAdmissionPreviewHuman(preview);
+  assert.match(human, /Background:/);
+  assert.match(human, /Why this matters: Decide which retention lever to pull first\./);
+  assert.match(human, /Who or what it serves: Product leadership and the retention squad\./);
+  assert.match(human, /Current situation: Churn rose eight percent/);
+  assert.match(human, /Parent Goal\/Plan: Goal retention-2026, plan item three\./);
+  assert.match(human, /Prior decisions:/);
+  assert.match(human, /Supplied inputs:/);
+  assert.match(human, /How the output is used: The report sets the quarter retention roadmap\./);
+  assert.match(human, /Worker authority:/);
+  assert.match(human, /Decisions that must return to Main:/);
+  assert.match(human, /Recommend the first root cause to act on\./);
+  // The background block leads the quality verdict in reading order.
+  assert.ok(human.indexOf("Background:") < human.indexOf("Task Contract:"), "background before quality verdict");
+});
+
+test("version 3 background edits change the bound preview revision digest", async () => {
+  const { taskFile } = await writeContextPreviewFixture();
+  const first = await buildTaskAdmissionPreview(taskFile, cloneDefaults());
+  const secondFile = await writeContextPreviewFixture({
+    purpose: "A different Main reason for the same research work.",
+  });
+  const second = await buildTaskAdmissionPreview(secondFile.taskFile, cloneDefaults());
+  assert.notEqual(second.previewRevisionDigest, first.previewRevisionDigest);
+  assert.equal(second.background!.purpose, "A different Main reason for the same research work.");
+  // The safe preview background is detached: mutating a copy cannot reach it.
+  const detached = JSON.parse(JSON.stringify(second.background));
+  detached.purpose = "hacked";
+  assert.equal(second.background!.purpose, "A different Main reason for the same research work.");
+});
+
+test("legacy version 2 preview never carries a background", async () => {
+  const { taskFile } = await writePreviewFixture({});
+  const preview = await buildTaskAdmissionPreview(taskFile, cloneDefaults());
+  assert.equal("background" in preview, false);
+});

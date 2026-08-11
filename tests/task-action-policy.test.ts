@@ -51,6 +51,7 @@ function makePolicy(baseMaxAttempts: number, maxMainCorrections = 1): EffectiveP
     maxAdaptationRounds: "global" as const,
     maxMainCorrections: "global" as const,
     maxMainReverifications: "global" as const,
+    maxWorkerValidationRepairs: "global" as const,
   };
   return {
     profileId: "global",
@@ -71,6 +72,7 @@ function makePolicy(baseMaxAttempts: number, maxMainCorrections = 1): EffectiveP
       maxAdaptationRounds: 0,
       maxMainCorrections,
       maxMainReverifications: 0,
+      maxWorkerValidationRepairs: 0,
     },
     provenance,
     enforcementCapability: {
@@ -448,6 +450,140 @@ test("explicitly resolved Task can only be reopened, never moved backward", asyn
     assert.equal(ready.operation, undefined);
 
     assert.deepEqual(requestableDestinations(policy), ["stopped-failed"]);
+  } finally {
+    store.close();
+  }
+});
+
+test("resolved succeeded Task exposes only Reopen, never revise/review/integration", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-ap-resolved-succeeded-"));
+  const store = new StateStore(home);
+  try {
+    const task = taskRecord("resolved-succeeded", { status: "succeeded", baseMaxAttempts: 2 });
+    store.createTask(task);
+    const verificationSequence = addVerification(store, task.id, true);
+    addMainReview(store, task.id, "accept", verificationSequence);
+    const resolutionState: TaskResolutionState = {
+      status: "resolved",
+      reason: "no-longer-needed",
+      resolvedAt: "2026-08-03T13:00:00.000Z",
+      eventSequence: 5,
+    };
+    // A resolved succeeded Task sits in History / stopped-failed even though
+    // its underlying Decision evidence (accepted review) would normally offer
+    // Integration toward Completed.
+    const policy = project(store, task, {
+      status: "succeeded",
+      decisionStage: "ready-for-integration",
+      currentColumn: "stopped-failed",
+      resolutionState,
+    });
+
+    const stopped = policy.destinations["stopped-failed"];
+    assert.equal(stopped.disposition, "requestable");
+    assert.equal(stopped.operation, "task_reopen");
+    assert.deepEqual([...stopped.requires!], ["confirm"]);
+
+    // No revise, main_review, integration_preflight, or correct anywhere.
+    assert.deepEqual(requestableDestinations(policy), ["stopped-failed"]);
+    for (const column of ALL_COLUMNS) {
+      if (column === "stopped-failed") continue;
+      const entry = policy.destinations[column];
+      assert.equal(entry.disposition, "no-op", column);
+      assert.equal(entry.operation, undefined, column);
+    }
+    assert.equal(
+      policy.nextCheckpoint,
+      "Reopen the handled Task to return it to Now, or leave it closed.",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("forged resolved evidence on non-terminal status fails open to the normal policy", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-ap-forged-resolved-"));
+  const store = new StateStore(home);
+  try {
+    const forgedResolution: TaskResolutionState = {
+      status: "resolved",
+      reason: "no-longer-needed",
+      resolvedAt: "2026-08-03T13:00:00.000Z",
+      eventSequence: 5,
+    };
+    const cases: Array<{
+      status: TaskStatus;
+      decisionStage: DecisionStage;
+      currentColumn: WorkHierarchyColumnCode;
+    }> = [
+      { status: "queued", decisionStage: "queued", currentColumn: "ready" },
+      { status: "waiting", decisionStage: "queued", currentColumn: "ready" },
+      { status: "blocked", decisionStage: "machine-failed", currentColumn: "stopped-failed" },
+      { status: "preparing", decisionStage: "worker-running", currentColumn: "running" },
+      { status: "running", decisionStage: "worker-running", currentColumn: "running" },
+      { status: "verifying", decisionStage: "machine-verified", currentColumn: "waiting-verification" },
+    ];
+    const tasks = cases.map(({ status }) => {
+      const task = taskRecord(`forged-${status}`, { status, baseMaxAttempts: 2 });
+      store.createTask(task);
+      return task;
+    });
+    for (let index = 0; index < cases.length; index += 1) {
+      const { status, decisionStage, currentColumn } = cases[index]!;
+      const task = tasks[index]!;
+      const policy = project(store, task, {
+        status,
+        decisionStage,
+        currentColumn,
+        resolutionState: forgedResolution,
+      });
+      // The resolved-only branch must not be entered: forged resolution on
+      // non-terminal work never short-circuits to Reopen-only.
+      assert.notEqual(
+        policy.nextCheckpoint,
+        "Reopen the handled Task to return it to Now, or leave it closed.",
+        `${status} must not be short-circuited to Reopen-only`,
+      );
+      for (const column of ALL_COLUMNS) {
+        assert.notEqual(
+          policy.destinations[column].operation,
+          "task_reopen",
+          `${status} must not expose task_reopen`,
+        );
+      }
+      // The current column still reports the normal already-there no-op.
+      assert.equal(policy.destinations[currentColumn].disposition, "no-op", status);
+      assert.equal(policy.destinations[currentColumn].reason, "already-there", status);
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test("forged resolved evidence does not suppress the dependency-held automatic", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-ap-forged-deps-"));
+  const store = new StateStore(home);
+  try {
+    const task = taskRecord("forged-deps", { status: "queued" });
+    store.createTask(task);
+    const forgedResolution: TaskResolutionState = {
+      status: "resolved",
+      reason: "no-longer-needed",
+      resolvedAt: "2026-08-03T13:00:00.000Z",
+      eventSequence: 5,
+    };
+    const policy = project(store, task, {
+      status: "queued",
+      decisionStage: "queued",
+      deps: false,
+      currentColumn: "not-started",
+      resolutionState: forgedResolution,
+    });
+    // The real dependency-held automatic policy is preserved, not replaced by
+    // the resolved-only branch, and no Reopen is invented.
+    assert.equal(policy.destinations.ready.disposition, "automatic-only");
+    assert.equal(policy.destinations.ready.reason, "dependency-held");
+    assert.equal(policy.destinations.ready.operation, undefined);
   } finally {
     store.close();
   }

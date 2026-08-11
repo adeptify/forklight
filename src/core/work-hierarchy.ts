@@ -5,7 +5,10 @@
  * versioned WorkHierarchyView. Read-only and deterministic: does not write
  * status, schedule work, resolve Profiles, or expose private evidence.
  */
-import { resolveReadiness } from "./dependency-resolver.js";
+import {
+  isPrerequisiteResultComplete,
+  resolveReadiness,
+} from "./dependency-resolver.js";
 import {
   evaluateMilestoneGate,
   projectGoal,
@@ -284,6 +287,11 @@ export interface WorkHierarchyGoalLane {
   summary: WorkHierarchyLaneSummary;
   /** Always an array so future multi-Plan storage does not replace the contract. */
   plans: WorkHierarchyPlanLane[];
+  /**
+   * Core-selected current phase. Absent when every supervised milestone is
+   * satisfied (terminal Goal); Hub falls back to the last phase for history.
+   */
+  currentPlanId?: string;
 }
 
 export interface WorkHierarchyOneOffLane {
@@ -1042,6 +1050,9 @@ interface PlanProjectionContext {
   goalName?: string;
   goalView?: GoalView;
   milestones?: GoalMilestoneRecord[];
+  /** True when this Plan is a supervised Goal phase after the current phase.
+   *  Its cards stay not-started regardless of within-Plan readiness. */
+  phaseBlocked?: boolean;
   summaries: Map<string, SafeTaskSummary>;
   /** Task ids claimed by this plan (original + effective) so one-off excludes them. */
   claimedTaskIds: Set<string>;
@@ -1056,6 +1067,7 @@ function resolvePlanDependencySatisfaction(
   depIds: string[];
   statuses: Map<string, TaskStatus | undefined>;
   gateSatisfaction?: Map<string, boolean>;
+  prerequisiteCompletion?: Map<string, boolean>;
 } {
   const depIds = ctx.dependencies
     .filter((d) => d.itemId === itemId)
@@ -1069,10 +1081,13 @@ function resolvePlanDependencySatisfaction(
   const effectiveStatuses = new Map<string, TaskStatus | undefined>(statuses);
 
   let gateSatisfaction: Map<string, boolean> | undefined;
-  if (ctx.goalId !== undefined && ctx.milestones !== undefined) {
+  let prerequisiteCompletion: Map<string, boolean> | undefined;
+  // Goal-owned Plans keep milestone-gate authority (machine fallback when a
+  // milestone row is absent). Independent Plans use the shared delivery rule.
+  if (ctx.goalId !== undefined) {
     gateSatisfaction = new Map();
     for (const dependencyId of depIds) {
-      const milestone = ctx.milestones.find((m) => m.itemId === dependencyId);
+      const milestone = ctx.milestones?.find((m) => m.itemId === dependencyId);
       const dep = statusByItem.get(dependencyId);
       if (milestone === undefined) {
         gateSatisfaction.set(dependencyId, dep?.taskStatus === "succeeded");
@@ -1090,6 +1105,16 @@ function resolvePlanDependencySatisfaction(
       );
       gateSatisfaction.set(dependencyId, evidence.satisfied);
     }
+  } else {
+    // Same Core completion fact as the Plan scheduler for independent Plans.
+    prerequisiteCompletion = new Map();
+    for (const dependencyId of depIds) {
+      const dep = statusByItem.get(dependencyId);
+      prerequisiteCompletion.set(
+        dependencyId,
+        isPrerequisiteResultComplete(store, dep?.taskId, dep?.taskStatus),
+      );
+    }
   }
 
   const decision = resolveReadiness(
@@ -1097,12 +1122,14 @@ function resolvePlanDependencySatisfaction(
     depIds,
     effectiveStatuses,
     gateSatisfaction,
+    prerequisiteCompletion,
   );
   return {
     satisfied: decision.kind === "ready",
     depIds,
     statuses: effectiveStatuses,
     ...(gateSatisfaction === undefined ? {} : { gateSatisfaction }),
+    ...(prerequisiteCompletion === undefined ? {} : { prerequisiteCompletion }),
   };
 }
 
@@ -1113,6 +1140,7 @@ function buildNamedEdges(
   dependentIds: string[],
   statuses: Map<string, TaskStatus | undefined>,
   gateSatisfaction?: Map<string, boolean>,
+  prerequisiteCompletion?: Map<string, boolean>,
 ): { namedDependencies: WorkHierarchyNamedEdge[]; namedRequiredBy: WorkHierarchyNamedEdge[] } {
   const itemStatuses = store.getPlanItemStatuses(planId);
   const byItem = new Map(itemStatuses.map((s) => [s.itemId, s]));
@@ -1125,9 +1153,13 @@ function buildNamedEdges(
     const safeName = sanitiseName(task?.name);
     const status = statuses.get(depId) ?? dep?.taskStatus;
     // Gate-satisfied deps count as satisfied even when machine status lags.
+    // Independent Plans: material Candidate without reviewed delivery stays waiting.
     const state = gateSatisfaction?.get(depId) === true
       ? "satisfied" as const
-      : dependencyEdgeState(status);
+      : (gateSatisfaction === undefined
+          && prerequisiteCompletion?.get(depId) === false)
+        ? "waiting" as const
+        : dependencyEdgeState(status);
     return {
       itemId: depId,
       ...(dep?.taskId === undefined ? {} : { taskId: dep.taskId }),
@@ -1246,6 +1278,7 @@ function projectPlanLane(
       dependentIds,
       depInfo.statuses,
       depInfo.gateSatisfaction,
+      depInfo.prerequisiteCompletion,
     );
 
     // FL-109E2: Plan-relative milestone gate truth. The configured Goal gate is
@@ -1273,21 +1306,29 @@ function projectPlanLane(
       };
     }
 
+    // Phase order is an additional Core prerequisite: a card in a supervised
+    // phase after the current one stays not-started regardless of its
+    // within-Plan dependency readiness or gate evidence. The browser never
+    // computes this — it reads the Core-projected currentPlanId.
+    const phaseBlocked = ctx.phaseBlocked === true;
+    const dependenciesSatisfied = phaseBlocked ? false : depInfo.satisfied;
+
     let placement = mapTaskToHierarchyColumn({
       status: summary.status,
       ...(summary.decisionStage === undefined ? {} : { decisionStage: summary.decisionStage }),
       ...(summary.boardScope === undefined ? {} : { boardScope: summary.boardScope }),
       ...(summary.boardReason === undefined ? {} : { boardReason: summary.boardReason }),
-      dependenciesSatisfied: depInfo.satisfied,
+      dependenciesSatisfied,
     });
     // A satisfied configured gate completes the card in this Goal's lane even
     // when the Task-wide decision stage still shows a broader review or
     // Integration step. A Task already Task-wide completed keeps its durable
     // delivered-outcome signal; the gate truth is still carried in goalGate.
-    if (goalGate?.satisfied === true && placement.column !== "completed") {
+    // Later-phase cards never claim completion while their phase is blocked.
+    if (goalGate?.satisfied === true && placement.column !== "completed" && !phaseBlocked) {
       placement = { column: "completed", placementReason: "goal-gate-satisfied" };
     }
-    const goalGateCompleted = goalGate?.satisfied === true;
+    const goalGateCompleted = goalGate?.satisfied === true && !phaseBlocked;
 
     // FL-109C1: Core-owned truthful action policy fed only by authoritative
     // Store evidence. Read-only; the Hub forwards it unchanged. A Goal-gate
@@ -1298,11 +1339,13 @@ function projectPlanLane(
       ...(summary.decisionStage === undefined ? {} : { decisionStage: summary.decisionStage }),
       ...(summary.boardScope === undefined ? {} : { boardScope: summary.boardScope }),
       ...(summary.boardReason === undefined ? {} : { boardReason: summary.boardReason }),
-      dependenciesSatisfied: depInfo.satisfied,
+      dependenciesSatisfied,
       delivered: hasDeliveredSummary(summary),
       resolutionState: summary.attentionResolution ?? { status: "none" },
       currentColumn: placement.column,
-      ...(goalGate?.satisfied === true ? { planGateSatisfied: true } : {}),
+      ...(goalGate?.satisfied === true && !phaseBlocked
+        ? { planGateSatisfied: true }
+        : {}),
     });
 
     const safeName = sanitiseName(summary.name) ?? sanitiseName(effectiveTask.name) ?? "Task";
@@ -1311,6 +1354,9 @@ function projectPlanLane(
     const blockers = goalGateCompleted
       ? []
       : buildCardBlockers(namedDependencies, summary.status, safeName);
+    if (phaseBlocked && !goalGateCompleted) {
+      blockers.unshift({ code: "dependency-waiting", label: "Earlier Goal phase" });
+    }
     const planName = sanitiseName(ctx.plan.name);
     const goalName = sanitiseName(ctx.goalName);
 
@@ -1510,9 +1556,20 @@ export function projectWorkHierarchy(
   const plans = store.listPlans();
   const goalsRaw = store.listGoals(100);
   const planById = new Map(plans.map((p) => [p.id, p]));
-  const goalPlanIds = new Set(goalsRaw.map((g) => g.planId));
+  // Every associated Plan (primary + later) is Goal-owned and never independent.
+  const goalPlanIds = new Set<string>();
+  for (const goal of goalsRaw) {
+    goalPlanIds.add(goal.planId);
+    try {
+      for (const association of store.listGoalPlanAssociations(goal.id)) {
+        goalPlanIds.add(association.planId);
+      }
+    } catch {
+      // Unknown or corrupt Goal rows are skipped below when projecting.
+    }
+  }
 
-  // --- Goal lanes (plans[] even for one-Plan storage) ---
+  // --- Goal lanes (all associated Plans in ordinal order) ---
   const goalLanes: WorkHierarchyGoalLane[] = [];
   const goalsOrdered = goalsRaw
     .slice()
@@ -1521,43 +1578,82 @@ export function projectWorkHierarchy(
     );
 
   for (const goal of goalsOrdered) {
-    const plan = planById.get(goal.planId);
-    if (plan === undefined) continue;
     let goalView: GoalView;
     try {
       goalView = projectGoal(store, goal.id);
     } catch {
       continue;
     }
+    // Associations are the multi-Plan authority; fall back to legacy primary only.
+    let associations = store.listGoalPlanAssociations(goal.id);
+    if (associations.length === 0) {
+      associations = [{
+        goalId: goal.id,
+        planId: goal.planId,
+        ordinal: 0,
+        createdAt: goal.createdAt,
+      }];
+    }
+    // Every supervised phase carries its own plan-qualified milestones; later
+    // supervised phases stay not-started until the current phase completes.
     const milestones = store.getGoalMilestones(goal.id);
-    const items = store.getPlanItems(plan.id);
-    const dependencies = store.getDependencies(plan.id);
-    const planClaimed = new Set<string>();
-    const planLane = projectPlanLane(store, {
-      plan,
-      items,
-      dependencies,
-      goalId: goal.id,
-      goalName: goalView.name,
-      goalView,
-      milestones,
-      summaries,
-      claimedTaskIds: planClaimed,
-    });
-    for (const id of planClaimed) claimedTaskIds.add(id);
+    const milestonesByPlan = new Map<string, GoalMilestoneRecord[]>();
+    for (const milestone of milestones) {
+      const key = milestone.planId ?? goal.planId;
+      const list = milestonesByPlan.get(key) ?? [];
+      list.push(milestone);
+      milestonesByPlan.set(key, list);
+    }
+    const currentIndex = goalView.currentPlanId === undefined
+      ? -1
+      : associations.findIndex((association) => association.planId === goalView.currentPlanId);
+    const filteredPlans: WorkHierarchyPlanLane[] = [];
 
-    const filteredPlanColumns = filterColumns(planLane.columns, filter);
-    if (cardCount(filteredPlanColumns) === 0) {
-      // Hide empty Goal ancestors under filters; keep empty Goals unfiltered.
-      if (hasActiveFilter(filter)) continue;
+    for (const association of associations) {
+      const plan = planById.get(association.planId);
+      if (plan === undefined) continue;
+      const items = store.getPlanItems(plan.id);
+      const dependencies = store.getDependencies(plan.id);
+      const planClaimed = new Set<string>();
+      const planMilestones = milestonesByPlan.get(association.planId) ?? [];
+      const supervised = planMilestones.length > 0;
+      const ordinal = associations.findIndex((a) => a.planId === association.planId);
+      const phaseBlocked = supervised && currentIndex >= 0 && ordinal > currentIndex;
+      const planLane = projectPlanLane(store, {
+        plan,
+        items,
+        dependencies,
+        goalId: goal.id,
+        goalName: goalView.name,
+        goalView,
+        ...(supervised ? { milestones: planMilestones } : {}),
+        ...(phaseBlocked ? { phaseBlocked: true } : {}),
+        summaries,
+        claimedTaskIds: planClaimed,
+      });
+      for (const id of planClaimed) claimedTaskIds.add(id);
+
+      const filteredPlanColumns = filterColumns(planLane.columns, filter);
+      if (cardCount(filteredPlanColumns) === 0) {
+        // Omit empty sibling Plans under filters; keep empty Plans unfiltered.
+        if (hasActiveFilter(filter)) continue;
+      }
+
+      filteredPlans.push({
+        ...planLane,
+        columns: filteredPlanColumns,
+        summary: deriveLaneSummary(flatCards(filteredPlanColumns)),
+      });
     }
 
-    const filteredPlan: WorkHierarchyPlanLane = {
-      ...planLane,
-      columns: filteredPlanColumns,
-      summary: deriveLaneSummary(flatCards(filteredPlanColumns)),
-    };
-    const planCards = flatCards(filteredPlanColumns);
+    if (filteredPlans.length === 0) {
+      // Hide empty Goal ancestors under filters; keep empty Goals unfiltered only
+      // when at least the primary Plan row still exists.
+      if (hasActiveFilter(filter)) continue;
+      if (planById.get(goal.planId) === undefined) continue;
+    }
+
+    const planCards = filteredPlans.flatMap((planLane) => flatCards(planLane.columns));
     const goalMessages = deriveGoalLaneMessages(goalView);
     goalLanes.push({
       kind: "goal",
@@ -1566,6 +1662,9 @@ export function projectWorkHierarchy(
       objective: sanitiseName(goalView.objective) ?? "",
       status: goalView.status,
       updatedAt: goalView.updatedAt,
+      ...(goalView.currentPlanId === undefined
+        ? {}
+        : { currentPlanId: goalView.currentPlanId }),
       summary: deriveLaneSummary(planCards, {
         whatCompleted: goalView.whatJustHappened,
         blocker: goalView.whatIsWaiting,
@@ -1574,11 +1673,11 @@ export function projectWorkHierarchy(
         blockerMessage: goalMessages.blockerMessage,
         nextActionMessage: goalMessages.nextActionMessage,
       }),
-      plans: [filteredPlan],
+      plans: filteredPlans,
     });
   }
 
-  // --- Independent plans (no Goal parent) ---
+  // --- Independent plans (no Goal parent; associated later Plans are excluded) ---
   const independentPlans: WorkHierarchyPlanLane[] = [];
   const independentOrdered = plans
     .filter((p) => !goalPlanIds.has(p.id))

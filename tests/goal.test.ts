@@ -31,6 +31,10 @@ import {
   resolveEffectiveMilestoneLineage,
   resolveQualifyingAmendedAcceptanceRemediation,
 } from "../src/core/goal.js";
+import {
+  buildGoalValidationPreview,
+  formatGoalValidationPreviewHuman,
+} from "../src/core/goal-preview.js";
 import { resolveReadiness } from "../src/core/dependency-resolver.js";
 import { SettingsService } from "../src/core/settings.js";
 import { upsertModelConfig } from "../src/core/model-catalog.js";
@@ -442,6 +446,67 @@ test("atomic goal registration creates plan tasks and goal before queue admissio
     const health = coordinator.health();
     assert.ok((health.queuedTaskIds as string[]).includes(foundation));
     assert.equal((health.queuedTaskIds as string[]).includes(service), false);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+const V3_TASK_FIXTURE = path.resolve("fixtures/v3-domain-neutral-task.yaml");
+
+async function writeV3FourTaskPlan(root: string): Promise<string> {
+  const planFile = path.join(root, "plan.json");
+  await writeFile(
+    planFile,
+    JSON.stringify({
+      version: 1,
+      name: "Version-3 goal plan",
+      objective: "Four version-3 items carrying the same frozen background through Goal registration.",
+      items: [
+        { id: "foundation", task: V3_TASK_FIXTURE, dependsOn: [] },
+        { id: "service", task: V3_TASK_FIXTURE, dependsOn: ["foundation"] },
+        { id: "console", task: V3_TASK_FIXTURE, dependsOn: ["foundation"] },
+        { id: "integrate-docs", task: V3_TASK_FIXTURE, dependsOn: ["service", "console"] },
+      ],
+    }),
+  );
+  return planFile;
+}
+
+test("version-3 Plan items register atomically through a Goal", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-goal-v3-"));
+  const planFile = await writeV3FourTaskPlan(home);
+  const goalFile = await writeGoalFile(home, planFile);
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const result = await coordinator.submitGoalFile(goalFile);
+    assert.equal(result.goalId, path.resolve(goalFile));
+    assert.equal(result.planId, path.resolve(planFile));
+    assert.equal(Object.keys(result.taskIdsByItemId).length, 4);
+
+    for (const itemId of ["foundation", "service", "console", "integrate-docs"]) {
+      const task = store.getTask(result.taskIdsByItemId[itemId]!);
+      assert.equal(task.spec.version, 3);
+      if (task.spec.version === 3) {
+        assert.equal(
+          task.spec.contract.background.purpose,
+          "Exercise context-rich version-3 Task contracts inside hierarchy work.",
+        );
+        assert.deepEqual(task.spec.contract.background.priorDecisions, [
+          "Plan and Goal items must support version 3.",
+          "Preserve version 2 behavior exactly and keep rejecting version 1 in structured Plans.",
+        ]);
+      } else {
+        assert.fail("expected a version-3 Task spec");
+      }
+    }
+
+    const goal = store.getGoal(result.goalId);
+    assert.equal(goal.status, "running");
+    assert.equal(store.getGoalMilestones(result.goalId).length, 4);
+    assert.equal(store.getTask(result.taskIdsByItemId.foundation!).status, "queued");
+    assert.equal(store.getTask(result.taskIdsByItemId.service!).status, "waiting");
   } finally {
     await coordinator.shutdown();
     store.close();
@@ -3014,4 +3079,435 @@ test("adaptation copies the parent TaskSpec and preserves the frozen network pol
     await coordinator.shutdown();
     store.close();
   }
+});
+
+test("projectGoal exposes ordered planIds while preserving legacy primary planId", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-goal-planids-"));
+  const planFile = await writeFourTaskPlan(home);
+  const goalFile = await writeGoalFile(home, planFile);
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const result = await coordinator.submitGoalFile(goalFile);
+    const onePlan = projectGoal(store, result.goalId);
+    assert.equal(onePlan.planId, result.planId);
+    assert.deepEqual(onePlan.planIds, [result.planId]);
+    // Associations exist immediately after Goal creation.
+    assert.deepEqual(
+      store.listGoalPlanAssociations(result.goalId).map((row) => row.planId),
+      [result.planId],
+    );
+
+    // Persist an independent Plan and attach as the next ordered phase.
+    const laterPlanFile = path.join(home, "later-plan.json");
+    await writeFile(
+      laterPlanFile,
+      JSON.stringify({
+        version: 1,
+        name: "Later phase plan",
+        objective: "Second phase under the same Goal.",
+        items: [
+          { id: "phase2-a", task: taskTemplate, dependsOn: [] },
+          { id: "phase2-b", task: taskTemplate, dependsOn: ["phase2-a"] },
+        ],
+      }),
+    );
+    const later = await coordinator.submitPlanFile(laterPlanFile);
+    assert.equal(store.getGoalByPlanId(later.planId), undefined);
+    store.attachPlanToGoal(result.goalId, later.planId);
+
+    const multi = projectGoal(store, result.goalId);
+    assert.equal(multi.planId, result.planId, "legacy primary planId unchanged");
+    assert.deepEqual(multi.planIds, [result.planId, later.planId]);
+    assert.equal(store.getGoalByPlanId(later.planId)?.id, result.goalId);
+    // Explicit: multi-Plan projection does not claim later-phase activation.
+    assert.equal(store.getGoal(result.goalId).planId, result.planId);
+    assert.equal(multi.milestones.length, 4, "milestones remain primary-Plan only");
+    assert.equal(multi.currentPlanId, result.planId, "ownership-attached later Plan is not supervised");
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+// --- FL-112E2: version-2 multi-phase Goals ---
+
+async function writeTwoItemPhase(root: string, fileName: string): Promise<string> {
+  const planFile = path.join(root, fileName);
+  await writeFile(
+    planFile,
+    JSON.stringify({
+      version: 1,
+      name: `Two-item phase ${fileName}`,
+      objective: "Two independent items; local ids repeat across phases.",
+      items: [
+        { id: "item-1", task: taskTemplate, dependsOn: [] },
+        { id: "item-2", task: taskTemplate, dependsOn: [] },
+      ],
+    }),
+  );
+  return planFile;
+}
+
+async function writeTwoPhaseGoalFile(
+  root: string,
+  planFiles: string[],
+  overrides: Record<string, unknown> = {},
+): Promise<string> {
+  const goalFile = path.join(root, "goal-v2.json");
+  const body = {
+    version: 2,
+    name: "Two phase goal",
+    objective: "Two ordered phases with duplicate local item ids.",
+    policy: {
+      maxDurationMs: null,
+      noProgressTimeoutMs: null,
+      maxCorrectionRounds: 1,
+      maxReviewRounds: 1,
+      maxNoNewEvidenceCycles: 2,
+    },
+    plans: planFiles.map((planFile) => ({
+      planFile: `./${path.basename(planFile)}`,
+      milestones: [
+        { itemId: "item-1", gate: "machine" },
+        { itemId: "item-2", gate: "machine" },
+      ],
+    })),
+    ...overrides,
+  };
+  await writeFile(goalFile, JSON.stringify(body, null, 2));
+  return goalFile;
+}
+
+test("v2 goal parser requires at least two ordered Plans and rejects duplicate plan files", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-goal-v2-parse-"));
+  const phaseOne = await writeTwoItemPhase(root, "phase-one.json");
+  const phaseTwo = await writeTwoItemPhase(root, "phase-two.json");
+  const goalFile = await writeTwoPhaseGoalFile(root, [phaseOne, phaseTwo]);
+  const report = await loadGoal(goalFile);
+  assert.equal(report.passed, true);
+  assert.equal(report.goal!.version, 2);
+  assert.equal(report.goal!.phases.length, 2);
+  assert.equal(report.goal!.phases[0]!.milestones.length, 2);
+  // Legacy primary aliases point at phase zero.
+  assert.equal(report.goal!.planFile, path.resolve(phaseOne));
+  assert.equal(report.goal!.plan.items.length, 2);
+  assert.equal(report.goal!.milestones.length, 2);
+
+  // A single declared phase is rejected.
+  const singleFile = await writeTwoPhaseGoalFile(root, [phaseOne]);
+  const single = await loadGoal(singleFile);
+  assert.equal(single.passed, false);
+  assert.match(single.issues.join("\n"), /at least two/i);
+
+  // Duplicate plan file is rejected even when both phases are otherwise valid.
+  const dupFile = await writeTwoPhaseGoalFile(root, [phaseOne, phaseOne]);
+  const dup = await loadGoal(dupFile);
+  assert.equal(dup.passed, false);
+  assert.match(dup.issues.join("\n"), /duplicated/i);
+});
+
+test("v2 goal submits all phases atomically, admits only phase one, and advances exactly once", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-goal-v2-advance-"));
+  const phaseOne = await writeTwoItemPhase(home, "phase-one.json");
+  const phaseTwo = await writeTwoItemPhase(home, "phase-two.json");
+  const goalFile = await writeTwoPhaseGoalFile(home, [phaseOne, phaseTwo]);
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  let p2a = "";
+  try {
+    const result = await coordinator.submitGoalFile(goalFile);
+    assert.equal(result.goalId, path.resolve(goalFile));
+    assert.equal(result.planResults.length, 2);
+    assert.equal(result.planResults[0]!.planId, path.resolve(phaseOne));
+    assert.equal(result.planResults[1]!.planId, path.resolve(phaseTwo));
+    assert.equal(result.planId, path.resolve(phaseOne), "legacy primary planId stays phase zero");
+
+    const p1a = result.planResults[0]!.taskIdsByItemId["item-1"]!;
+    const p1b = result.planResults[0]!.taskIdsByItemId["item-2"]!;
+    p2a = result.planResults[1]!.taskIdsByItemId["item-1"]!;
+    const p2b = result.planResults[1]!.taskIdsByItemId["item-2"]!;
+    assert.notEqual(p1a, p2a, "duplicate local ids resolve to distinct Tasks");
+
+    // Phase one roots are queued; phase two Tasks persist waiting, never queued.
+    assert.equal(store.getTask(p1a).status, "queued");
+    assert.equal(store.getTask(p1b).status, "queued");
+    assert.equal(store.getTask(p2a).status, "waiting");
+    assert.equal(store.getTask(p2b).status, "waiting");
+    assert.match(store.getTask(p2a).error ?? "", /earlier Goal phase/i);
+    assert.equal((coordinator.health().queuedTaskIds as string[]).includes(p2a), false);
+
+    // Milestones carry plan-qualified identity and no identity collision.
+    const milestones = store.getGoalMilestones(result.goalId);
+    assert.equal(milestones.length, 4);
+    assert.equal(milestones.filter((m) => m.planId === path.resolve(phaseOne)).length, 2);
+    assert.equal(milestones.filter((m) => m.planId === path.resolve(phaseTwo)).length, 2);
+
+    // Satisfy every phase-one gate. One recover call must refresh Goal phase
+    // truth, admit the next phase, and queue its ready roots before returning.
+    markSucceeded(store, p1a);
+    markSucceeded(store, p1b);
+    await coordinator.recover();
+
+    assert.equal(store.getTask(p2a).status, "queued");
+    assert.equal(store.getTask(p2b).status, "queued");
+    assert.equal(
+      store.listEvents(p2a).filter((event) => event.type === "task.ready").length,
+      1,
+      "phase-two roots queue exactly once after one recover call",
+    );
+
+    // Repeated recovery stays exact-once: no second task.ready or queue entry.
+    await coordinator.recover();
+    assert.equal(store.getTask(p2a).status, "queued");
+    assert.equal(
+      store.listEvents(p2a).filter((event) => event.type === "task.ready").length,
+      1,
+      "repeated recovery does not re-queue phase-two roots",
+    );
+
+    const view = projectGoal(store, result.goalId);
+    assert.equal(view.currentPlanId, path.resolve(phaseTwo));
+    assert.equal(
+      view.milestones.filter((m) => m.planId === path.resolve(phaseOne)).every((m) => m.satisfied),
+      true,
+    );
+    assert.notEqual(store.getGoal(result.goalId).status, "completed");
+
+    await coordinator.shutdown();
+    store.close();
+  } catch (error) {
+    await coordinator.shutdown();
+    store.close();
+    throw error;
+  }
+
+  // Restart recovery advances with one call and stays exact-once on a second.
+  const reopened = new StateStore(home);
+  const recovered = testCoordinator(reopened, 0);
+  try {
+    await recovered.recover();
+    assert.equal(reopened.getTask(p2a).status, "queued");
+    assert.equal(
+      reopened.listEvents(p2a).filter((event) => event.type === "task.ready").length,
+      1,
+      "one restart recover call leaves phase-two roots queued once",
+    );
+    await recovered.recover();
+    assert.equal(
+      reopened.listEvents(p2a).filter((event) => event.type === "task.ready").length,
+      1,
+      "repeated restart recovery stays exact-once",
+    );
+  } finally {
+    await recovered.shutdown();
+    reopened.close();
+  }
+});
+
+test("v2 goal later phase stays waiting while the current phase is blocked", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-goal-v2-blocked-"));
+  const phaseOne = await writeTwoItemPhase(home, "phase-one.json");
+  const phaseTwo = await writeTwoItemPhase(home, "phase-two.json");
+  const goalFile = await writeTwoPhaseGoalFile(home, [phaseOne, phaseTwo]);
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const result = await coordinator.submitGoalFile(goalFile);
+    const p1a = result.planResults[0]!.taskIdsByItemId["item-1"]!;
+    const p2a = result.planResults[1]!.taskIdsByItemId["item-1"]!;
+    // Phase-one milestone fails; phase-two Tasks have no local dependencies.
+    store.setTaskStatus(p1a, "failed", {
+      error: "verification failed",
+      finishedAt: new Date().toISOString(),
+    });
+    await coordinator.recover();
+    await coordinator.recover();
+
+    assert.equal(store.getTask(p2a).status, "waiting");
+    assert.match(store.getTask(p2a).error ?? "", /earlier Goal phase/i);
+    assert.equal((coordinator.health().queuedTaskIds as string[]).includes(p2a), false);
+
+    const view = projectGoal(store, result.goalId);
+    assert.equal(view.currentPlanId, path.resolve(phaseOne));
+    assert.equal(view.reasonCode, "milestone-failed");
+    assert.equal(view.nextActionCode, "correct-or-decide");
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+test("v2 goal completes only after every phase gate is satisfied", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-goal-v2-complete-"));
+  const phaseOne = await writeTwoItemPhase(home, "phase-one.json");
+  const phaseTwo = await writeTwoItemPhase(home, "phase-two.json");
+  const goalFile = await writeTwoPhaseGoalFile(home, [phaseOne, phaseTwo]);
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  try {
+    const result = await coordinator.submitGoalFile(goalFile);
+    const p1a = result.planResults[0]!.taskIdsByItemId["item-1"]!;
+    const p1b = result.planResults[0]!.taskIdsByItemId["item-2"]!;
+    const p2a = result.planResults[1]!.taskIdsByItemId["item-1"]!;
+    const p2b = result.planResults[1]!.taskIdsByItemId["item-2"]!;
+
+    markSucceeded(store, p1a);
+    markSucceeded(store, p1b);
+    await coordinator.recover();
+    await coordinator.recover();
+    assert.notEqual(store.getGoal(result.goalId).status, "completed");
+
+    markSucceeded(store, p2a);
+    markSucceeded(store, p2b);
+    await coordinator.recover();
+    await coordinator.recover();
+
+    const goal = store.getGoal(result.goalId);
+    assert.equal(goal.status, "completed");
+    const view = projectGoal(store, result.goalId);
+    assert.equal(view.currentPlanId, undefined, "terminal Goal exposes no current phase");
+    assert.equal(view.progress.total, 4);
+    assert.equal(view.progress.satisfied, 4);
+    assert.equal(view.milestones.length, 4);
+  } finally {
+    await coordinator.shutdown();
+    store.close();
+  }
+});
+
+// --- FL-112G3: read-only validate-goal preview ---
+
+test("validate-goal preview: valid v1 returns bounded hierarchy facts and creates nothing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-goal-validate-v1-"));
+  const planFile = await writeFourTaskPlan(root);
+  const goalFile = await writeGoalFile(root, planFile);
+  const preview = await buildGoalValidationPreview(goalFile);
+
+  assert.equal(preview.passed, true);
+  assert.equal(preview.version, 1);
+  assert.equal(preview.name, "Durable four-task goal");
+  assert.equal(preview.objective, "Supervise a four-task plan with mixed milestone gates.");
+  assert.equal(preview.phaseCount, 1);
+  assert.equal(preview.taskCount, 4);
+  assert.equal(preview.phases!.length, 1);
+  const phase = preview.phases![0]!;
+  assert.equal(phase.taskCount, 4);
+  assert.equal(phase.milestoneCount, 4);
+  assert.deepEqual(
+    phase.milestones.map((m) => [m.itemId, m.gate]),
+    [
+      ["foundation", "machine"],
+      ["service", "integration"],
+      ["console", "main-accept"],
+      ["integrate-docs", "machine"],
+    ],
+  );
+  // Milestone task names come from the validated Plan Task facts.
+  assert.ok(phase.milestones.every((m) => m.taskName.length > 0));
+  // Dependency waves are bounded item-id groups, never raw contracts.
+  assert.deepEqual(
+    phase.dependencyWaves.map((wave) => wave.slice().sort()),
+    [["foundation"], ["console", "service"], ["integrate-docs"]],
+  );
+  assert.deepEqual(preview.issues, []);
+  assert.match(preview.note, /Read-only validation/);
+
+  // Human and JSON presentation share the same safe facts.
+  const human = formatGoalValidationPreviewHuman(preview);
+  const json = JSON.stringify(preview, null, 2);
+  assert.match(human, /Goal: Durable four-task goal \(version 1\)/);
+  assert.match(human, /Validation: PASS/);
+  assert.match(human, /Phases: 1 Plan\(s\), 4 Task\(s\)/);
+  assert.match(human, /Wave 1: foundation/);
+  assert.match(json, /"passed": true/);
+  assert.match(json, /"phaseCount": 1/);
+  // Privacy boundary: no raw Task contract, Provider, command, or path.
+  assert.doesNotMatch(json, /python3|unittest|deepseek|api-key|taskFile|planFile/);
+  assert.doesNotMatch(human, /python3|unittest|deepseek|api-key/);
+
+  // No Store mutation: no Goal, Plan, Task, event, receipt, or workspace.
+  const store = new StateStore(root);
+  try {
+    assert.deepEqual(store.listGoals(), []);
+    assert.deepEqual(store.listTasks(), []);
+    assert.deepEqual(store.listPlans(), []);
+  } finally {
+    store.close();
+  }
+});
+
+test("validate-goal preview: valid v2 returns ordered phases with distinct local ids", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-goal-validate-v2-"));
+  const phaseOne = await writeTwoItemPhase(root, "phase-one.json");
+  const phaseTwo = await writeTwoItemPhase(root, "phase-two.json");
+  const goalFile = await writeTwoPhaseGoalFile(root, [phaseOne, phaseTwo]);
+  const preview = await buildGoalValidationPreview(goalFile);
+
+  assert.equal(preview.passed, true);
+  assert.equal(preview.version, 2);
+  assert.equal(preview.phaseCount, 2);
+  assert.equal(preview.taskCount, 4);
+  assert.equal(preview.phases!.length, 2);
+  for (const phase of preview.phases!) {
+    assert.equal(phase.milestoneCount, 2);
+    assert.equal(phase.taskCount, 2);
+    assert.deepEqual(
+      phase.milestones.map((m) => m.itemId),
+      ["item-1", "item-2"],
+    );
+  }
+  assert.equal(preview.phases![0]!.planName, "Two-item phase phase-one.json");
+  assert.equal(preview.phases![1]!.planName, "Two-item phase phase-two.json");
+  const json = JSON.stringify(preview, null, 2);
+  assert.doesNotMatch(json, /python3|unittest|deepseek|api-key/);
+});
+
+test("validate-goal preview: invalid nested Plan or Task contracts fail through the existing validator", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "forklight-goal-validate-invalid-"));
+
+  // Invalid milestone binding: milestone references a Plan item that does not exist.
+  const planFile = await writeFourTaskPlan(root);
+  const badMilestoneGoal = await writeGoalFile(root, planFile, {
+    milestones: [
+      { itemId: "foundation", gate: "machine" },
+      { itemId: "ghost-item", gate: "machine" },
+      { itemId: "console", gate: "machine" },
+      { itemId: "integrate-docs", gate: "machine" },
+    ],
+  });
+  const milestonePreview = await buildGoalValidationPreview(badMilestoneGoal);
+  assert.equal(milestonePreview.passed, false);
+  assert.ok(milestonePreview.issues.some((issue) => /not a plan item/.test(issue)));
+  assert.equal(milestonePreview.version, undefined);
+  assert.equal(milestonePreview.phases, undefined);
+  assert.match(JSON.stringify(milestonePreview), /"passed":false/);
+
+  // Invalid Plan dependency: a Plan item depends on an unknown Task id.
+  const badPlan = path.join(root, "bad-plan.json");
+  await writeFile(
+    badPlan,
+    JSON.stringify({
+      version: 1,
+      name: "Broken dependency plan",
+      objective: "Proves invalid dependencies fail Goal validation read-only.",
+      items: [
+        { id: "alpha", task: taskTemplate, dependsOn: [] },
+        { id: "beta", task: taskTemplate, dependsOn: ["ghost"] },
+      ],
+    }),
+  );
+  const badGoal = await writeGoalFile(root, badPlan, {
+    name: "Broken dependency goal",
+    objective: "Goal referencing an invalid Plan dependency.",
+    milestones: [
+      { itemId: "alpha", gate: "machine" },
+      { itemId: "beta", gate: "machine" },
+    ],
+  });
+  const depPreview = await buildGoalValidationPreview(badGoal);
+  assert.equal(depPreview.passed, false);
+  assert.ok(depPreview.issues.some((issue) => /unknown task/i.test(issue)));
+  // Existing validator issues are surfaced, never a reimplemented validation.
+  assert.match(depPreview.issues.join("\n"), /ghost/);
 });

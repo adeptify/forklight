@@ -9,6 +9,8 @@ import type {
   VerificationResult,
 } from "../src/core/types.js";
 
+const REPAIR_DIGEST = "a".repeat(64);
+
 const now = "2026-07-24T00:00:00.000Z";
 
 function task(status: TaskRecord["status"]): TaskRecord {
@@ -480,6 +482,180 @@ test("Decision View progress is terminal for finished tasks (FL-D83)", () => {
     nowMs: Date.parse(now),
   });
   assert.equal(view.progress.activity, "terminal");
+});
+
+// --- Content-free validation-repair projection (FL-109) ---
+
+function taskWithRepairPolicy(
+  status: TaskRecord["status"],
+  maxWorkerValidationRepairs: number,
+  source: "global" | "worker" | "task",
+): TaskRecord {
+  return {
+    ...task(status),
+    effectivePolicy: {
+      profileId: source === "global" ? "global" : "profile-a",
+      values: {
+        maxWorkerValidationRepairs,
+      },
+      provenance: {
+        maxWorkerValidationRepairs: source,
+      },
+      enforcementCapability: {
+        durationEnforcement: "preemptive",
+        tokenEnforcement: "unsupported",
+        progressWatchdog: "terminal",
+      },
+    } as unknown as NonNullable<TaskRecord["effectivePolicy"]>,
+  };
+}
+
+function repairWorkerIdentity(taskRecord: TaskRecord): Record<string, string> {
+  return {
+    provider: taskRecord.spec.provider.name,
+    model: taskRecord.spec.provider.model,
+    runtime: taskRecord.spec.runtime.name,
+    effort: taskRecord.spec.runtime.effort,
+  };
+}
+
+function repairPayload(taskRecord: TaskRecord, round: number): Record<string, unknown> {
+  return {
+    kind: "worker-validation-repair",
+    schemaVersion: 1,
+    taskId: taskRecord.id,
+    round,
+    attemptId: `repair-attempt-${round}`,
+    targetAttemptOrdinal: round + 1,
+    priorAttemptId: "attempt-1",
+    verificationEventSequence: 4,
+    candidateRevisionId: `revision-${round}`,
+    evidenceFingerprint: REPAIR_DIGEST,
+    workerIdentity: repairWorkerIdentity(taskRecord),
+    feedback: "repair the failing behavior",
+  };
+}
+
+function repairEvent(
+  sequence: number,
+  type: EventRecord["type"],
+  taskRecord: TaskRecord,
+  payload: Record<string, unknown>,
+): EventRecord {
+  const phase = type === "worker.validation-repair.authorized" ? "authorized" : "started";
+  const attemptId = phase === "authorized"
+    ? String(payload.priorAttemptId)
+    : String(payload.attemptId);
+  return {
+    id: sequence,
+    taskId: taskRecord.id,
+    attemptId,
+    sequence,
+    timestamp: now,
+    type,
+    summary: type,
+    payload,
+  };
+}
+
+test("Decision View projects an in-progress same-Worker repair round from durable events", () => {
+  const running = taskWithRepairPolicy("running", 1, "worker");
+  const events: EventRecord[] = [
+    repairEvent(5, "worker.validation-repair.authorized", running, repairPayload(running, 1)),
+    repairEvent(6, "worker.validation-repair.started", running, {
+      ...repairPayload(running, 1),
+      authorizationEventSequence: 5,
+    }),
+  ];
+  const view = buildTaskDecisionView({
+    task: running,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  assert.ok(view.validationRepair);
+  assert.equal(view.validationRepair.enabled, true);
+  assert.equal(view.validationRepair.inProgress, true);
+  // The active round already occupies the allowance (consumed counts every
+  // durable round, including the one in progress).
+  assert.deepEqual(view.validationRepair.allowance, {
+    max: 1,
+    consumed: 1,
+    remaining: 0,
+    source: "worker",
+  });
+  assert.equal(view.validationRepair.rounds.length, 1);
+  assert.equal(view.validationRepair.rounds[0]?.round, 1);
+  assert.equal(view.validationRepair.rounds[0]?.state, "started");
+});
+
+test("Decision View projects an exhausted allowance and its stop reason", () => {
+  const failed = taskWithRepairPolicy("failed", 1, "global");
+  const payload = repairPayload(failed, 1);
+  const events: EventRecord[] = [
+    repairEvent(5, "worker.validation-repair.authorized", failed, payload),
+    repairEvent(6, "worker.validation-repair.started", failed, {
+      ...payload,
+      authorizationEventSequence: 5,
+    }),
+    repairEvent(7, "worker.validation-repair.completed", failed, {
+      ...payload,
+      authorizationEventSequence: 5,
+      outcome: "failed",
+      reason: "allowance-exhausted",
+    }),
+  ];
+  const view = buildTaskDecisionView({
+    task: failed,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  assert.ok(view.validationRepair);
+  assert.equal(view.validationRepair.inProgress, false);
+  assert.equal(view.validationRepair.allowance.consumed, 1);
+  assert.equal(view.validationRepair.allowance.remaining, 0);
+  assert.equal(view.validationRepair.stopReason, "allowance-exhausted");
+  assert.equal(view.validationRepair.rounds[0]?.terminalOutcome, "failed");
+});
+
+test("Decision View reports a durable non-repairable skip without consuming a round", () => {
+  const failed = taskWithRepairPolicy("failed", 1, "worker");
+  const events: EventRecord[] = [
+    event(3, "worker.validation-repair.skipped", {
+      reason: "verification-infrastructure",
+      nextAction: "Main receives the bounded evidence and decides.",
+    }),
+  ];
+  const view = buildTaskDecisionView({
+    task: failed,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  assert.ok(view.validationRepair);
+  assert.equal(view.validationRepair.inProgress, false);
+  assert.equal(view.validationRepair.rounds.length, 0);
+  assert.equal(view.validationRepair.allowance.consumed, 0);
+  assert.equal(view.validationRepair.skipped.length, 1);
+  assert.equal(view.validationRepair.skipped[0]?.reason, "verification-infrastructure");
+  assert.ok(view.validationRepair.skipped[0]?.nextAction);
+});
+
+test("Decision View omits the validation-repair projection when lineage is corrupt", () => {
+  const running = taskWithRepairPolicy("running", 1, "worker");
+  const events: EventRecord[] = [
+    repairEvent(5, "worker.validation-repair.authorized", running, repairPayload(running, 1)),
+    // A second authorization for the same round breaks the one-per-round rule.
+    repairEvent(6, "worker.validation-repair.authorized", running, repairPayload(running, 1)),
+  ];
+  const view = buildTaskDecisionView({
+    task: running,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  assert.equal(view.validationRepair, undefined);
 });
 
 test("Decision View exposes a readable preparation cursor only while preparing", () => {

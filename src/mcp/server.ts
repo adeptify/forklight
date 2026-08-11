@@ -464,6 +464,28 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
   );
 
   server.registerTool(
+    "forklight_goal_validate",
+    {
+      title: "Validate a durable Goal before submission",
+      description:
+        "Read-only validation of a Goal file before submission. Loads the Goal and its ordered Plans and structured Tasks through the existing Goal validator and returns one bounded hierarchy preview: Goal version, name, objective, phase/Plan count, Task count, per-Plan dependency waves, milestone gates, and whether validation passed. Never creates or submits a Goal, Plan, Task, event, or workspace, and never exposes raw contracts, commands, Provider settings, or private paths.",
+      inputSchema: z.object({
+        goalFile: z.string().min(1).describe("Absolute path to the Goal YAML or JSON file"),
+      }).strict(),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ goalFile }) => {
+      await ensureDaemon(home);
+      const preview = await daemonRequest<Record<string, unknown>>(
+        "goal_validate",
+        { goalFile },
+        home,
+      );
+      return textAndData(preview);
+    },
+  );
+
+  server.registerTool(
     "forklight_goal_status",
     {
       title: "Inspect a durable Goal",
@@ -913,9 +935,9 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
   server.registerTool(
     "forklight_task_resolve",
     {
-      title: "Mark a failed or interrupted Task as handled",
+      title: "Resolve handled attention (failed/interrupted or succeeded-not-delivered)",
       description:
-        "Explicit Main closure of a failed/interrupted Task after the real-world problem has been handled. Requires confirm: true. The Task stays truthfully failed/interrupted, its original evidence remains readable, and no success, delivery, model-quality, or cost fact is invented. One closed reason, a bounded Main note, and an optional successor/evidence Task id are durable evidence. Exact replay is idempotent; a conflicting resolve fails until reopened. The Task moves to History with reason attention-resolved.",
+        "Explicit Main closure of a Task that no longer needs operational action: a failed/interrupted Task, or a succeeded Task with no delivered outcome and no running Attempt. Requires confirm: true. The machine status stays unchanged, its original review, routing, and delivery evidence remains readable, and no success, delivery, model-quality, or cost fact is invented. One closed reason, a bounded Main note, and an optional successor/evidence Task id are durable evidence. Exact replay is idempotent; a conflicting resolve fails until reopened. The Task moves to History with reason attention-resolved.",
       inputSchema: z.object({
         taskId: z.string().uuid(),
         reason: z.enum([
@@ -929,7 +951,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         evidenceTaskId: z.string().uuid().optional()
           .describe("Optional successor/evidence Task id that shows the problem was handled"),
         confirm: z.literal(true).describe(
-          "Explicit confirmation that Main considers the failure handled. Must be true.",
+          "Explicit confirmation that Main closes the handled attention. Must be true.",
         ),
       }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -963,7 +985,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
           );
           return textAndData(
             result,
-            `Task ${taskId} resolved as ${reason}; the Task stays failed/interrupted and moved to History (attention-resolved).`,
+            `Task ${taskId} resolved as ${reason}; the machine status is unchanged and the Task moved to History (attention-resolved).`,
           );
         },
       });
@@ -973,15 +995,15 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
   server.registerTool(
     "forklight_task_reopen",
     {
-      title: "Reopen a handled failure for further action",
+      title: "Reopen resolved attention for further action",
       description:
-        "Explicit Main reopen of a handled failure, returning the unchanged failed/interrupted Task to Now. Requires confirm: true. Appends one durable reopen event; the machine status is never changed. Exact replay is idempotent; nothing to reopen fails closed before writing any event.",
+        "Explicit Main reopen of resolved attention, returning the unchanged failed/interrupted or succeeded-not-delivered Task to its evidence-derived Now placement. Requires confirm: true. Appends one durable reopen event; the machine status is never changed. Exact replay is idempotent; nothing to reopen fails closed before writing any event.",
       inputSchema: z.object({
         taskId: z.string().uuid(),
         note: z.string().trim().max(500).optional()
           .describe("Optional bounded Main-authored explanation of why the failure is actionable again"),
         confirm: z.literal(true).describe(
-          "Explicit confirmation that Main reopens the handled failure. Must be true.",
+          "Explicit confirmation that Main reopens the resolved attention. Must be true.",
         ),
       }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -1011,7 +1033,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
           );
           return textAndData(
             result,
-            `Task ${taskId} reopened; the failed/interrupted Task returned to Now.`,
+            `Task ${taskId} reopened; the machine status is unchanged and the Task returned to Now.`,
           );
         },
       });

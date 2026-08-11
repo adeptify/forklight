@@ -43,9 +43,22 @@ import {
   type PreparationObservation,
 } from "../workspace/copy.js";
 import { verifyTask } from "./verifier.js";
-import { checkpointSatisfied, resolveTerminalAfterVerification } from "./checkpoint.js";
+import {
+  checkpointMcpReadinessFromEvents,
+  checkpointSatisfied,
+  resolveTerminalAfterVerification,
+} from "./checkpoint.js";
+import {
+  aggregateAttemptUsage,
+  remainingContinuationBudget,
+  type WorkerAttemptAggregate,
+} from "./worker-aggregate.js";
 import { getWorkerAdapter } from "../workers/registry.js";
-import type { WorkerExecutionResult } from "../workers/types.js";
+import type {
+  CorrectionExecutionIntent,
+  WorkerValidationRepairExecutionIntent,
+  WorkerExecutionResult,
+} from "../workers/types.js";
 import {
   providerLabel,
   providerLaunchAuthentication,
@@ -443,6 +456,7 @@ function failForPolicyLimit(
   attempt: AttemptRecord,
   worker: WorkerExecutionResult,
   evidence: PolicyLimitEvidence,
+  aggregate: WorkerAttemptAggregate,
 ): RunResult {
   const finishedAt = timestamp();
   const error = `Worker policy limit exceeded: ${evidence.category}`;
@@ -452,14 +466,14 @@ function failForPolicyLimit(
     finishedAt,
     exitCode: worker.exitCode,
     ...(worker.resultText === undefined ? {} : { resultText: worker.resultText }),
-    ...(worker.costUsd === undefined ? {} : { costUsd: worker.costUsd }),
-    ...(worker.turns === undefined ? {} : { turns: worker.turns }),
-    ...(worker.runtimeCostEstimateUsd === undefined
+    ...(aggregate.costUsd === undefined ? {} : { costUsd: aggregate.costUsd }),
+    ...(aggregate.turns === undefined ? {} : { turns: aggregate.turns }),
+    ...(aggregate.runtimeCostEstimateUsd === undefined
       ? {}
-      : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
-    ...(worker.usage === undefined ? {} : { usage: worker.usage }),
+      : { runtimeCostEstimateUsd: aggregate.runtimeCostEstimateUsd }),
+    ...(aggregate.usage === undefined ? {} : { usage: aggregate.usage }),
     error,
-    officialCost: buildOfficialCost(task.spec.provider, worker.usage),
+    officialCost: buildOfficialCost(task.spec.provider, aggregate.usage),
   });
   store.setTaskStatus(task.id, "failed", {
     finishedAt,
@@ -486,6 +500,14 @@ export async function executeAttempt(
    * callers may omit it.
    */
   onWorkerProfileSlotRelease?: () => void,
+  /**
+   * Typed Main-authorized correction execution intent consumed from a durable
+   * correction grant. Present only on the explicit correction path; ordinary
+   * resume, system-restart continuation, and new execution omit it so the
+   * Worker adapter can distinguish an authorized completed-Goal correction
+   * from any other resuming execution.
+   */
+  correctionIntent?: CorrectionExecutionIntent,
 ): Promise<RunResult> {
   if (resuming) {
     await assertWorkspaceExists(task.paths);
@@ -493,7 +515,40 @@ export async function executeAttempt(
     throw new Error("Worker snapshot is incomplete; preparation must finish before execution");
   }
   const exec = execution ?? cloneDefaults().execution;
-  const ordinal = store.nextAttemptOrdinal(task.id);
+  let recoveredAttempt: AttemptRecord | undefined;
+  if (options?.attemptId !== undefined) {
+    try {
+      recoveredAttempt = store.getAttempt(options.attemptId);
+    } catch {
+      recoveredAttempt = undefined;
+    }
+    if (recoveredAttempt !== undefined) {
+      if (
+        recoveredAttempt.taskId !== task.id
+        || recoveredAttempt.executionKind !== options.executionKind
+        || recoveredAttempt.status !== "interrupted"
+      ) {
+        throw new Error("Worker validation-repair Attempt identity is not resumable");
+      }
+      if (
+        options.workerValidationRepair !== undefined
+        && (
+          recoveredAttempt.id !== options.workerValidationRepair.attemptId
+          || recoveredAttempt.workerValidationRepairRound !== options.workerValidationRepair.round
+        )
+      ) {
+        throw new Error("Worker validation-repair Attempt identity is not resumable");
+      }
+    }
+  }
+  if (options?.workerValidationRepair !== undefined && (
+    options.executionKind !== "worker-validation-repair"
+    || options.attemptId === undefined
+    || options.workerValidationRepair.attemptId !== options.attemptId
+  )) {
+    throw new Error("Worker validation-repair Attempt identity is not authorized");
+  }
+  const ordinal = recoveredAttempt?.ordinal ?? store.nextAttemptOrdinal(task.id);
   // Read base maxAttempts from immutable task snapshot, falling back to live settings for legacy tasks
   const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
   const maximumOrdinal = options?.maximumOrdinal ?? baseMaxAttempts;
@@ -502,28 +557,79 @@ export async function executeAttempt(
       `Task ${task.id} has reached maximum attempts (${maximumOrdinal}); cannot start attempt ${ordinal}`,
     );
   }
-  const attemptId = randomUUID();
+  const attemptId = recoveredAttempt?.id ?? options?.attemptId ?? randomUUID();
   const adapter = getWorkerAdapter(task.spec.runtime.name);
-  const attempt: AttemptRecord = {
-    id: attemptId,
-    taskId: task.id,
-    ordinal,
-    status: "running",
-    sessionId: task.sessionId,
-    rawLogPath: path.join(task.paths.logs, `attempt-${ordinal}.jsonl`),
-    startedAt: timestamp(),
-    runtimeBudgetUsd: options?.maxBudgetUsdOverride === undefined
-      ? task.spec.runtime.maxBudgetUsd
-      : options.maxBudgetUsdOverride,
-    runtimeBudgetEnforcement: adapter.capabilities().budgetFlag,
-  };
-  store.createAttempt(attempt);
+  const executionKind = options?.executionKind
+    ?? (correctionIntent === undefined ? "standard" : "main-correction");
+  let attempt: AttemptRecord;
+  if (recoveredAttempt === undefined) {
+    attempt = {
+      id: attemptId,
+      taskId: task.id,
+      ordinal,
+      status: "running",
+      sessionId: task.sessionId,
+      rawLogPath: path.join(task.paths.logs, `attempt-${ordinal}.jsonl`),
+      startedAt: timestamp(),
+      executionKind,
+      ...(options?.workerValidationRepair === undefined
+        ? {}
+        : { workerValidationRepairRound: options.workerValidationRepair.round }),
+      runtimeBudgetUsd: options?.maxBudgetUsdOverride === undefined
+        ? task.spec.runtime.maxBudgetUsd
+        : options.maxBudgetUsdOverride,
+      runtimeBudgetEnforcement: adapter.capabilities().budgetFlag,
+    };
+    store.createAttempt(attempt);
+  } else {
+    // A Daemon restart may reopen the exact interrupted repair Attempt. Clear
+    // terminal evidence before handing it back to the Runtime so persisted
+    // state cannot present a running Attempt with a stale pid or outcome.
+    // `undefined` is intentionally serialized away by StateStore; use the
+    // narrow update type here because exactOptionalPropertyTypes otherwise
+    // treats omission and explicit clearing as different operations.
+    store.updateAttempt(attemptId, {
+      status: "running",
+      pid: undefined,
+      finishedAt: undefined,
+      exitCode: undefined,
+      error: undefined,
+    } as unknown as Partial<AttemptRecord>);
+    attempt = store.getAttempt(attemptId);
+  }
   store.setTaskStatus(task.id, "running", {
     currentAttemptId: attemptId,
     error: null,
     finishedAt: null,
     ...(task.startedAt === undefined ? { startedAt: attempt.startedAt } : {}),
   });
+
+  // Same-Attempt continuation budget: the Runtime USD ceiling applies across
+  // the aggregate Attempt, never reset independently for each invocation.
+  // Fail closed (zero remaining) when any prior invocation lacks a finite
+  // non-negative cost estimate or actual cost; the original maximum is never
+  // restored by a later continuation.
+  const priorStoredCost = {
+    ...(attempt.costUsd === undefined ? {} : { costUsd: attempt.costUsd }),
+    ...(attempt.runtimeCostEstimateUsd === undefined
+      ? {}
+      : { runtimeCostEstimateUsd: attempt.runtimeCostEstimateUsd }),
+  };
+  const attemptBudgetCeiling = attempt.runtimeBudgetUsd ?? task.spec.runtime.maxBudgetUsd;
+  if (attemptBudgetCeiling !== undefined && attemptBudgetCeiling !== null) {
+    const remaining = remainingContinuationBudget(
+      attemptBudgetCeiling,
+      store.listEvents(task.id),
+      attemptId,
+      priorStoredCost,
+    );
+    // Pass the remaining budget to the Runtime without rewriting the durable
+    // original ceiling: the ceiling is the aggregate Attempt maximum and must
+    // never be reset (or over-reduced) by a later invocation.
+    if (attempt.runtimeBudgetUsd !== remaining) {
+      attempt = { ...attempt, runtimeBudgetUsd: remaining };
+    }
+  }
 
   // Idempotent optional release: one notification per Attempt at the
   // Worker-return / pre-verification boundary. Failures here never rewrite
@@ -571,6 +677,15 @@ export async function executeAttempt(
           ...(onProgress === undefined ? {} : { onEvent: onProgress }),
           wasInterrupted: forwarding.wasInterrupted,
           ...(feedback === undefined ? {} : { feedback }),
+          ...(correctionIntent === undefined ? {} : { correctionIntent }),
+          ...(options?.workerValidationRepair === undefined ? {} : {
+            validationRepairIntent: {
+              kind: "worker-validation-repair",
+              authorizationEventSequence: options.workerValidationRepair.authorizationEventSequence,
+              round: options.workerValidationRepair.round,
+              attemptId: attempt.id,
+            } satisfies WorkerValidationRepairExecutionIntent,
+          }),
         },
         execution: exec,
         ...(pd === undefined ? {} : { providerDefaults: pd }),
@@ -611,6 +726,19 @@ export async function executeAttempt(
   notifyWorkerProfileSlotRelease();
 
   const workerFinishedAt = timestamp();
+  // Canonical per-Attempt aggregation: combine the current Runtime invocation
+  // with every prior same-Attempt invocation. Runtime terminal metrics are
+  // per-invocation and never assumed cumulative, so totals and every aggregate
+  // limit see the whole Attempt, not the latest sub-run.
+  const attemptEvents = store.listEvents(task.id);
+  const aggregate = aggregateAttemptUsage(attemptEvents, attemptId, worker, {
+    ...(attempt.usage === undefined ? {} : { usage: attempt.usage }),
+    ...(attempt.costUsd === undefined ? {} : { costUsd: attempt.costUsd }),
+    ...(attempt.runtimeCostEstimateUsd === undefined
+      ? {}
+      : { runtimeCostEstimateUsd: attempt.runtimeCostEstimateUsd }),
+    ...(attempt.turns === undefined ? {} : { turns: attempt.turns }),
+  });
   const maxDurationMs = task.effectivePolicy?.values.maxDurationMs ?? null;
   if (
     maxDurationMs !== null
@@ -623,7 +751,7 @@ export async function executeAttempt(
       observed: duration.observedMs(),
       effect: "hard-fail",
       detail: "Worker exceeded the configured wall-duration limit",
-    });
+    }, aggregate);
   }
 
   if (worker.policyLimit !== undefined) {
@@ -635,12 +763,12 @@ export async function executeAttempt(
       finishedAt: workerFinishedAt,
       exitCode: worker.exitCode,
       ...(worker.resultText === undefined ? {} : { resultText: worker.resultText }),
-      ...(worker.costUsd === undefined ? {} : { costUsd: worker.costUsd }),
-      ...(worker.turns === undefined ? {} : { turns: worker.turns }),
-      ...(worker.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
-      ...(worker.usage === undefined ? {} : { usage: worker.usage }),
+      ...(aggregate.costUsd === undefined ? {} : { costUsd: aggregate.costUsd }),
+      ...(aggregate.turns === undefined ? {} : { turns: aggregate.turns }),
+      ...(aggregate.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: aggregate.runtimeCostEstimateUsd }),
+      ...(aggregate.usage === undefined ? {} : { usage: aggregate.usage }),
       ...(worker.error === undefined ? {} : { error: worker.error }),
-      officialCost: buildOfficialCost(task.spec.provider, worker.usage),
+      officialCost: buildOfficialCost(task.spec.provider, aggregate.usage),
     });
     store.setTaskStatus(task.id, "interrupted", {
       finishedAt: workerFinishedAt,
@@ -657,12 +785,12 @@ export async function executeAttempt(
       finishedAt: workerFinishedAt,
       exitCode: worker.exitCode,
       ...(worker.resultText === undefined ? {} : { resultText: worker.resultText }),
-      ...(worker.costUsd === undefined ? {} : { costUsd: worker.costUsd }),
-      ...(worker.turns === undefined ? {} : { turns: worker.turns }),
-      ...(worker.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
-      ...(worker.usage === undefined ? {} : { usage: worker.usage }),
+      ...(aggregate.costUsd === undefined ? {} : { costUsd: aggregate.costUsd }),
+      ...(aggregate.turns === undefined ? {} : { turns: aggregate.turns }),
+      ...(aggregate.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: aggregate.runtimeCostEstimateUsd }),
+      ...(aggregate.usage === undefined ? {} : { usage: aggregate.usage }),
       error: worker.error ?? "Worker execution failed",
-      officialCost: buildOfficialCost(task.spec.provider, worker.usage),
+      officialCost: buildOfficialCost(task.spec.provider, aggregate.usage),
     });
     store.setTaskStatus(task.id, "failed", {
       finishedAt: workerFinishedAt,
@@ -713,14 +841,16 @@ export async function executeAttempt(
   );
 
   // Post-observation Token enforcement from the immutable Task snapshot.
+  // The ceiling applies to the aggregate Attempt total (every same-Attempt
+  // invocation), never to the latest sub-run alone.
   const snap = task.effectivePolicy;
   if (snap !== undefined && worker.status === "succeeded") {
-    if (snap.values.observedTokenCeiling !== null && worker.usage !== undefined) {
+    if (snap.values.observedTokenCeiling !== null && aggregate.usage !== undefined) {
       const grossTokens =
-        worker.usage.inputTokens
-        + worker.usage.outputTokens
-        + worker.usage.cacheReadInputTokens
-        + worker.usage.cacheCreationInputTokens;
+        aggregate.usage.inputTokens
+        + aggregate.usage.outputTokens
+        + aggregate.usage.cacheReadInputTokens
+        + aggregate.usage.cacheCreationInputTokens;
       if (grossTokens > snap.values.observedTokenCeiling) {
         return failForPolicyLimit(store, task, attempt, worker, {
           category: "observed-token",
@@ -729,7 +859,7 @@ export async function executeAttempt(
           observed: grossTokens,
           effect: "hard-fail",
           detail: "Observed gross Tokens exceeded the configured ceiling",
-        });
+        }, aggregate);
       }
     }
   }
@@ -781,24 +911,35 @@ export async function executeAttempt(
       attemptId,
       task.spec.acceptance.commands.length,
     );
+  // Truthful MCP readiness from Claude init events: a supported runtime whose
+  // configured checkpoint server explicitly failed is supported-but-unavailable
+  // and must never be mistaken for Worker omission.
+  const checkpointMcpReadiness = checkpointCap === "unsupported"
+    ? ("unknown" as const)
+    : checkpointMcpReadinessFromEvents(store.listEvents(task.id), attemptId);
   const terminal = resolveTerminalAfterVerification({
     verificationPassed: verification.passed,
     checkpointCapability: checkpointCap,
     checkpointSatisfied: checkpointOk,
+    mcpReadiness: checkpointMcpReadiness,
   });
   if (terminal.recordCheckpointGap && terminal.gapReason !== undefined) {
     const reason = terminal.gapReason;
+    const summary = reason === "runtime-unsupported"
+      ? "Checkpoint skipped: runtime does not support ForkLight checkpoint MCP"
+      : reason === "mcp-unavailable"
+        ? "Checkpoint skipped: configured checkpoint MCP server was unavailable in Claude; independent verification is decisive"
+        : "Worker checkpoint missing or failed (non-authoritative); independent verification is decisive";
     store.addEvent(
       task.id,
       attemptId,
       "checkpoint.skipped",
-      reason === "runtime-unsupported"
-        ? "Checkpoint skipped: runtime does not support ForkLight checkpoint MCP"
-        : "Worker checkpoint missing or failed (non-authoritative); independent verification is decisive",
+      summary,
       {
         reason,
         runtime: task.spec.runtime.name,
         verificationPassed: verification.passed,
+        mcpReadiness: checkpointMcpReadiness,
       },
     );
   }
@@ -812,12 +953,12 @@ export async function executeAttempt(
     finishedAt,
     exitCode: worker.exitCode,
     ...(worker.resultText === undefined ? {} : { resultText: worker.resultText }),
-    ...(worker.costUsd === undefined ? {} : { costUsd: worker.costUsd }),
-    ...(worker.turns === undefined ? {} : { turns: worker.turns }),
-    ...(worker.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: worker.runtimeCostEstimateUsd }),
-    ...(worker.usage === undefined ? {} : { usage: worker.usage }),
+    ...(aggregate.costUsd === undefined ? {} : { costUsd: aggregate.costUsd }),
+    ...(aggregate.turns === undefined ? {} : { turns: aggregate.turns }),
+    ...(aggregate.runtimeCostEstimateUsd === undefined ? {} : { runtimeCostEstimateUsd: aggregate.runtimeCostEstimateUsd }),
+    ...(aggregate.usage === undefined ? {} : { usage: aggregate.usage }),
     ...(finalStatus === "failed" && failure !== undefined ? { error: failure } : {}),
-    officialCost: buildOfficialCost(task.spec.provider, worker.usage),
+    officialCost: buildOfficialCost(task.spec.provider, aggregate.usage),
   });
   store.setTaskStatus(task.id, finalStatus, {
     finishedAt,
@@ -967,6 +1108,24 @@ export async function correctTask(
     ].filter((item): item is string => item !== undefined).join("\n\n");
   }
 
+  // The typed correction intent is consumed from the durable grant, never
+  // inferred from feedback text. Ordinary resume and system-restart paths
+  // carry no intent, so only this explicit correction may cross a prior
+  // completed Codex native Goal boundary.
+  if (pending.executionOptions.authorizationEventSequence === undefined) {
+    throw new Error(`Task ${taskId} correction grant is missing its authorization event sequence`);
+  }
+  const correctionIntent: CorrectionExecutionIntent = {
+    kind: "main-correction",
+    authorizationEventSequence: pending.executionOptions.authorizationEventSequence,
+    ...(pending.candidateRevisionId === undefined
+      ? {}
+      : { candidateRevisionId: pending.candidateRevisionId }),
+    ...(pending.gapContractDigest === undefined
+      ? {}
+      : { gapContractDigest: pending.gapContractDigest }),
+  };
+
   return executeAttempt(
     store,
     task,
@@ -977,6 +1136,7 @@ export async function correctTask(
     providerDefaults,
     pending.executionOptions,
     onWorkerProfileSlotRelease,
+    correctionIntent,
   );
 }
 

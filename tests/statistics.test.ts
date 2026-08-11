@@ -1344,6 +1344,7 @@ function boundedTask(
         maxAdaptationRounds: 0,
         maxMainCorrections: 0,
         maxMainReverifications: 0,
+        maxWorkerValidationRepairs: 0,
       },
       provenance: {
         maxDurationMs: "global",
@@ -1362,6 +1363,7 @@ function boundedTask(
         maxAdaptationRounds: "global",
         maxMainCorrections: "global",
         maxMainReverifications: "global",
+        maxWorkerValidationRepairs: "global",
       },
       enforcementCapability: {
         durationEnforcement: "preemptive",

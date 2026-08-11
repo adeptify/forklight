@@ -9,6 +9,13 @@
  *   2. Succeeded Task whose latest valid Main Review is an exact `revise` of
  *      the current Attempt, latest verification, and (when modern revision
  *      history exists) the exact reviewed Candidate Revision.
+ *   3. Runtime-workspace path: a failed/interrupted Task whose latest Attempt
+ *      is failed/interrupted with exact-Attempt worker.started/resumed evidence
+ *      but no valid verification.completed bound to that Attempt. The Worker
+ *      really launched and may have left useful files before ending; reverify
+ *      reruns the original acceptance suite against the retained workspace
+ *      without launching a Worker or creating an Attempt. An empty recomputed
+ *      business Diff fails closed as a no-candidate outcome.
  *
  * Boundaries (product contract):
  *   - Never invoke a Worker, create an Attempt, rewrite the prior Attempt, or
@@ -46,6 +53,7 @@ import {
   resolveRevisionForAttempt,
 } from "./candidate-revision.js";
 import { executeVerificationPass } from "./verifier.js";
+import { failureCategoryFromEvents } from "./worker-failure.js";
 import { isoTimestamp as timestamp } from "./time.js";
 
 // --- Constants ---
@@ -70,7 +78,10 @@ export type CandidateReverificationEligibilityCategory =
   | "allowance-exhausted"
   | "no-main-revise"
   | "reviewed-revision-mismatch"
-  | "already-integrated";
+  | "already-integrated"
+  | "runtime-not-started"
+  | "runtime-auth-failed"
+  | "runtime-policy-limit";
 
 const REJECTION_MESSAGES: Record<Exclude<CandidateReverificationEligibilityCategory, "eligible">, string> = {
   "task-not-failed":
@@ -96,6 +107,12 @@ const REJECTION_MESSAGES: Record<Exclude<CandidateReverificationEligibilityCateg
     "candidate reverification rejected: latest Main revise is not bound to the exact reviewed Candidate Revision",
   "already-integrated":
     "candidate reverification rejected: Task already has Integration results",
+  "runtime-not-started":
+    "candidate reverification rejected: the latest Attempt has no worker.started/resumed evidence; the runtime never actually launched, so there is no retained run to reverify",
+  "runtime-auth-failed":
+    "candidate reverification rejected: the run failed Provider authentication; no retained Candidate can be reverified",
+  "runtime-policy-limit":
+    "candidate reverification rejected: the run hit a policy limit (budget or infeasible contract); use Main correction, policy revision, or a new Task",
 };
 
 /** Stable privacy-safe message for an eligibility category. Never echoes
@@ -126,9 +143,17 @@ export interface CandidateReverificationAllowanceView {
   source: ProvenanceSource;
 }
 
+/** Which eligibility path produced the eligible result (and later the outcome). */
+export type CandidateReverificationPath =
+  | "behavior-failure"
+  | "succeeded-repair"
+  | "runtime-workspace";
+
 export interface CandidateReverificationEligibility {
   eligible: boolean;
   category: CandidateReverificationEligibilityCategory;
+  /** Explicit eligible path. Present only when `eligible` is true. */
+  eligiblePath?: CandidateReverificationPath;
   /** The retained Attempt that would be reverified, when one exists. */
   attemptId?: string;
   /** The latest verification event sequence, when one exists for the latest Attempt. */
@@ -159,8 +184,12 @@ export interface CandidateReverificationCostFacts {
   noFullRestartSavingsClaim: true;
 }
 
+export type CandidateReverificationResultStatus = "passed" | "failed" | "no-candidate";
+
 export interface CandidateReverificationResult {
-  status: "passed" | "failed";
+  status: CandidateReverificationResultStatus;
+  /** The exact path that produced this outcome. */
+  path: CandidateReverificationPath;
   taskId: string;
   /** The retained Attempt id (its original status is preserved, never rewritten). */
   attemptId: string;
@@ -171,12 +200,15 @@ export interface CandidateReverificationResult {
   verification: VerificationResult;
   allowance: CandidateReverificationAllowanceView;
   costFacts: CandidateReverificationCostFacts;
-  /** Whether a fresh Main Review accept is required before Integration. Always true. */
-  requiresFreshMainAccept: true;
+  /** Whether a fresh Main Review accept is required before Integration. True
+   *  for every non-empty retained Candidate (pass or failed checks); false for
+   *  the no-candidate outcome where there is nothing to accept. */
+  requiresFreshMainAccept: boolean;
 }
 
 export interface CandidateReverificationView {
-  status: "passed" | "failed";
+  status: CandidateReverificationResultStatus;
+  path: CandidateReverificationPath;
   taskId: string;
   taskStatus: TaskRecord["status"];
   attemptId: string;
@@ -184,7 +216,7 @@ export interface CandidateReverificationView {
   verificationEventSequence: number;
   allowance: CandidateReverificationAllowanceView;
   costFacts: CandidateReverificationCostFacts;
-  requiresFreshMainAccept: true;
+  requiresFreshMainAccept: boolean;
 }
 
 // --- Helpers ---
@@ -303,14 +335,15 @@ export function resolveCandidateReverificationEligibility(
     return { eligible: false, category: "running-attempt", allowance };
   }
 
-  if (task.status === "failed") {
-    return resolveFailedPathEligibility(
+  if (task.status === "failed" || task.status === "interrupted") {
+    return resolveFailedOrInterruptedPathEligibility(
       store,
       taskId,
       attempts,
       events,
       allowance,
       maxMainReverifications,
+      task.status,
     );
   }
   if (task.status === "succeeded") {
@@ -324,6 +357,175 @@ export function resolveCandidateReverificationEligibility(
     );
   }
   return { eligible: false, category: "task-not-failed", allowance };
+}
+
+/**
+ * Failed/interrupted Task eligibility. ANY verification.completed evidence
+ * bound to the latest Attempt owns the next step — valid evidence uses the
+ * existing behavior-only rules, malformed evidence fails closed. Only a latest
+ * Attempt with no verification.completed evidence at all can use the
+ * runtime-workspace path (and only when the Worker really started).
+ */
+function resolveFailedOrInterruptedPathEligibility(
+  store: StateStore,
+  taskId: string,
+  attempts: readonly AttemptRecord[],
+  events: readonly EventRecord[],
+  allowance: CandidateReverificationAllowanceView,
+  maxMainReverifications: number,
+  taskStatus: TaskRecord["status"],
+): CandidateReverificationEligibility {
+  const latest = latestAttempt(attempts);
+  if (
+    latest === undefined
+    || (latest.status !== "succeeded"
+      && latest.status !== "failed"
+      && latest.status !== "interrupted")
+  ) {
+    return { eligible: false, category: "no-completed-attempt", allowance };
+  }
+  // ANY verification.completed evidence bound to the latest Attempt owns the
+  // next step — valid or not. Valid evidence uses the existing behavior-only
+  // rules; malformed evidence fails closed ("no-failed-verification") and can
+  // never open the runtime-workspace path. Only a latest Attempt with no
+  // verification.completed evidence at all is a candidate for the runtime path.
+  const latestAttemptVerification = events
+    .filter(
+      (event) => event.type === "verification.completed" && event.attemptId === latest.id,
+    )
+    .reduce<EventRecord | undefined>(
+      (latestEvent, event) => latestEvent === undefined || event.sequence > latestEvent.sequence
+        ? event
+        : latestEvent,
+      undefined,
+    );
+  if (latestAttemptVerification !== undefined) {
+    if (taskStatus === "failed") {
+      return resolveFailedPathEligibility(
+        store,
+        taskId,
+        attempts,
+        events,
+        allowance,
+        maxMainReverifications,
+      );
+    }
+    return { eligible: false, category: "task-not-failed", allowance };
+  }
+
+  // No valid independent verification bound to the latest Attempt. The
+  // runtime-workspace path requires a failed/interrupted Attempt — a succeeded
+  // Attempt with missing verification is not a retained runtime run.
+  if (latest.status !== "failed" && latest.status !== "interrupted") {
+    return {
+      eligible: false,
+      category: "no-failed-verification",
+      attemptId: latest.id,
+      allowance,
+    };
+  }
+  return resolveRuntimeWorkspacePathEligibility(
+    store,
+    taskId,
+    latest,
+    events,
+    allowance,
+    maxMainReverifications,
+  );
+}
+
+/**
+ * Runtime-workspace eligibility: a Worker really launched (exact-Attempt
+ * worker.started/resumed evidence) and its latest Attempt ended before any
+ * verification completed. Rejects launch/doctor failures, authentication and
+ * policy-limit terminal paths, integration, and exhausted allowance. Read-only.
+ */
+function resolveRuntimeWorkspacePathEligibility(
+  store: StateStore,
+  taskId: string,
+  latest: AttemptRecord,
+  events: readonly EventRecord[],
+  allowance: CandidateReverificationAllowanceView,
+  maxMainReverifications: number,
+): CandidateReverificationEligibility {
+  if (store.listIntegrationResults(taskId).length > 0) {
+    return {
+      eligible: false,
+      category: "already-integrated",
+      attemptId: latest.id,
+      allowance,
+    };
+  }
+  const hasExactWorkerStart = events.some(
+    (event) =>
+      event.attemptId === latest.id
+      && (event.type === "worker.started" || event.type === "worker.resumed"),
+  );
+  if (!hasExactWorkerStart) {
+    return {
+      eligible: false,
+      category: "runtime-not-started",
+      attemptId: latest.id,
+      allowance,
+    };
+  }
+  // Newest classified failure category for THIS Attempt only (auth preflight,
+  // worker.failed, verification.completed). Older Attempt authentication,
+  // budget, contract, or policy evidence can never block a newer eligible run.
+  const attemptEvents = events.filter((event) => event.attemptId === latest.id);
+  const failureCategory = failureCategoryFromEvents(attemptEvents);
+  if (failureCategory === "authentication") {
+    return {
+      eligible: false,
+      category: "runtime-auth-failed",
+      attemptId: latest.id,
+      allowance,
+    };
+  }
+  // Every exact-Attempt policy-limit family is excluded: budget/contract
+  // classification AND the durable policy.* terminal event families
+  // (duration, token, no-progress, size).
+  const hasExactPolicyLimitEvent = attemptEvents.some((event) =>
+    event.type === "policy.duration.exceeded"
+    || event.type === "policy.token.exceeded"
+    || event.type === "policy.noprogress.exceeded"
+    || event.type === "policy.size.exceeded",
+  );
+  if (
+    failureCategory === "budget"
+    || failureCategory === "contract-infeasible"
+    || hasExactPolicyLimitEvent
+  ) {
+    return {
+      eligible: false,
+      category: "runtime-policy-limit",
+      attemptId: latest.id,
+      allowance,
+    };
+  }
+  if (maxMainReverifications === 0) {
+    return {
+      eligible: false,
+      category: "allowance-zero",
+      attemptId: latest.id,
+      allowance,
+    };
+  }
+  if (allowance.consumed >= maxMainReverifications) {
+    return {
+      eligible: false,
+      category: "allowance-exhausted",
+      attemptId: latest.id,
+      allowance,
+    };
+  }
+  return {
+    eligible: true,
+    category: "eligible",
+    eligiblePath: "runtime-workspace",
+    attemptId: latest.id,
+    allowance,
+  };
 }
 
 function resolveFailedPathEligibility(
@@ -396,6 +598,7 @@ function resolveFailedPathEligibility(
   return {
     eligible: true,
     category: "eligible",
+    eligiblePath: "behavior-failure",
     attemptId: latest.id,
     verificationEventSequence: verificationEvent.sequence,
     allowance,
@@ -477,6 +680,7 @@ function resolveSucceededPathEligibility(
   return {
     eligible: true,
     category: "eligible",
+    eligiblePath: "succeeded-repair",
     attemptId: latest.id,
     verificationEventSequence: verificationEvent.sequence,
     allowance,
@@ -531,8 +735,11 @@ export async function reverifyCandidate(
   if (!eligibility.eligible) {
     throw new Error(rejectionMessage(eligibility.category));
   }
+  const path = eligibility.eligiblePath ?? "behavior-failure";
   const attemptId = eligibility.attemptId!;
-  const priorVerificationSequence = eligibility.verificationEventSequence!;
+  // The runtime-workspace path has no prior verification evidence; 0 records
+  // "no prior verification" without leaking anything private.
+  const priorVerificationSequence = eligibility.verificationEventSequence ?? 0;
 
   activeReverifications.add(input.taskId);
 
@@ -547,6 +754,7 @@ export async function reverifyCandidate(
       "Candidate reverification authorized",
       {
         attemptId,
+        path,
         reasonLength: reason.length,
         priorVerificationSequence,
         allowanceBefore,
@@ -563,6 +771,7 @@ export async function reverifyCandidate(
       "Candidate reverification started",
       {
         attemptId,
+        path,
         acceptanceCommandCount,
         workerInvoked: false,
       },
@@ -595,12 +804,81 @@ export async function reverifyCandidate(
       verification,
     );
     const verificationEventSequence = completedEvent.sequence;
+    const attempt = store.getAttempt(attemptId);
 
-    // 7a. Capture exact Candidate Revision bound to this verification event
+    // 7a. Runtime-workspace path fails closed on an empty recomputed business
+    // Diff. This happens only AFTER the full acceptance rerun, and it never
+    // depends on noChangeMode: an empty patch is never a Candidate. The Task
+    // stays failed/interrupted, no Candidate Revision is captured, a stable
+    // privacy-safe no-candidate outcome is recorded, and nothing marks success.
+    if (path === "runtime-workspace" && !businessPatchNonEmpty(verification)) {
+      const noCandidateCommandCount = verification.commands.length;
+      const noCandidatePassed = verification.commands.filter(
+        (command) => command.exitCode === 0 && !command.timedOut,
+      ).length;
+      const noCandidateCommandDurationMs = verification.commands.reduce(
+        (sum, command) => sum + command.durationMs,
+        0,
+      );
+      const eventsAfterNoCandidate = store.listEvents(input.taskId);
+      const allowanceAfterNoCandidate = resolveAllowance(
+        task,
+        eventsAfterNoCandidate,
+        maxMainReverifications,
+      );
+      const noCandidateCostFacts: CandidateReverificationCostFacts = {
+        workerInvoked: false,
+        incrementalWorkerTokens: 0,
+        incrementalModelRuntimeCostUsd: 0,
+        commandCount: noCandidateCommandCount,
+        passedCommandCount: noCandidatePassed,
+        commandDurationMs: noCandidateCommandDurationMs,
+        wallDurationMs,
+        localVerificationTimeNotZero: true,
+        mainExchangeNotZero: true,
+        noFullRestartSavingsClaim: true,
+      };
+      store.addEvent(
+        input.taskId,
+        attemptId,
+        "candidate.reverification.completed",
+        `Candidate reverification no-candidate: ${noCandidatePassed}/${noCandidateCommandCount} commands passed, no retained workspace change`,
+        {
+          status: "no-candidate",
+          path,
+          attemptId,
+          attemptStatus: attempt.status,
+          verificationEventSequence,
+          workerInvoked: false,
+          incrementalWorkerTokens: 0,
+          incrementalModelRuntimeCostUsd: 0,
+          commandCount: noCandidateCommandCount,
+          passedCommandCount: noCandidatePassed,
+          commandDurationMs: noCandidateCommandDurationMs,
+          wallDurationMs,
+          allowance: allowanceAfterNoCandidate,
+          requiresFreshMainAccept: false,
+          inputTaskStatus,
+        },
+      );
+      return {
+        status: "no-candidate",
+        path,
+        taskId: input.taskId,
+        attemptId,
+        attemptStatus: attempt.status,
+        verificationEventSequence,
+        verification,
+        allowance: allowanceAfterNoCandidate,
+        costFacts: noCandidateCostFacts,
+        requiresFreshMainAccept: false,
+      };
+    }
+
+    // 7b. Capture exact Candidate Revision bound to this verification event
     // before any status transition. On capture failure, keep the prior Task
     // status, preserve Attempt/history, record a stable content-free failure
     // event, return failed zero-Worker facts, and never retry.
-    const attempt = store.getAttempt(attemptId);
     let revisionCaptureFailed = false;
     try {
       const businessPatch = verification.patches?.business;
@@ -644,6 +922,9 @@ export async function reverifyCandidate(
 
     // 8. Status transitions:
     //    - Failed path on pass + successful capture: move Task to "succeeded".
+    //    - Runtime-workspace path on pass + successful capture: a failed OR
+    //      interrupted Task may move to "succeeded"; the original Attempt
+    //      stays failed/interrupted (never rewritten).
     //    - Succeeded path: never rewrite the machine-success Task status.
     //    - Preserve the retained Attempt (never rewrite it). currentAttemptId
     //      already points at the retained Attempt, so Main Review accept will
@@ -652,7 +933,8 @@ export async function reverifyCandidate(
     if (
       verification.passed
       && !revisionCaptureFailed
-      && inputTaskStatus === "failed"
+      && (inputTaskStatus === "failed"
+        || (path === "runtime-workspace" && inputTaskStatus === "interrupted"))
     ) {
       store.setTaskStatus(input.taskId, "succeeded", {
         error: null,
@@ -686,6 +968,7 @@ export async function reverifyCandidate(
       `Candidate reverification ${status}: ${passedCommandCount}/${commandCount} commands passed`,
       {
         status,
+        path,
         attemptId,
         attemptStatus: attempt.status,
         verificationEventSequence,
@@ -704,6 +987,7 @@ export async function reverifyCandidate(
 
     return {
       status,
+      path,
       taskId: input.taskId,
       attemptId,
       attemptStatus: attempt.status,
@@ -725,6 +1009,7 @@ export function projectCandidateReverificationResult(
 ): CandidateReverificationView {
   return {
     status: result.status,
+    path: result.path,
     taskId: result.taskId,
     taskStatus,
     attemptId: result.attemptId,
@@ -732,6 +1017,6 @@ export function projectCandidateReverificationResult(
     verificationEventSequence: result.verificationEventSequence,
     allowance: result.allowance,
     costFacts: result.costFacts,
-    requiresFreshMainAccept: true,
+    requiresFreshMainAccept: result.requiresFreshMainAccept,
   };
 }

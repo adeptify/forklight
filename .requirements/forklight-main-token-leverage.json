@@ -1,0 +1,339 @@
+{
+  "schema_version": "1.0",
+  "meta": {
+    "goal_id": "forklight-main-token-leverage",
+    "title": "让 Main 用更少 Token 驱动 Worker 高质量完成工作",
+    "status": "confirmed",
+    "mode": "long-run",
+    "runtime": "codex",
+    "clarity_score": 96,
+    "summary": "ForkLight 要成为由强 Main 主导的通用执行系统。Main 可以并且应该理解需求、补全业务背景、制定 Goal、Plan、Task、选择 Worker、审查和决策；Worker 负责研究、实现、验证和迭代。ForkLight 通过合适的 Runtime Goal、持续会话、任务依赖、审查修复、成果复用和智能路由，让 Worker 尽可能高质量地端到端交付，并用真实对照证明这种分工为 Main 节约了多少 Token。先让 CLI/API 完整可用，最后再统一设计 Hub。",
+    "summary_confirmed": true,
+    "budget": "不设长期 Goal 的总 Token 或墙钟上限；单项执行默认最多一轮自动修复和一次 Main 修正；无新增证据即停止，里程碑边界停下验收",
+    "persist": "full",
+    "checkpoint": "evidence",
+    "created_at": "2026-08-09T00:00:00+08:00",
+    "updated_at": "2026-08-09T12:00:00+08:00",
+    "source": {
+      "seed": "重新建立 ForkLight Goal：以节约 Main Token 和 Worker 高质量交付为核心，支持通用 Coding/非 Coding 任务；CLI/API 先毕业，UI 最后统一设计。"
+    }
+  },
+  "context": {
+    "repo_scan": {
+      "branch": "main",
+      "stack": [
+        "TypeScript",
+        "Node.js 24+",
+        "SQLite",
+        "Daemon",
+        "CLI",
+        "MCP/API",
+        "Web Hub"
+      ],
+      "readme_summary": "现有 ForkLight 是 local-first 执行中枢，已有 Task/Attempt/Candidate、隔离工作区、多 Runtime、Goal/Plan/Task、独立验证、Integration、Hub 和统计基础。",
+      "agents_files": [
+        "AGENTS.md"
+      ],
+      "conventions": [
+        "Main 拥有意图、规划、拆分、路由、审查和集成决策",
+        "实质迭代必须真实 dogfood ForkLight",
+        "Worker 不得写原仓、commit 或 push",
+        "独立验证、隔离和明确授权不能被关闭",
+        "完成前运行 npm run check"
+      ],
+      "scan_notes": [
+        "main 工作树包含大量未提交既有改动，重建基线时不得 reset 或覆盖",
+        "现有 PROJECT.md 约 500 行且 docs 中存在大量阶段合同，需要收敛为新的 Goal 目录",
+        "本地 Store 约有 553 Task、815 Attempt、288784 Event、10 Goal、13 Plan、192 Integration，SQLite 约 439 MB",
+        "旧记录只有满足路由或 Main Token 对照证据资格时才留在 Live Store；清理前必须完整备份",
+        "FL-116B 已通过 Worker 与独立验证，停在 awaiting-main-review，是否保留由新 Goal 相关性审查决定"
+      ]
+    },
+    "terms": [
+      {
+        "term": "Main Token 杠杆",
+        "definition": "Main 把 Token 用于理解、规划、拆分、路由、审查和关键决策；把研究、实现、测试和迭代交给 Worker。节约量是同范围同验收下，Main 亲自完成的 Token 减去 Main 实际编排与审查 Token。",
+        "source": "user",
+        "status": "confirmed"
+      },
+      {
+        "term": "完整背景",
+        "definition": "Worker 在执行前获得与任务有关的业务目的、用户、上级 Goal/Plan、当前现状、历史决策、输入材料、预期用途、边界、授权、质量标准和验收；技术模块只是 Coding Task 的可选部分。",
+        "source": "user",
+        "status": "confirmed"
+      },
+      {
+        "term": "通用任务",
+        "definition": "Goal/Plan/Task 的核心合同不假设产出一定是代码补丁；可承载 Coding、研究、产品、设计、增长、内容、分析等工作，并按任务类型使用不同产物和验收方式。",
+        "source": "user",
+        "status": "confirmed"
+      },
+      {
+        "term": "高质量交付",
+        "definition": "Worker 不只产出初稿，而是在自己的执行链内完成必要研究、实现、验证和有限修正，返回满足合同的产物、证据、风险和待 Main 决策事项。",
+        "source": "user",
+        "status": "confirmed"
+      },
+      {
+        "term": "Runtime Goal 策略",
+        "definition": "Runtime 存在真实可观测的原生 Goal 时优先使用；否则使用持久 Session、续跑、检查点、分阶段 Task、裁判 Worker或其他诚实策略，不伪装原生 Goal。",
+        "source": "user",
+        "status": "confirmed"
+      },
+      {
+        "term": "唯一信息源",
+        "definition": "一个 Goal 目录是项目管理唯一入口，包含目标、路线图、进度、决策和证据；PROJECT.md 仅做短入口，旧阶段文档不再维持另一套状态。",
+        "source": "user",
+        "status": "confirmed"
+      },
+      {
+        "term": "值得保留的旧任务",
+        "definition": "具有完整范围、身份、结果、验证、Main 判断和失败归因，能支持公平路由；或具有同范围同验收的直接 Main 对照，能支持可信 Main Token 评估的记录。",
+        "source": "user",
+        "status": "confirmed"
+      }
+    ]
+  },
+  "goal": {
+    "outcome": "对具有明确验收的 Coding 和非 Coding 工作，Main 能充分理解背景并制定 Goal、Plan、Task，由 ForkLight 选择合适 Worker 和执行策略，使 Worker 持续完成研究、实现、验证与有限修正；Main 只需承担规划、关键决策和最终审查。交付质量不低于 Main 直接完成的同范围基线，且 ForkLight 能用可审计的成对证据证明 Main Token 得到节约。",
+    "verification": {
+      "commands": [
+        "npm install",
+        "npm run check",
+        "node dist/src/cli.js doctor --json",
+        "node dist/src/cli.js health --json",
+        "node dist/src/cli.js goal list --json",
+        "node dist/src/cli.js board --json",
+        "node dist/src/cli.js stats --json"
+      ],
+      "artifacts": [
+        "goals/forklight-main-token-leverage/plan.md",
+        "goals/forklight-main-token-leverage/progress.md",
+        "goals/forklight-main-token-leverage/decisions.md",
+        "goals/forklight-main-token-leverage/evidence/data-retention-report.json",
+        "goals/forklight-main-token-leverage/evidence/coding-delegation-run.md",
+        "goals/forklight-main-token-leverage/evidence/noncoding-delegation-run.md",
+        "goals/forklight-main-token-leverage/evidence/main-token-pairs.json",
+        "goals/forklight-main-token-leverage/evidence/clean-clone-run.md",
+        "最终 Hub 桌面和手机截图及 Impeccable verdict"
+      ],
+      "evidence_sources": [
+        "全量测试、构建、Daemon 与 API/CLI 合同测试",
+        "真实 Coding 与非 Coding Goal/Plan/Task dogfood",
+        "Worker 自检、独立验证、裁判、修复、Candidate 与 Main 决策链",
+        "同范围同验收的直接 Main 与委派执行成对样本",
+        "清理前备份、资格 dry-run、删除清单和隔离恢复演练",
+        "CLI/API clean-clone 验收，以及最后的 Hub 可用性验收"
+      ]
+    },
+    "constraints": [
+      "Main 负责理解、背景补全、目标规划、任务拆分、路由、审查和关键决策；节约 Main Token 不等于取消 Main 的高价值工作",
+      "Goal、Plan、Task 必须先表达业务与用户背景、目标和产物用途，再附加领域或技术细节",
+      "核心合同与 API 不绑定代码补丁；Coding 是首个成熟域，至少一个真实非 Coding 场景必须端到端通过",
+      "Worker 应在自身执行链内研究、实现、自检和有限修正；普通执行问题不得过早抛回 Main",
+      "真实原生 Runtime Goal 优先；不支持时必须使用诚实的替代策略并显示实际模式",
+      "交付质量是硬门槛；Main Token 节约是北极星；Worker Token、费用和时间作为透明的次级权衡",
+      "没有同范围同验收的直接 Main 对照，不得声称节约了 Main Token",
+      "历史数据只在满足路由或 Main Token 评估资格时留在 Live Store；删除前完整备份、dry-run 和恢复验证，永久删除备份另行批准",
+      "先完成 CLI/API 和真实执行链，再统一设计 Hub；前期不继续零碎修 UI",
+      "每项默认最多一轮 Worker 自动修复和一次 Main 修正；无新增证据就停止，不自动换模型重做",
+      "ForkLight 实质改动继续 dogfood ForkLight，Main 审查后才允许 Integration",
+      "未经一骏明确授权不得 commit 或 push",
+      "开发优先选择能闭环的最简单方案；没有至少两个真实重复场景或明确当前需求，不新增通用抽象、策略层或配置项",
+      "实现只解决当前验收范围；发现非阻断边角问题记录到 later，不得自动扩大合同或开启新任务",
+      "验证按风险分层：Worker 先跑聚焦测试和必要构建；完整套件在候选集成或里程碑关口运行一次，除非源码变化使证据失效",
+      "达到约定质量和验收后立即收口；不为了理论完美、极低概率边界或更漂亮的统计继续迭代"
+    ],
+    "boundaries": {
+      "in_scope": [
+        "领域无关的 Goal/Plan/Task 背景合同、依赖和执行状态",
+        "Main 到 Worker 的上下文选择、压缩、交付包和决策回传",
+        "多 Runtime/模型/effort、原生 Goal、持续 Session、并发、恢复和策略选择",
+        "Worker 自检、独立验证、裁判、有限修复、部分成果复用、跨 Worker 交接和安全 Integration",
+        "证据驱动路由、例外 Competition、模型能力统计和执行策略学习",
+        "Main Token 成对测量，以及质量、Worker Token、费用和时间的完整价值报告",
+        "完整 CLI/API、诊断、备份恢复、Coding/非 Coding dogfood和 clean-clone 使用",
+        "CLI/API 毕业后的 Impeccable Hub 统一设计与首次使用引导",
+        "新 SSOT、真实进度重建、旧文档收敛和历史数据清理"
+      ],
+      "out_of_scope": [
+        "多人协作、组织权限和云同步",
+        "托管 SaaS 控制面",
+        "一次性覆盖所有非 Coding 行业；本轮只要求通用合同和至少一个真实非 Coding 场景",
+        "正式开源治理、社区运营和公共发布流程",
+        "签名 macOS App、自动更新和 App Store",
+        "仅为了统计而重跑工作或制造模型比较",
+        "在 CLI/API 未毕业前重做 Hub"
+      ],
+      "allowed_paths": [
+        "/Users/yijunwang/code/forklight",
+        "/Users/yijunwang/Library/Application Support/ForkLight（仅在备份和清理计划获批后）"
+      ],
+      "forbidden_paths": [
+        "其他产品仓库",
+        "Provider 凭据和 Keychain 内容",
+        "未备份的 Store 或运行目录",
+        "远端 Git 仓库（未经授权）"
+      ]
+    },
+    "metrics": [
+      {
+        "name": "Main Token 节约",
+        "baseline": "现有少量样本不足以形成可信结论",
+        "target": "每个已毕业代表任务族均有同范围同验收成对样本，委派后的 Main Token 低于直接 Main；整体报告中位节约率且不夸大",
+        "unit": "Token 与百分比",
+        "measurement": "direct Main tokens - Main orchestration/review tokens；Worker Token 单独报告"
+      },
+      {
+        "name": "交付质量",
+        "baseline": "当前仍出现 Worker 写完后由 Main 发现构建或语义问题",
+        "target": "用于 Main Token 结论的委派交付质量不低于直接 Main 基线，并通过对应领域验收",
+        "unit": "通过率与审查结论",
+        "measurement": "同验收命令或领域 rubric、独立验证和 Main review"
+      },
+      {
+        "name": "Worker 端到端完成率",
+        "baseline": "当前缺少稳定的通用统计",
+        "target": "代表性 Coding 与非 Coding 任务无需 Main 亲自执行即可完成；需要 Main 时只返回关键决策",
+        "unit": "任务比例",
+        "measurement": "Attempt、修复、决策请求与 Main-direct 记录"
+      },
+      {
+        "name": "背景合同完整度",
+        "baseline": "当前 Task 以技术交代为主，业务和用户背景不足",
+        "target": "100% 新 Task 明确 why、上级 Goal/Plan、用户/对象、现状、输入、产出用途、边界、质量标准和验收；不适用项明确说明",
+        "unit": "字段与语义检查",
+        "measurement": "CLI/API contract validation 和真实任务审计"
+      },
+      {
+        "name": "执行模式真实性",
+        "baseline": "不同 Runtime Goal 能力不一致",
+        "target": "100% Attempt 显示实际使用的 native Goal、persistent session、single run 或其他策略，不伪装支持",
+        "unit": "Attempt",
+        "measurement": "冻结策略快照和 Runtime 事件"
+      },
+      {
+        "name": "CLI/API 覆盖",
+        "baseline": "已有大量能力但接口语义仍偏 Coding 且不统一",
+        "target": "所有核心流程先通过 CLI/API 完成，Coding 与非 Coding 真实任务均不依赖 Hub 或数据库手改",
+        "unit": "核心流程",
+        "measurement": "合同测试与 clean CLI/API dogfood"
+      },
+      {
+        "name": "Live Store 保留纯度",
+        "baseline": "约 553 个旧 Task 未按证据价值筛选",
+        "target": "100% 保留旧任务满足路由或 Main Token 评估资格，其余在获批后删除",
+        "unit": "比例",
+        "measurement": "资格 dry-run、清理报告和引用完整性检查"
+      },
+      {
+        "name": "下载后首次交付",
+        "baseline": "尚无合格 clean-user 旅程",
+        "target": "陌生开发者克隆仓库后 30 分钟内完成配置和真实交付，不查数据库、不手改配置",
+        "unit": "分钟",
+        "measurement": "最终 CLI/API + Hub clean-clone 观察记录"
+      }
+    ],
+    "iteration_policy": "启动整理不算产品里程碑：先收口当前 Candidate、建立精确基线和完整备份，再落地新 SSOT并清理无价值历史。产品里程碑为：M1 通用任务合同与 CLI/API——Main 能把完整背景组织成 Goal/Plan/Task并派发 Coding/非 Coding 工作；M2 持续高质量交付——Runtime Goal/替代策略、依赖、恢复、自检、裁判、有限修复、复用和安全 Integration 形成闭环；M3 智能委派——路由、Competition、模型能力和执行策略基于公平证据工作；M4 Main Token 杠杆——每个代表任务族都能在质量不降的前提下证明 Main Token 节约并同时报告 Worker 成本/时间；M5 产品毕业——CLI/API 先完成 clean-clone，再用 Impeccable 一次性设计功能完备 Hub并通过 30 分钟首次交付。所有里程碑都是总 Goal 的必需能力。里程碑内可自动推进；里程碑边界展示结果并等待确认。 每轮先选能形成端到端闭环的最小切片；复用现有能力，不预建未来框架。非阻断发现只记录，不在当前轮处理。聚焦验证随 Task 执行，完整套件只在 Candidate 集成或里程碑关口运行一次；达到验收立即收口。",
+    "blocked_stop": "同一交付在一轮 Worker 自动修复和一次 Main 修正后仍不满足验收，或连续两次没有新增证据，停止并向 Main 返回已完成成果、缺口、证据和所需决策；不得自动换模型重做、扩大范围、让 Main 接管普通执行或继续无界打磨。",
+    "priority": "p0",
+    "mvp_vs_later": {
+      "mvp": [
+        "M1：通用背景合同、Goal/Plan/Task 与完整 CLI/API",
+        "M2：Worker 持续高质量交付、修复、裁判、复用和 Integration",
+        "M3：证据驱动的智能路由、Competition 和策略学习",
+        "M4：质量不降前提下的真实 Main Token 节约与完整价值报告",
+        "M5：CLI/API clean-clone、Impeccable Hub 和 30 分钟首次交付"
+      ],
+      "later": [
+        "多人协作与组织权限",
+        "云服务",
+        "全面覆盖所有非 Coding 领域",
+        "正式开源治理",
+        "签名 macOS App 和自动更新"
+      ]
+    }
+  },
+  "clarification_log": [
+    {
+      "question": "ForkLight 的根本目标是什么？",
+      "answer": "通过 Worker 执行工作为 Main 节约 Token，同时保证 Worker 通过合理 Goal、Plan、Task 和 Runtime 策略持续高质量交付。"
+    },
+    {
+      "question": "Main 是否应减少规划和拆分？",
+      "answer": "不是。Main 可以并且应该拆分、规划、调度、审查；节约的是 Main 亲自研究、实现、测试和反复修复的 Token。"
+    },
+    {
+      "question": "Worker 需要什么背景？",
+      "answer": "不只技术交代，还要有业务、用户、上级目标、现状、历史决策、材料、产出用途、边界、质量和验收。"
+    },
+    {
+      "question": "是否只支持 Coding？",
+      "answer": "核心合同要支持未来的非 Coding 任务；本轮至少用一个真实非 Coding 场景验收，不要求覆盖全部领域。"
+    },
+    {
+      "question": "CLI/API 与 UI 顺序？",
+      "answer": "先保证 CLI/API 可用，UI 最后功能完备后统一设计。"
+    },
+    {
+      "question": "旧数据怎么处理？",
+      "answer": "完整备份；能用于智能路由或 Main Token 评估的保留，否则删除；永久删备份前再次批准。"
+    },
+    {
+      "question": "SSOT 怎么组织？",
+      "answer": "一个 Goal 目录作为唯一入口。"
+    },
+    {
+      "question": "下载后怎样算可用？",
+      "answer": "陌生开发者 30 分钟内完成首个真实任务。"
+    },
+    {
+      "question": "开发过程如何控制复杂度？",
+      "answer": "不要把简单事情复杂化，不钻牛角尖；优先最短闭环，非阻断问题不扩 scope，达到验收立即停止。"
+    }
+  ],
+  "risks": [
+    {
+      "risk": "把节约 Main Token 错解成减少 Main 的规划和判断",
+      "impact": "任务背景和拆分质量下降",
+      "mitigation": "明确 Main 的高价值职责，测量只扣除被 Worker 接管的执行 Token"
+    },
+    {
+      "risk": "为了显示节约而使用不公平对照",
+      "impact": "价值报告失真",
+      "mitigation": "同范围同验收成对样本、质量硬门槛、证据不足时显示无法判断"
+    },
+    {
+      "risk": "向 Worker 倾倒过多无关背景",
+      "impact": "Worker Token 增加且执行更差",
+      "mitigation": "Main 选择与任务相关的背景，显示来源、包含/排除和摘要，不复制整段会话"
+    },
+    {
+      "risk": "Worker Goal 变成长时间无效循环",
+      "impact": "费用增加且仍不交付",
+      "mitigation": "真实进展检查、有限修复、无新证据停止和关键决策回 Main"
+    },
+    {
+      "risk": "通用任务抽象过度拖慢 Coding 成熟度",
+      "impact": "合同复杂但没有真实交付",
+      "mitigation": "保留领域无关核心与 Coding 可选扩展，用一项 Coding 和一项非 Coding 实际验收"
+    },
+    {
+      "risk": "UI 过早绑定尚未稳定的行为",
+      "impact": "反复改页面且继续偏离产品",
+      "mitigation": "CLI/API 先毕业，Hub 最后通过 Impeccable 一次性统一设计"
+    },
+    {
+      "risk": "历史清理误删证据或覆盖未提交成果",
+      "impact": "学习数据与已有实现丢失",
+      "mitigation": "精确基线、完整备份、dry-run、隔离恢复，不 reset、不覆盖、不 commit/push"
+    },
+    {
+      "risk": "把简单问题抽象成复杂框架或在边角语义上钻牛角尖",
+      "impact": "开发周期和 Main/Worker Token 失控，用户能力没有新增",
+      "mitigation": "最简单闭环优先、抽象需真实重复证据、非阻断项进 later、分层测试、验收通过即停止"
+    }
+  ],
+  "open_questions": []
+}
+

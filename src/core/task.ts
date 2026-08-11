@@ -41,6 +41,8 @@ import {
 import { reviewerOutputBoundsLine } from "./review-graph.js";
 import type {
   CompetitionTrigger,
+  ContextContractTaskSpec,
+  ContextTaskContract,
   ContractTaskSpec,
   DeliveryResolution,
   DeliverySpec,
@@ -50,6 +52,8 @@ import type {
   ResolvedExecutionMode,
   RoutingDecisionSnapshot,
   TaskAdvancedPolicyOverride,
+  TaskBackground,
+  TaskCodingExtension,
   TaskContract,
   TaskModuleContract,
   TaskPresentation,
@@ -292,16 +296,16 @@ function positiveInteger(value: unknown, label: string): number {
   return value;
 }
 
-function parseModules(value: unknown): TaskModuleContract[] {
-  return objectArray(value, "task.contract.modules").map((module, index) => ({
-    name: stringValue(module.name, `task.contract.modules[${index}].name`),
+function parseModules(value: unknown, label = "task.contract.modules"): TaskModuleContract[] {
+  return objectArray(value, label).map((module, index) => ({
+    name: stringValue(module.name, `${label}[${index}].name`),
     responsibility: stringValue(
       module.responsibility,
-      `task.contract.modules[${index}].responsibility`,
+      `${label}[${index}].responsibility`,
     ),
-    consumes: stringArray(module.consumes, `task.contract.modules[${index}].consumes`),
-    produces: stringArray(module.produces, `task.contract.modules[${index}].produces`),
-    boundaries: stringArray(module.boundaries, `task.contract.modules[${index}].boundaries`),
+    consumes: stringArray(module.consumes, `${label}[${index}].consumes`),
+    produces: stringArray(module.produces, `${label}[${index}].produces`),
+    boundaries: stringArray(module.boundaries, `${label}[${index}].boundaries`),
   }));
 }
 
@@ -383,6 +387,87 @@ function parseContract(value: unknown): TaskContract {
   };
 }
 
+function nonEmptyStringArray(value: unknown, label: string): string[] {
+  const items = stringArray(value, label);
+  if (items.length === 0) throw new Error(`${label} must contain at least one entry`);
+  return items;
+}
+
+/** Strict structured background for the domain-neutral version-3 contract.
+ *  Scalars are required non-empty strings; decision/authority lists must name
+ *  at least one boundary. Every error names the exact field so Main can fix it. */
+function parseBackground(value: unknown): TaskBackground {
+  const background = object(value, "task.contract.background");
+  return {
+    purpose: stringValue(background.purpose, "task.contract.background.purpose"),
+    audience: stringValue(background.audience, "task.contract.background.audience"),
+    currentSituation: stringValue(
+      background.currentSituation,
+      "task.contract.background.currentSituation",
+    ),
+    parentGoalPlan: stringValue(
+      background.parentGoalPlan,
+      "task.contract.background.parentGoalPlan",
+    ),
+    priorDecisions: stringArray(
+      background.priorDecisions,
+      "task.contract.background.priorDecisions",
+    ),
+    suppliedInputs: stringArray(
+      background.suppliedInputs,
+      "task.contract.background.suppliedInputs",
+    ),
+    downstreamUse: stringValue(
+      background.downstreamUse,
+      "task.contract.background.downstreamUse",
+    ),
+    workerAuthority: nonEmptyStringArray(
+      background.workerAuthority,
+      "task.contract.background.workerAuthority",
+    ),
+    returnToMain: nonEmptyStringArray(
+      background.returnToMain,
+      "task.contract.background.returnToMain",
+    ),
+  };
+}
+
+/** Optional Coding-only technical detail. Absent for domain-neutral Tasks. */
+function parseCodingExtension(value: unknown): TaskCodingExtension | undefined {
+  if (value === undefined) return undefined;
+  const coding = object(value, "task.contract.coding");
+  const changeBudget = object(coding.changeBudget, "task.contract.coding.changeBudget");
+  return {
+    modules: parseModules(coding.modules, "task.contract.coding.modules"),
+    callChain: stringArray(coding.callChain, "task.contract.coding.callChain"),
+    changeBudget: {
+      maxFiles: positiveInteger(changeBudget.maxFiles, "task.contract.coding.changeBudget.maxFiles"),
+      maxDiffLines: positiveInteger(
+        changeBudget.maxDiffLines,
+        "task.contract.coding.changeBudget.maxDiffLines",
+      ),
+    },
+  };
+}
+
+function parseContextContract(value: unknown): ContextTaskContract {
+  const contract = object(value, "task.contract");
+  const presentation = parsePresentation(contract.presentation);
+  const coding = parseCodingExtension(contract.coding);
+  return {
+    outcome: stringValue(contract.outcome, "task.contract.outcome"),
+    ...(presentation === undefined ? {} : { presentation }),
+    background: parseBackground(contract.background),
+    inScope: stringArray(contract.inScope, "task.contract.inScope"),
+    outOfScope: stringArray(contract.outOfScope, "task.contract.outOfScope"),
+    executionSteps: stringArray(contract.executionSteps, "task.contract.executionSteps"),
+    deliverables: stringArray(contract.deliverables, "task.contract.deliverables"),
+    scenarios: parseScenarios(contract.scenarios),
+    risks: stringArray(contract.risks, "task.contract.risks"),
+    ...(coding === undefined ? {} : { coding }),
+  };
+}
+
 export function assessTaskQuality(spec: TaskSpec, quality?: ContractQualitySettings): QualityReport {
   return assessTaskQualityWithPolicy(
     spec,
@@ -408,7 +493,9 @@ export function parseTaskSpec(
   policy?: TaskPolicy,
 ): TaskSpec {
   const root = object(parsed, "task");
-  if (root.version !== 1 && root.version !== 2) throw new Error("task.version must be 1 or 2");
+  if (root.version !== 1 && root.version !== 2 && root.version !== 3) {
+    throw new Error("task.version must be 1, 2, or 3");
+  }
 
   const provider = object(root.provider ?? {}, "task.provider");
   const runtime = object(root.runtime ?? {}, "task.runtime");
@@ -848,6 +935,26 @@ export function parseTaskSpec(
     };
   }
 
+  const qualityPolicy = deriveEffectiveQualityPolicy(selectedProfileId, {
+    contractQuality: policy?.contractQuality ?? cloneDefaults().contractQuality,
+    workerProfiles: workerProfiles ?? cloneDefaults().workerProfiles,
+  });
+
+  if (root.version === 3) {
+    const spec: ContextContractTaskSpec = {
+      version: 3,
+      ...common,
+      contract: parseContextContract(root.contract),
+      acceptance: {
+        criteria: stringArray(acceptance.criteria, "task.acceptance.criteria"),
+        commands: acceptanceCommands,
+      },
+    };
+    spec.qualityPolicy = qualityPolicy;
+    assertTaskQualityWithPolicy(spec, qualityPolicy);
+    return spec;
+  }
+
   const spec: ContractTaskSpec = {
     version: 2,
     ...common,
@@ -857,10 +964,6 @@ export function parseTaskSpec(
       commands: acceptanceCommands,
     },
   };
-  const qualityPolicy = deriveEffectiveQualityPolicy(selectedProfileId, {
-    contractQuality: policy?.contractQuality ?? cloneDefaults().contractQuality,
-    workerProfiles: workerProfiles ?? cloneDefaults().workerProfiles,
-  });
   spec.qualityPolicy = qualityPolicy;
   assertTaskQualityWithPolicy(spec, qualityPolicy);
   return spec;
@@ -887,7 +990,8 @@ export async function loadTaskSpec(
  */
 export type WorkerHardBoundaryPolicy =
   | { kind: "tool-only-no-shell" }
-  | { kind: "codex-workspace-command"; allowEdits: boolean };
+  | { kind: "codex-workspace-command"; allowEdits: boolean }
+  | { kind: "codex-native-goal-command"; allowEdits: boolean };
 
 /** Compose hard boundaries that match the selected Runtime's real tool surface.
  *  Runtime-specific wording may narrow authority but cannot override isolation,
@@ -902,7 +1006,11 @@ export function hardBoundaries(
     ? policy.allowEdits
       ? "Use only Codex's workspace-sandboxed command tool for product file inspect, search, and edit inside this isolated Task workspace under workspace-write. Command network access is disabled. Keep product changes inside the Task workspace; do not use global /tmp, host paths, or the source tree for product work. Runtime-private temporary storage is for process needs only. Unrestricted host shell, approval escalation, extra product writable roots, web, apps, MCP, nested agents, source Integration, commit, and push remain forbidden."
       : "Use only Codex's workspace-sandboxed command tool for product file inspect and search inside this isolated Task workspace under read-only. Do not edit product files. Command network access is disabled. Do not use global /tmp, host paths, or the source tree for product work. Runtime-private temporary storage is for process needs only. Unrestricted host shell, approval escalation, extra product writable roots, web, apps, MCP, nested agents, source Integration, commit, and push remain forbidden."
-    : "Shell access is intentionally unavailable. Do not attempt to run commands.";
+    : policy.kind === "codex-native-goal-command"
+      ? policy.allowEdits
+        ? "Use only Codex's workspace-sandboxed command tool for product file inspect, search, edit, and the Worker self-check inside this isolated Task workspace under workspace-write. Command network access is disabled. Keep product changes inside the Task workspace; do not use global /tmp, host paths, or the source tree for product work. Runtime-private temporary storage is for process needs only. Unrestricted host shell, approval escalation, extra product writable roots, web, apps, MCP, nested agents, source Integration, commit, and push remain forbidden."
+        : "Use only Codex's workspace-sandboxed command tool for product file inspect, search, and the Worker self-check inside this isolated Task workspace under read-only. Do not edit product files. Command network access is disabled. Do not use global /tmp, host paths, or the source tree for product work. Runtime-private temporary storage is for process needs only. Unrestricted host shell, approval escalation, extra product writable roots, web, apps, MCP, nested agents, source Integration, commit, and push remain forbidden."
+      : "Shell access is intentionally unavailable. Do not attempt to run commands.";
   return [
     "Work only inside the current workspace.",
     "Read the task-owned .forklight/workspace-context.md, but do not read or modify ForkLight state outside the workspace.",
@@ -966,7 +1074,7 @@ export function claudeCheckpointProtocolLines(acceptanceCommands: string[]): str
     "- After your final edit, call mcp__forklight_checkpoint__run once when the tool is available.",
     `- Pass every approved command id: ${ids.join(", ")}.`,
     "- ForkLight independently reruns every acceptance command; that result is authoritative for success.",
-    "- If the checkpoint tool is unavailable or fails, still report completion after fixing issues you can see; do not invent a fake pass.",
+    "- If the checkpoint tool is unavailable, partial, or fails, mark the Worker self-validation as unverified; do not claim a machine-green self-check or invent a fake pass.",
   ];
 }
 
@@ -979,9 +1087,11 @@ export function claudeCheckpointProtocolLines(acceptanceCommands: string[]): str
  *  scope, hard boundaries, and independent acceptance stay authoritative in
  *  every mode. Mirrors the verifier's per-mode effect (hard-fail / warning /
  *  score-evidence / ignored) without touching verifier authority. */
-function changeBudgetBlock(spec: ContractTaskSpec): string[] {
-  const { maxFiles, maxDiffLines } = spec.contract.changeBudget;
-  const mode: PolicyMode = spec.completionPolicy?.changeBudgetMode ?? "hard";
+function changeBudgetBlock(
+  budget: { maxFiles: number; maxDiffLines: number },
+  mode: PolicyMode,
+): string[] {
+  const { maxFiles, maxDiffLines } = budget;
   const limits = [
     `- At most ${maxFiles} changed files`,
     `- At most ${maxDiffLines} added/deleted lines`,
@@ -1026,7 +1136,15 @@ function buildLegacyPrompt(
   spec: Extract<TaskSpec, { version: 1 }>,
   resuming: boolean,
   feedback?: string,
+  appendices?: WorkerPromptAppendices,
 ): string {
+  const toolLines = appendices?.toolLines ?? claudeToolProtocolLines(spec.worker.focusPaths);
+  const checkpointLines = appendices?.checkpointLines !== undefined
+    ? appendices.checkpointLines
+    : claudeCheckpointProtocolLines(spec.acceptance.commands);
+  const boundaryLines = hardBoundaries(
+    appendices?.hardBoundaryPolicy ?? { kind: "tool-only-no-shell" },
+  );
   const lines = [
     resuming
       ? "Resume the previously interrupted bounded coding task from the existing session."
@@ -1036,15 +1154,19 @@ function buildLegacyPrompt(
     `Goal: ${spec.goal}`,
     "",
     "Tool protocol:",
-    ...claudeToolProtocolLines(spec.worker.focusPaths).map((instruction) => `- ${instruction}`),
+    ...toolLines.map((instruction) =>
+      instruction.startsWith("- ") || instruction.startsWith("  ")
+        ? instruction
+        : `- ${instruction}`),
     "",
     "Hard boundaries:",
-    ...hardBoundaries().map((boundary) => `- ${boundary}`),
+    ...boundaryLines.map((boundary) => `- ${boundary}`),
     ...spec.constraints.map((constraint) => `- ${constraint}`),
     "",
     "Acceptance commands ForkLight will run after you finish:",
     ...spec.acceptance.commands.map((command) => `- ${command}`),
-    ...claudeCheckpointProtocolLines(spec.acceptance.commands),
+    ...checkpointLines,
+    ...(appendices?.validationRepairLines ?? []),
     ...feedbackSection(feedback),
   ];
   return lines.join("\n");
@@ -1055,6 +1177,9 @@ export interface WorkerPromptAppendices {
   toolLines?: string[];
   /** Checkpoint section lines including blank first line if non-empty. */
   checkpointLines?: string[];
+  /** Runtime-specific Worker validation contract. It is intentionally
+   * separate from independent verification authority. */
+  validationRepairLines?: string[];
   /**
    * When set, replaces the generic final coding-summary instruction.
    * Used only for durably identified Review Graph reviewer Tasks.
@@ -1111,13 +1236,49 @@ export function workerPromptAppendicesForTask(
   };
 }
 
+/**
+ * Prompt/checkpoint contract for the finite Worker-owned validation loop.
+ * Command ids are generated from the original acceptance list, preserving
+ * order and preventing a repair from silently substituting a partial suite.
+ */
+export function workerValidationRepairProtocolLines(
+  acceptanceCommands: string[],
+  runtime: "codex" | "claude" | "grok",
+): string[] {
+  const ids = acceptanceCommands.map((_, index) => `acceptance-${index + 1}`);
+  if (runtime === "codex") {
+    return [
+      "",
+      "Worker validation self-check:",
+      "- After the final edit, use the workspace-sandboxed command tool to run every original acceptance command yourself in this exact order:",
+      ...acceptanceCommands.map((command, index) => `  ${ids[index]}: ${command}`),
+      "- This self-check is non-authoritative; ForkLight independently reruns the unchanged complete suite before Main review.",
+    ];
+  }
+  if (runtime === "claude") {
+    return [
+      "",
+      "Worker validation self-check:",
+      "- After the final edit, call the supported ForkLight checkpoint once with every original command id in this exact order:",
+      `  ${ids.join(", ")}`,
+      "- A missing or partial checkpoint is unverified evidence, never a machine-green claim; ForkLight still independently reruns the unchanged complete suite.",
+    ];
+  }
+  return [
+    "",
+    "Worker validation self-check:",
+    "- This Runtime does not support ForkLight checkpoint MCP; do not claim a checkpoint or invent one.",
+    "- ForkLight independently reruns every original acceptance command in order; the result remains authoritative before Main review.",
+  ];
+}
+
 export function buildWorkerPrompt(
   spec: TaskSpec,
   resuming: boolean,
   feedback?: string,
   appendices?: WorkerPromptAppendices,
 ): string {
-  if (spec.version === 1) return buildLegacyPrompt(spec, resuming, feedback);
+  if (spec.version === 1) return buildLegacyPrompt(spec, resuming, feedback, appendices);
   // Default appendices stay Claude-compatible for direct callers; adapters pass explicit lines.
   const toolLines = appendices?.toolLines
     ?? claudeToolProtocolLines(spec.worker.focusPaths);
@@ -1150,9 +1311,38 @@ export function buildWorkerPrompt(
         ? instruction
         : `- ${instruction}`),
     "",
-    "Context:",
-    ...spec.contract.context.map((item) => `- ${item}`),
-    "",
+  ];
+
+  // Version-3 Tasks lead with the required structured background; legacy v2
+  // keeps its exact free-form Context block byte-for-byte.
+  if (spec.version === 3) {
+    const background = spec.contract.background;
+    lines.push("Background:");
+    lines.push(`- Why this matters: ${background.purpose}`);
+    lines.push(`- Who or what it serves: ${background.audience}`);
+    lines.push(`- Current situation: ${background.currentSituation}`);
+    lines.push(`- Parent Goal/Plan: ${background.parentGoalPlan}`);
+    if (background.priorDecisions.length > 0) {
+      lines.push("- Prior decisions:");
+      for (const decision of background.priorDecisions) lines.push(`  - ${decision}`);
+    }
+    if (background.suppliedInputs.length > 0) {
+      lines.push("- Supplied inputs:");
+      for (const input of background.suppliedInputs) lines.push(`  - ${input}`);
+    }
+    lines.push(`- How the output is used: ${background.downstreamUse}`);
+    lines.push("- Worker authority:");
+    for (const authority of background.workerAuthority) lines.push(`  - ${authority}`);
+    lines.push("- Decisions that must return to Main:");
+    for (const decision of background.returnToMain) lines.push(`  - ${decision}`);
+    lines.push("");
+  } else {
+    lines.push("Context:");
+    lines.push(...spec.contract.context.map((item) => `- ${item}`));
+    lines.push("");
+  }
+
+  lines.push(
     "In scope:",
     ...spec.contract.inScope.map((item) => `- ${item}`),
     "",
@@ -1165,23 +1355,38 @@ export function buildWorkerPrompt(
     "Deliverables:",
     ...spec.contract.deliverables.map((item) => `- ${item}`),
     "",
-    "Module contracts:",
-  ];
-  for (const module of spec.contract.modules) {
-    lines.push(
-      `- ${module.name}: ${module.responsibility}`,
-      `  consumes: ${module.consumes.join("; ")}`,
-      `  produces: ${module.produces.join("; ")}`,
-      `  boundaries: ${module.boundaries.join("; ")}`,
-    );
-  }
-  lines.push(
-    "",
-    "Call chain:",
-    ...spec.contract.callChain.map((item, index) => `${index + 1}. ${item}`),
-    "",
-    "Scenarios:",
   );
+
+  // Version-3 Tasks isolate Coding-only module/call-chain detail in the optional
+  // extension; v2 keeps its exact "Module contracts" block byte-for-byte.
+  if (spec.version === 3) {
+    const coding = spec.contract.coding;
+    if (coding !== undefined) {
+      lines.push("Coding detail:");
+      for (const module of coding.modules) {
+        lines.push(
+          `- ${module.name}: ${module.responsibility}`,
+          `  consumes: ${module.consumes.join("; ")}`,
+          `  produces: ${module.produces.join("; ")}`,
+          `  boundaries: ${module.boundaries.join("; ")}`,
+        );
+      }
+      lines.push("", "Call chain:", ...coding.callChain.map((item, index) => `${index + 1}. ${item}`));
+    }
+  } else {
+    lines.push("Module contracts:");
+    for (const module of spec.contract.modules) {
+      lines.push(
+        `- ${module.name}: ${module.responsibility}`,
+        `  consumes: ${module.consumes.join("; ")}`,
+        `  produces: ${module.produces.join("; ")}`,
+        `  boundaries: ${module.boundaries.join("; ")}`,
+      );
+    }
+    lines.push("", "Call chain:", ...spec.contract.callChain.map((item, index) => `${index + 1}. ${item}`));
+  }
+
+  lines.push("", "Scenarios:");
   for (const scenario of spec.contract.scenarios) {
     lines.push(
       `- ${scenario.name}`,
@@ -1190,12 +1395,24 @@ export function buildWorkerPrompt(
       `  Then: ${scenario.then}`,
     );
   }
+  lines.push("", "Known risks:", ...spec.contract.risks.map((item) => `- ${item}`));
+
+  // Change budget is Coding-only for v3; v2 always carries it.
+  if (spec.version === 3) {
+    if (spec.contract.coding !== undefined) {
+      lines.push(
+        "",
+        ...changeBudgetBlock(spec.contract.coding.changeBudget, spec.completionPolicy?.changeBudgetMode ?? "hard"),
+      );
+    }
+  } else {
+    lines.push(
+      "",
+      ...changeBudgetBlock(spec.contract.changeBudget, spec.completionPolicy?.changeBudgetMode ?? "hard"),
+    );
+  }
+
   lines.push(
-    "",
-    "Known risks:",
-    ...spec.contract.risks.map((item) => `- ${item}`),
-    "",
-    ...changeBudgetBlock(spec),
     "",
     "Hard boundaries:",
     ...boundaryLines.map((boundary) => `- ${boundary}`),
@@ -1206,6 +1423,7 @@ export function buildWorkerPrompt(
     "Independent acceptance commands:",
     ...spec.acceptance.commands.map((command) => `- ${command}`),
     ...checkpointLines,
+    ...(appendices?.validationRepairLines ?? []),
     ...feedbackSection(feedback),
     "",
     ...(terminalOutputLines !== undefined && terminalOutputLines.length > 0

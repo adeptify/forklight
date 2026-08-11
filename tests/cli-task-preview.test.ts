@@ -357,3 +357,96 @@ acceptance:
     await rm(taskDir, { recursive: true, force: true }).catch(() => undefined);
   }
 });
+
+test("CLI validate-goal prints a bounded hierarchy preview and creates nothing", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-goal-validate-"));
+  const root = path.join(home, "goal");
+  await mkdir(root, { recursive: true });
+  const task = path.resolve(projectRoot, "examples", "deepseek-checkout.yaml");
+  const planFile = path.join(root, "plan.json");
+  await writeFile(
+    planFile,
+    JSON.stringify({
+      version: 1,
+      name: "CLI goal validate plan",
+      objective: "Four-task plan for the CLI validate-goal command.",
+      items: [
+        { id: "foundation", task, dependsOn: [] },
+        { id: "service", task, dependsOn: ["foundation"] },
+        { id: "console", task, dependsOn: ["foundation"] },
+        { id: "integrate-docs", task, dependsOn: ["service", "console"] },
+      ],
+    }),
+  );
+  const goalFile = path.join(root, "goal.json");
+  await writeFile(
+    goalFile,
+    JSON.stringify({
+      version: 1,
+      name: "CLI goal validate",
+      objective: "Prove the CLI validate-goal command is read-only.",
+      planFile,
+      policy: {
+        maxDurationMs: null,
+        noProgressTimeoutMs: null,
+        maxCorrectionRounds: 1,
+        maxReviewRounds: 1,
+        maxNoNewEvidenceCycles: 2,
+      },
+      milestones: [
+        { itemId: "foundation", gate: "machine" },
+        { itemId: "service", gate: "machine" },
+        { itemId: "console", gate: "machine" },
+        { itemId: "integrate-docs", gate: "machine" },
+      ],
+    }, null, 2),
+  );
+
+  const runCli = async (extra: string[]): Promise<string> => {
+    const result = await execFileAsync(
+      process.execPath,
+      [
+        "--disable-warning=ExperimentalWarning",
+        "--import", "tsx",
+        path.join(projectRoot, "src", "cli.ts"),
+        "validate-goal", goalFile, ...extra,
+      ],
+      {
+        env: { ...process.env, FORKLIGHT_HOME: home, PATH: path.join(home, "empty-bin") },
+        timeout: 15_000,
+        cwd: projectRoot,
+      },
+    ).catch((error: unknown) => {
+      const execError = error as { stdout?: string; stderr?: string; code?: number };
+      return {
+        stdout: execError.stdout ?? "",
+        stderr: execError.stderr ?? "",
+        code: execError.code ?? 1,
+      };
+    });
+    return result.stdout + result.stderr;
+  };
+
+  const human = await runCli([]);
+  assert.match(human, /Goal: CLI goal validate \(version 1\)/);
+  assert.match(human, /Validation: PASS/);
+  assert.match(human, /Phases: 1 Plan\(s\), 4 Task\(s\)/);
+  assert.match(human, /Wave 1: foundation/);
+  assert.doesNotMatch(human, /python3|unittest|deepseek|api-key/);
+
+  const json = await runCli(["--json"]);
+  assert.match(json, /"passed": true/);
+  assert.match(json, /"phaseCount": 1/);
+  assert.match(json, /"taskCount": 4/);
+  assert.doesNotMatch(json, /python3|unittest|deepseek|api-key/);
+
+  // No Store mutation: no Goal, Plan, Task, event, receipt, or workspace.
+  const store = new StateStore(home);
+  try {
+    assert.deepEqual(store.listGoals(), []);
+    assert.deepEqual(store.listTasks(), []);
+    assert.deepEqual(store.listPlans(), []);
+  } finally {
+    store.close();
+  }
+});

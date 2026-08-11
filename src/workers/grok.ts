@@ -13,6 +13,7 @@ import { createInterface } from "node:readline";
 import {
   buildWorkerPrompt,
   neutralToolProtocolLines,
+  workerValidationRepairProtocolLines,
   workerPromptAppendicesForTask,
 } from "../core/task.js";
 import { readProviderKey } from "../core/secrets.js";
@@ -521,6 +522,7 @@ export class GrokBuildAdapter implements WorkerAdapter {
       workerPromptAppendicesForTask(task, {
         toolLines: this.toolProtocolAppendix(task),
         checkpointLines: this.checkpointProtocolAppendix(task),
+        validationRepairLines: workerValidationRepairProtocolLines(task.spec.acceptance.commands, "grok"),
       }),
     );
     await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {

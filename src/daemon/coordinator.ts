@@ -10,14 +10,18 @@ import type {
   AdaptationPreview,
   AdaptationProposedReasonCategory,
   AdaptationTransitionRecord,
+  AttemptRecord,
+  CandidateRevision,
   CompetitionRecord,
   AttemptAuthorization,
   AttemptExecutionOptions,
+  CheckpointOperationView,
   CheckpointReport,
   CheckpointRequest,
   DependencyRecord,
   EffectivePolicySnapshot,
   GoalMilestoneRecord,
+  GoalPlanAssociation,
   GoalRecord,
   IntegrationResultRecord,
   IntegrationOperationView,
@@ -29,11 +33,19 @@ import type {
   ProbeEvidence,
   ProviderStatus,
   StagedTaskRegistration,
+  StructuredTaskSpec,
   TaskRecord,
   TaskSpec,
   TaskStatus,
+  VerificationResult,
 } from "../core/types.js";
-import { runCheckpoint } from "../core/checkpoint.js";
+import { executeCheckpointCommands, resolveCheckpointSelection, runCheckpoint } from "../core/checkpoint.js";
+import {
+  checkpointOperationId,
+  checkpointStartedFromEvents,
+  checkpointTerminalFromEvents,
+  checkpointViewStatus,
+} from "../core/checkpoint-operation.js";
 import {
   authorizeExtraAttempt,
   authorizeMainCorrection,
@@ -74,6 +86,10 @@ import {
   type SelfUpgradeEvidenceProjection,
 } from "../core/self-upgrade-evidence.js";
 import {
+  buildGoalValidationPreview,
+  type SafeGoalValidationPreview,
+} from "../core/goal-preview.js";
+import {
   advanceGoalRecords,
   assertGoal,
   assertGoalCorrectionAllowed,
@@ -85,8 +101,10 @@ import {
   projectGoal,
   reconcileGoalRecords,
   resolveEffectiveMilestoneLineage,
+  resolveGoalCurrentPlanId,
   stopGoalRecords,
   type GoalAdvanceResult,
+  type GoalPlanRegistrationResult,
   type GoalRegistrationResult,
   type GoalView,
   type LoadedGoal,
@@ -130,6 +148,7 @@ import {
   buildOutcomeIntakeConfirmationReceipt,
   buildProposedOutcomeIntake,
   createOutcomeIntakeRecord,
+  distinctTaskContractVersions,
   normalizeOutcomeIntakeConfirm,
   normalizeOutcomeIntakeCreate,
   normalizeOutcomeIntakeListLimit,
@@ -150,10 +169,12 @@ import {
 } from "../core/outcome-intake.js";
 import { isoTimestamp as timestamp, sleepMs as sleep } from "../core/time.js";
 import { providerReadiness } from "../core/providers.js";
-import { listWorkerAdapters } from "../workers/registry.js";
+import { getWorkerAdapter, listWorkerAdapters } from "../workers/registry.js";
+import type { WorkerCapabilityMatrix } from "../workers/types.js";
 import { resolveWorkerReadiness } from "../core/worker-readiness.js";
 import type { RuntimeName } from "../core/runtime-names.js";
 import {
+  isPrerequisiteResultComplete,
   resolveReadiness,
   type DependencyDecision,
 } from "../core/dependency-resolver.js";
@@ -240,7 +261,7 @@ import {
 } from "../core/task-resolution.js";
 import { paginateTaskHistory, type TaskHistoryPage, type TaskHistoryPageRequest } from "../core/task-history.js";
 import { isTerminalTaskStatus, toLatestEventMeta } from "../core/task-progress.js";
-import { failureCategoryForTask } from "../core/worker-failure.js";
+import { failureCategoryForTask, failureCategoryFromEvents } from "../core/worker-failure.js";
 import {
   launchActivationRunner,
   writeActivationHandoff,
@@ -280,8 +301,22 @@ import {
 } from "../core/candidate-reverification.js";
 import { maxMainReverificationsFromSnapshot } from "../core/advanced-policy.js";
 import {
+  authorizeWorkerValidationRepair,
+  decideWorkerValidationRepair,
+  recordWorkerValidationRepairCompleted,
+  recordWorkerValidationRepairSkipped,
+  recordWorkerValidationRepairStarted,
+  resolvePendingWorkerValidationRepair,
+  resolveWorkerValidationRepairHistory,
+  isWorkerValidationRepairVerification,
+  workerValidationRepairFeedback,
+  type WorkerValidationRepairAuthorization,
+  type WorkerValidationRepairDecision,
+} from "../core/worker-validation-repair.js";
+import {
   resolveCorrectionEligibility,
   resolveLatestRevision,
+  resolveLatestRevisionForAttempt,
   describeCorrectionRejection,
   validateStructuredCorrectionInput,
 } from "../core/candidate-revision.js";
@@ -304,7 +339,7 @@ export type { GoalRegistrationResult, GoalView, GoalAdvanceResult };
  *  Created from the same load used for digest identity so confirmation never
  *  validates one byte set and registers a later independent read. */
 type OutcomeIntakeArtifactRegistration =
-  | { kind: "task"; spec: TaskSpec; taskFile: string }
+  | { kind: "task"; spec: StructuredTaskSpec; taskFile: string }
   | { kind: "plan"; plan: WorkPlan }
   | { kind: "goal"; goal: LoadedGoal };
 
@@ -324,6 +359,14 @@ interface OutcomeIntakeRegistrationResult {
   dependencies?: DependencyRecord[];
   goal?: GoalRecord;
   milestones?: GoalMilestoneRecord[];
+  /** Ordered multi-Plan Goal graph for v2 confirmations. */
+  goalPhases?: {
+    registrationsByPlan: StagedTaskRegistration[][];
+    plans: PlanRecord[];
+    itemsByPlan: PlanItemRecord[][];
+    dependenciesByPlan: DependencyRecord[][];
+    associations: GoalPlanAssociation[];
+  };
   planId?: string;
   goalId?: string;
 }
@@ -344,6 +387,7 @@ interface QueuedJob {
   correcting?: boolean;
   feedback?: string;
   executionOptions?: AttemptExecutionOptions;
+  workerValidationRepair?: WorkerValidationRepairAuthorization;
 }
 
 type ProviderProbeOutcome = ProbeEvidence | { error: string };
@@ -465,6 +509,11 @@ export class DaemonCoordinator {
   private readonly profileWorkerOccupancy = new Set<string>();
   private readonly activeIntegrations = new Map<string, Promise<void>>();
   private readonly integrationOperations = new Map<string, IntegrationOperationContext>();
+  /** Checkpoint operations with an in-memory background execution. Owned here
+   *  before launch so a concurrent/repeated start never spawns a second
+   *  verifier process. After a restart this set is empty and durable started
+   *  evidence fails closed to outcome-unknown. */
+  private readonly activeCheckpointOperations = new Set<string>();
   private readonly authorizedHandoffShutdowns = new Set<string>();
   /** Same-path serialization gate for preview-bound draft classification writes.
    *  A second in-progress write to the same Task Contract is rejected so a
@@ -517,6 +566,186 @@ export class DaemonCoordinator {
 
   checkpoint(request: CheckpointRequest): Promise<CheckpointReport> {
     return runCheckpoint(this.store, request);
+  }
+
+  // --- Checkpoint operation lifecycle (start once, observe through bounded waits) ---
+
+  /**
+   * Accept a long Worker checkpoint through a short exchange. The approved
+   * command set is started exactly once per (Task, Attempt, canonical
+   * command-id selection): a repeated start after a lost response returns the
+   * same operation without launching a second verifier process, and a durable
+   * started operation with no in-memory execution after a daemon restart
+   * returns outcome-unknown and is never silently rerun. The in-memory
+   * ownership record is installed before the background execution is launched.
+   */
+  checkpointStart(request: CheckpointRequest): CheckpointOperationView {
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    const task = this.store.getTask(request.taskId);
+    if (task.status !== "running" || task.currentAttemptId !== request.attemptId) {
+      throw new Error("Checkpoint requires the Task current running attempt");
+    }
+    const { selected, canonicalIds } = resolveCheckpointSelection(task, request);
+    const operationId = checkpointOperationId(task.id, request.attemptId, canonicalIds);
+
+    // In-memory ownership: the same running operation is reused, never re-launched.
+    if (this.activeCheckpointOperations.has(operationId)) {
+      return this.checkpointOperationView(operationId);
+    }
+
+    // Durable terminal evidence: idempotent replay of an already-finished run.
+    if (this.checkpointTerminalState(operationId) !== undefined) {
+      return this.checkpointOperationView(operationId);
+    }
+
+    // Durable started evidence without in-memory execution: the daemon
+    // restarted while the operation was running. Fail closed — never rerun.
+    if (this.checkpointStartedEvidence(operationId, task.id)) {
+      return this.checkpointOperationView(operationId);
+    }
+
+    // Fresh start: persist identity before launching the background execution
+    // so a crash in this window is recoverable as outcome-unknown.
+    const now = timestamp();
+    this.store.saveCheckpointOperation({
+      operationId,
+      taskId: task.id,
+      attemptId: request.attemptId,
+      commandIds: canonicalIds,
+      createdAt: now,
+      updatedAt: now,
+    });
+    this.store.addEvent(
+      task.id,
+      request.attemptId,
+      "checkpoint.started",
+      `Worker requested ${selected.length} approved checkpoint command(s)`,
+      { operationId, commandIds: canonicalIds },
+    );
+    this.activeCheckpointOperations.add(operationId);
+    void this.executeCheckpointOperation(request, operationId, canonicalIds)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        try {
+          this.store.addEvent(
+            request.taskId,
+            request.attemptId,
+            "checkpoint.failed",
+            "Non-authoritative checkpoint failed before producing a report",
+            { operationId, reason: message.slice(0, 500) },
+          );
+        } catch {
+          // The Task may have been removed mid-execution; the operation remains
+          // started-without-terminal and is never rerun.
+        }
+      })
+      .finally(() => {
+        this.activeCheckpointOperations.delete(operationId);
+      });
+    return this.checkpointOperationView(operationId);
+  }
+
+  /** Read-only privacy-safe status of one checkpoint operation. */
+  checkpointStatus(operationId: string): CheckpointOperationView {
+    return this.checkpointOperationView(operationId);
+  }
+
+  /**
+   * Bounded observation of one checkpoint operation. While the operation is
+   * running in-memory, waits up to timeoutMs for terminal evidence. An
+   * operation with durable started evidence but no in-memory execution (daemon
+   * restart) is reported outcome-unknown immediately — no execution exists to
+   * wait for and nothing is ever rerun.
+   */
+  async waitCheckpoint(operationId: string, timeoutMs: number): Promise<CheckpointOperationView> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 3_600_000) {
+      throw new Error("Checkpoint wait timeoutMs must be an integer from 1 to 3600000");
+    }
+    if (!this.activeCheckpointOperations.has(operationId)) {
+      return this.checkpointOperationView(operationId);
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (this.checkpointTerminalState(operationId) === undefined && Date.now() < deadline) {
+      await sleep(Math.min(50, Math.max(1, deadline - Date.now())));
+    }
+    return this.checkpointOperationView(operationId);
+  }
+
+  /** Return the existing terminal CheckpointReport for a completed operation. */
+  checkpointReport(operationId: string): CheckpointReport {
+    const record = this.store.getCheckpointOperation(operationId);
+    if (record === undefined) {
+      throw new Error(`Unknown checkpoint operation: ${operationId}`);
+    }
+    const terminal = checkpointTerminalFromEvents(
+      this.store.listEvents(record.taskId),
+      operationId,
+    );
+    if (terminal?.status !== "completed") {
+      throw new Error("Checkpoint operation has no terminal report");
+    }
+    return terminal.report as CheckpointReport;
+  }
+
+  /** Launch the background execution for one fresh checkpoint operation. */
+  private async executeCheckpointOperation(
+    request: CheckpointRequest,
+    operationId: string,
+    canonicalIds: string[],
+  ): Promise<void> {
+    const task = this.store.getTask(request.taskId);
+    const report = await executeCheckpointCommands(
+      task,
+      canonicalIds,
+      request.attemptId,
+      operationId,
+    );
+    this.store.addEvent(
+      request.taskId,
+      request.attemptId,
+      "checkpoint.completed",
+      `Non-authoritative checkpoint completed: ${report.commands.length} command(s)`,
+      report,
+    );
+  }
+
+  /** Reconstruct the privacy-safe operation view from durable evidence plus
+   *  in-memory execution state. Never exposes raw command output. */
+  private checkpointOperationView(operationId: string): CheckpointOperationView {
+    const record = this.store.getCheckpointOperation(operationId);
+    if (record === undefined) {
+      throw new Error(`Unknown checkpoint operation: ${operationId}`);
+    }
+    const terminal = checkpointTerminalFromEvents(
+      this.store.listEvents(record.taskId),
+      operationId,
+    );
+    const report = terminal?.status === "completed"
+      ? terminal.report as CheckpointReport | undefined
+      : undefined;
+    const commands = report?.commands ?? [];
+    return {
+      operationId,
+      taskId: record.taskId,
+      attemptId: record.attemptId,
+      status: checkpointViewStatus(terminal, this.activeCheckpointOperations.has(operationId)),
+      commandIds: record.commandIds,
+      commandCount: record.commandIds.length,
+      passedCommandCount: commands.filter((command) => command.exitCode === 0).length,
+      failedCommandCount: commands.filter((command) => command.exitCode !== 0).length,
+    };
+  }
+
+  private checkpointTerminalState(operationId: string): ReturnType<typeof checkpointTerminalFromEvents> {
+    const record = this.store.getCheckpointOperation(operationId);
+    if (record === undefined) return undefined;
+    return checkpointTerminalFromEvents(this.store.listEvents(record.taskId), operationId);
+  }
+
+  /** True when durable started evidence exists (record or started event). */
+  private checkpointStartedEvidence(operationId: string, taskId: string): boolean {
+    if (this.store.getCheckpointOperation(operationId) !== undefined) return true;
+    return checkpointStartedFromEvents(this.store.listEvents(taskId), operationId);
   }
 
   /** Resolve the effective advanced policy for a newly created Task.
@@ -1130,109 +1359,161 @@ export class DaemonCoordinator {
   }
 
   /**
-   * Atomically freeze one Goal over a four-to-eight Task Plan, then queue
-   * only dependency-ready work through the ordinary Plan scheduler.
+   * Atomically freeze one Goal over one or more ordered phase Plans, then queue
+   * only phase-one dependency-ready work through the ordinary Plan scheduler.
+   * Later-phase Tasks persist as not-started/waiting with a plain phase
+   * prerequisite reason and never enter the in-memory queue early.
    */
   submitGoal(loaded: LoadedGoal): GoalRegistrationResult {
     const createdAt = timestamp();
     const prepared = this.prepareGoalRegistration(loaded, createdAt);
-    this.store.createPlanExecutionWithGoal(
-      prepared.registrations,
-      prepared.planRecord,
-      prepared.items,
-      prepared.dependencies,
-      prepared.goal,
-      prepared.milestones,
-    );
-    // Queue only after durable registration; Goal gates apply on admission.
-    for (const taskId of Object.values(prepared.taskIdsByItemId)) this.queueTask(taskId);
+    if (prepared.plans.length > 1) {
+      this.store.createGoalPhasesExecution({
+        registrationsByPlan: prepared.registrationsByPlan,
+        plans: prepared.plans,
+        itemsByPlan: prepared.itemsByPlan,
+        dependenciesByPlan: prepared.dependenciesByPlan,
+        goal: prepared.goal,
+        associations: prepared.associations,
+        milestones: prepared.milestones,
+      });
+    } else {
+      this.store.createPlanExecutionWithGoal(
+        prepared.registrations,
+        prepared.plans[0]!,
+        prepared.itemsByPlan[0]!,
+        prepared.dependenciesByPlan[0]!,
+        prepared.goal,
+        prepared.milestones,
+      );
+    }
+    // Queue only after durable registration; phase-aware admission decides the
+    // current phase and marks later-phase Tasks waiting.
+    for (const taskId of prepared.registrations.map(({ task }) => task.id)) this.queueTask(taskId);
     this.reconcileGoal(prepared.goal.id);
     return {
       goalId: prepared.goal.id,
-      planId: prepared.planRecord.id,
+      planId: prepared.plans[0]!.id,
       taskIdsByItemId: prepared.taskIdsByItemId,
+      planResults: prepared.planResults,
     };
   }
 
-  /** Build the exact existing Goal registration graph (Plan Tasks, dependencies,
-   *  Goal, and milestones) from one validated load. Shared by ordinary Goal
-   *  submission and confirmed outcome-intake creation so both paths produce
-   *  identical records. Never mutates or queues by itself. */
+  /** Build the exact existing Goal registration graph (every phase Plan graph,
+   *  ordered associations, Goal, and plan-qualified milestones) from one
+   *  validated load. Shared by ordinary Goal submission and confirmed
+   *  outcome-intake creation so both paths produce identical records. Never
+   *  mutates or queues by itself. */
   private prepareGoalRegistration(
     loaded: LoadedGoal,
     createdAt: string,
   ): {
     registrations: StagedTaskRegistration[];
-    items: PlanItemRecord[];
-    dependencies: DependencyRecord[];
-    planRecord: PlanRecord;
+    registrationsByPlan: StagedTaskRegistration[][];
+    plans: PlanRecord[];
+    itemsByPlan: PlanItemRecord[][];
+    dependenciesByPlan: DependencyRecord[][];
+    associations: GoalPlanAssociation[];
     goal: GoalRecord;
     milestones: GoalMilestoneRecord[];
+    planResults: GoalPlanRegistrationResult[];
     taskIdsByItemId: Record<string, string>;
   } {
-    const plan = loaded.plan;
-    const planId = plan.planFile;
     const home = path.dirname(this.store.databasePath);
-    const taskIdsByItemId: Record<string, string> = {};
-    const registrations: StagedTaskRegistration[] = [];
-    const items: PlanItemRecord[] = [];
+    const registrationsByPlan: StagedTaskRegistration[][] = [];
+    const plans: PlanRecord[] = [];
+    const itemsByPlan: PlanItemRecord[][] = [];
+    const dependenciesByPlan: DependencyRecord[][] = [];
+    const planResults: GoalPlanRegistrationResult[] = [];
+    const phaseTaskIdsByItemId: Array<Record<string, string>> = [];
 
-    plan.items.forEach((item, itemIndex) => {
-      const taskId = randomUUID();
-      const effectivePolicy = this.resolveEffectivePolicy(item.task);
-      taskIdsByItemId[item.id] = taskId;
-      registrations.push({
-        task: buildTaskRecord({
-          spec: item.task,
-          taskFile: item.taskFile,
-          home,
-          id: taskId,
-          sessionId: randomUUID(),
-          createdAt,
-          ...(effectivePolicy === undefined ? {} : { effectivePolicy }),
-        }),
-        creationEvent: {
-          summary: `Task created: ${item.task.name}`,
-          payload: {
-            provider: item.task.provider.name,
-            model: item.task.provider.model,
-            runtime: item.task.runtime.name,
-            sourcePath: item.task.project,
-            goalFile: loaded.goalFile,
+    for (const phase of loaded.phases) {
+      const planId = phase.plan.planFile;
+      const taskIdsByItemId: Record<string, string> = {};
+      const registrations: StagedTaskRegistration[] = [];
+      const items: PlanItemRecord[] = [];
+
+      phase.plan.items.forEach((item, itemIndex) => {
+        const taskId = randomUUID();
+        const effectivePolicy = this.resolveEffectivePolicy(item.task);
+        taskIdsByItemId[item.id] = taskId;
+        registrations.push({
+          task: buildTaskRecord({
+            spec: item.task,
+            taskFile: item.taskFile,
+            home,
+            id: taskId,
+            sessionId: randomUUID(),
+            createdAt,
+            ...(effectivePolicy === undefined ? {} : { effectivePolicy }),
+          }),
+          creationEvent: {
+            summary: `Task created: ${item.task.name}`,
+            payload: {
+              provider: item.task.provider.name,
+              model: item.task.provider.model,
+              runtime: item.task.runtime.name,
+              sourcePath: item.task.project,
+              goalFile: loaded.goalFile,
+            },
           },
-        },
+        });
+        items.push({
+          id: item.id,
+          planId,
+          taskId,
+          itemIndex,
+          taskFile: item.taskFile,
+        });
       });
-      items.push({
-        id: item.id,
-        planId,
-        taskId,
-        itemIndex,
-        taskFile: item.taskFile,
-      });
-    });
 
-    const dependencies: DependencyRecord[] = plan.items.flatMap((item) =>
-      item.dependsOn.map((dependsOnItemId) => ({
-        planId,
-        itemId: item.id,
-        dependsOnItemId,
-      })),
-    );
-    const planRecord: PlanRecord = {
-      id: planId,
-      name: plan.name,
-      objective: plan.objective,
-      planFile: plan.planFile,
+      const dependencies: DependencyRecord[] = phase.plan.items.flatMap((item) =>
+        item.dependsOn.map((dependsOnItemId) => ({
+          planId,
+          itemId: item.id,
+          dependsOnItemId,
+        })),
+      );
+      const planRecord: PlanRecord = {
+        id: planId,
+        name: phase.plan.name,
+        objective: phase.plan.objective,
+        planFile: phase.plan.planFile,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      registrationsByPlan.push(registrations);
+      plans.push(planRecord);
+      itemsByPlan.push(items);
+      dependenciesByPlan.push(dependencies);
+      phaseTaskIdsByItemId.push(taskIdsByItemId);
+      planResults.push({ planId, taskIdsByItemId });
+    }
+
+    const associations: GoalPlanAssociation[] = plans.map((plan, ordinal) => ({
+      goalId: loaded.goalFile,
+      planId: plan.id,
+      ordinal,
       createdAt,
-      updatedAt: createdAt,
-    };
+    }));
     const { goal, milestones } = buildGoalRecords({
       loaded,
-      planId,
-      taskIdsByItemId,
+      phasePlanIds: plans.map((plan) => plan.id),
+      phaseTaskIdsByItemId,
       createdAt,
     });
-    return { registrations, items, dependencies, planRecord, goal, milestones, taskIdsByItemId };
+    return {
+      registrations: registrationsByPlan.flat(),
+      registrationsByPlan,
+      plans,
+      itemsByPlan,
+      dependenciesByPlan,
+      associations,
+      goal,
+      milestones,
+      planResults,
+      taskIdsByItemId: planResults[0]!.taskIdsByItemId,
+    };
   }
 
   /** Build one exact staged Task registration from a validated Task load. */
@@ -1271,6 +1552,21 @@ export class DaemonCoordinator {
     const settings = this.settings.get();
     const loaded = await assertGoal(goalFile, taskPolicy(settings));
     return this.submitGoal(loaded);
+  }
+
+  /**
+   * Read-only Goal file validation. Loads the Goal and its ordered Plans and
+   * structured Tasks through the existing authoritative Goal validator and
+   * returns one bounded hierarchy preview shared with CLI and MCP. Never
+   * submits, never persists a Goal, Plan, Task, event, or workspace, and never
+   * mutates reconciliation state. Invalid Goal/Plan/dependency/Task contracts
+   * surface the validator's own issues with passed: false.
+   */
+  async goalValidate(goalFile: string): Promise<SafeGoalValidationPreview> {
+    if (!path.isAbsolute(goalFile)) {
+      throw new Error("goal_validate requires an absolute Goal file path");
+    }
+    return buildGoalValidationPreview(goalFile, taskPolicy(this.settings.get()));
   }
 
   goalStatus(goalId: string): GoalView {
@@ -1622,11 +1918,12 @@ export class DaemonCoordinator {
   }
 
   /**
-   * Main resolves a failed/interrupted Task as handled after the real-world
-   * problem has been fixed. Delegates all authority, eligibility, idempotency,
-   * and conflict semantics to the Core service; returns the closed result with
-   * the canonical board placement. Never changes machine status, delivery
-   * truth, review truth, or statistics.
+   * Main resolves handled attention (a failed/interrupted Task or a succeeded
+   * Task with no delivered outcome) after the real-world work no longer needs
+   * operational action. Delegates all authority, eligibility, idempotency, and
+   * conflict semantics to the Core service; returns the closed result with the
+   * canonical board placement. Never changes machine status, delivery truth,
+   * review truth, or statistics.
    */
   resolveTask(
     taskId: string,
@@ -1661,10 +1958,11 @@ export class DaemonCoordinator {
   }
 
   /**
-   * Main explicitly reopens a handled failure, returning the unchanged
-   * failed/interrupted Task to Now. Delegates all authority, idempotency, and
-   * conflict semantics to the Core service. Reopen is rejected when the Task
-   * later gained delivered/activated/repaired-delivery truth.
+   * Main explicitly reopens resolved attention, returning the unchanged
+   * failed/interrupted or succeeded-not-delivered Task to its evidence-derived
+   * Now placement. Delegates all authority, idempotency, and conflict
+   * semantics to the Core service. Reopen is rejected when the Task later
+   * gained delivered/activated/repaired-delivery truth.
    */
   reopenTask(
     taskId: string,
@@ -2131,9 +2429,12 @@ export class DaemonCoordinator {
       ...(competitionContext === undefined ? {} : { competitionContext }),
       ...(reviewGraph === undefined ? {} : { reviewGraph }),
       // Latest explicit Main attention resolution from durable events. Only
-      // failed/interrupted Tasks project it; forged evidence fails open.
+      // terminal failed/interrupted/succeeded Tasks project it; forged
+      // evidence on other statuses fails open to Now.
       ...(attentionResolution.status === "none"
-        || (task.status !== "failed" && task.status !== "interrupted")
+        || (task.status !== "failed"
+          && task.status !== "interrupted"
+          && task.status !== "succeeded")
         ? {}
         : { attentionResolution }),
     };
@@ -2557,6 +2858,12 @@ export class DaemonCoordinator {
       }
 
       if (task.workerPid !== undefined) await stopOrphanWorker(task.workerPid);
+      let pendingWorkerRepair: ReturnType<typeof resolvePendingWorkerValidationRepair> = null;
+      try {
+        pendingWorkerRepair = resolvePendingWorkerValidationRepair(this.store, task.id);
+      } catch {
+        recordWorkerValidationRepairSkipped(this.store, task.id, task.currentAttemptId, "conflicting-history");
+      }
       if (task.currentAttemptId) {
         try {
           const attempt = this.store.getAttempt(task.currentAttemptId);
@@ -2573,6 +2880,16 @@ export class DaemonCoordinator {
         }
       }
       const hasAttempts = this.store.listAttempts(task.id).length > 0;
+      let currentAttemptIsWorkerValidationRepair = false;
+      if (task.currentAttemptId !== undefined) {
+        try {
+          currentAttemptIsWorkerValidationRepair = this.store.getAttempt(task.currentAttemptId).executionKind
+            === "worker-validation-repair";
+        } catch {
+          // Missing Attempt identity remains fail-closed below through the
+          // ordinary recovery path's existing durable-history checks.
+        }
+      }
       this.store.setTaskStatus(task.id, "interrupted", {
         finishedAt: timestamp(),
         workerPid: null,
@@ -2584,9 +2901,22 @@ export class DaemonCoordinator {
         "worker.interrupted",
         "Daemon restart detected; task queued for recovery",
       );
-      this.enqueue({ taskId: task.id, resuming: hasAttempts }, true);
+      // A started Worker-repair round has its own typed continuation. Do not
+      // let generic resume/restart authority consume it or create a second
+      // Attempt identity.
+      if (pendingWorkerRepair !== null || currentAttemptIsWorkerValidationRepair) {
+        // The durable pending marker is queued below with the exact auth.
+        // A repair Attempt with terminal or corrupt history is also kept out
+        // of generic resume; the dedicated repair recovery pass will close or
+        // skip it without crossing authority paths.
+      } else {
+        this.enqueue({ taskId: task.id, resuming: hasAttempts }, true);
+      }
       recovered.push(task.id);
     }
+    // Repair recovery precedes Main correction and generic restart recovery;
+    // those loops then observe the queued Task and cannot claim it.
+    this.recoverPendingWorkerValidationRepairs(recovered);
     // A Main correction grant is durable before its in-memory queue entry.
     // Recover failed/interrupted tasks from the narrow post-grant crash window,
     // and recover already-queued corrections without inventing new feedback.
@@ -2672,11 +3002,17 @@ export class DaemonCoordinator {
           taskId,
           resuming: attemptCount > 0,
           ...(recoveryOptions === null ? {} : { executionOptions: recoveryOptions }),
-        }, true);
+        });
         recovered.push(taskId);
       }
     } catch {
       // Corrupt handoff evidence remains inspectable; unrelated recovery continues.
+    }
+    // Refresh Goal phase gates and currentPlanId from durable Task evidence
+    // before Plan admission so one recover call can cross a satisfied phase
+    // boundary and queue the newly current roots exactly once.
+    for (const goal of this.store.listGoals(100)) {
+      this.reconcileGoal(goal.id);
     }
     this.reconcilePlans();
     // Reconcile any running competitions whose candidates are now all terminal
@@ -2694,11 +3030,382 @@ export class DaemonCoordinator {
     // Turn terminal reviewer resultText into validated evidence exactly once.
     reconcileAllReviewGraphs(this.store);
     this.recoverIntegrationOperations();
-    // Reconstruct Goal supervision from durable records without duplicating work.
+    // Final Goal projection refresh after competition/review/integration
+    // recovery; Plan admission already ran once above and stays exact-once.
     for (const goal of this.store.listGoals(100)) {
       this.reconcileGoal(goal.id);
     }
     return recovered;
+  }
+
+  /** Collect only the typed evidence needed by the Worker-repair allowlist. */
+  private workerValidationRepairEvidence(taskId: string, attemptId: string): {
+    task: TaskRecord;
+    attempt: AttemptRecord;
+    workerStatus: "succeeded" | "failed" | "interrupted";
+    verification?: VerificationResult;
+    candidate?: CandidateRevision;
+    verificationEventSequence?: number;
+    workerFailureCategory?: string;
+    runtimeCapabilities?: WorkerCapabilityMatrix;
+  } {
+    const task = this.store.getTask(taskId);
+    const attempt = this.store.getAttempt(attemptId);
+    const events = this.store.listEvents(taskId);
+    const verificationEvent = events
+      .filter((event) => event.type === "verification.completed" && event.attemptId === attemptId)
+      .at(-1);
+    const payload = verificationEvent?.payload;
+    const verification = isWorkerValidationRepairVerification(payload)
+      ? payload
+      : undefined;
+    const attemptEvents = events.filter((event) => event.attemptId === attemptId);
+    // A same-round interrupted Goal may later emit a completion on the exact
+    // Attempt, so use the newest terminal Worker event rather than treating
+    // any historical completion as success. This also fails closed when a
+    // late finalization failure follows a completion.
+    const latestWorkerTerminal = attemptEvents
+      .filter((event) =>
+        event.type === "worker.completed"
+        || event.type === "worker.failed"
+        || event.type === "worker.interrupted")
+      .at(-1);
+    const workerStatus = latestWorkerTerminal?.type === "worker.completed"
+      ? "succeeded"
+      : latestWorkerTerminal?.type === "worker.interrupted" || attempt.status === "interrupted"
+        ? "interrupted"
+        : "failed";
+    let candidate: CandidateRevision | undefined;
+    try {
+      candidate = resolveLatestRevisionForAttempt(events, attemptId);
+    } catch {
+      candidate = undefined;
+    }
+    let runtimeCapabilities: WorkerCapabilityMatrix | undefined;
+    try {
+      runtimeCapabilities = getWorkerAdapter(task.spec.runtime.name).capabilities();
+    } catch {
+      runtimeCapabilities = undefined;
+    }
+    const workerFailureCategory = failureCategoryFromEvents(attemptEvents);
+    return {
+      task,
+      attempt,
+      workerStatus,
+      ...(verification === undefined ? {} : { verification }),
+      ...(candidate === undefined ? {} : { candidate }),
+      ...(verificationEvent === undefined ? {} : { verificationEventSequence: verificationEvent.sequence }),
+      ...(workerFailureCategory === undefined ? {} : { workerFailureCategory }),
+      ...(runtimeCapabilities === undefined ? {} : { runtimeCapabilities }),
+    };
+  }
+
+  private decideWorkerValidationRepair(taskId: string, attemptId: string): {
+    evidence: ReturnType<DaemonCoordinator["workerValidationRepairEvidence"]>;
+    decision: WorkerValidationRepairDecision;
+  } {
+    const evidence = this.workerValidationRepairEvidence(taskId, attemptId);
+    let history: ReturnType<typeof resolveWorkerValidationRepairHistory>;
+    try {
+      history = resolveWorkerValidationRepairHistory(this.store.listEvents(taskId));
+    } catch {
+      return {
+        evidence,
+        decision: {
+          eligible: false,
+          reason: "conflicting-history",
+          round: 0,
+          allowance: 0,
+          consumedRounds: 0,
+          remainingAllowance: 0,
+          taskId: evidence.task.id,
+          attemptId: evidence.attempt.id,
+          nextAction: "Stop automatic Worker repair and return the corrupt lineage to Main.",
+        },
+      };
+    }
+    const decision = decideWorkerValidationRepair({
+      task: evidence.task,
+      attempt: evidence.attempt,
+      workerStatus: evidence.workerStatus,
+      ...(evidence.verification === undefined ? {} : { verification: evidence.verification }),
+      ...(evidence.candidate === undefined ? {} : { candidateRevision: evidence.candidate }),
+      ...(evidence.verificationEventSequence === undefined ? {} : { verificationEventSequence: evidence.verificationEventSequence }),
+      ...(evidence.workerFailureCategory === undefined ? {} : { workerFailureCategory: evidence.workerFailureCategory }),
+      ...(evidence.runtimeCapabilities === undefined ? {} : { runtimeCapabilities: evidence.runtimeCapabilities }),
+      repairHistory: history,
+    });
+    return { evidence, decision };
+  }
+
+  /** Authorize one eligible round and leave it durably queued for the scheduler.
+   * The caller may be inside the current job; queue recovery happens after the
+   * active entry is removed so concurrency accounting cannot be bypassed. */
+  private authorizeNextWorkerValidationRepair(
+    taskId: string,
+    attemptId: string,
+  ): WorkerValidationRepairAuthorization | undefined {
+    const { evidence, decision } = this.decideWorkerValidationRepair(taskId, attemptId);
+    if (!decision.eligible || evidence.verification === undefined || evidence.candidate === undefined
+      || evidence.verificationEventSequence === undefined) {
+      if (decision.reason !== "verification-passed" && decision.reason !== "round-in-progress") {
+        recordWorkerValidationRepairSkipped(this.store, taskId, attemptId, decision.reason);
+      }
+      return undefined;
+    }
+    const authorization = authorizeWorkerValidationRepair(this.store, evidence.task, {
+      decision,
+      priorAttemptId: attemptId,
+      verificationEventSequence: evidence.verificationEventSequence,
+      candidateRevisionId: evidence.candidate.id,
+      feedback: workerValidationRepairFeedback(
+        evidence.verification,
+        decision.round,
+        evidence.task.paths.workspace,
+      ),
+    });
+    this.store.setTaskStatus(taskId, "queued", {
+      finishedAt: null,
+      workerPid: null,
+      currentAttemptId: null,
+      error: null,
+    });
+    return authorization;
+  }
+
+  /** Queue one exact durable repair authorization through the ordinary
+   * dependency and concurrency gates. This helper is also used by the
+   * terminal-Attempt crash window, where the next authorization is created
+   * during recovery rather than by the normal completed job finally block. */
+  private enqueueWorkerValidationRepair(
+    taskId: string,
+    authorization: WorkerValidationRepairAuthorization,
+    recovered: string[],
+  ): void {
+    this.enqueue({
+      taskId,
+      resuming: true,
+      workerValidationRepair: authorization,
+      executionOptions: {
+        maximumOrdinal: authorization.targetAttemptOrdinal,
+        attemptId: authorization.attemptId,
+        executionKind: "worker-validation-repair",
+        workerValidationRepair: {
+          round: authorization.round,
+          authorizationEventSequence: authorization.authorizationEventSequence,
+          attemptId: authorization.attemptId,
+        },
+      },
+    });
+    if (!recovered.includes(taskId)) recovered.push(taskId);
+  }
+
+  /** Queue durable repair authorizations only after active-job cleanup. */
+  private recoverPendingWorkerValidationRepairs(recovered: string[] = []): void {
+    if (this.closing) return;
+    for (const task of this.store.listTasks(["failed", "interrupted", "queued", "succeeded"])) {
+      if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) continue;
+      let pending: ReturnType<typeof resolvePendingWorkerValidationRepair>;
+      try {
+        pending = resolvePendingWorkerValidationRepair(this.store, task.id);
+      } catch {
+        recordWorkerValidationRepairSkipped(this.store, task.id, task.currentAttemptId, "conflicting-history");
+        continue;
+      }
+      if (pending !== null) {
+        const boundAttempt = this.store.listAttempts(task.id).find(
+          (attempt) => attempt.id === pending.authorization.attemptId,
+        );
+        if (boundAttempt !== undefined && (
+          boundAttempt.executionKind !== "worker-validation-repair"
+          || boundAttempt.workerValidationRepairRound !== pending.authorization.round
+          || boundAttempt.sessionId !== task.sessionId
+        )) {
+          // A durable authorization may never be rebound to an ordinary,
+          // differently numbered, or differently scoped Attempt. Refuse it
+          // before queueing or starting any Runtime work.
+          recordWorkerValidationRepairSkipped(
+            this.store,
+            task.id,
+            pending.authorization.attemptId,
+            "conflicting-history",
+          );
+          continue;
+        }
+        if (task.status === "succeeded" && (boundAttempt === undefined
+          || boundAttempt.status !== "succeeded")) {
+          // A succeeded Task cannot safely launch a pending repair. This is
+          // an impossible/crash-corrupt combination, not a new authority.
+          recordWorkerValidationRepairSkipped(
+            this.store,
+            task.id,
+            pending.authorization.attemptId,
+            "conflicting-history",
+          );
+          continue;
+        }
+        if (
+          boundAttempt !== undefined
+          && boundAttempt.status !== "interrupted"
+          && boundAttempt.status !== "running"
+        ) {
+          // The Runtime Attempt is already terminal but the coordinator may
+          // have crashed before writing the round terminal marker. Close the
+          // existing round exactly once; never replay model work for a
+          // completed Attempt.
+          recordWorkerValidationRepairStarted(this.store, pending.authorization);
+          recordWorkerValidationRepairCompleted(this.store, {
+            authorization: pending.authorization,
+            attemptId: boundAttempt.id,
+            outcome: task.status === "succeeded" ? "passed" : "failed",
+          });
+          if (task.status !== "succeeded") {
+            try {
+              this.authorizeNextWorkerValidationRepair(task.id, boundAttempt.id);
+            } catch {
+              recordWorkerValidationRepairSkipped(this.store, task.id, boundAttempt.id, "conflicting-history");
+            }
+          }
+          if (!recovered.includes(task.id)) recovered.push(task.id);
+          continue;
+        }
+        this.enqueueWorkerValidationRepair(task.id, pending.authorization, recovered);
+        continue;
+      }
+
+      // Crash window after a repair Attempt reached a terminal state but
+      // before the coordinator authorized the exact next round. Only a
+      // terminal repair lineage can enter this recovery path; an ordinary
+      // failed Attempt never acquires Worker-repair authority here.
+      const latestAttempt = this.store.listAttempts(task.id).at(-1);
+      if (latestAttempt?.executionKind !== "worker-validation-repair") continue;
+      let history: ReturnType<typeof resolveWorkerValidationRepairHistory>;
+      try {
+        history = resolveWorkerValidationRepairHistory(this.store.listEvents(task.id));
+      } catch {
+        recordWorkerValidationRepairSkipped(this.store, task.id, latestAttempt.id, "conflicting-history");
+        continue;
+      }
+      const terminalRound = history.find(
+        (entry) => entry.attemptId === latestAttempt.id && entry.state === "terminal",
+      );
+      if (terminalRound?.terminalOutcome !== "failed") continue;
+      try {
+        const authorization = this.authorizeNextWorkerValidationRepair(task.id, latestAttempt.id);
+        if (authorization !== undefined) {
+          this.enqueueWorkerValidationRepair(task.id, authorization, recovered);
+        }
+      } catch {
+        recordWorkerValidationRepairSkipped(this.store, task.id, latestAttempt.id, "conflicting-history");
+      }
+    }
+  }
+
+  /** Execute one already-authorized Worker repair without crossing into any
+   * generic resume, Main correction, or extra-Attempt authority. */
+  private async executeWorkerValidationRepair(
+    job: QueuedJob,
+    task: TaskRecord,
+    settings: ForkLightSettings,
+    onWorkerProfileSlotRelease: () => void,
+  ): Promise<void> {
+    const authorization = job.workerValidationRepair;
+    if (authorization === undefined) return;
+    let pending: ReturnType<typeof resolvePendingWorkerValidationRepair>;
+    try {
+      pending = resolvePendingWorkerValidationRepair(this.store, task.id);
+    } catch {
+      recordWorkerValidationRepairSkipped(this.store, task.id, authorization.attemptId, "conflicting-history");
+      return;
+    }
+    const bound = pending?.authorization;
+    if (
+      bound === undefined
+      || bound.taskId !== authorization.taskId
+      || bound.round !== authorization.round
+      || bound.authorizationEventSequence !== authorization.authorizationEventSequence
+      || bound.attemptId !== authorization.attemptId
+      || bound.targetAttemptOrdinal !== authorization.targetAttemptOrdinal
+      || bound.priorAttemptId !== authorization.priorAttemptId
+      || bound.evidenceFingerprint !== authorization.evidenceFingerprint
+      || bound.workerIdentity.provider !== task.spec.provider.name
+      || bound.workerIdentity.model !== task.spec.provider.model
+      || bound.workerIdentity.runtime !== task.spec.runtime.name
+      || bound.workerIdentity.effort !== task.spec.runtime.effort
+      || bound.workerIdentity.workerProfileId !== task.spec.workerProfileId
+    ) {
+      recordWorkerValidationRepairSkipped(this.store, task.id, authorization.attemptId, "conflicting-history");
+      return;
+    }
+
+    // The start marker is durable before any Runtime call. A restart after it
+    // therefore recovers this exact round instead of inventing a new one.
+    recordWorkerValidationRepairStarted(this.store, authorization);
+    const options: AttemptExecutionOptions = {
+      maximumOrdinal: authorization.targetAttemptOrdinal,
+      attemptId: authorization.attemptId,
+      executionKind: "worker-validation-repair",
+      workerValidationRepair: {
+        round: authorization.round,
+        authorizationEventSequence: authorization.authorizationEventSequence,
+        attemptId: authorization.attemptId,
+      },
+    };
+    let terminalRecorded = false;
+    const closeRound = (
+      outcome: "passed" | "failed" | "stopped",
+      reason?: Parameters<typeof recordWorkerValidationRepairCompleted>[1]["reason"],
+    ): void => {
+      if (terminalRecorded) return;
+      recordWorkerValidationRepairCompleted(this.store, {
+        authorization,
+        attemptId: authorization.attemptId,
+        outcome,
+        ...(reason === undefined ? {} : { reason }),
+      });
+      terminalRecorded = true;
+    };
+
+    if (!preflightTaskLaunchAuthentication(this.store, task, this.providerAuthInspector)) {
+      closeRound("stopped", "non-behavior-failure");
+      return;
+    }
+
+    let result: Awaited<ReturnType<typeof executeAttempt>>;
+    try {
+      result = await executeAttempt(
+        this.store,
+        task,
+        true,
+        undefined,
+        authorization.feedback,
+        settings.execution,
+        settings.providerDefaults,
+        options,
+        onWorkerProfileSlotRelease,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const current = this.store.getTask(task.id);
+      if (current.status !== "failed") {
+        this.store.setTaskStatus(task.id, "failed", {
+          finishedAt: timestamp(),
+          workerPid: null,
+          error: message,
+        });
+      }
+      closeRound("stopped", "non-behavior-failure");
+      return;
+    }
+
+    if (result.task.status === "succeeded") {
+      closeRound("passed");
+      return;
+    }
+    closeRound("failed");
+    // The current terminal evidence is the only input for the next exact
+    // round. The next authorization, if any, is queued after active cleanup.
+    this.authorizeNextWorkerValidationRepair(task.id, result.attempt.id);
   }
 
   /**
@@ -3128,9 +3835,12 @@ export class DaemonCoordinator {
 
   /** Authorize and execute one bounded candidate reverification. Never enters a
    *  crash-recoverable Worker state. Failed path: on pass the Task moves to
-   *  "succeeded" while the Attempt is preserved. Succeeded+Main-revise path:
-   *  Task and Attempt status are preserved on both pass and failure. A fresh
-   *  Main accept is always required before Integration. Requires no
+   *  "succeeded" while the Attempt is preserved. Runtime-workspace path: a
+   *  failed OR interrupted Task may move to "succeeded" on exact passing
+   *  evidence while the original Attempt stays failed/interrupted; an empty
+   *  recomputed Diff closes as a no-candidate outcome. Succeeded+Main-revise
+   *  path: Task and Attempt status are preserved on both pass and failure. A
+   *  fresh Main accept is always required before Integration. Requires no
    *  running/queued Worker job. */
   async reverifyCandidate(
     taskId: string,
@@ -3303,9 +4013,12 @@ export class DaemonCoordinator {
     );
     const statusByItem = new Map(itemStatuses.map((status) => [status.itemId, status]));
     // Goal-supervised Plans combine ordinary readiness with milestone gates.
-    // Non-Goal Plans omit gateSatisfaction so behavior stays byte-compatible.
+    // Independent Plans omit gateSatisfaction and instead pass the shared
+    // Core prerequisite-completion fact (machine success for legacy/zero-diff;
+    // reviewed delivery for material Candidates).
     const goal = this.store.getGoalByPlanId(item.planId);
     let gateSatisfaction: Map<string, boolean> | undefined;
+    let prerequisiteCompletion: Map<string, boolean> | undefined;
     // Goal-supervised Plans use effective Task status (handoff successor when
     // authoritative) so a failed source does not permanently block downstream
     // after a successful successor completes the milestone gate.
@@ -3315,7 +4028,8 @@ export class DaemonCoordinator {
     if (goal !== undefined) {
       gateSatisfaction = new Map();
       for (const dependencyId of dependencyIds) {
-        const milestone = this.store.getGoalMilestone(goal.id, dependencyId);
+        // Plan-qualified lookup keeps duplicate local item IDs unambiguous.
+        const milestone = this.store.getGoalMilestone(goal.id, dependencyId, item.planId);
         const dep = statusByItem.get(dependencyId);
         if (milestone === undefined) {
           // Machine-only fallback when milestone row is missing (should not happen).
@@ -3334,6 +4048,16 @@ export class DaemonCoordinator {
         );
         gateSatisfaction.set(dependencyId, evidence.satisfied);
       }
+    } else {
+      // Shared Core completion: one fact for scheduler and hierarchy.
+      prerequisiteCompletion = new Map();
+      for (const dependencyId of dependencyIds) {
+        const dep = statusByItem.get(dependencyId);
+        prerequisiteCompletion.set(
+          dependencyId,
+          isPrerequisiteResultComplete(this.store, dep?.taskId, dep?.taskStatus),
+        );
+      }
     }
     return {
       ...item,
@@ -3342,6 +4066,7 @@ export class DaemonCoordinator {
         dependencyIds,
         effectiveStatuses,
         gateSatisfaction,
+        prerequisiteCompletion,
       ),
     };
   }
@@ -3368,10 +4093,62 @@ export class DaemonCoordinator {
     );
   }
 
+  /**
+   * Core-owned phase-prerequisite admission. A Task in a supervised Goal phase
+   * that is not the Core-selected current phase can never become ready merely
+   * because its within-Plan dependencies are empty or satisfied. Ownership-only
+   * attached Plans without milestone rows are not supervised and schedule
+   * through the ordinary Plan scheduler.
+   */
+  private phaseBlockedDecision(taskId: string):
+    | { planId: string; itemId: string; currentPlanId: string }
+    | undefined {
+    const item = this.store.getPlanItemByTaskId(taskId);
+    if (!item) return undefined;
+    const goal = this.store.getGoalByPlanId(item.planId);
+    if (goal === undefined) return undefined;
+    // Terminal Goals use the existing stop/admission-block path (the stop
+    // reason is more truthful than a phase-prerequisite explanation).
+    if (goalAdmissionBlocked(goal)) return undefined;
+    const planMilestones = this.store.getGoalMilestones(goal.id)
+      .filter((milestone) => (milestone.planId ?? goal.planId) === item.planId);
+    if (planMilestones.length === 0) return undefined;
+    const currentPlanId = resolveGoalCurrentPlanId(this.store, goal.id);
+    if (currentPlanId === undefined || currentPlanId === item.planId) return undefined;
+    return { planId: item.planId, itemId: item.itemId, currentPlanId };
+  }
+
+  private persistPhaseBlockedDecision(
+    taskId: string,
+    planId: string,
+    itemId: string,
+    currentPlanId: string,
+  ): void {
+    const task = this.store.getTask(taskId);
+    const detail = "Waiting for earlier Goal phase to complete";
+    if (task.status === "waiting" && task.error === detail) return;
+    this.store.setTaskStatus(taskId, "waiting", { error: detail, finishedAt: null });
+    this.store.addEvent(
+      taskId,
+      task.currentAttemptId,
+      "task.waiting",
+      detail,
+      { planId, itemId, currentPlanId, phasePrerequisite: true },
+    );
+  }
+
   private enqueue(job: QueuedJob, bypassDependencies = false): void {
     if (this.closing) throw new Error("ForkLight daemon is shutting down");
     if (this.active.has(job.taskId) || this.queue.some((queued) => queued.taskId === job.taskId)) {
       throw new Error(`Task ${job.taskId} is already queued or running`);
+    }
+    // Phase order is an additional Core prerequisite that applies on every
+    // admission path — ordinary submission, status recovery, and handoff
+    // successors alike. A later phase never runs early.
+    const phase = this.phaseBlockedDecision(job.taskId);
+    if (phase !== undefined) {
+      this.persistPhaseBlockedDecision(job.taskId, phase.planId, phase.itemId, phase.currentPlanId);
+      return;
     }
     if (!bypassDependencies) {
       // Stopped/failed/completed Goals block future Task admission only.
@@ -3584,6 +4361,7 @@ export class DaemonCoordinator {
           this.reconcilePlans();
           this.reconcileCompetitions(job.taskId);
           this.reconcileReviewGraphs(job.taskId);
+          this.recoverPendingWorkerValidationRepairs();
           this.pump();
         });
       this.active.set(job.taskId, execution);
@@ -3601,6 +4379,16 @@ export class DaemonCoordinator {
     const onWorkerProfileSlotRelease = (): void => {
       this.releaseProfileWorkerOccupancy(job.taskId);
     };
+
+    if (job.workerValidationRepair !== undefined) {
+      await this.executeWorkerValidationRepair(
+        job,
+        task,
+        settings,
+        onWorkerProfileSlotRelease,
+      );
+      return;
+    }
 
     // Canonical launch admission. For a new Task this runs before any source
     // copy; for resume/correction it still runs before a new Attempt or Worker.
@@ -3672,7 +4460,7 @@ export class DaemonCoordinator {
         }
         return;
       }
-      await executeAttempt(
+      const result = await executeAttempt(
         this.store,
         currentTask,
         false,
@@ -3683,6 +4471,10 @@ export class DaemonCoordinator {
         undefined,
         onWorkerProfileSlotRelease,
       );
+      // Only the ordinary initial Worker delivery enters the Worker-owned
+      // validation-repair allowlist. Main correction and generic resume stay
+      // separate authority paths.
+      this.authorizeNextWorkerValidationRepair(task.id, result.attempt.id);
     }
   }
 
@@ -3928,8 +4720,8 @@ export class DaemonCoordinator {
     const policy = taskPolicy(this.settings.get());
     if (shape === "task") {
       const loaded = await loadTaskSpec(artifactPath, policy);
-      if (loaded.spec.version !== 2) {
-        throw new Error("Task proposal requires a version-2 Task Contract");
+      if (loaded.spec.version === 1) {
+        throw new Error("Task proposal requires a version-2 or version-3 Task Contract");
       }
       return {
         facts: {
@@ -3937,6 +4729,7 @@ export class DaemonCoordinator {
           displayName: loaded.spec.name,
           objective: loaded.spec.contract.outcome,
           taskCount: 1,
+          taskContractVersions: [loaded.spec.version],
         },
         artifactDigest: loaded.taskFileDigest,
         registration: { kind: "task", spec: loaded.spec, taskFile: loaded.taskFile },
@@ -3951,6 +4744,9 @@ export class DaemonCoordinator {
           objective: report.plan.objective,
           taskCount: report.plan.items.length,
           dependencyWaves: report.plan.waves,
+          taskContractVersions: distinctTaskContractVersions(
+            report.plan.items.map((item) => item.task.version),
+          ),
         },
         artifactDigest: await outcomeIntakeArtifactGraphDigest(
           artifactPath,
@@ -3960,20 +4756,31 @@ export class DaemonCoordinator {
       };
     }
     const loadedGoal = await assertGoal(artifactPath, policy);
+    const taskCount = loadedGoal.phases.reduce(
+      (sum, phase) => sum + phase.plan.items.length,
+      0,
+    );
     return {
       facts: {
         shape,
         displayName: loadedGoal.name,
         objective: loadedGoal.objective,
-        taskCount: loadedGoal.plan.items.length,
-        dependencyWaves: loadedGoal.plan.waves,
+        taskCount,
+        goalVersion: loadedGoal.version,
+        ...(loadedGoal.phases.length === 1
+          ? { dependencyWaves: loadedGoal.phases[0]!.plan.waves }
+          : {}),
+        taskContractVersions: distinctTaskContractVersions(
+          loadedGoal.phases.flatMap((phase) =>
+            phase.plan.items.map((item) => item.task.version)),
+        ),
       },
       artifactDigest: await outcomeIntakeArtifactGraphDigest(
         artifactPath,
-        [
-          loadedGoal.planFile,
-          ...loadedGoal.plan.items.map((item) => item.taskFile),
-        ],
+        loadedGoal.phases.flatMap((phase) => [
+          phase.planFile,
+          ...phase.plan.items.map((item) => item.taskFile),
+        ]),
       ),
       registration: { kind: "goal", goal: loadedGoal },
     };
@@ -4019,16 +4826,32 @@ export class DaemonCoordinator {
       throw new Error("Outcome intake proposal shape mismatch");
     }
     const prepared = this.prepareGoalRegistration(artifact.registration.goal, createdAt);
-    return {
-      taskIds: Object.values(prepared.taskIdsByItemId),
+    const base = {
+      taskIds: prepared.registrations.map(({ task }) => task.id),
       registrations: prepared.registrations,
-      planRecord: prepared.planRecord,
-      items: prepared.items,
-      dependencies: prepared.dependencies,
+      planRecord: prepared.plans[0]!,
       goal: prepared.goal,
       milestones: prepared.milestones,
-      planId: prepared.planRecord.id,
+      planId: prepared.plans[0]!.id,
       goalId: prepared.goal.id,
+    };
+    if (prepared.plans.length > 1) {
+      return {
+        ...base,
+        goalPhases: {
+          registrationsByPlan: prepared.registrationsByPlan,
+          plans: prepared.plans,
+          itemsByPlan: prepared.itemsByPlan,
+          dependenciesByPlan: prepared.dependenciesByPlan,
+          associations: prepared.associations,
+        },
+      };
+    }
+    // v1 Goal: legacy single-Plan confirmation graph.
+    return {
+      ...base,
+      items: prepared.itemsByPlan[0]!,
+      dependencies: prepared.dependenciesByPlan[0]!,
     };
   }
 
@@ -4107,6 +4930,9 @@ export class DaemonCoordinator {
         expectedRevision: current.revision,
         updatedIntake: updated,
         registrations: registration.registrations,
+        ...(registration.goalPhases === undefined
+          ? {}
+          : { goalPhases: registration.goalPhases }),
         ...(registration.planRecord === undefined ? {} : { plan: registration.planRecord }),
         ...(registration.items === undefined ? {} : { items: registration.items }),
         ...(registration.dependencies === undefined

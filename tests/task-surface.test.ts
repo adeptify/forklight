@@ -1984,7 +1984,7 @@ test("paginateTaskHistory: nextCursor is present only when more matching records
   assert.equal(second.totalCount, 30);
 });
 
-// --- Attention resolution (handled failures) ---
+// --- Attention resolution (handled attention) ---
 
 const RESOLVED_STATE = {
   status: "resolved" as const,
@@ -2098,15 +2098,25 @@ test("resolveTaskResolution validates eligibility and appends one immutable even
     () => resolveTaskResolution(
       store,
       taskId,
-      { reason: "environment-recovered", note: "x", confirm: false as unknown as true },
+      {
+        reason: "environment-recovered",
+        note: "x",
+        confirm: false as unknown as true,
+        delivered: false,
+      },
     ),
     /confirm/,
   );
 
-  // Succeeded tasks are never eligible.
-  store.setTaskStatus(taskId, "succeeded", {});
+  // Non-terminal statuses are never eligible.
+  store.setTaskStatus(taskId, "queued", {});
   assert.throws(
-    () => resolveTaskResolution(store, taskId, { reason: "environment-recovered", note: "x", confirm: true }),
+    () => resolveTaskResolution(store, taskId, {
+      reason: "environment-recovered",
+      note: "x",
+      confirm: true,
+      delivered: false,
+    }),
     /cannot be resolved from status/,
   );
   store.setTaskStatus(taskId, "failed", {});
@@ -2124,12 +2134,23 @@ test("resolveTaskResolution validates eligibility and appends one immutable even
   store.createAttempt(runningAttempt);
   store.updateTask(taskId, { currentAttemptId: "attempt-running" });
   assert.throws(
-    () => resolveTaskResolution(store, taskId, { reason: "environment-recovered", note: "x", confirm: true }),
+    () => resolveTaskResolution(store, taskId, {
+      reason: "environment-recovered",
+      note: "x",
+      confirm: true,
+      delivered: false,
+    }),
     /running Attempt/,
   );
   store.updateTask(taskId, { currentAttemptId: null });
 
-  const result = resolveTaskResolution(store, taskId, { reason: "environment-recovered", note: "env fixed", confirm: true });
+  // Fixture proves no delivered outcome: explicit delivered:false is required.
+  const result = resolveTaskResolution(store, taskId, {
+    reason: "environment-recovered",
+    note: "env fixed",
+    confirm: true,
+    delivered: false,
+  });
   assert.equal(result.existing, false);
   assert.equal(result.state.status, "resolved");
   assert.equal(store.getTask(taskId).status, "failed", "machine status preserved");
@@ -2139,7 +2160,12 @@ test("resolveTaskResolution validates eligibility and appends one immutable even
   );
 
   // Exact replay is idempotent.
-  const replay = resolveTaskResolution(store, taskId, { reason: "environment-recovered", note: "env fixed", confirm: true });
+  const replay = resolveTaskResolution(store, taskId, {
+    reason: "environment-recovered",
+    note: "env fixed",
+    confirm: true,
+    delivered: false,
+  });
   assert.equal(replay.existing, true);
   assert.equal(
     store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
@@ -2149,7 +2175,12 @@ test("resolveTaskResolution validates eligibility and appends one immutable even
 
   // Conflicting resolve fails closed and preserves the first resolution.
   assert.throws(
-    () => resolveTaskResolution(store, taskId, { reason: "superseded", note: "different", confirm: true }),
+    () => resolveTaskResolution(store, taskId, {
+      reason: "superseded",
+      note: "different",
+      confirm: true,
+      delivered: false,
+    }),
     /already resolved/,
   );
   assert.equal(
@@ -2158,7 +2189,11 @@ test("resolveTaskResolution validates eligibility and appends one immutable even
   );
 
   // Reopen restores Now without changing machine status.
-  const reopened = reopenTaskResolution(store, taskId, { note: "needs attention again", confirm: true });
+  const reopened = reopenTaskResolution(store, taskId, {
+    note: "needs attention again",
+    confirm: true,
+    delivered: false,
+  });
   assert.equal(reopened.existing, false);
   assert.equal(reopened.state.status, "reopened");
   assert.equal(store.getTask(taskId).status, "failed");
@@ -2166,7 +2201,11 @@ test("resolveTaskResolution validates eligibility and appends one immutable even
 
   // Reopen on a non-resolved Task fails closed.
   assert.throws(
-    () => reopenTaskResolution(store, taskId, { note: "again", confirm: true }),
+    () => reopenTaskResolution(store, taskId, {
+      note: "again",
+      confirm: true,
+      delivered: false,
+    }),
     /already reopened/,
   );
   store.close();
@@ -2178,7 +2217,11 @@ test("reopenTaskResolution on a never-resolved Task fails before writing", async
   const taskId = "88888888-8888-4888-8888-888888888888";
   store.createTask(makeTask(taskId, "failed"));
   assert.throws(
-    () => reopenTaskResolution(store, taskId, { note: "again", confirm: true }),
+    () => reopenTaskResolution(store, taskId, {
+      note: "again",
+      confirm: true,
+      delivered: false,
+    }),
     /not resolved/,
   );
   assert.equal(store.listEvents(taskId).filter((e) => e.type === "task.resolution.reopened").length, 0);
@@ -2250,6 +2293,231 @@ test("coordinator.resolveTask closes a failed Task; reopen restores Now", async 
   store.close();
 });
 
+test("resolveTaskResolution allows a succeeded non-delivered Task; reopen restores Now", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-succeeded-core-"));
+  const store = new StateStore(home);
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  const succeededTask = makeTask(taskId, "succeeded");
+  delete succeededTask.currentAttemptId;
+  store.createTask(succeededTask);
+  store.addEvent(taskId, "attempt-1", "verification.completed", "passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: "/state/task/diff.patch",
+    sourceUnchanged: false,
+  });
+
+  const result = resolveTaskResolution(store, taskId, {
+    reason: "no-longer-needed",
+    confirm: true,
+    delivered: false,
+  });
+  assert.equal(result.existing, false);
+  assert.equal(result.state.status, "resolved");
+  assert.equal(store.getTask(taskId).status, "succeeded", "machine status preserved");
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
+    1,
+  );
+
+  // Exact replay is idempotent.
+  const replay = resolveTaskResolution(store, taskId, {
+    reason: "no-longer-needed",
+    confirm: true,
+    delivered: false,
+  });
+  assert.equal(replay.existing, true);
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
+    1,
+  );
+
+  // Reopen returns the same unresolved succeeded Task to Now.
+  const reopened = reopenTaskResolution(store, taskId, {
+    confirm: true,
+    delivered: false,
+  });
+  assert.equal(reopened.existing, false);
+  assert.equal(reopened.state.status, "reopened");
+  assert.equal(store.getTask(taskId).status, "succeeded");
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.reopened").length,
+    1,
+  );
+
+  // Delivered truth still rejects resolve for a succeeded Task.
+  assert.throws(
+    () => resolveTaskResolution(store, taskId, {
+      reason: "no-longer-needed",
+      confirm: true,
+      delivered: true,
+    }),
+    /delivered/,
+  );
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
+    1,
+    "delivered rejection writes no resolve event",
+  );
+  store.close();
+});
+
+test("projectBoardPlacement: resolved succeeded non-delivered closes to History attention-resolved", () => {
+  assert.deepEqual(
+    projectBoardPlacement({
+      status: "succeeded",
+      decisionStage: "awaiting-main-review",
+      attentionResolution: RESOLVED_STATE,
+    }),
+    { boardScope: "history", boardReason: "attention-resolved" },
+  );
+  assert.deepEqual(
+    projectBoardPlacement({
+      status: "succeeded",
+      decisionStage: "ready-for-integration",
+      attentionResolution: RESOLVED_STATE,
+    }),
+    { boardScope: "history", boardReason: "attention-resolved" },
+  );
+  // Delivered/activated/verified-repaired stays stronger than resolution.
+  assert.deepEqual(
+    projectBoardPlacement({
+      status: "succeeded",
+      decisionStage: "delivered",
+      attentionResolution: RESOLVED_STATE,
+    }),
+    { boardScope: "history", boardReason: "delivered" },
+  );
+  assert.deepEqual(
+    projectBoardPlacement({
+      status: "succeeded",
+      decisionStage: "activated",
+      attentionResolution: RESOLVED_STATE,
+    }),
+    { boardScope: "history", boardReason: "activated" },
+  );
+  assert.deepEqual(
+    projectBoardPlacement({
+      status: "succeeded",
+      decisionStage: "machine-verified",
+      remediationDisposition: REPAIRED,
+      attentionResolution: RESOLVED_STATE,
+    }),
+    { boardScope: "history", boardReason: "repaired-delivered" },
+  );
+});
+
+test("coordinator.resolveTask closes a succeeded non-delivered Task; reopen restores Now", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-coord-succeeded-"));
+  const store = new StateStore(home);
+  const taskId = "33333333-3333-4333-8333-333333333333";
+  const succeededTask = makeTask(taskId, "succeeded");
+  delete succeededTask.currentAttemptId;
+  store.createTask(succeededTask);
+  store.addEvent(taskId, "attempt-1", "verification.completed", "passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: "/state/task/diff.patch",
+    sourceUnchanged: false,
+  });
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store));
+
+  const resolved = coordinator.resolveTask(
+    taskId,
+    "no-longer-needed",
+    "historical evidence only",
+    undefined,
+    true,
+  );
+  assert.equal(resolved.existing, false);
+  assert.equal(resolved.state.status, "resolved");
+  assert.equal(resolved.boardScope, "history");
+  assert.equal(resolved.boardReason, "attention-resolved");
+  assert.equal(store.getTask(taskId).status, "succeeded", "machine status preserved");
+
+  const reopened = coordinator.reopenTask(taskId, "needs review again", true);
+  assert.equal(reopened.existing, false);
+  assert.equal(reopened.state.status, "reopened");
+  assert.equal(reopened.boardScope, "now");
+  assert.equal(reopened.boardReason, "awaiting-main");
+  assert.equal(store.getTask(taskId).status, "succeeded");
+  store.close();
+});
+
+test("listTaskSurfaces carries attentionResolution for a resolved succeeded Task", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-surface-succeeded-"));
+  const store = new StateStore(home);
+  const taskId = "44444444-4444-4444-8444-444444444444";
+  const succeededTask = makeTask(taskId, "succeeded");
+  delete succeededTask.currentAttemptId;
+  store.createTask(succeededTask);
+  store.addEvent(taskId, "attempt-1", "verification.completed", "passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: "/state/task/diff.patch",
+    sourceUnchanged: false,
+  });
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store));
+  coordinator.resolveTask(taskId, "handled-elsewhere", "no longer needed", undefined, true);
+
+  const surface = coordinator.listTaskSurfaces(["succeeded"], 10)[0]!;
+  assert.equal(surface.status, "succeeded");
+  assert.equal(surface.attentionResolution?.status, "resolved");
+  assert.equal(surface.boardScope, "history");
+  assert.equal(surface.boardReason, "attention-resolved");
+  store.close();
+});
+
+test("resolve/reopen on a succeeded Task leave machine, review, and decision facts unchanged", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-unchanged-succeeded-"));
+  const store = new StateStore(home);
+  const taskId = "55555555-5555-4555-8555-555555555555";
+  const succeededTask = makeTask(taskId, "succeeded");
+  delete succeededTask.currentAttemptId;
+  store.createTask(succeededTask);
+  store.addEvent(taskId, "attempt-1", "verification.completed", "passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: "/state/task/diff.patch",
+    sourceUnchanged: false,
+  });
+
+  const beforeTask = store.getTask(taskId);
+  const beforeEvents = store.listEvents(taskId);
+
+  const coordinator = new DaemonCoordinator(store, new SettingsService(store));
+  coordinator.resolveTask(taskId, "environment-recovered", "superseded", undefined, true);
+  coordinator.reopenTask(taskId, "needs again", true);
+
+  const afterTask = store.getTask(taskId);
+  const afterEvents = store.listEvents(taskId)
+    .filter((e) => e.type !== "task.resolution.completed" && e.type !== "task.resolution.reopened");
+
+  assert.equal(afterTask.status, beforeTask.status, "machine status unchanged");
+  assert.equal(afterTask.updatedAt, beforeTask.updatedAt, "task updatedAt unchanged");
+  assert.deepEqual(afterTask.spec, beforeTask.spec, "spec and routing evidence unchanged");
+  assert.equal(afterEvents.length, beforeEvents.length, "non-resolution events preserved");
+  for (const event of beforeEvents) {
+    const afterEvent = afterEvents.find((candidate) => candidate.id === event.id);
+    assert.ok(afterEvent, "each original event retained");
+    assert.equal(afterEvent!.type, event.type);
+    assert.deepEqual(afterEvent!.payload, event.payload);
+  }
+  store.close();
+});
+
 test("listTaskSurfaces carries attentionResolution and the closed placement", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-surface-"));
   const store = new StateStore(home);
@@ -2280,9 +2548,9 @@ test("attention resolution never invents success, delivery, or cost facts", asyn
   assert.ok(!json.includes("costUsd"), "no cost facts invented");
 });
 
-test("projectBoardPlacement: resolution cannot hide non-failed Tasks in History", () => {
+test("projectBoardPlacement: resolution cannot hide non-terminal Tasks in History", () => {
   const forged = RESOLVED_STATE;
-  const invalidStatuses = ["queued", "running", "preparing", "verifying", "succeeded", "blocked", "waiting"];
+  const invalidStatuses = ["queued", "running", "preparing", "verifying", "blocked", "waiting"];
   for (const status of invalidStatuses) {
     const placement = projectBoardPlacement({
       status: status as TaskRecord["status"],
@@ -2361,17 +2629,51 @@ test("reopen rejects a Task that later gained delivered truth", async () => {
   delete failedTask.currentAttemptId;
   store.createTask(failedTask);
   store.addEvent(taskId, "attempt-1", "worker.failed", "failed", { failureCategory: "runtime" });
-  resolveTaskResolution(store, taskId, { reason: "handled-elsewhere", confirm: true });
+  // Fixture has no delivered outcome at resolve time.
+  resolveTaskResolution(store, taskId, {
+    reason: "handled-elsewhere",
+    confirm: true,
+    delivered: false,
+  });
   // Later Main verifies repaired delivery.
   store.saveRemediationDisposition(taskId, REPAIRED);
-  // Reopen must fail closed and write no reopen event.
+  // Reopen must fail closed and write no reopen event when caller supplies delivered true.
   assert.throws(
-    () => reopenTaskResolution(store, taskId, { note: "again", confirm: true, delivered: true }),
+    () => reopenTaskResolution(store, taskId, {
+      note: "again",
+      confirm: true,
+      delivered: true,
+    }),
     /delivered/,
   );
   assert.equal(
     store.listEvents(taskId).filter((e) => e.type === "task.resolution.reopened").length,
     0,
+  );
+  store.close();
+});
+
+test("resolve rejects a Task when caller supplies delivered true", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-resolve-delivered-"));
+  const store = new StateStore(home);
+  const taskId = "55555555-5555-4555-8555-555555555555";
+  const failedTask = makeTask(taskId, "failed");
+  delete failedTask.currentAttemptId;
+  store.createTask(failedTask);
+  store.addEvent(taskId, "attempt-1", "worker.failed", "failed", { failureCategory: "runtime" });
+  // Delivered-outcome rejection fixture: caller-owned delivered truth is true.
+  assert.throws(
+    () => resolveTaskResolution(store, taskId, {
+      reason: "handled-elsewhere",
+      confirm: true,
+      delivered: true,
+    }),
+    /delivered/,
+  );
+  assert.equal(
+    store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
+    0,
+    "no resolve event when delivered outcome is present",
   );
   store.close();
 });
@@ -2386,13 +2688,21 @@ test("resolve and reopen notes are optional but bounded", async () => {
   store.addEvent(taskId, "attempt-1", "worker.failed", "failed", { failureCategory: "runtime" });
 
   // Omitted note succeeds and is omitted from the state projection.
-  const noNote = resolveTaskResolution(store, taskId, { reason: "handled-elsewhere", confirm: true });
+  const noNote = resolveTaskResolution(store, taskId, {
+    reason: "handled-elsewhere",
+    confirm: true,
+    delivered: false,
+  });
   assert.equal(noNote.existing, false);
   assert.equal(noNote.state.status, "resolved");
   assert.ok(!("note" in noNote.state), "note is omitted when not provided");
 
   // Exact replay with omitted note is idempotent.
-  const replay = resolveTaskResolution(store, taskId, { reason: "handled-elsewhere", confirm: true });
+  const replay = resolveTaskResolution(store, taskId, {
+    reason: "handled-elsewhere",
+    confirm: true,
+    delivered: false,
+  });
   assert.equal(replay.existing, true);
   assert.equal(
     store.listEvents(taskId).filter((e) => e.type === "task.resolution.completed").length,
@@ -2401,12 +2711,20 @@ test("resolve and reopen notes are optional but bounded", async () => {
 
   // Overlong note fails before mutation.
   assert.throws(
-    () => resolveTaskResolution(store, taskId, { reason: "superseded", note: "x".repeat(501), confirm: true }),
+    () => resolveTaskResolution(store, taskId, {
+      reason: "superseded",
+      note: "x".repeat(501),
+      confirm: true,
+      delivered: false,
+    }),
     /at most 500/,
   );
 
   // Reopen with omitted note succeeds.
-  const reopened = reopenTaskResolution(store, taskId, { confirm: true });
+  const reopened = reopenTaskResolution(store, taskId, {
+    confirm: true,
+    delivered: false,
+  });
   assert.equal(reopened.existing, false);
   assert.equal(reopened.state.status, "reopened");
   assert.ok(!("note" in reopened.state), "reopen note omitted when not provided");

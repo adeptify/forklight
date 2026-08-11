@@ -188,6 +188,105 @@ function coord(store: StateStore): DaemonCoordinator {
   return new DaemonCoordinator(store, new SettingsService(store), 2);
 }
 
+// --- Runtime-workspace fixture ---
+
+interface RuntimeWorkspaceTaskOptions {
+  taskStatus?: "failed" | "interrupted";
+  attemptStatus?: "failed" | "interrupted";
+  /** worker.failed failureCategory emitted after worker.started. */
+  failureCategory?: "authentication" | "budget" | "runtime" | "connectivity" | "contract-infeasible";
+  /** When false, no worker.started/resumed event is recorded (launch/doctor never reached the Worker). */
+  workerStarted?: boolean;
+  /** When false, the workspace is left identical to source so the recomputed business Diff is empty. */
+  workspaceChanged?: boolean;
+  policyOverrides?: Partial<AdvancedPolicyFields>;
+  maxRev?: number;
+}
+
+/**
+ * Build a failed/interrupted Task whose latest Attempt really started a Worker
+ * (exact-Attempt worker.started evidence) but ended before any verification
+ * completed. The workspace may retain a Worker edit (business Diff) or not.
+ */
+async function buildRuntimeWorkspaceTask(
+  id: string,
+  options: RuntimeWorkspaceTaskOptions = {},
+): Promise<BuiltTask> {
+  const maxRev = options.maxRev ?? 1;
+  const home = await mkdtemp(path.join(tmpdir(), `fl-runtime-${id}-`));
+  const sourceDir = path.join(home, "source");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal text.\n");
+  const markerPath = path.join(home, ".fl-runtime-marker");
+  const command = `test -f ${markerPath}`;
+  const spec = v1Spec(sourceDir, [command]);
+  const paths = taskPaths(home, id);
+  await prepareWorkspace(spec, paths);
+  if (options.workspaceChanged !== false) {
+    // Simulate the Worker editing files in the isolated workspace before dying.
+    await writeFile(
+      path.join(paths.workspace, "readme.md"),
+      "# hello\n\nChanged by Worker before crash.\n",
+    );
+    await writeWorkspacePatchReport(paths, createPathPolicy(spec));
+  }
+
+  const store = new StateStore(home);
+  const taskStatus = options.taskStatus ?? "failed";
+  const attemptStatus = options.attemptStatus ?? "failed";
+  const task: TaskRecord = {
+    id,
+    name: spec.name,
+    status: taskStatus,
+    sourcePath: sourceDir,
+    taskFile: `forklight://test/${id}`,
+    spec,
+    paths,
+    sessionId: `session-${id}`,
+    currentAttemptId: `${id}-att-1`,
+    createdAt: "2026-07-28T00:00:00Z",
+    updatedAt: "2026-07-28T01:00:00Z",
+    startedAt: "2026-07-28T00:00:00Z",
+    finishedAt: "2026-07-28T01:00:00Z",
+    error: "Worker ended before verification completed",
+    effectivePolicy: snapshot(maxRev, options.policyOverrides),
+  };
+  store.createTask(task);
+  const attempt: AttemptRecord = {
+    id: `${id}-att-1`,
+    taskId: id,
+    ordinal: 1,
+    status: attemptStatus,
+    sessionId: task.sessionId,
+    rawLogPath: path.join(paths.logs, "att-1.jsonl"),
+    startedAt: "2026-07-28T00:00:00Z",
+    finishedAt: "2026-07-28T01:00:00Z",
+    exitCode: 1,
+    runtimeBudgetUsd: 0.1,
+  };
+  store.createAttempt(attempt);
+  // Seed exact terminal events so history preservation is provable: a failed
+  // Attempt gets worker.failed (with an optional classified category), an
+  // interrupted Attempt gets worker.interrupted.
+  if (options.workerStarted !== false) {
+    store.addEvent(id, attempt.id, "worker.started", "Worker started", {
+      attemptId: attempt.id,
+    });
+  }
+  if (options.failureCategory !== undefined) {
+    store.addEvent(id, attempt.id, "worker.failed", "Worker failed", {
+      failureCategory: options.failureCategory,
+    });
+  } else if (taskStatus === "interrupted" || attemptStatus === "interrupted") {
+    store.addEvent(id, attempt.id, "worker.interrupted", "Worker interrupted", {});
+  } else {
+    store.addEvent(id, attempt.id, "worker.failed", "Worker failed", {
+      failureCategory: "runtime",
+    });
+  }
+  return { task, attemptId: attempt.id, store, home, markerPath, command };
+}
+
 // --- Eligibility ---
 
 test("eligibility: eligible failed candidate with behavior-only failure", async () => {
@@ -619,6 +718,7 @@ test("projection: privacy-safe view omits reason and command output", () => {
   const view = projectCandidateReverificationResult(
     {
       status: "passed",
+      path: "behavior-failure",
       taskId: "t",
       attemptId: "a",
       attemptStatus: "succeeded",
@@ -672,7 +772,7 @@ test("coordinator: reverifyCandidate delegates to the core and returns the proje
   }
 });
 
-test("coordinator: successful reverification immediately wakes plan dependents", async () => {
+test("coordinator: successful material reverification holds plan dependents until reviewed delivery", async () => {
   const built = await buildFailedCandidateTask("coord-plan");
   try {
     const dependentId = "coord-plan-dependent";
@@ -696,7 +796,7 @@ test("coordinator: successful reverification immediately wakes plan dependents",
       {
         id: "coord-plan-graph",
         name: "candidate reverification dependency",
-        objective: "Wake a dependent after verification-only recovery",
+        objective: "Hold a dependent until reviewed delivery after material recovery",
         planFile: "forklight://test/coord-plan-graph",
         createdAt: "2026-07-27T00:00:00Z",
         updatedAt: "2026-07-27T00:00:00Z",
@@ -711,10 +811,13 @@ test("coordinator: successful reverification immediately wakes plan dependents",
     const c = new DaemonCoordinator(built.store, new SettingsService(built.store), 0);
     const view = await c.reverifyCandidate(built.task.id, "transient acceptance failure", true);
     assert.equal(view.status, "passed");
-    assert.equal(built.store.getTask(dependentId).status, "queued");
+    // Material Candidate at machine success must not unlock the dependent.
+    // Dedicated daemon delivery tests own exact Main accept + Integration unlock.
+    assert.equal(built.store.getTask(built.task.id).status, "succeeded");
+    assert.equal(built.store.getTask(dependentId).status, "waiting");
     assert.equal(
       built.store.listEvents(dependentId).filter((event) => event.type === "task.ready").length,
-      1,
+      0,
     );
     await c.shutdown();
   } finally {
@@ -855,6 +958,7 @@ test("Hub: buildSafeTaskJourney projects candidateReverification with zero-Worke
       type: "candidate.reverification.completed",
       payload: {
         status: "passed",
+        path: "behavior-failure",
         attemptId: "a1",
         attemptStatus: "succeeded",
         verificationEventSequence: 7,
@@ -881,6 +985,7 @@ test("Hub: buildSafeTaskJourney projects candidateReverification with zero-Worke
   assert.equal(rv.localVerificationTimeNotZero, true);
   assert.equal(rv.noFullRestartSavingsClaim, true);
   assert.equal(rv.allowance.remaining, 0);
+  assert.equal(rv.requiresFreshMainAccept, true);
 });
 
 test("Hub: malformed candidate reverification evidence is omitted instead of fabricating zero-cost facts", () => {
@@ -914,6 +1019,7 @@ test("Hub i18n carries candidate reverification keys in both languages", async (
     "taskReverifyJourneyOutcome", "taskReverifyJourneyCommands",
     "taskReverifyJourneyZeroWorker", "taskReverifyJourneyNotFree",
     "taskReverifyJourneyFreshAccept", "taskReverifyStatusPassed", "taskReverifyStatusFailed",
+    "taskReverifyStatusNoCandidate",
     "taskReverifyRejectTaskNotFailed", "taskReverifyRejectCompetition",
     "taskReverifyRejectRunning", "taskReverifyRejectNoAttempt",
     "taskReverifyRejectNoVerification", "taskReverifyRejectWrongCategory",
@@ -921,6 +1027,9 @@ test("Hub i18n carries candidate reverification keys in both languages", async (
     "taskReverifyRejectAllowanceExhausted",
     "taskReverifyRejectNoMainRevise", "taskReverifyRejectReviewedRevisionMismatch",
     "taskReverifyRejectAlreadyIntegrated",
+    "taskReverifyRejectRuntimeNotStarted", "taskReverifyRejectRuntimeAuthFailed",
+    "taskReverifyRejectRuntimePolicyLimit",
+    "taskReverifyRuntimeHint", "taskReverifyRuntimeJourneyIntro",
     "workersAdvMaxMainReverifications", "workersAdvMaxMainReverificationsHint",
   ]) {
     assert.ok(i18n.indexOf(key) !== i18n.lastIndexOf(key), `${key} exists in both en and zh`);
@@ -951,6 +1060,13 @@ test("Hub app.js wires the reverify control and journey card without private con
   assert.ok(src.includes("taskReverifyRejectNoMainRevise"), "succeeded-path no-revise label");
   assert.ok(src.includes("taskReverifyRejectReviewedRevisionMismatch"), "revision mismatch label");
   assert.ok(src.includes("taskReverifyRejectAlreadyIntegrated"), "already-integrated label");
+  // Runtime-workspace path copy and rejection labels.
+  assert.ok(src.includes("taskReverifyRejectRuntimeNotStarted"), "runtime not-started label");
+  assert.ok(src.includes("taskReverifyRejectRuntimeAuthFailed"), "runtime auth label");
+  assert.ok(src.includes("taskReverifyRejectRuntimePolicyLimit"), "runtime policy-limit label");
+  assert.ok(src.includes("taskReverifyRuntimeHint"), "runtime hint key");
+  assert.ok(src.includes("taskReverifyRuntimeJourneyIntro"), "runtime journey intro key");
+  assert.ok(src.includes("taskReverifyStatusNoCandidate"), "no-candidate status key");
   // The reverify button is disabled when not eligible.
   assert.ok(src.includes("reverifyBtn.disabled = true"));
 });
@@ -1661,4 +1777,624 @@ test("capture failure: blocked revisions directory keeps task failed with conten
     built.store.close();
     await rm(built.home, { recursive: true, force: true });
   }
+});
+
+// --- Runtime-workspace path (Worker really started, ended before verification) ---
+
+test("runtime path eligibility: exact worker.started + no verification is eligible", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-eligible");
+  try {
+    const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+    assert.equal(elig.eligible, true);
+    assert.equal(elig.category, "eligible");
+    assert.equal(elig.eligiblePath, "runtime-workspace");
+    assert.equal(elig.attemptId, built.attemptId);
+    assert.equal(elig.allowance.remaining, 1);
+    assert.equal(elig.verificationEventSequence, undefined, "no prior verification evidence");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: interrupted Task with exact worker.started is eligible", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-int-elig", {
+    taskStatus: "interrupted",
+    attemptStatus: "interrupted",
+  });
+  try {
+    const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+    assert.equal(elig.eligible, true);
+    assert.equal(elig.eligiblePath, "runtime-workspace");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: launch/doctor failure without worker start is rejected", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-notstarted", { workerStarted: false });
+  try {
+    const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+    assert.equal(elig.eligible, false);
+    assert.equal(elig.category, "runtime-not-started");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: preflight authentication failure without worker start is rejected", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-auth-preflight", { workerStarted: false });
+  try {
+    built.store.addEvent(
+      built.task.id,
+      built.attemptId,
+      "task.launch-preflight.failed",
+      "preflight auth failed",
+      { failureCategory: "authentication" },
+    );
+    const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+    assert.equal(elig.eligible, false);
+    assert.equal(elig.category, "runtime-not-started");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: authentication failure after worker start is rejected", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-auth", {
+    failureCategory: "authentication",
+  });
+  try {
+    const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+    assert.equal(elig.category, "runtime-auth-failed");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: policy-limit terminal paths are excluded", async () => {
+  for (const category of ["budget", "contract-infeasible"] as const) {
+    const built = await buildRuntimeWorkspaceTask(`rw-policy-${category}`, {
+      failureCategory: category,
+    });
+    try {
+      const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+      assert.equal(elig.category, "runtime-policy-limit", category);
+    } finally {
+      built.store.close();
+      await rm(built.home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("runtime path eligibility: allowance zero and exhausted are rejected", async () => {
+  const zero = await buildRuntimeWorkspaceTask("rw-allow0", { maxRev: 0 });
+  try {
+    assert.equal(
+      resolveCandidateReverificationEligibility(zero.store, zero.task.id, 0).category,
+      "allowance-zero",
+    );
+  } finally {
+    zero.store.close();
+    await rm(zero.home, { recursive: true, force: true });
+  }
+  const exhausted = await buildRuntimeWorkspaceTask("rw-allowex");
+  try {
+    exhausted.store.addEvent(
+      exhausted.task.id,
+      exhausted.attemptId,
+      "candidate.reverification.authorized",
+      "prior",
+      { attemptId: exhausted.attemptId },
+    );
+    assert.equal(
+      resolveCandidateReverificationEligibility(exhausted.store, exhausted.task.id, 1).category,
+      "allowance-exhausted",
+    );
+  } finally {
+    exhausted.store.close();
+    await rm(exhausted.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: latest Attempt with valid verification is governed by existing rules", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-stale");
+  try {
+    // A passing verification bound to the latest Attempt must route to the
+    // existing behavior-failure rules, never the runtime-workspace path.
+    built.store.addEvent(
+      built.task.id,
+      built.attemptId,
+      "verification.completed",
+      "verified",
+      failedVerification(built.command, {
+        diffPath: built.task.paths.diff,
+        behaviorPassed: true,
+      }),
+    );
+    const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+    assert.equal(elig.eligible, false);
+    assert.equal(elig.category, "wrong-failure-category", "existing verification owns the next step");
+    assert.equal(elig.eligiblePath, undefined);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: behavior-only failed verification keeps the original path", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-behav");
+  try {
+    built.store.addEvent(
+      built.task.id,
+      built.attemptId,
+      "verification.completed",
+      "verified",
+      failedVerification(built.command, { diffPath: built.task.paths.diff }),
+    );
+    const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+    assert.equal(elig.eligible, true);
+    assert.equal(elig.eligiblePath, "behavior-failure");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: older Attempt policy evidence cannot block a newer eligible run", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-older");
+  try {
+    // Older attempt hit a budget policy limit — it must not block the latest.
+    const olderId = `${built.task.id}-att-0`;
+    built.store.createAttempt({
+      id: olderId,
+      taskId: built.task.id,
+      ordinal: 0,
+      status: "failed",
+      sessionId: `session-${built.task.id}-old`,
+      rawLogPath: path.join(built.task.paths.logs, "att-0.jsonl"),
+      startedAt: "2026-07-28T00:00:00Z",
+      finishedAt: "2026-07-28T00:30:00Z",
+      exitCode: 1,
+      runtimeBudgetUsd: 0.1,
+    });
+    built.store.addEvent(built.task.id, olderId, "worker.started", "Worker started", { attemptId: olderId });
+    built.store.addEvent(built.task.id, olderId, "worker.failed", "Worker failed", { failureCategory: "budget" });
+    // The fixture's attempt (ordinal 1) is still the latest and really started.
+    const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+    assert.equal(elig.eligible, true, "older budget evidence must not block the newer run");
+    assert.equal(elig.eligiblePath, "runtime-workspace");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: every exact-Attempt policy event family is excluded", async () => {
+  const policyTypes = [
+    "policy.duration.exceeded",
+    "policy.token.exceeded",
+    "policy.noprogress.exceeded",
+    "policy.size.exceeded",
+  ] as const;
+  for (const type of policyTypes) {
+    const built = await buildRuntimeWorkspaceTask(`rw-policyevt-${type.replaceAll(".", "-")}`);
+    try {
+      built.store.addEvent(built.task.id, built.attemptId, type, "policy limit", {});
+      const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+      assert.equal(elig.eligible, false, type);
+      assert.equal(elig.category, "runtime-policy-limit", type);
+    } finally {
+      built.store.close();
+      await rm(built.home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("runtime path eligibility: malformed verification evidence on the latest Attempt fails closed", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-malformed");
+  try {
+    built.store.addEvent(
+      built.task.id,
+      built.attemptId,
+      "verification.completed",
+      "malformed evidence",
+      { notAVerificationResult: true },
+    );
+    const elig = resolveCandidateReverificationEligibility(built.store, built.task.id, 1);
+    assert.equal(elig.eligible, false, "malformed verification must not open the runtime path");
+    assert.equal(elig.category, "no-failed-verification");
+    assert.equal(elig.eligiblePath, undefined);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path: useful changed workspace passes → Task succeeds, Attempt preserved, exact revision", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-pass");
+  try {
+    await writeFile(built.markerPath, "pass\n");
+    const result = await reverifyCandidate(
+      built.store,
+      { taskId: built.task.id, reason: "worker crashed after editing; retained files verified", confirm: true },
+      1,
+      30_000,
+    );
+    assert.equal(result.status, "passed");
+    assert.equal(result.path, "runtime-workspace");
+    assert.equal(built.store.getTask(built.task.id).status, "succeeded", "Task moved to succeeded");
+    assert.equal(built.store.getAttempt(built.attemptId).status, "failed", "original Attempt preserved");
+    assert.equal(built.store.listAttempts(built.task.id).length, 1, "no new Attempt created");
+    assert.equal(result.costFacts.workerInvoked, false);
+    assert.equal(result.costFacts.incrementalWorkerTokens, 0);
+    assert.equal(result.requiresFreshMainAccept, true);
+    // Exact Candidate Revision bound to the new verification event.
+    const events = built.store.listEvents(built.task.id);
+    const revisions = events.filter((event) => event.type === "candidate.revision.captured");
+    assert.equal(revisions.length, 1);
+    const rev = revisions[0]!.payload as { verificationEventSequence: number; verificationPassed: boolean };
+    assert.equal(rev.verificationEventSequence, result.verificationEventSequence);
+    assert.equal(rev.verificationPassed, true);
+    // Immutable history: original worker.started / worker.failed still present.
+    assert.ok(events.some((e) => e.type === "worker.started"), "original worker.started preserved");
+    assert.ok(events.some((e) => e.type === "worker.failed"), "original worker.failed preserved");
+    // New canonical verification is the latest.
+    const verifications = events.filter((e) => e.type === "verification.completed");
+    assert.equal(verifications.at(-1)!.sequence, result.verificationEventSequence);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path: interrupted Task with useful workspace passes → Task succeeds, Attempt stays interrupted", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-int", {
+    taskStatus: "interrupted",
+    attemptStatus: "interrupted",
+  });
+  try {
+    await writeFile(built.markerPath, "pass\n");
+    const result = await reverifyCandidate(
+      built.store,
+      { taskId: built.task.id, reason: "interrupted after edits; retained files verified", confirm: true },
+      1,
+      30_000,
+    );
+    assert.equal(result.status, "passed");
+    assert.equal(result.path, "runtime-workspace");
+    assert.equal(built.store.getTask(built.task.id).status, "succeeded");
+    assert.equal(built.store.getAttempt(built.attemptId).status, "interrupted", "Attempt stays interrupted");
+    assert.equal(built.store.listAttempts(built.task.id).length, 1);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path: non-empty Diff but checks fail → Candidate retained, Task stays failed, no auto-retry", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-fail");
+  try {
+    // marker absent → the acceptance command still fails.
+    const result = await reverifyCandidate(
+      built.store,
+      { taskId: built.task.id, reason: "check retained files", confirm: true },
+      1,
+      30_000,
+    );
+    assert.equal(result.status, "failed");
+    assert.equal(result.path, "runtime-workspace");
+    assert.equal(built.store.getTask(built.task.id).status, "failed", "Task stays failed");
+    assert.equal(built.store.getAttempt(built.attemptId).status, "failed", "Attempt preserved");
+    assert.equal(result.costFacts.passedCommandCount, 0);
+    // A retained (non-empty) Candidate still requires a fresh Main accept —
+    // only the no-candidate outcome reports false.
+    assert.equal(result.requiresFreshMainAccept, true);
+    // The exact failed-verification Candidate is retained for targeted handling.
+    const revisions = built.store.listEvents(built.task.id)
+      .filter((event) => event.type === "candidate.revision.captured");
+    assert.equal(revisions.length, 1, "non-empty Diff is captured even on failed checks");
+    assert.equal((revisions[0]!.payload as { verificationPassed: boolean }).verificationPassed, false);
+    // Allowance consumed; nothing retries automatically.
+    assert.equal(
+      resolveCandidateReverificationEligibility(built.store, built.task.id, 1).category,
+      "allowance-exhausted",
+    );
+    assert.equal(built.store.listAttempts(built.task.id).length, 1);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path: empty recomputed Diff → no-candidate, no revision, never success, cannot be accepted or integrated", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-empty", { workspaceChanged: false });
+  try {
+    // Even a passing acceptance command cannot make an empty Diff a Candidate.
+    await writeFile(built.markerPath, "pass\n");
+    const result = await reverifyCandidate(
+      built.store,
+      { taskId: built.task.id, reason: "empty retained workspace", confirm: true },
+      1,
+      30_000,
+    );
+    assert.equal(result.status, "no-candidate");
+    assert.equal(result.path, "runtime-workspace");
+    assert.equal(built.store.getTask(built.task.id).status, "failed", "never marks success");
+    assert.equal(built.store.getAttempt(built.attemptId).status, "failed");
+    assert.equal(
+      built.store.listEvents(built.task.id).filter((e) => e.type === "candidate.revision.captured").length,
+      0,
+      "no Candidate captured",
+    );
+    // Truthful handoff: a no-candidate outcome requires no fresh Main accept.
+    assert.equal(result.requiresFreshMainAccept, false, "no Candidate, so no fresh Main accept is possible");
+    const completions = built.store.listEvents(built.task.id)
+      .filter((e) => e.type === "candidate.reverification.completed");
+    const noCandidatePayload = completions.at(-1)!.payload as { status: string; requiresFreshMainAccept: boolean };
+    assert.equal(noCandidatePayload.status, "no-candidate");
+    assert.equal(noCandidatePayload.requiresFreshMainAccept, false);
+    // Cannot be Main-accepted: the empty patch leaves verification failing.
+    assert.throws(
+      () => recordMainReview(built.store, built.task.id, {
+        decision: "accept", reason: "cannot accept nothing", confirm: true,
+      }),
+      /passing independent verification/,
+    );
+    // Cannot be integrated: the Task is not succeeded.
+    const preflight = await preflightIntegration(built.store, built.task.id, {
+      reviewedPatchMaxFiles: 5,
+      reviewedPatchMaxLines: 400,
+      reviewReceiptTtlMs: 900_000,
+      verificationTimeoutMs: 30_000,
+      backupRetentionCount: 3,
+      autoRollback: true,
+    });
+    assert.ok(preflight.rejectionReasons.length > 0, "preflight rejects a failed task");
+    // No new Attempt; allowance consumed; zero-Worker facts exact.
+    assert.equal(built.store.listAttempts(built.task.id).length, 1);
+    assert.equal(result.costFacts.workerInvoked, false);
+    assert.equal(result.costFacts.incrementalWorkerTokens, 0);
+    assert.equal(result.allowance.consumed, 1);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path: empty Diff is still no-candidate even when no-change policy is off", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-empty-off", {
+    workspaceChanged: false,
+    policyOverrides: { completionMode: "off", changeBudgetMode: "off" },
+  });
+  try {
+    await writeFile(built.markerPath, "pass\n");
+    const result = await reverifyCandidate(
+      built.store,
+      { taskId: built.task.id, reason: "empty under off policy", confirm: true },
+      1,
+      30_000,
+    );
+    assert.equal(result.status, "no-candidate", "empty Diff fails closed regardless of noChangeMode");
+    assert.equal(built.store.getTask(built.task.id).status, "failed");
+    assert.equal(result.requiresFreshMainAccept, false, "no Candidate under off policy either");
+    assert.equal(
+      built.store.listEvents(built.task.id).filter((e) => e.type === "candidate.revision.captured").length,
+      0,
+    );
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path eligibility: Integration results block the path", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-intres");
+  try {
+    const ts = "2026-07-28T02:00:00Z";
+    built.store.saveIntegrationReceipt({
+      id: "rw-receipt",
+      taskId: built.task.id,
+      patchDigest: "b".repeat(64),
+      affectedFiles: ["readme.md"],
+      rejectionReasons: [],
+      sourceEvidence: {},
+      createdAt: ts,
+      expiresAt: ts,
+      consumed: false,
+    });
+    built.store.saveIntegrationResult({
+      id: "rw-int",
+      taskId: built.task.id,
+      receiptId: "rw-receipt",
+      status: "applied",
+      appliedAt: ts,
+      createdAt: ts,
+    });
+    assert.equal(
+      resolveCandidateReverificationEligibility(built.store, built.task.id, 1).category,
+      "already-integrated",
+    );
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path: passing recovered Candidate requires a fresh exact Main accept before Integration", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-binding");
+  try {
+    await writeFile(built.markerPath, "pass\n");
+    const result = await reverifyCandidate(
+      built.store,
+      { taskId: built.task.id, reason: "verify recovered candidate", confirm: true },
+      1,
+      30_000,
+    );
+    assert.equal(result.status, "passed");
+    assert.equal(built.store.getTask(built.task.id).status, "succeeded");
+    // No accept yet → preflight rejects.
+    const before = await preflightIntegration(built.store, built.task.id, {
+      reviewedPatchMaxFiles: 5,
+      reviewedPatchMaxLines: 400,
+      reviewReceiptTtlMs: 900_000,
+      verificationTimeoutMs: 30_000,
+      backupRetentionCount: 3,
+      autoRollback: true,
+    });
+    assert.ok(before.rejectionReasons.some((r) => r.includes("Main agent review acceptance is required")));
+    // Fresh exact accept bound to the new verification and Candidate Revision.
+    const accept = recordMainReview(built.store, built.task.id, {
+      decision: "accept",
+      reason: "fresh accept after runtime recovery",
+      confirm: true,
+    });
+    assert.equal(accept.verificationEventSequence, result.verificationEventSequence);
+    const after = await preflightIntegration(built.store, built.task.id, {
+      reviewedPatchMaxFiles: 5,
+      reviewedPatchMaxLines: 400,
+      reviewReceiptTtlMs: 900_000,
+      verificationTimeoutMs: 30_000,
+      backupRetentionCount: 3,
+      autoRollback: true,
+    });
+    assert.equal(after.rejectionReasons.length, 0, "preflight passes after fresh accept");
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path: crash-safe incomplete authorization does not create an Attempt or auto-retry", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-crash");
+  try {
+    built.store.addEvent(
+      built.task.id,
+      built.attemptId,
+      "candidate.reverification.authorized",
+      "authorized then crashed",
+      { attemptId: built.attemptId },
+    );
+    assert.equal(built.store.getTask(built.task.id).status, "failed");
+    const beforeAttempts = built.store.listAttempts(built.task.id).length;
+    const coordinator = coord(built.store);
+    await coordinator.recover();
+    assert.equal(built.store.getTask(built.task.id).status, "failed", "recover must not change status");
+    assert.equal(built.store.listAttempts(built.task.id).length, beforeAttempts, "recover must not create an Attempt");
+    assert.equal(
+      resolveCandidateReverificationEligibility(built.store, built.task.id, 1).category,
+      "allowance-exhausted",
+    );
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path: daemon/CLI projection carries the runtime-workspace discriminator", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-daemon");
+  try {
+    await writeFile(built.markerPath, "pass\n");
+    const c = coord(built.store);
+    const view = await c.reverifyCandidate(built.task.id, "verify retained files", true);
+    assert.equal(view.status, "passed");
+    assert.equal(view.path, "runtime-workspace");
+    assert.equal(view.taskStatus, "succeeded");
+    assert.equal(view.attemptStatus, "failed");
+    assert.equal(view.costFacts.workerInvoked, false);
+    assert.equal(view.requiresFreshMainAccept, true);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("runtime path: daemon/CLI projection reports no-candidate without a fresh accept requirement", async () => {
+  const built = await buildRuntimeWorkspaceTask("rw-daemon-nc", { workspaceChanged: false });
+  try {
+    const c = coord(built.store);
+    const view = await c.reverifyCandidate(built.task.id, "empty retained workspace", true);
+    assert.equal(view.status, "no-candidate");
+    assert.equal(view.path, "runtime-workspace");
+    assert.equal(view.taskStatus, "failed");
+    assert.equal(view.requiresFreshMainAccept, false);
+    assert.equal(view.costFacts.workerInvoked, false);
+  } finally {
+    built.store.close();
+    await rm(built.home, { recursive: true, force: true });
+  }
+});
+
+test("Hub: runtime-workspace reverification projects the path discriminator", () => {
+  const task = { id: "t", status: "succeeded", spec: { version: 2, provider: { name: "deepseek" }, runtime: { name: "claude-code" } } } as unknown as Record<string, unknown>;
+  const decision = { verification: { passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true, commands: [], diffPath: "/d", sourceUnchanged: true } } as unknown;
+  const inspect = {
+    events: [{
+      type: "candidate.reverification.completed",
+      payload: {
+        status: "passed",
+        path: "runtime-workspace",
+        attemptId: "a1",
+        attemptStatus: "failed",
+        verificationEventSequence: 7,
+        workerInvoked: false,
+        incrementalWorkerTokens: 0,
+        incrementalModelRuntimeCostUsd: 0,
+        commandCount: 1,
+        passedCommandCount: 1,
+        commandDurationMs: 3,
+        wallDurationMs: 9,
+        allowance: { max: 1, consumed: 1, remaining: 0, source: "global" },
+        requiresFreshMainAccept: true,
+      },
+    }],
+    attempts: [],
+  } as unknown;
+  const journey = buildSafeTaskJourney(task, decision, inspect);
+  assert.ok(journey.candidateReverification);
+  assert.equal(journey.candidateReverification!.path, "runtime-workspace");
+  assert.equal(journey.candidateReverification!.attemptStatus, "failed");
+  assert.equal(journey.candidateReverification!.status, "passed");
+  assert.equal(journey.candidateReverification!.requiresFreshMainAccept, true);
+});
+
+test("Hub: no-candidate reverification projects status without private evidence", async () => {
+  const task = { id: "t", status: "failed", spec: { version: 2, provider: { name: "deepseek" }, runtime: { name: "claude-code" } } } as unknown as Record<string, unknown>;
+  const decision = { verification: { passed: false, behaviorPassed: false, policyPassed: false, sourceCompatible: true, commands: [], diffPath: "/d", sourceUnchanged: true } } as unknown;
+  const inspect = {
+    events: [{
+      type: "candidate.reverification.completed",
+      payload: {
+        status: "no-candidate",
+        path: "runtime-workspace",
+        attemptId: "a1",
+        attemptStatus: "failed",
+        verificationEventSequence: 7,
+        workerInvoked: false,
+        incrementalWorkerTokens: 0,
+        incrementalModelRuntimeCostUsd: 0,
+        commandCount: 1,
+        passedCommandCount: 1,
+        commandDurationMs: 3,
+        wallDurationMs: 9,
+        allowance: { max: 1, consumed: 1, remaining: 0, source: "global" },
+        requiresFreshMainAccept: false,
+      },
+    }],
+    attempts: [],
+  } as unknown;
+  const journey = buildSafeTaskJourney(task, decision, inspect);
+  assert.ok(journey.candidateReverification);
+  assert.equal(journey.candidateReverification!.status, "no-candidate");
+  assert.equal(journey.candidateReverification!.path, "runtime-workspace");
+  assert.equal(journey.candidateReverification!.requiresFreshMainAccept, false, "no-candidate truthfully needs no fresh accept");
+  // The Hub truthfully reports the no-candidate fact in plain language.
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  assert.ok(src.includes("taskReverifyStatusNoCandidate"), "no-candidate status label wired");
+  assert.ok(i18n.includes("taskReverifyStatusNoCandidate:") , "no-candidate key present");
 });

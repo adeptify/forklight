@@ -23,7 +23,15 @@ export function assessIntegrationFeasibility(
   const integrationMaxFiles = integration.reviewedPatchMaxFiles;
   const integrationMaxLines = integration.reviewedPatchMaxLines;
 
-  if (spec.version !== 2) {
+  // Change budget is Coding-only for version-3 Tasks (optional extension);
+  // v2 always carries it. Domain-neutral Tasks have no change budget.
+  const budget = spec.version === 2
+    ? spec.contract.changeBudget
+    : spec.version === 3 && spec.contract.coding !== undefined
+      ? spec.contract.coding.changeBudget
+      : undefined;
+
+  if (budget === undefined) {
     return {
       applicable: false,
       integratable: true,
@@ -35,8 +43,8 @@ export function assessIntegrationFeasibility(
     };
   }
 
-  const taskMaxFiles = spec.contract.changeBudget.maxFiles;
-  const taskMaxLines = spec.contract.changeBudget.maxDiffLines;
+  const taskMaxFiles = budget.maxFiles;
+  const taskMaxLines = budget.maxDiffLines;
   const issues: string[] = [];
   if (taskMaxFiles > integrationMaxFiles) {
     issues.push(

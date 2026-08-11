@@ -23,7 +23,43 @@ export interface CheckpointLaunch {
 
 export type CheckpointGapReason =
   | "runtime-unsupported"
+  | "mcp-unavailable"
   | "missing-or-failed-non-authoritative";
+
+/**
+ * Bounded checkpoint MCP readiness projected from Claude init events.
+ * `failed` means Claude explicitly reported the configured checkpoint server
+ * failed — the Worker never received the tool and must not be blamed for
+ * omitting it. `unknown` means no usable readiness evidence was reported.
+ */
+export type CheckpointMcpReadiness = "ready" | "failed" | "unknown";
+
+/**
+ * Read the last reported readiness of the `forklight_checkpoint` MCP server
+ * from durable Claude init events for one Attempt. Only bounded codes are
+ * stored; raw server diagnostics never leave the normalizer.
+ */
+export function checkpointMcpReadinessFromEvents(
+  events: readonly EventRecord[],
+  attemptId: string,
+): CheckpointMcpReadiness {
+  for (const event of [...events].reverse()) {
+    if (event.attemptId !== attemptId || event.type !== "worker.message") continue;
+    if (event.payload === null || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+      continue;
+    }
+    const servers = (event.payload as { mcpServers?: unknown }).mcpServers;
+    if (!Array.isArray(servers)) continue;
+    for (const server of servers) {
+      if (server === null || typeof server !== "object" || Array.isArray(server)) continue;
+      const entry = server as { name?: unknown; status?: unknown };
+      if (entry.name !== "forklight_checkpoint") continue;
+      if (entry.status === "ready") return "ready";
+      if (entry.status === "failed") return "failed";
+    }
+  }
+  return "unknown";
+}
 
 export interface TerminalAfterVerification {
   status: "succeeded" | "failed";
@@ -70,22 +106,21 @@ export function checkpointSatisfied(
     report.authority !== "non-authoritative-checkpoint"
     || !Array.isArray(report.commands)
   ) return false;
-  const expected = new Set(
-    Array.from({ length: commandCount }, (_, index) => `acceptance-${index + 1}`),
-  );
-  for (const command of report.commands) {
+  const expected = Array.from({ length: commandCount }, (_, index) => `acceptance-${index + 1}`);
+  if (report.commands.length !== expected.length) return false;
+  for (const [index, command] of report.commands.entries()) {
     if (command === null || typeof command !== "object") return false;
     const candidate = command as { commandId?: unknown; exitCode?: unknown; timedOut?: unknown };
     if (
       typeof candidate.commandId !== "string"
-      || !expected.delete(candidate.commandId)
+      || candidate.commandId !== expected[index]
       || candidate.exitCode !== 0
       || candidate.timedOut !== false
     ) {
       return false;
     }
   }
-  return expected.size === 0;
+  return true;
 }
 
 /**
@@ -102,6 +137,8 @@ export function resolveTerminalAfterVerification(input: {
   verificationPassed: boolean;
   checkpointCapability: CapabilitySupport;
   checkpointSatisfied: boolean;
+  /** Evidence from Claude init events; unknown when not reported. */
+  mcpReadiness?: CheckpointMcpReadiness;
 }): TerminalAfterVerification {
   if (!input.verificationPassed) {
     return {
@@ -119,6 +156,16 @@ export function resolveTerminalAfterVerification(input: {
   }
   // supported | partial: checkpoint optional for terminal success
   if (!input.checkpointSatisfied) {
+    // Claude explicitly reported the configured checkpoint MCP server failed:
+    // the Worker never received the tool, so this is supported-but-unavailable,
+    // not Worker omission.
+    if (input.mcpReadiness === "failed") {
+      return {
+        status: "succeeded",
+        recordCheckpointGap: true,
+        gapReason: "mcp-unavailable",
+      };
+    }
     return {
       status: "succeeded",
       recordCheckpointGap: true,
@@ -156,34 +203,64 @@ export function checkpointLaunch(
   };
 }
 
-export async function runCheckpoint(
-  store: StateStore,
-  request: CheckpointRequest,
-): Promise<CheckpointReport> {
-  const task = store.getTask(request.taskId);
-  if (task.status !== "running" || task.currentAttemptId !== request.attemptId) {
-    throw new Error("Checkpoint requires the Task current running attempt");
-  }
+export interface CheckpointSelection {
+  /** canonical `acceptance-N` → raw command text for the Task Contract. */
+  catalog: Map<string, string>;
+  /** Command ids in request order (defaults to the full catalog order). */
+  selected: string[];
+  /** Deterministic Task Contract catalog-order selection used for operation
+   *  identity and execution. Numeric order (`acceptance-1` … `acceptance-11`)
+   *  keeps full suites satisfying checkpointSatisfied and lets reordered
+   *  equivalent selections reuse one operation. */
+  canonicalIds: string[];
+}
 
+/** Resolve and validate the approved checkpoint command selection for one
+ *  Task. Unknown and duplicate ids fail closed; the default selection is the
+ *  full catalog. */
+export function resolveCheckpointSelection(
+  task: TaskRecord,
+  request: CheckpointRequest,
+): CheckpointSelection {
   const catalog = new Map<string, string>(
     task.spec.acceptance.commands.map(
       (command, index) => [`acceptance-${index + 1}`, command],
     ),
   );
   const selected = request.commandIds ?? [...catalog.keys()];
+  const seen = new Set<string>();
   for (const commandId of selected) {
     if (!catalog.has(commandId)) {
       throw new Error(`unknown checkpoint command id: ${commandId}`);
     }
+    if (seen.has(commandId)) {
+      throw new Error(`duplicate checkpoint command id: ${commandId}`);
+    }
+    seen.add(commandId);
   }
+  const order = new Map<string, number>();
+  for (const [index, commandId] of [...catalog.keys()].entries()) {
+    order.set(commandId, index);
+  }
+  return {
+    catalog,
+    selected,
+    canonicalIds: [...selected].sort((a, b) => order.get(a)! - order.get(b)!),
+  };
+}
 
-  store.addEvent(
-    task.id,
-    request.attemptId,
-    "checkpoint.started",
-    `Worker requested ${selected.length} approved checkpoint command(s)`,
-    { commandIds: selected },
-  );
+/** Execute the selected approved checkpoint commands and build the existing
+ *  private CheckpointReport shape. Never records events; callers own the
+ *  lifecycle events so both the synchronous and operation paths stay
+ *  single-authority. The optional operationId is embedded in the report so the
+ *  terminal event can be matched back to its operation. */
+export async function executeCheckpointCommands(
+  task: TaskRecord,
+  selected: readonly string[],
+  attemptId: string,
+  operationId?: string,
+): Promise<CheckpointReport> {
+  const { catalog } = resolveCheckpointSelection(task, { taskId: task.id, attemptId, commandIds: [...selected] });
 
   const commands: CheckpointReport["commands"] = [];
   const { env: verifierEnvironment, shellGitPrefix } = await verifierProcessEnvironment(task);
@@ -207,17 +284,40 @@ export async function runCheckpoint(
 
   const patches = await writeWorkspacePatchReport(task.paths, createPathPolicy(task.spec));
 
-  const report: CheckpointReport = {
+  return {
     authority: "non-authoritative-checkpoint",
-    attemptId: request.attemptId,
+    attemptId,
     commands,
     patches,
+    ...(operationId === undefined ? {} : { operationId }),
   };
+}
+
+export async function runCheckpoint(
+  store: StateStore,
+  request: CheckpointRequest,
+): Promise<CheckpointReport> {
+  const task = store.getTask(request.taskId);
+  if (task.status !== "running" || task.currentAttemptId !== request.attemptId) {
+    throw new Error("Checkpoint requires the Task current running attempt");
+  }
+
+  const { selected } = resolveCheckpointSelection(task, request);
+
+  store.addEvent(
+    task.id,
+    request.attemptId,
+    "checkpoint.started",
+    `Worker requested ${selected.length} approved checkpoint command(s)`,
+    { commandIds: selected },
+  );
+
+  const report = await executeCheckpointCommands(task, selected, request.attemptId);
   store.addEvent(
     task.id,
     request.attemptId,
     "checkpoint.completed",
-    `Non-authoritative checkpoint completed: ${commands.length} command(s)`,
+    `Non-authoritative checkpoint completed: ${report.commands.length} command(s)`,
     report,
   );
   return report;

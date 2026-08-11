@@ -1,0 +1,182 @@
+version: 3
+name: Audit M1 graduation against the confirmed Goal
+project: /Users/yijunwang/code/forklight
+taskClass: m1-exit-audit
+taskFamily: main-worker-work-contract
+workerProfileId: deepseek-flash-1m
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+routingDecision:
+  taskFamily: main-worker-work-contract
+  shortlist:
+    - provider: deepseek
+      model: deepseek-v4-flash[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: deepseek-flash-1m
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: deepseek
+    model: deepseek-v4-flash[1M]
+    runtime: claude-code
+    effort: high
+    workerProfileId: deepseek-flash-1m
+  selectedBecause:
+    code: main-judgment
+    note: This is a bounded non-Coding source audit; DeepSeek Flash can trace the completed M1 surfaces while preserving Main Codex quota.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts:
+      deepseek/deepseek-v4-flash[1M]: 0
+      openai/gpt-5.6-luna: 0
+
+contract:
+  outcome: >-
+    Replace the stale M1 gap audit with one concise, evidence-backed exit audit that tells Main whether
+    M1 can graduate now. It must map every M1 exit requirement to current CLI/API, test and real dogfood
+    evidence; mark only a user-visible or contract-breaking absence as blocking; separate later M2-M5 work;
+    and name the exact final boundary checks Main should run. It changes no product code or live data.
+  presentation:
+    summary: 用一份简洁、能核对的报告回答：M1 到底完成没有，还缺什么是真阻断，最后该跑哪些检查。
+    language: zh-CN
+  background:
+    purpose: Stop M1 from drifting through stale plans and repeated audits; establish one final graduation verdict before the milestone boundary.
+    audience: 一骏 and the Main runtime deciding whether to stop at M1 or open M2.
+    currentSituation: The previous audit predates five integrated M1 slices and still lists them as gaps. The live store and progress file are also stale after approved retention cleanup. Product code must not expand unless the current M1 exit contract has a real blocking gap.
+    parentGoalPlan: Goal forklight-main-token-leverage, final step of M1.
+    priorDecisions:
+      - Main owns planning and final judgment; Workers own bounded research and execution.
+      - CLI/API must graduate before Hub work.
+      - Do not turn missing future M2-M5 capability or extra test preference into an M1 blocker.
+      - Stop at the M1 milestone boundary for user review.
+    suppliedInputs:
+      - Context-rich v3 Task contract integrated and active.
+      - Real non-Coding v3 audit Task 399baf0e-1dc6-42da-ab06-e42911a68375 accepted without correction.
+      - v3 Task through Plan, Goal and outcome Task c52600a5-dd27-4648-a44c-c0256e62442a integrated after one correction.
+      - validate-goal CLI/daemon/MCP Task 8731697e-9353-4533-b939-c66eac8f502c integrated.
+      - outcome CLI Task 9a0e1024-8317-45f6-a6ba-921c481cf196 integrated.
+      - hierarchy CLI Task c8f3d497-fe52-4356-895f-6b81b4774684 integrated.
+      - succeeded non-delivered attention-resolution Task 34488658-22ca-4f0f-87c6-a0b6e21994a5 integrated after one precise correction; 101 Core/policy and 76 CLI/MCP tests passed.
+      - Live retention cleanup now has 292 Tasks, 430 Attempts, 213154 Events, 41 review graphs, 1 Competition, 2 paired samples and 159 Integration results; quick_check and foreign_key_check pass.
+      - Exact 89-item stale-attention list hash 0af780091e4add89e6195562647b1e0c19178be3c2e1309e178867fd5d948b11 was resolved; all 89 remain status succeeded and waiting-user-decision is empty.
+    downstreamUse: Main will reconcile progress and retention evidence, run the one full M1 boundary suite, and stop for 一骏 if the audit verdict is graduate.
+    workerAuthority:
+      - Rewrite only the existing M1 audit report; remove stale gap/backlog text rather than appending another diary.
+      - Judge current M1 requirements by observable user result and exact evidence, not by theoretical completeness.
+      - Record a blocking gap only when the confirmed M1 exit cannot be demonstrated through CLI/API and real Coding/non-Coding flows.
+    returnToMain:
+      - Return any current M1 exit requirement that lacks both implementation and executable evidence.
+      - Return any contradiction between the supplied completed-task facts and current source/tests.
+      - Return any final boundary check that cannot be run without Hub, database edits or Provider credentials.
+  inScope:
+    - Trace the confirmed M1 result and exit rule in contract.md and plan.md.
+    - Verify current CLI/API surfaces for Task, Plan, Goal, outcome intake, work hierarchy and Task Plan context.
+    - Verify v3 background reaches standalone and Plan/Goal/outcome paths and Worker prompts.
+    - Reconcile real Coding and non-Coding dogfood evidence.
+    - Rewrite goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md as a concise final exit audit with Verdict, requirement matrix, blocking gaps, non-blocking later work and exact boundary checks.
+  outOfScope:
+    - Do not edit product code, tests, configuration, SSOT contract/plan/progress/decisions, other evidence files, examples, Hub, Store or backups.
+    - Do not run Providers, create Tasks, mutate daemon state, design Hub, start M2, claim Main Token savings or require M2-M5 features for M1.
+    - Do not add a second audit file, backlog system or generic documentation framework.
+    - Do not commit or push.
+  executionSteps:
+    - Read the M1 contract/plan exit rule and the previous audit's exact gaps.
+    - Trace each previously named gap to current source and focused tests.
+    - Compare the real Coding/non-Coding evidence with the M1 exit requirements.
+    - Rewrite the existing report with one explicit graduate/not-graduate verdict and only evidence-supported blockers.
+    - Run the three declared document checks, fix only this report if needed, and stop.
+  deliverables:
+    - One current M1 exit audit replacing stale gap text.
+    - One exact list of final Main boundary commands; full suite itself remains Main's one boundary run.
+  scenarios:
+    - name: Previously listed gap is now closed
+      given: The old report says outcome CLI, validate-goal or hierarchy CLI is missing
+      when: Current source and tests expose that surface
+      then: The new report marks it closed with paths/tests and removes it from the backlog
+    - name: Future capability is absent
+      given: A capability belongs to persistent delivery, routing, Token proof or final Hub
+      when: The M1 verdict is formed
+      then: It is labeled M2-M5 later work and does not block M1
+    - name: Real M1 evidence is insufficient
+      given: A required Coding or non-Coding CLI/API flow has no implementation or executable evidence
+      when: The audit reaches its verdict
+      then: It records one concrete blocker, the smallest closure path and a not-graduate verdict
+  risks:
+    - Reusing stale line numbers can create false confidence; cite stable symbols, commands and test names where possible.
+    - Treating every untested CLI permutation as blocking would restart endless work; require evidence proportional to the M1 user result.
+    - Supplied live-data facts cannot be re-read from the isolated workspace; label them as Main-supplied, already verified operational evidence.
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: 1800000
+  workerStopGraceMs: 10000
+  fileLimit: 1
+  fileLimitMode: hard
+  changedLineLimit: 500
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - coverage
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - goals/forklight-main-token-leverage/contract.md
+    - goals/forklight-main-token-leverage/plan.md
+    - goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md
+    - goals/forklight-main-token-leverage/evidence/coding-delegation-run.md
+    - goals/forklight-main-token-leverage/evidence/noncoding-delegation-run.md
+    - src/cli.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/daemon/coordinator.ts
+    - src/mcp/server.ts
+    - src/core/task.ts
+    - src/core/plan.ts
+    - src/core/goal.ts
+    - src/core/outcome-intake.ts
+    - src/core/work-hierarchy.ts
+    - tests/goal.test.ts
+    - tests/plan.test.ts
+    - tests/outcome-intake.test.ts
+    - tests/hierarchy-cli.test.ts
+    - tests/outcome-cli.test.ts
+    - tests/cli-task-preview.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - The report gives one explicit graduate or not-graduate verdict against the current M1 exit rule.
+    - Every old G1-G5 gap is either closed with current evidence or remains one concrete blocking gap.
+    - Coding and non-Coding real flows are both accounted for without claiming Main Token savings.
+    - M2-M5 work is separated from M1 blockers and no Hub work is proposed before the boundary.
+    - Only the existing audit report changes.
+  commands:
+    - test -f goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md
+    - rg -q 'Verdict|结论' goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md && rg -q 'G1|G2|G3|G4|G5' goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md
+    - git diff --check

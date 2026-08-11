@@ -1,5 +1,13 @@
+<!--
+THESIS: One Goal owns one working canvas. Refuse the global flat board that makes hierarchy look like telemetry.
+OWN-WORLD: A quiet local workbench in bone, graphite, muted teal, and restrained status color; controls feel precise, not decorative.
+STORY: Describe an outcome, let Main explain the right work shape, choose a Goal workspace, then follow its current phase and Task movement without losing context.
+FIRST VIEWPORT: A compact outcome entry leads into a Goal rail and one focused board; one-off work and history remain nearby but secondary, with the next decision always visible.
+FORM: Focused Goal workspace with a left context rail, fourth grounded structure, staged as one stable operating surface; seed 31d3080b.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+-->
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -7,20 +15,6 @@
 <meta name="referrer" content="no-referrer">
 <title>ForkLight</title>
 <link rel="stylesheet" href="app.css">
-<script>
-/* Apply theme before paint to avoid flash. No secrets. */
-(function () {
-  try {
-    var stored = localStorage.getItem("fl-theme");
-    var theme = stored === "dark" || stored === "light"
-      ? stored
-      : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    document.documentElement.setAttribute("data-theme", theme);
-  } catch (_) {
-    document.documentElement.setAttribute("data-theme", "light");
-  }
-})();
-</script>
 </head>
 <body>
 <a class="skip" href="#main" data-i18n="skip">跳到主要内容</a>
@@ -87,7 +81,7 @@
     <header class="topbar">
       <div class="topbar-copy">
         <h1 id="fl-page-title" class="page-title">工作</h1>
-        <p id="fl-page-sub" class="page-sub">统一的目标 → 计划 → 任务看板，含阻塞与下一步</p>
+        <p id="fl-page-sub" class="page-sub">查看 Goal、独立 Plan 或一次性 Task 工作区，以及其中的工作</p>
       </div>
       <div id="fl-top-meta" class="top-meta"></div>
     </header>

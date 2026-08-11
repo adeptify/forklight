@@ -63,12 +63,42 @@ export interface WorkerExecutionResult {
   failureCategory?: import("../core/worker-failure.js").WorkerFailureCategory;
 }
 
+/** Explicit Main-authorized correction execution intent carried from durable
+ *  grant consumption to a Worker adapter. Feedback content is never used to
+ *  infer authority; ordinary resume and system-restart continuation carry no
+ *  intent, so only an authorized correction may cross a prior completed Codex
+ *  native Goal boundary. */
+export interface CorrectionExecutionIntent {
+  readonly kind: "main-correction";
+  /** Sequence of the durable attempt.authorization.granted event. */
+  readonly authorizationEventSequence: number;
+  /** Candidate revision id bound to this correction (structured corrections). */
+  readonly candidateRevisionId?: string;
+  /** Gap-contract digest bound to this correction (structured corrections). */
+  readonly gapContractDigest?: string;
+}
+
+/** Typed Worker-owned validation-repair authority. Distinct from Main
+ * correction and generic restart continuation. */
+export interface WorkerValidationRepairExecutionIntent {
+  readonly kind: "worker-validation-repair";
+  readonly authorizationEventSequence: number;
+  readonly round: number;
+  /** Exact Attempt authorized for this repair round. */
+  readonly attemptId: string;
+}
+
 export interface WorkerRunHooks {
   /** Every adapter that spawns a child must call this immediately after spawn. */
   onSpawn?: (child: ChildProcess) => void;
   onEvent?: (event: NormalizedWorkerEvent) => void;
   wasInterrupted?: () => boolean;
   feedback?: string;
+  /** Typed Main-authorized correction intent. Absent for ordinary resume,
+   *  system-restart continuation, and new execution. */
+  correctionIntent?: CorrectionExecutionIntent;
+  /** Present only for an exactly authorized Worker validation-repair round. */
+  validationRepairIntent?: WorkerValidationRepairExecutionIntent;
 }
 
 export interface WorkerRunContext {

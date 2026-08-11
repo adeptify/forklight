@@ -916,13 +916,15 @@ test("CLI status/list preserve canonical Main, remediation, and Integration plac
   }
 });
 
-test("CLI resolve closes a handled failure; reopen restores Now without changing status", async () => {
-  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-resolve-"));
+function seedFailedCliTask(
+  home: string,
+  taskId: string,
+  options?: { evidenceTaskId?: string },
+): void {
   const store = new StateStore(home);
-  const taskId = "cli-resolve-task";
   const taskRecord: TaskRecord = {
     id: taskId,
-    name: "cli-resolve-task",
+    name: taskId,
     status: "failed",
     sourcePath: "/source",
     taskFile: `/task-${taskId}.yaml`,
@@ -946,7 +948,81 @@ test("CLI resolve closes a handled failure; reopen restores Now without changing
   store.addEvent(taskId, undefined, "worker.failed", "Worker failed: connectivity", {
     failureCategory: "connectivity",
   });
+  if (options?.evidenceTaskId !== undefined) {
+    const evidence: TaskRecord = {
+      ...taskRecord,
+      id: options.evidenceTaskId,
+      name: options.evidenceTaskId,
+      status: "succeeded",
+      taskFile: `/task-${options.evidenceTaskId}.yaml`,
+      sessionId: `session-${options.evidenceTaskId}`,
+    };
+    store.createTask(evidence);
+  }
   store.close();
+}
+
+function seedSucceededCliTask(home: string, taskId: string): void {
+  const store = new StateStore(home);
+  const taskRecord: TaskRecord = {
+    id: taskId,
+    name: taskId,
+    status: "succeeded",
+    sourcePath: "/source",
+    taskFile: `/task-${taskId}.yaml`,
+    spec: {
+      provider: { name: "deepseek", model: "deepseek-v4-pro[1M]" },
+      runtime: { name: "claude-code" },
+    } as TaskRecord["spec"],
+    paths: {
+      root: "/state/task",
+      baseline: "/state/task/baseline",
+      workspace: "/state/task/workspace",
+      logs: "/state/task/logs",
+      claudeConfig: "/state/task/claude",
+      diff: "/state/task/diff.patch",
+    },
+    sessionId: `session-${taskId}`,
+    createdAt: "2026-07-31T03:30:00.000Z",
+    updatedAt: "2026-07-31T03:30:00.000Z",
+  };
+  store.createTask(taskRecord);
+  store.addEvent(taskId, undefined, "verification.completed", "Independent verification passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: "/state/task/diff.patch",
+    sourceUnchanged: false,
+  });
+  store.close();
+}
+
+function taskMutationSnapshot(home: string, taskId: string): {
+  events: number;
+  resolutionCompleted: number;
+  resolutionReopened: number;
+  receipts: number;
+} {
+  const store = new StateStore(home);
+  try {
+    const events = store.listEvents(taskId);
+    return {
+      events: events.length,
+      resolutionCompleted: events.filter((e) => e.type === "task.resolution.completed").length,
+      resolutionReopened: events.filter((e) => e.type === "task.resolution.reopened").length,
+      receipts: store.listExchangeReceipts(taskId).length,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+test("CLI resolve closes a handled failure; reopen restores Now without changing status", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-resolve-"));
+  const taskId = "cli-resolve-task";
+  seedFailedCliTask(home, taskId);
 
   const daemon = new ForkLightDaemon(home, 0);
   await daemon.start();
@@ -987,8 +1063,235 @@ test("CLI resolve closes a handled failure; reopen restores Now without changing
     const status = await runCli(home, ["status", taskId, "--json"]);
     assert.equal(status.code, 0, status.stderr);
     assert.equal((JSON.parse(status.stdout) as Record<string, unknown>).status, "failed");
+
+    // Human path (no --json) remains compatible after reopen.
+    const human = await runCli(home, [
+      "resolve", taskId, "--reason", "no-longer-needed", "--confirm",
+    ]);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /resolved|attention/i);
+    assert.ok(!human.stdout.trimStart().startsWith("{"), "human path is not JSON");
   } finally {
     await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("CLI resolve accepts optional --evidence without inventing success", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-resolve-evidence-"));
+  const taskId = "cli-resolve-evidence-task";
+  const evidenceTaskId = "cli-resolve-evidence-successor";
+  seedFailedCliTask(home, taskId, { evidenceTaskId });
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const resolved = await runCli(home, [
+      "resolve",
+      taskId,
+      "--reason",
+      "superseded",
+      "--evidence",
+      evidenceTaskId,
+      "--confirm",
+      "--json",
+    ]);
+    assert.equal(resolved.code, 0, resolved.stderr);
+    const body = JSON.parse(resolved.stdout) as Record<string, unknown>;
+    assert.equal(body.existing, false);
+    const state = body.state as Record<string, unknown>;
+    assert.equal(state.status, "resolved");
+    assert.equal(state.evidenceTaskId, evidenceTaskId);
+    assert.equal(body.boardReason, "attention-resolved");
+
+    const status = await runCli(home, ["status", taskId, "--json"]);
+    assert.equal(status.code, 0, status.stderr);
+    assert.equal(
+      (JSON.parse(status.stdout) as Record<string, unknown>).status,
+      "failed",
+      "evidence link does not invent machine success",
+    );
+  } finally {
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("CLI resolve closes a succeeded non-delivered Task; reopen restores Now without changing status", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-resolve-succeeded-"));
+  const taskId = "cli-resolve-succeeded-task";
+  seedSucceededCliTask(home, taskId);
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const resolved = await runCli(home, [
+      "resolve", taskId, "--reason", "no-longer-needed", "--note", "historical evidence only", "--confirm", "--json",
+    ]);
+    assert.equal(resolved.code, 0, resolved.stderr);
+    const resolvedBody = JSON.parse(resolved.stdout) as Record<string, unknown>;
+    assert.equal(resolvedBody.existing, false);
+    assert.equal((resolvedBody.state as Record<string, unknown>).status, "resolved");
+    assert.equal(resolvedBody.boardScope, "history");
+    assert.equal(resolvedBody.boardReason, "attention-resolved");
+
+    // Machine status is unchanged.
+    const status = await runCli(home, ["status", taskId, "--json"]);
+    assert.equal(status.code, 0, status.stderr);
+    assert.equal((JSON.parse(status.stdout) as Record<string, unknown>).status, "succeeded");
+
+    // Exact replay is idempotent.
+    const replay = await runCli(home, [
+      "resolve", taskId, "--reason", "no-longer-needed", "--note", "historical evidence only", "--confirm", "--json",
+    ]);
+    assert.equal(replay.code, 0, replay.stderr);
+    assert.equal((JSON.parse(replay.stdout) as Record<string, unknown>).existing, true);
+
+    // Reopen restores the same unresolved succeeded Task to Now.
+    const reopened = await runCli(home, [
+      "reopen", taskId, "--note", "needs review again", "--confirm", "--json",
+    ]);
+    assert.equal(reopened.code, 0, reopened.stderr);
+    const reopenedBody = JSON.parse(reopened.stdout) as Record<string, unknown>;
+    assert.equal((reopenedBody.state as Record<string, unknown>).status, "reopened");
+    assert.equal(reopenedBody.boardScope, "now");
+
+    const afterStatus = await runCli(home, ["status", taskId, "--json"]);
+    assert.equal(afterStatus.code, 0, afterStatus.stderr);
+    assert.equal((JSON.parse(afterStatus.stdout) as Record<string, unknown>).status, "succeeded");
+  } finally {
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("CLI resolve rejects a delivered succeeded Task before writing a resolution event", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-resolve-delivered-"));
+  const taskId = "cli-resolve-delivered-task";
+  seedSucceededCliTask(home, taskId);
+  const store = new StateStore(home);
+  store.saveRemediationDisposition(taskId, {
+    status: "verified-repaired-delivered",
+    checkId: "check-1",
+    createdAt: "2026-07-31T04:00:00.000Z",
+  });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const before = taskMutationSnapshot(home, taskId);
+    const resolved = await runCli(home, [
+      "resolve", taskId, "--reason", "no-longer-needed", "--confirm", "--json",
+    ]);
+    assert.notEqual(resolved.code, 0);
+    assert.match(resolved.stderr, /delivered/i);
+    const after = taskMutationSnapshot(home, taskId);
+    assert.equal(after.events, before.events, "delivered rejection writes no Task event");
+    assert.equal(after.resolutionCompleted, before.resolutionCompleted);
+    assert.equal(after.resolutionReopened, before.resolutionReopened);
+  } finally {
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("CLI resolve/reopen reject unknown, stray, duplicate, and missing-value args before mutation", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-resolve-args-"));
+  const taskId = "cli-resolve-args-task";
+  seedFailedCliTask(home, taskId);
+
+  // Pre-daemon path: invalid grammar never starts a Daemon or writes receipts.
+  const noDaemonCases: Array<{ args: string[]; pattern: RegExp }> = [
+    {
+      args: ["resolve", taskId, "--reason", "environment-recovered", "--confirm", "--typo-flag"],
+      pattern: /unknown argument: --typo-flag/,
+    },
+    {
+      args: ["resolve", taskId, "--reason", "environment-recovered", "--confirm", "stray-text"],
+      pattern: /unexpected argument: stray-text/,
+    },
+    {
+      args: [
+        "resolve", taskId, "--reason", "environment-recovered",
+        "--reason", "superseded", "--confirm",
+      ],
+      pattern: /duplicate flag: --reason/,
+    },
+    {
+      args: ["resolve", taskId, "--reason", "--confirm"],
+      pattern: /--reason requires a value/,
+    },
+    {
+      args: [
+        "resolve", taskId, "--reason", "environment-recovered",
+        "--confirm", "--confirm",
+      ],
+      pattern: /duplicate flag: --confirm/,
+    },
+    {
+      args: ["reopen", taskId, "--confirm", "--evidence", "not-allowed"],
+      pattern: /unknown argument: --evidence/,
+    },
+    {
+      args: ["reopen", taskId, "--note", "--confirm"],
+      pattern: /--note requires a value/,
+    },
+    {
+      args: ["reopen", taskId, "--confirm", "--confirm"],
+      pattern: /duplicate flag: --confirm/,
+    },
+  ];
+
+  try {
+    for (const { args, pattern } of noDaemonCases) {
+      const before = taskMutationSnapshot(home, taskId);
+      const result = await runCli(home, args);
+      assert.notEqual(result.code, 0, `expected failure for ${args.join(" ")}`);
+      assert.match(result.stderr, pattern, result.stderr);
+      assert.equal(
+        existsSync(daemonSocketPath(home)),
+        false,
+        `invalid ${args[0]} must not start a daemon`,
+      );
+      assert.deepEqual(
+        taskMutationSnapshot(home, taskId),
+        before,
+        `invalid ${args.join(" ")} must not mutate events or receipts`,
+      );
+    }
+
+    // With a live Daemon, the same grammar still fails before Task events or
+    // exchange receipts are written.
+    const daemon = new ForkLightDaemon(home, 0);
+    await daemon.start();
+    try {
+      const before = taskMutationSnapshot(home, taskId);
+      const live = await runCli(home, [
+        "resolve", taskId, "--reason", "environment-recovered", "--confirm", "--unknown",
+      ]);
+      assert.notEqual(live.code, 0);
+      assert.match(live.stderr, /unknown argument: --unknown/);
+      assert.deepEqual(
+        taskMutationSnapshot(home, taskId),
+        before,
+        "live-daemon invalid resolve must not mutate events or receipts",
+      );
+
+      const liveReopen = await runCli(home, [
+        "reopen", taskId, "--confirm", "extra",
+      ]);
+      assert.notEqual(liveReopen.code, 0);
+      assert.match(liveReopen.stderr, /unexpected argument: extra/);
+      assert.deepEqual(
+        taskMutationSnapshot(home, taskId),
+        before,
+        "live-daemon invalid reopen must not mutate events or receipts",
+      );
+    } finally {
+      await daemon.close();
+    }
+  } finally {
     await rm(home, { recursive: true, force: true }).catch(() => undefined);
   }
 });

@@ -18,7 +18,9 @@ ForkLight 是 **local-first、运行时与模型无关的执行中枢**：由一
 | **ForkLight** | 持久 Task/Attempt/Candidate、隔离工作区、预算与有限恢复、独立验证、Hub/CLI/MCP |
 | **Worker** | 仅在隔离工作区内完成被分配的实现；无原仓写权限，无 commit/push 权 |
 
-项目事实以 [`PROJECT.md`](./PROJECT.md) 为唯一管理源。
+项目目标、里程碑与当前进度以
+[`goals/forklight-main-token-leverage/`](./goals/forklight-main-token-leverage/)
+为唯一管理入口；`PROJECT.md` 是待收敛的历史快照。
 
 ### 主要功能点
 

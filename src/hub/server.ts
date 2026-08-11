@@ -367,6 +367,12 @@ export interface SafeTaskJourney {
   candidateReuse?: CandidateReuseSection;
   candidateReverification?: CandidateReverificationSection;
   retainedCandidate: RetainedCandidateSection;
+  /** Content-free finite same-Worker validation-repair allowance and rounds. */
+  validationRepair?: ValidationRepairSection;
+  /** Plain-language current verified-delivery stage and next actor. The
+   *  browser translates these closed codes only; it never recomputes repair
+   *  eligibility or marks work successful. */
+  deliveryJourney: DeliveryJourneySection;
   /** Privacy-safe cross-Worker handoff story when this Task is source or successor. */
   candidateHandoff?: CandidateHandoffSection;
   /**
@@ -389,6 +395,51 @@ export interface AttentionResolutionSection {
   evidenceTaskId?: string;
   resolvedAt?: string;
   reopenedAt?: string;
+}
+
+/** Content-free finite validation-repair allowance and round lineage. */
+export interface ValidationRepairSection {
+  enabled: boolean;
+  allowance: {
+    max: number;
+    consumed: number;
+    remaining: number;
+    source: "task" | "worker" | "global";
+  };
+  /** True while a round is authorized but not terminal. */
+  inProgress: boolean;
+  /** Bounded round facts for progressive technical disclosure. */
+  rounds: Array<{
+    round: number;
+    state: "authorized" | "started" | "terminal";
+    terminalOutcome?: "passed" | "failed" | "stopped";
+    terminalReason?: string;
+    targetAttemptOrdinal?: number;
+    authorizationEventSequence?: number;
+  }>;
+  /** Durable refusals that never consumed a round. */
+  skipped: Array<{ reason: string; nextAction?: string }>;
+  /** Latest terminal round's stop reason when present. */
+  stopReason?: string;
+}
+
+/** Plain-language current verified-delivery stage and next actor. */
+export interface DeliveryJourneySection {
+  stage:
+    | "implementing"
+    | "worker-finished"
+    | "verifying"
+    | "repairing"
+    | "awaiting-main-review"
+    | "main-accepted"
+    | "stopped"
+    | "queued"
+    | "unknown";
+  nextActor: "worker" | "verifier" | "main" | "user" | "none";
+  /** Present only for the repairing stage. */
+  repair?: { round: number; total: number; remaining: number; source: "task" | "worker" | "global" };
+  /** Closed stop reason (failure category or repair stop reason) when known. */
+  stopReason?: string;
 }
 
 interface CandidateHandoffSection {
@@ -417,7 +468,10 @@ interface CandidateHandoffSection {
 
 interface CandidateReverificationSection {
   /** Latest reverification outcome. */
-  status: "passed" | "failed";
+  status: "passed" | "failed" | "no-candidate";
+  /** Exact path that produced the outcome. Runtime-workspace means the Worker
+   *  ended unexpectedly and its retained files were independently checked. */
+  path: "behavior-failure" | "succeeded-repair" | "runtime-workspace";
   /** Retained Attempt id (its original status is preserved). */
   attemptId: string;
   /** Retained Attempt status (unchanged by reverification). */
@@ -444,6 +498,9 @@ interface CandidateReverificationSection {
   mainExchangeNotZero: true;
   /** No full-restart saving is claimed without a paired baseline. */
   noFullRestartSavingsClaim: true;
+  /** Truthful handoff: false only for the no-candidate outcome (nothing to
+   *  accept); true for every non-empty retained Candidate. */
+  requiresFreshMainAccept: boolean;
 }
 
 interface CandidateReuseSection {
@@ -874,11 +931,18 @@ export function buildSafeTaskJourney(
     const allowance = (rv.allowance ?? {}) as Record<string, unknown>;
     const nonnegativeInteger = (value: unknown): value is number =>
       typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-    const status = rv.status === "passed" || rv.status === "failed" ? rv.status : undefined;
+    const status = rv.status === "passed" || rv.status === "failed" || rv.status === "no-candidate"
+      ? rv.status
+      : undefined;
+    const path = rv.path === "behavior-failure" || rv.path === "succeeded-repair"
+      || rv.path === "runtime-workspace"
+      ? rv.path
+      : undefined;
     const attemptId = typeof rv.attemptId === "string" && rv.attemptId.length > 0
       ? rv.attemptId
       : undefined;
     const attemptStatus = rv.attemptStatus === "succeeded" || rv.attemptStatus === "failed"
+      || rv.attemptStatus === "interrupted"
       ? rv.attemptStatus
       : undefined;
     const verificationEventSequence = nonnegativeInteger(rv.verificationEventSequence)
@@ -904,17 +968,23 @@ export function buildSafeTaskJourney(
       && passedCommandCount <= commandCount
       && commandDurationMs !== undefined
       && wallDurationMs !== undefined;
+    // No-candidate outcomes truthfully report that no fresh Main acceptance is
+    // possible; every non-empty retained Candidate still requires one.
     const validExactFacts = rv.workerInvoked === false
       && rv.incrementalWorkerTokens === 0
       && rv.incrementalModelRuntimeCostUsd === 0
-      && rv.requiresFreshMainAccept === true;
+      && (status === "no-candidate"
+        ? rv.requiresFreshMainAccept === false
+        : rv.requiresFreshMainAccept === true);
     if (
-      status !== undefined && attemptId !== undefined && attemptStatus !== undefined
+      status !== undefined && path !== undefined
+      && attemptId !== undefined && attemptStatus !== undefined
       && verificationEventSequence !== undefined
       && validAllowance && validCounts && validExactFacts
     ) {
       candidateReverification = {
         status,
+        path,
         attemptId,
         attemptStatus,
         verificationEventSequence,
@@ -934,6 +1004,7 @@ export function buildSafeTaskJourney(
         localVerificationTimeNotZero: true,
         mainExchangeNotZero: true,
         noFullRestartSavingsClaim: true,
+        requiresFreshMainAccept: rv.requiresFreshMainAccept === true,
       };
     }
   }
@@ -1105,6 +1176,22 @@ export function buildSafeTaskJourney(
 
   const retainedCandidate = buildRetainedCandidateSection(rawTask, inspectEvents);
 
+  // Finite same-Worker validation-repair projection from the daemon's canonical
+  // decision view. The browser translates closed codes; it never recomputes
+  // eligibility, allowance, or round counts.
+  const validationRepair = buildSafeValidationRepairSection(d.validationRepair);
+  const liveStageRaw = (d.progress as Record<string, unknown> | undefined)?.liveStage;
+  const liveStageStage = liveStageRaw !== null && typeof liveStageRaw === "object"
+    ? (liveStageRaw as { stage?: unknown }).stage
+    : undefined;
+  const deliveryJourney = buildDeliveryJourneySection({
+    taskStatus,
+    ...(mainReview === undefined ? {} : { mainReview }),
+    ...(validationRepair === undefined ? {} : { validationRepair }),
+    ...(failureCategory === undefined ? {} : { failureCategory }),
+    ...(typeof liveStageStage === "string" ? { liveStageStage } : {}),
+  });
+
   // Cross-Worker handoff projection from durable events only (no private paths).
   let candidateHandoff: CandidateHandoffSection | undefined;
   const handoffAuthorized = inspectEvents
@@ -1190,6 +1277,8 @@ export function buildSafeTaskJourney(
     cause,
     nextAction,
     retainedCandidate,
+    ...(validationRepair === undefined ? {} : { validationRepair }),
+    deliveryJourney,
     ...(candidateReuse === undefined ? {} : { candidateReuse }),
     ...(candidateReverification === undefined ? {} : { candidateReverification }),
     ...(candidateHandoff === undefined ? {} : { candidateHandoff }),
@@ -1539,6 +1628,158 @@ function buildBoundedAttempts(
           ? { costUsd: attempt.costUsd } : {}),
       };
     });
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Project the content-free validation-repair section from the daemon's
+ *  canonical TaskDecisionView.validationRepair. The browser owns readable
+ *  copy; this layer only bounds and forwards the closed codes. */
+function buildSafeValidationRepairSection(
+  rawValidationRepair: unknown,
+): ValidationRepairSection | undefined {
+  if (
+    rawValidationRepair === null || typeof rawValidationRepair !== "object"
+    || Array.isArray(rawValidationRepair)
+  ) {
+    return undefined;
+  }
+  const v = rawValidationRepair as Record<string, unknown>;
+  const rawAllowance = v.allowance;
+  if (rawAllowance === null || typeof rawAllowance !== "object" || Array.isArray(rawAllowance)) {
+    return undefined;
+  }
+  const allowance = rawAllowance as Record<string, unknown>;
+  const max = isNonNegativeInteger(allowance.max) ? allowance.max : undefined;
+  const consumed = isNonNegativeInteger(allowance.consumed) ? allowance.consumed : undefined;
+  const remaining = isNonNegativeInteger(allowance.remaining) ? allowance.remaining : undefined;
+  const source = allowance.source === "task" || allowance.source === "worker"
+    || allowance.source === "global"
+    ? allowance.source as "task" | "worker" | "global"
+    : undefined;
+  // Malformed allowance evidence fails closed: never invent a zero value, a
+  // recomputed remaining count, or a provenance that was not recorded.
+  if (
+    max === undefined || consumed === undefined || remaining === undefined
+    || source === undefined
+    || consumed > max
+    || remaining !== Math.max(0, max - consumed)
+  ) {
+    return undefined;
+  }
+  const rounds: ValidationRepairSection["rounds"] = [];
+  if (Array.isArray(v.rounds)) {
+    for (const entry of v.rounds) {
+      if (entry === null || typeof entry !== "object") continue;
+      const r = entry as Record<string, unknown>;
+      if (!isNonNegativeInteger(r.round) || r.round < 1) continue;
+      if (r.state !== "authorized" && r.state !== "started" && r.state !== "terminal") continue;
+      rounds.push({
+        round: r.round,
+        state: r.state as "authorized" | "started" | "terminal",
+        ...(r.terminalOutcome === "passed" || r.terminalOutcome === "failed"
+          || r.terminalOutcome === "stopped"
+          ? { terminalOutcome: r.terminalOutcome as "passed" | "failed" | "stopped" }
+          : {}),
+        ...(typeof r.terminalReason === "string" && r.terminalReason.length > 0
+          ? { terminalReason: r.terminalReason }
+          : {}),
+        ...(isNonNegativeInteger(r.targetAttemptOrdinal) && r.targetAttemptOrdinal > 0
+          ? { targetAttemptOrdinal: r.targetAttemptOrdinal }
+          : {}),
+        ...(isNonNegativeInteger(r.authorizationEventSequence) && r.authorizationEventSequence > 0
+          ? { authorizationEventSequence: r.authorizationEventSequence }
+          : {}),
+      });
+    }
+  }
+  const skipped: ValidationRepairSection["skipped"] = [];
+  if (Array.isArray(v.skipped)) {
+    for (const entry of v.skipped) {
+      if (entry === null || typeof entry !== "object") continue;
+      const reason = (entry as Record<string, unknown>).reason;
+      if (typeof reason !== "string" || reason.length === 0) continue;
+      const nextAction = (entry as Record<string, unknown>).nextAction;
+      skipped.push({
+        reason,
+        ...(typeof nextAction === "string" && nextAction.length > 0 ? { nextAction } : {}),
+      });
+    }
+  }
+  return {
+    enabled: max > 0,
+    allowance: { max, consumed, remaining, source },
+    inProgress: v.inProgress === true,
+    rounds,
+    skipped,
+    ...(typeof v.stopReason === "string" && v.stopReason.length > 0
+      ? { stopReason: v.stopReason }
+      : {}),
+  };
+}
+
+/** Plain-language current verified-delivery stage and next actor from canonical
+ *  server facts. Never invents a stage: every branch is backed by durable Task
+ *  status, verification, review, or repair evidence. */
+function buildDeliveryJourneySection(input: {
+  taskStatus: string;
+  mainReview?: { decision: string; reason: string };
+  validationRepair?: ValidationRepairSection;
+  failureCategory?: string;
+  liveStageStage?: string;
+}): DeliveryJourneySection {
+  const repair = input.validationRepair;
+  if (repair?.inProgress) {
+    const activeRound = repair.rounds.find((round) => round.state !== "terminal");
+    return {
+      stage: "repairing",
+      nextActor: "worker",
+      repair: {
+        round: activeRound?.round ?? repair.allowance.consumed + 1,
+        total: repair.allowance.max,
+        remaining: repair.allowance.remaining,
+        source: repair.allowance.source,
+      },
+    };
+  }
+  const status = input.taskStatus;
+  if (status === "queued" || status === "waiting" || status === "blocked" || status === "pending") {
+    return { stage: "queued", nextActor: "none" };
+  }
+  if (status === "preparing" || status === "running" || status === "active") {
+    // The evidence-backed live stage disambiguates independent verification /
+    // a finished Worker even when the Task status lags the durable sequence.
+    if (input.liveStageStage === "verifying") {
+      return { stage: "verifying", nextActor: "verifier" };
+    }
+    if (input.liveStageStage === "worker-finished") {
+      // Worker completion is unverified evidence: it proves the Worker
+      // reported done, not that any self-check passed. Closed truth below.
+      return { stage: "worker-finished", nextActor: "verifier" };
+    }
+    return { stage: "implementing", nextActor: "worker" };
+  }
+  if (status === "verifying") {
+    return { stage: "verifying", nextActor: "verifier" };
+  }
+  if (status === "succeeded") {
+    const decision = input.mainReview?.decision;
+    if (decision === "accept") return { stage: "main-accepted", nextActor: "user" };
+    if (decision === "reject") return { stage: "stopped", nextActor: "main" };
+    if (decision === "revise") return { stage: "awaiting-main-review", nextActor: "main" };
+    return { stage: "awaiting-main-review", nextActor: "main" };
+  }
+  if (status === "failed" || status === "interrupted") {
+    const stopReason = repair?.stopReason ?? input.failureCategory;
+    return {
+      stage: "stopped",
+      nextActor: "main",
+      ...(stopReason === undefined ? {} : { stopReason }),
+    };
+  }
+  return { stage: "unknown", nextActor: "none" };
 }
 
 function resolveCause(
@@ -2432,6 +2673,7 @@ export class HubServer {
         globalDefaults.workerStopGraceMs = currentSettings.execution.workerStopGraceMs;
         globalDefaults.baseMaxAttempts = currentSettings.execution.maxAttempts;
         globalDefaults.maxExtraAttempts = currentSettings.execution.maxExtraAttempts;
+        globalDefaults.maxWorkerValidationRepairs = currentSettings.execution.maxWorkerValidationRepairs;
         globalDefaults.maxConcurrency = currentSettings.execution.maxConcurrency;
         globalDefaults.completionMode = currentSettings.completionPolicy.noChangeMode;
         globalDefaults.changeBudgetMode = currentSettings.completionPolicy.changeBudgetMode;
@@ -2747,11 +2989,14 @@ export class HubServer {
     }
     const shape = (proposal as { shape?: unknown }).shape;
     if (shape !== "task" && shape !== "plan" && shape !== "goal") return intake;
+    // Goal proposals keep their file version so the contract story stays
+    // truthful (v1 stays legacy; v2 also names the multi-phase family).
+    const goalVersion = (proposal as { goalVersion?: 1 | 2 }).goalVersion;
     return {
       ...intake,
       proposal: {
         ...(proposal as Record<string, unknown>),
-        contractsInvolved: contractsInvolvedForShape(shape),
+        contractsInvolved: contractsInvolvedForShape(shape, goalVersion),
       },
     };
   }

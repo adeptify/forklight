@@ -1,0 +1,65 @@
+version: 3
+name: Domain-neutral v3 plan item
+project: ./checkout
+taskClass: v3-domain-neutral-fixture
+contract:
+  outcome: >-
+    Produce one observable, verifiable result so a context-rich version-3 Task
+    contract can ride inside a Plan and Goal without losing its frozen background.
+  presentation:
+    summary: 领域中立三版任务，用于验证 Plan 与 Goal 携带批准背景。
+    language: zh-CN
+  background:
+    purpose: Exercise context-rich version-3 Task contracts inside hierarchy work.
+    audience: Plan and Goal runtimes plus the Worker that renders the approved background.
+    currentSituation: Version-3 Tasks parse, preview, store, and execute standalone, but hierarchy loaders still admit only version 2.
+    parentGoalPlan: Goal forklight-main-token-leverage, M1 context-first slice.
+    priorDecisions:
+      - Plan and Goal items must support version 3.
+      - Preserve version 2 behavior exactly and keep rejecting version 1 in structured Plans.
+    suppliedInputs:
+      - A domain-neutral version-3 Task contract fixture bound to the checkout project.
+    downstreamUse: Proves that a version-3 Plan item retains its exact Worker-visible background after registration.
+    workerAuthority:
+      - Keep the smallest typed change that preserves the frozen background.
+    returnToMain:
+      - Return any need for a database migration or stored-record rewrite.
+  inScope:
+    - Prove the version-3 context contract loads as a Plan item and registers atomically through a Goal.
+  outOfScope:
+    - Do not change version-2 behavior or add new public commands.
+  executionSteps:
+    - Load the Work Plan through the shared loader.
+    - Register the Goal atomically through the existing hierarchy path.
+  deliverables:
+    - Passing focused hierarchy regression evidence for version 3.
+  scenarios:
+    - name: hierarchy load
+      given: A Plan item points to this domain-neutral version-3 Task contract.
+      when: the Plan and Goal are loaded and registered.
+      then: the frozen background is retained exactly and no partial registration occurs.
+    - name: legacy guard
+      given: A Plan item points to a version-1 Task contract.
+      when: the Plan is loaded.
+      then: it is rejected with a truthful unsupported-contract error.
+  risks:
+    - A broad TaskSpec union could accidentally admit version 1.
+provider:
+  name: deepseek
+  model: deepseek-v4-flash
+  keychainService: forklight.v3-domain-neutral-fixture
+runtime:
+  name: claude-code
+  executable: claude
+  effort: low
+  maxBudgetUsd: null
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - README.md
+acceptance:
+  criteria:
+    - The version-3 fixture loads and registers inside a Plan and Goal.
+  commands:
+    - "true"

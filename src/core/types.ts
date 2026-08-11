@@ -48,9 +48,14 @@ export type EventType =
   | "verification.completed"
   | "checkpoint.started"
   | "checkpoint.completed"
+  | "checkpoint.failed"
   | "checkpoint.skipped"
   | "attempt.authorization.granted"
   | "attempt.restart-continuation.skipped"
+  | "worker.validation-repair.authorized"
+  | "worker.validation-repair.started"
+  | "worker.validation-repair.completed"
+  | "worker.validation-repair.skipped"
   | "main-review.completed"
   | "main.failure-attribution.recorded"
   | "competition.main-decision.completed"
@@ -156,6 +161,56 @@ export interface TaskContract {
     maxFiles: number;
     maxDiffLines: number;
   };
+}
+
+/** Universal structured background explaining why a Task exists and how its
+ *  output will be used. Required for the domain-neutral version-3 contract.
+ *  Main-authored and stored exactly; ForkLight never infers or translates it. */
+export interface TaskBackground {
+  /** Why the work matters. */
+  purpose: string;
+  /** Who or what the work serves. */
+  audience: string;
+  /** Current situation the work responds to. */
+  currentSituation: string;
+  /** Parent Goal/Plan context this Task belongs to. */
+  parentGoalPlan: string;
+  /** Prior decisions that shape this Task. */
+  priorDecisions: string[];
+  /** Inputs supplied to the Worker. */
+  suppliedInputs: string[];
+  /** How the output will be used downstream. */
+  downstreamUse: string;
+  /** Worker authority boundaries. */
+  workerAuthority: string[];
+  /** Decisions that must return to Main. */
+  returnToMain: string[];
+}
+
+/** Optional Coding-only technical detail for a version-3 Task. Isolated so a
+ *  domain-neutral Task never invents modules, call chains, or file budgets. */
+export interface TaskCodingExtension {
+  modules: TaskModuleContract[];
+  callChain: string[];
+  changeBudget: {
+    maxFiles: number;
+    maxDiffLines: number;
+  };
+}
+
+/** Version-3 domain-neutral Task Contract: universal structured background plus
+ *  domain-neutral work facts; Coding detail is an optional isolated extension. */
+export interface ContextTaskContract {
+  outcome: string;
+  presentation?: TaskPresentation;
+  background: TaskBackground;
+  inScope: string[];
+  outOfScope: string[];
+  executionSteps: string[];
+  deliverables: string[];
+  scenarios: TaskScenarioContract[];
+  risks: string[];
+  coding?: TaskCodingExtension;
 }
 
 /** Frozen Worker identity for routing comparison and audit.
@@ -294,7 +349,21 @@ export interface ContractTaskSpec extends SharedTaskSpec {
   };
 }
 
-export type TaskSpec = LegacyTaskSpec | ContractTaskSpec;
+export interface ContextContractTaskSpec extends SharedTaskSpec {
+  version: 3;
+  contract: ContextTaskContract;
+  acceptance: {
+    criteria: string[];
+    commands: string[];
+  };
+}
+
+export type TaskSpec = LegacyTaskSpec | ContractTaskSpec | ContextContractTaskSpec;
+
+/** Structured Task specs admitted inside hierarchy work: Plan items, Goal
+ *  Plans, and outcome-intake Task proposals. Explicitly excludes legacy
+ *  version-1 Task specs, which remain rejected in structured Plan work. */
+export type StructuredTaskSpec = ContractTaskSpec | ContextContractTaskSpec;
 
 export interface QualityCheck {
   id: string;
@@ -423,6 +492,10 @@ export interface AttemptRecord {
   /** Frozen evidence of whether this Attempt's runtime could enforce the USD
    * budget flag. Absent on legacy Attempts and therefore not assumed. */
   runtimeBudgetEnforcement?: RuntimeBudgetEnforcement;
+  /** Typed execution lineage. Legacy Attempts omit this field. */
+  executionKind?: "standard" | "main-correction" | "restart-recovery" | "worker-validation-repair";
+  /** Validation-repair round bound to this Attempt when executionKind is repair. */
+  workerValidationRepairRound?: number;
   officialCost?: AttemptOfficialCost;
 }
 
@@ -437,6 +510,16 @@ export interface AttemptExecutionOptions {
   maximumOrdinal: number;
   maxBudgetUsdOverride?: number | null;
   authorizationEventSequence?: number;
+  /** Stable Attempt identity allocated by a durable coordinator before launch. */
+  attemptId?: string;
+  executionKind?: AttemptRecord["executionKind"];
+  /** Typed Worker-validation authorization; never a Main correction grant. */
+  workerValidationRepair?: {
+    round: number;
+    authorizationEventSequence: number;
+    /** Exact durable repair Attempt bound before Runtime launch. */
+    attemptId: string;
+  };
 }
 
 export type MainReviewDecisionKind = "accept" | "revise" | "reject";
@@ -602,6 +685,37 @@ export interface CheckpointReport {
   attemptId: string;
   commands: Array<VerificationCommandResult & { commandId: string }>;
   patches: WorkspacePatchReport;
+  /** Stable checkpoint operation id when produced through the operation path. */
+  operationId?: string;
+}
+
+/** Operation lifecycle for a long-running non-authoritative checkpoint.
+ *  Status is reconstructed from durable events plus in-memory execution state. */
+export type CheckpointOperationStatus = "running" | "completed" | "failed" | "outcome-unknown";
+
+/** Privacy-safe checkpoint operation projection. Public lifecycle status exposes
+ *  only ids, bounded states and counts — never raw command text or output. */
+export interface CheckpointOperationView {
+  operationId: string;
+  taskId: string;
+  attemptId: string;
+  status: CheckpointOperationStatus;
+  commandIds: string[];
+  commandCount: number;
+  passedCommandCount: number;
+  failedCommandCount: number;
+}
+
+/** Durable checkpoint operation identity. Status is always reconstructed from
+ *  ordered events; this record proves the operation started so a daemon restart
+ *  can fail closed to outcome-unknown instead of silently rerunning commands. */
+export interface CheckpointOperationRecord {
+  operationId: string;
+  taskId: string;
+  attemptId: string;
+  commandIds: string[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PatchEvidence {
@@ -740,6 +854,7 @@ export interface GoalRecord {
   version: 1;
   name: string;
   objective: string;
+  /** Legacy primary Plan identity. Equals the ordinal-zero association. */
   planId: string;
   goalFile: string;
   policy: GoalPolicy;
@@ -756,8 +871,27 @@ export interface GoalRecord {
   stoppedAt?: string;
 }
 
+/**
+ * Durable ordered membership of a Plan under one Goal owner.
+ * ordinal 0 is the legacy primary Plan (goals.plan_id / GoalRecord.planId).
+ * Ownership only — does not claim the Plan is active, milestone-supervised,
+ * or admitted for Task execution. Later-phase lifecycle is a future slice.
+ */
+export interface GoalPlanAssociation {
+  goalId: string;
+  planId: string;
+  ordinal: number;
+  createdAt: string;
+}
+
 export interface GoalMilestoneRecord {
   goalId: string;
+  /**
+   * Owning Plan identity. Plan-local item IDs may repeat across Goal phases,
+   * so milestone identity is (goalId, planId, itemId). Legacy rows are
+   * backfilled to the Goal's primary Plan on migration.
+   */
+  planId?: string;
   itemId: string;
   taskId?: string;
   gate: GoalMilestoneGate;
@@ -880,6 +1014,9 @@ export interface AdvancedPolicyFields {
    *  a Worker or creating an Attempt. Independent from maxMainCorrections and
    *  maxExtraAttempts. Default 1; 0 disables. */
   maxMainReverifications: number;
+  /** Maximum same-Worker validation-repair rounds after an independently
+   *  verified behavior failure. Default 1 for new Tasks; 0 disables. */
+  maxWorkerValidationRepairs: number;
 }
 
 /** Task-level per-field override for advanced execution policy.
@@ -901,6 +1038,7 @@ export interface TaskAdvancedPolicyOverride {
   maxAdaptationRounds?: number;
   maxMainCorrections?: number;
   maxMainReverifications?: number;
+  maxWorkerValidationRepairs?: number;
 }
 
 /** Runtime enforcement capability truthfully derived from the Worker adapter.
@@ -1517,6 +1655,42 @@ export interface DualClockProjection {
     | "none";
 }
 
+/** Content-free same-Worker validation-repair allowance projection. */
+export interface ValidationRepairAllowance {
+  max: number;
+  consumed: number;
+  remaining: number;
+  source: ProvenanceSource;
+}
+
+/** One durable validation-repair round (closed display facts only). */
+export interface ValidationRepairRoundView {
+  round: number;
+  state: "authorized" | "started" | "terminal";
+  terminalOutcome?: "passed" | "failed" | "stopped";
+  terminalReason?: string;
+  targetAttemptOrdinal: number;
+  priorAttemptId: string;
+  authorizationEventSequence: number;
+  verificationEventSequence: number;
+  candidateRevisionId: string;
+}
+
+/** Canonical same-Worker validation-repair projection for status surfaces.
+ *  Browser rendering must translate these closed codes only — it never decides
+ *  repair eligibility or marks work successful. */
+export interface ValidationRepairView {
+  enabled: boolean;
+  allowance: ValidationRepairAllowance;
+  /** True while a round is authorized but not terminal. */
+  inProgress: boolean;
+  rounds: ValidationRepairRoundView[];
+  /** Durable refusals that never consumed a round. */
+  skipped: Array<{ reason: string; nextAction?: string }>;
+  /** Latest terminal round's stop reason when present. */
+  stopReason?: string;
+}
+
 export interface TaskDecisionView {
   taskId: string;
   stage: DecisionStage;
@@ -1571,6 +1745,8 @@ export interface TaskDecisionView {
    *  status; `reopened` returns it to Now. Privacy-safe: reason code + bounded
    *  Main note + optional evidence Task id + timestamps only. */
   attentionResolution?: import("./task-resolution.js").TaskResolutionState;
+  /** Content-free same-Worker validation-repair lineage from durable events. */
+  validationRepair?: ValidationRepairView;
 }
 
 export interface ActivationHandoff {

@@ -267,6 +267,46 @@ export function projectTaskActionPolicy(
   }
 
   const resolved = resolutionState.status === "resolved";
+  // The resolved-attention branch is terminal-status only. A forged resolved
+  // state on queued/waiting/blocked/preparing/running/verifying work (or an
+  // absent status) must fail open to the normal policy and must never expose
+  // Reopen or suppress the real actions.
+  const isTerminalAttentionStatus =
+    status === "failed" || status === "interrupted" || status === "succeeded";
+  // A resolved Task is closed attention (failed/interrupted or
+  // succeeded-not-delivered): every destination is a no-op except the History
+  // column, which exposes Reopen as the only requestable follow-up. Review,
+  // revise, correction, and Integration must never be offered on resolved
+  // work without reopening it first. Delivered truth stays stronger and is
+  // still enforced by the per-column delivered guards below.
+  if (resolved && !delivered && isTerminalAttentionStatus) {
+    const reopenOnly = (column: WorkHierarchyColumnCode): TaskDestinationPolicy =>
+      noop(
+        column,
+        "requires-reopen-first",
+        "Reopen the handled Task before it can move to another column.",
+      );
+    return {
+      schemaVersion: TASK_ACTION_POLICY_SCHEMA_VERSION,
+      nextCheckpoint: "Reopen the handled Task to return it to Now, or leave it closed.",
+      destinations: {
+        "not-started": reopenOnly("not-started"),
+        ready: reopenOnly("ready"),
+        running: reopenOnly("running"),
+        "waiting-verification": reopenOnly("waiting-verification"),
+        "waiting-user-decision": reopenOnly("waiting-user-decision"),
+        completed: reopenOnly("completed"),
+        "stopped-failed": requestable(
+          "stopped-failed",
+          "task_reopen",
+          ["confirm"],
+          "reopen-returns-now",
+          "Reopen returns the handled Task from History to Now.",
+        ),
+      },
+    };
+  }
+
   const events = store.listEvents(taskId);
   const latestVerification = events
     .filter((event) => event.type === "verification.completed")
@@ -615,7 +655,10 @@ export function projectTaskActionPolicy(
       );
     }
     if (currentColumn === "stopped-failed") {
-      if (resolved) {
+      // Reopen is only requestable for terminal failed/interrupted/succeeded
+      // Tasks. Forged resolution evidence on queued/waiting/blocked/preparing/
+      // running/verifying work fails open to the normal Stopped/failed entry.
+      if (resolved && isTerminalAttentionStatus) {
         return requestable(
           "stopped-failed",
           "task_reopen",

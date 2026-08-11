@@ -475,6 +475,31 @@ export class ForkLightDaemon {
                 ),
               }),
         });
+      case "checkpoint_start":
+        return this.coordinator.checkpointStart({
+          taskId: requiredString(params.taskId, "taskId"),
+          attemptId: requiredString(params.attemptId, "attemptId"),
+          ...(params.commandIds === undefined
+            ? {}
+            : {
+                commandIds: requireArray(params.commandIds, "commandIds").map(
+                  (value, index) => requiredBoundedString(value, `commandIds[${index}]`),
+                ),
+              }),
+        });
+      case "checkpoint_status":
+        return this.coordinator.checkpointStatus(
+          requiredString(params.operationId, "operationId"),
+        );
+      case "checkpoint_wait":
+        return this.coordinator.waitCheckpoint(
+          requiredString(params.operationId, "operationId"),
+          params.timeoutMs as number,
+        );
+      case "checkpoint_report":
+        return this.coordinator.checkpointReport(
+          requiredString(params.operationId, "operationId"),
+        );
       case "resume":
         return this.coordinator.resume(
           requiredString(params.taskId, "taskId"),
@@ -955,6 +980,8 @@ export class ForkLightDaemon {
         );
       case "goal_submit_file":
         return this.coordinator.submitGoalFile(requiredString(params.goalFile, "goalFile"));
+      case "goal_validate":
+        return this.coordinator.goalValidate(requiredString(params.goalFile, "goalFile"));
       case "goal_status":
         return this.coordinator.goalStatus(requiredString(params.goalId, "goalId"));
       case "goal_list":

@@ -134,14 +134,19 @@ export function projectBoardPlacement(input: {
   ) {
     return { boardScope: "history", boardReason: "repaired-delivered" };
   }
-  // Explicit Main resolution of a handled failure is a durable closed outcome
-  // ONLY for a failed/interrupted Task: it moves to History while its machine
-  // status is preserved. Forged resolution evidence on queued/running/
-  // preparing/verifying/succeeded targets must never hide the work in History;
-  // reopened or malformed evidence also falls through to the normal placement.
+  // Explicit Main resolution of handled attention is a durable closed outcome
+  // for a terminal failed/interrupted/succeeded Task: it moves to History while
+  // its machine status is preserved. Succeeded is eligible only because the
+  // delivered/activated/repaired branches above already outrank it — a delivered
+  // succeeded Task is never hidden here. Forged resolution evidence on
+  // queued/running/preparing/verifying/blocked/waiting targets must never hide
+  // the work in History; reopened or malformed evidence also falls through to
+  // the normal placement.
   if (
     input.attentionResolution?.status === "resolved"
-    && (input.status === "failed" || input.status === "interrupted")
+    && (input.status === "failed"
+      || input.status === "interrupted"
+      || input.status === "succeeded")
   ) {
     return { boardScope: "history", boardReason: "attention-resolved" };
   }
@@ -207,9 +212,10 @@ export interface SafeTaskSummary {
    *  Contains only status, checkId, and createdAt — no raw command output, reason, or source. */
   remediationDisposition?: RemediationDisposition;
   /** Latest explicit Main attention-resolution state (resolved/reopened/none).
-   *  `resolved` closes a handled failure to History without changing machine
-   *  status; `reopened` returns it to Now. Privacy-safe: reason code + bounded
-   *  Main note + optional evidence Task id + timestamps only. */
+   *  `resolved` closes handled attention (a failed/interrupted or
+   *  succeeded-not-delivered Task) to History without changing machine status;
+   *  `reopened` returns it to Now. Privacy-safe: reason code + bounded Main
+   *  note + optional evidence Task id + timestamps only. */
   attentionResolution?: TaskResolutionState;
   /** Canonical Now/History placement. Always set by buildTaskSummary; absent
    *  only on hand-built legacy summaries. `history` means a durably closed
@@ -254,11 +260,14 @@ export function buildTaskSummary(
     ...(decisionStage === undefined ? {} : { decisionStage }),
     ...(failureCategory === undefined ? {} : { failureCategory }),
     ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
-    // Only failed/interrupted Tasks can project attention resolution. Forged
-    // resolution evidence on other statuses never surfaces on the summary.
+    // Only terminal failed/interrupted/succeeded Tasks can project attention
+    // resolution; forged resolution evidence on other statuses never surfaces
+    // on the summary. Delivered truth still outranks resolution in placement.
     ...(attentionResolution === undefined
       || attentionResolution.status === "none"
-      || (task.status !== "failed" && task.status !== "interrupted")
+      || (task.status !== "failed"
+        && task.status !== "interrupted"
+        && task.status !== "succeeded")
       ? {}
       : { attentionResolution }),
     // Canonical Now/History placement is always provided so every board/list

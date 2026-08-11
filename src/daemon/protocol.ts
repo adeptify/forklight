@@ -8,6 +8,10 @@ export type DaemonMethod =
   | "inspect"
   | "task_decision"
   | "checkpoint_run"
+  | "checkpoint_start"
+  | "checkpoint_status"
+  | "checkpoint_wait"
+  | "checkpoint_report"
   | "resume"
   | "main_review"
   | "main_failure_attribution"
@@ -60,6 +64,7 @@ export type DaemonMethod =
   | "review_graph_create"
   | "review_graph_status"
   | "goal_submit_file"
+  | "goal_validate"
   | "goal_status"
   | "goal_list"
   | "goal_advance"
@@ -116,6 +121,9 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "integration_status",
   "integration_wait",
   "integration_history",
+  "checkpoint_status",
+  "checkpoint_wait",
+  "checkpoint_report",
   "competition_status",
   "competition_compare",
   "competition_list",
@@ -127,6 +135,7 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "candidate_reverify_eligibility",
   "correction_eligibility",
   "review_graph_status",
+  "goal_validate",
   "goal_status",
   "goal_list",
   "economics_summary",

@@ -8,6 +8,11 @@ import {
   type LatestEventMeta,
   type PreparationStageCursor,
 } from "./task-progress.js";
+import { maxWorkerValidationRepairsFromSnapshot } from "./advanced-policy.js";
+import {
+  resolveWorkerValidationRepairHistory,
+  type WorkerValidationRepairHistoryEntry,
+} from "./worker-validation-repair.js";
 import type {
   AttemptRecord,
   CheckpointReport,
@@ -17,6 +22,7 @@ import type {
   RemediationDisposition,
   TaskDecisionView,
   TaskRecord,
+  ValidationRepairView,
   VerificationResult,
   WorkerClaim,
 } from "./types.js";
@@ -309,6 +315,70 @@ function stageAndAction(input: {
   };
 }
 
+/** Project the content-free validation-repair lineage from durable events and
+ *  the frozen Task policy. Corrupt or unsupported lineage fails closed: the
+ *  view is omitted rather than inventing round counts. */
+function buildValidationRepairView(
+  task: TaskRecord,
+  events: readonly EventRecord[],
+): ValidationRepairView | undefined {
+  // Only Tasks with an immutable policy snapshot have canonical allowance
+  // evidence. Legacy Tasks without one deliberately retain zero automatic
+  // repair; presenting that as an inherited/overridden value would invent a
+  // policy story that never existed.
+  if (task.effectivePolicy === undefined) return undefined;
+  let history: WorkerValidationRepairHistoryEntry[];
+  try {
+    history = resolveWorkerValidationRepairHistory(events);
+  } catch {
+    return undefined;
+  }
+  const max = maxWorkerValidationRepairsFromSnapshot(task.effectivePolicy);
+  const source = task.effectivePolicy?.provenance?.maxWorkerValidationRepairs ?? "global";
+  const consumed = new Set(history.map((entry) => entry.round)).size;
+  const remaining = Math.max(0, max - consumed);
+  const inProgress = history.some((entry) => entry.state !== "terminal");
+  const rounds: ValidationRepairView["rounds"] = history.map((entry) => ({
+    round: entry.round,
+    state: entry.state,
+    ...(entry.terminalOutcome === undefined
+      ? {}
+      : { terminalOutcome: entry.terminalOutcome }),
+    ...(entry.terminalReason === undefined
+      ? {}
+      : { terminalReason: entry.terminalReason }),
+    targetAttemptOrdinal: entry.targetAttemptOrdinal,
+    priorAttemptId: entry.priorAttemptId,
+    authorizationEventSequence: entry.authorizationEventSequence,
+    verificationEventSequence: entry.verificationEventSequence,
+    candidateRevisionId: entry.candidateRevisionId,
+  }));
+  const skipped: ValidationRepairView["skipped"] = [];
+  for (const event of events) {
+    if (event.type !== "worker.validation-repair.skipped") continue;
+    if (event.payload === null || typeof event.payload !== "object") continue;
+    const payload = event.payload as Record<string, unknown>;
+    if (typeof payload.reason !== "string" || payload.reason.length === 0) continue;
+    skipped.push({
+      reason: payload.reason,
+      ...(typeof payload.nextAction === "string" && payload.nextAction.length > 0
+        ? { nextAction: payload.nextAction }
+        : {}),
+    });
+  }
+  const lastTerminal = [...history].reverse().find((entry) => entry.state === "terminal");
+  return {
+    enabled: max > 0,
+    allowance: { max, consumed, remaining, source },
+    inProgress,
+    rounds,
+    skipped,
+    ...(lastTerminal?.terminalReason === undefined
+      ? {}
+      : { stopReason: lastTerminal.terminalReason }),
+  };
+}
+
 export function buildTaskDecisionView(input: {
   task: TaskRecord;
   attempts: readonly AttemptRecord[];
@@ -345,6 +415,7 @@ export function buildTaskDecisionView(input: {
   });
   const claim = workerClaim(input.task, orderedEvents);
   const checkpointReport = checkpoint(orderedEvents);
+  const validationRepair = buildValidationRepairView(input.task, orderedEvents);
   const latestMeta: LatestEventMeta | undefined = latest === undefined
     ? undefined
     : {
@@ -381,15 +452,19 @@ export function buildTaskDecisionView(input: {
     ...(currentReview === undefined ? {} : { mainReview: currentReview }),
     lineage: buildDeliveryLineage(input.attempts, orderedEvents),
     ...(integration === undefined ? {} : { integration }),
+    ...(validationRepair === undefined ? {} : { validationRepair }),
     progress,
     ...(failureCategory === undefined ? {} : { failureCategory }),
     ...(input.remediationDisposition === undefined
       ? {}
       : { remediationDisposition: input.remediationDisposition }),
-    // Only failed/interrupted Tasks project attention resolution; forged
-    // resolution evidence on other statuses fails open to Now.
+    // Only terminal failed/interrupted/succeeded Tasks project attention
+    // resolution; forged resolution evidence on other statuses fails open to
+    // Now. Delivered/activated/repaired placement stays stronger.
     ...(attentionResolution.status === "none"
-      || (input.task.status !== "failed" && input.task.status !== "interrupted")
+      || (input.task.status !== "failed"
+        && input.task.status !== "interrupted"
+        && input.task.status !== "succeeded")
       ? {}
       : { attentionResolution }),
   };

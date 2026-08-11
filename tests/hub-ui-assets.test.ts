@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { buildSafeTaskJourney } from "../src/hub/server.js";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hubPublic = path.join(root, "src", "hub", "public");
@@ -27,6 +28,8 @@ test("Hub public assets exist with configure + operate chrome", async () => {
   assert.ok(html.includes("<!DOCTYPE html>"));
   assert.ok(html.includes('data-tab="model"') && html.includes('data-tab="work"'));
   assert.ok(html.includes('id="fl-detail"'));
+  assert.ok(html.includes("THESIS: One Goal owns one working canvas."),
+    "the binding Work direction comment remains intact");
   assert.ok(js.includes("X-ForkLight-Hub-Token"));
   assert.ok(js.includes("function kanbanCard"));
   assert.ok(css.length > 200);
@@ -613,6 +616,9 @@ test("Hub Goal cards localize stopped/completed status and next actions without 
 
 test("Hub app.js security and decision-drawer invariants", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
+  assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>/i,
+    "Hub CSP permits only external scripts; theme restore must not be blocked");
   assert.ok(!/\.innerHTML\s*=/.test(src));
   assert.ok(!/onclick\s*=/i.test(src));
   assert.ok(!/\.style\./.test(src));
@@ -637,14 +643,21 @@ test("Hub app.js security and decision-drawer invariants", async () => {
     localStorageCalls.every((call) => /["']fl-theme["']/.test(call)),
     "localStorage is limited to the non-secret theme preference",
   );
+  const theme = extractFunctionSource(src, "getTheme");
+  assert.ok(theme.includes('localStorage.getItem("fl-theme")'),
+    "external Hub script restores the saved non-secret theme");
+  assert.ok(theme.includes('matchMedia("(prefers-color-scheme: dark)")'),
+    "system theme remains the fallback when no preference was saved");
   const sessionStorageCalls = codeOnly.match(
     /sessionStorage\.(?:getItem|setItem|removeItem)\([^\n;]*/g,
   ) ?? [];
   assert.ok(sessionStorageCalls.length >= 3, "tab session supports token get/set/remove");
   assert.ok(
     sessionStorageCalls.every((call) =>
-      call.includes("HUB_TOKEN_SESSION_KEY") || call.includes("fl-work-collapse")),
-    "sessionStorage is limited to the Hub token and the Work collapse preference",
+      call.includes("HUB_TOKEN_SESSION_KEY")
+        || call.includes("fl-work-collapse")
+        || call.includes("WORK_READING_CONTEXT_KEY")),
+    "sessionStorage is limited to Hub token, Work collapse, and bounded Work reading context",
   );
   assert.ok(src.includes("isValidHubToken"));
   assert.ok(src.includes("clearHubToken"));
@@ -825,6 +838,149 @@ test("Hub Worker editor exposes network route fields and truthful card copy", as
   assert.ok(block.includes("netNoProxyField.wrap.hidden = !custom"), "no-proxy label+input group hides with mode");
 });
 
+test("Hub exposes a configurable finite validation-repair allowance in the Worker editor", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  // Editor control: inherit / off / one / custom select plus a custom count.
+  assert.ok(src.includes('setAttribute("data-repair-mode", "true")'), "repair mode select exists");
+  assert.ok(src.includes('setAttribute("data-repair-value", "true")'), "repair custom count input exists");
+  assert.ok(src.includes('"workersAdvRepairInherit"'), "inherit option label wired");
+  assert.ok(src.includes('"workersAdvRepairOff"'), "off option label wired");
+  assert.ok(src.includes('"workersAdvRepairOne"'), "one option label wired");
+  assert.ok(src.includes('"workersAdvRepairCustom"'), "custom option label wired");
+  // collectAdvancedPatch writes 0 / 1 / custom and omits on inherit.
+  assert.ok(src.includes('patch.maxWorkerValidationRepairs = 0;'), "off saves 0");
+  assert.ok(src.includes('patch.maxWorkerValidationRepairs = 1;'), "one saves 1");
+  // The immutable root cap is excluded from the Task adaptation panel.
+  assert.ok(src.includes('field !== "maxWorkerValidationRepairs"'), "repair cap excluded from adaptation panel");
+  // Task Detail journey renders the plain-language verified-delivery stage and
+  // the finite validation-repair section.
+  assert.ok(src.includes("function renderValidationRepairSection("), "repair journey section exists");
+  assert.ok(src.includes("function deliveryJourneyStageText("), "delivery journey stage translator exists");
+  assert.ok(src.includes('data-fl-role", "journey-repair"'), "repair journey section has a stable data-fl-role");
+  assert.ok(src.includes("journeyStageRepairHint"), "repair round hint copy is wired");
+  // Plain-language finite allowance explanation in both languages.
+  assert.ok(i18n.includes("构建或测试失败后，自动交给同一个 Worker 修复几次"), "zh setting label");
+  assert.ok(i18n.includes("Automatic repairs after a failed build or test"), "en setting label");
+  assert.ok(i18n.includes("这是有限配额，不是无限循环"), "zh finite-not-endless explanation");
+  assert.ok(i18n.includes("finite allowance, not an endless loop"), "en finite-not-endless explanation");
+  // Non-retry failure explanation in both languages.
+  assert.ok(i18n.includes("这不是普通代码问题"), "zh non-retry explanation");
+  assert.ok(i18n.includes("not an ordinary code problem"), "en non-retry explanation");
+  // The verified-delivery journey stages exist in zh.
+  for (const phrase of ["正在实现", "Worker 已完成，等待 ForkLight 验证", "ForkLight 独立验证",
+    "同一个 Worker 正在修复", "等待 Main 审查", "已停止，原因与下一步见下方"]) {
+    assert.ok(i18n.includes(phrase), `zh journey stage: ${phrase}`);
+  }
+  for (const phrase of ["implementing the assignment", "The Worker finished; waiting for ForkLight verification",
+    "independently verifying the result", "same Worker is repairing",
+    "Waiting for Main review", "reason and next step are below"]) {
+    assert.ok(i18n.includes(phrase), `en journey stage: ${phrase}`);
+  }
+  // A finished Worker is never presented as an active self-check. The old
+  // journey-stage claim (key and its standalone copy) is gone; checkpoint
+  // timeline labels that describe recorded evidence may still use the phrase.
+  assert.ok(!i18n.includes("journeyStageSelfChecking"), "zh no invented self-check journey key");
+  assert.ok(!i18n.includes("self-checking its result"), "en no invented self-check claim");
+});
+
+test("Hub delivery journey reports a finished Worker without claiming a self-check", () => {
+  const task = {
+    id: "delivery-1",
+    status: "running",
+    spec: { version: 2, provider: { name: "deepseek" }, runtime: { name: "claude-code" } },
+  } as unknown as Record<string, unknown>;
+  const journey = buildSafeTaskJourney(
+    task,
+    { progress: { liveStage: { stage: "worker-finished" } } },
+  );
+  assert.equal(journey.deliveryJourney.stage, "worker-finished");
+  assert.equal(journey.deliveryJourney.nextActor, "verifier");
+  assert.notEqual(journey.deliveryJourney.stage, "self-checking");
+});
+
+test("Hub delivery journey keeps the independent-verification stage once verification starts", () => {
+  const task = {
+    id: "delivery-2",
+    status: "running",
+    spec: { version: 2, provider: { name: "deepseek" }, runtime: { name: "claude-code" } },
+  } as unknown as Record<string, unknown>;
+  const journey = buildSafeTaskJourney(
+    task,
+    { progress: { liveStage: { stage: "verifying" } } },
+  );
+  assert.equal(journey.deliveryJourney.stage, "verifying");
+  assert.equal(journey.deliveryJourney.nextActor, "verifier");
+});
+
+test("Hub safe journey omits malformed validation-repair allowance evidence", () => {
+  const task = {
+    id: "repair-1",
+    status: "failed",
+    spec: { version: 2, provider: { name: "deepseek" }, runtime: { name: "claude-code" } },
+  } as unknown as Record<string, unknown>;
+  const valid = {
+    validationRepair: {
+      allowance: { max: 1, consumed: 1, remaining: 0, source: "global" },
+      inProgress: false,
+      rounds: [],
+      skipped: [],
+    },
+  };
+  const projected = buildSafeTaskJourney(task, valid);
+  assert.ok(projected.validationRepair, "valid allowance still renders");
+  assert.equal(projected.validationRepair?.allowance.max, 1);
+  assert.equal(projected.validationRepair?.allowance.source, "global");
+
+  const inconsistent = buildSafeTaskJourney(task, {
+    validationRepair: {
+      allowance: { max: 1, consumed: 1, remaining: 1, source: "global" },
+      inProgress: false,
+      rounds: [],
+      skipped: [],
+    },
+  });
+  assert.equal(inconsistent.validationRepair, undefined, "inconsistent consumed/remaining/max is omitted");
+
+  const badSource = buildSafeTaskJourney(task, {
+    validationRepair: {
+      allowance: { max: 1, consumed: 1, remaining: 0, source: "inherited" },
+      inProgress: false,
+      rounds: [],
+      skipped: [],
+    },
+  });
+  assert.equal(badSource.validationRepair, undefined, "unknown provenance is omitted, not defaulted to global");
+
+  const missingMax = buildSafeTaskJourney(task, {
+    validationRepair: {
+      allowance: { consumed: 1, remaining: 0, source: "global" },
+      inProgress: false,
+      rounds: [],
+      skipped: [],
+    },
+  });
+  assert.equal(missingMax.validationRepair, undefined, "missing max is omitted, not invented as zero");
+});
+
+test("Hub i18n labels the closed eligible and conflicting-history repair reasons in both languages", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.ok(enSection.includes("journeyRepairReasonEligible"), "en eligible key wired");
+  assert.ok(enSection.includes("journeyRepairReasonConflictingHistory"), "en conflicting-history key wired");
+  assert.ok(enSection.includes("eligible for automatic repair"), "en eligible label is plain language");
+  assert.ok(enSection.includes("conflicts with the task evidence"), "en conflicting-history label is plain language");
+  assert.ok(zhSection.includes("journeyRepairReasonEligible"), "zh eligible key wired");
+  assert.ok(zhSection.includes("journeyRepairReasonConflictingHistory"), "zh conflicting-history key wired");
+  assert.ok(zhSection.includes("符合自动修复条件"), "zh eligible label is plain language");
+  assert.ok(zhSection.includes("修复历史与任务证据冲突"), "zh conflicting-history label is plain language");
+  // The two closed reasons must not fall back to the generic unknown label.
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const storySource = extractFunctionSource(src, "repairStopReasonLabel");
+  assert.ok(storySource.includes('"eligible": "journeyRepairReasonEligible"'), "repair label maps eligible");
+  assert.ok(storySource.includes('"conflicting-history": "journeyRepairReasonConflictingHistory"'), "repair label maps conflicting-history");
+});
+
 test("Hub i18n carries network route copy in both languages", async () => {
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   for (const phrase of [
@@ -924,7 +1080,7 @@ test("Hub Worker card connection story is one privacy-safe conclusion per state"
   assert.equal(blockedRuntime.next, "workersReadinessNextRuntime");
 });
 
-test("Hub Worker card leads with a connection conclusion and keeps execution facts under disclosure", async () => {
+test("Hub Worker row leads with a connection conclusion and keeps selected management progressive", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
@@ -936,6 +1092,8 @@ test("Hub Worker card leads with a connection conclusion and keeps execution fac
   assert.ok(block.includes("worker-connection"), "connection story has a stable data-fl-role marker");
   assert.ok(block.includes("worker-execution-details"), "execution details have a stable data-fl-role marker");
   assert.ok(block.includes("workerConnectionStory(readiness"), "card composes one connection story");
+  assert.ok(block.indexOf("if(isEditing){") < block.indexOf("worker-execution-details"),
+    "policy and technical disclosures render only for the selected Worker");
   assert.ok(block.indexOf("worker-connection") < block.indexOf("worker-execution-details"),
     "connection conclusion leads before the execution disclosure");
 
@@ -950,7 +1108,6 @@ test("Hub Worker card leads with a connection conclusion and keeps execution fac
   // All prior execution, policy, readiness-check, identity, pricing, and action
   // fact builders remain consumed by the card.
   for (const key of [
-    "workersCardDefaultPurpose",
     "workersCardExecutionIdentity",
     "workersCardExecutionBehavior",
     "workersCardBudgetUnlimited",
@@ -4720,9 +4877,10 @@ test("Hub primary Worker, Main, and verification summaries explain meaning befor
   const workerStart = src.indexOf("function rWorker()");
   const workerEnd = src.indexOf("function rLimits()", workerStart);
   const workerBlock = src.slice(workerStart, workerEnd);
-  assert.ok(workerBlock.includes("workersCardDefaultPurpose"), "Worker card explains when it is used");
   assert.ok(workerBlock.includes("workersCardExecutionIdentity"), "Worker card explains model, runtime, and mode in one line");
-  assert.ok(workerBlock.includes("workersCardExecutionBehavior"), "execution facts stay under one behavior disclosure");
+  assert.ok(workerBlock.includes("workersCardExecutionBehavior"), "selected Worker execution facts stay under one disclosure");
+  assert.ok(workerBlock.indexOf("if(isEditing){") < workerBlock.indexOf("workersCardExecutionBehavior"),
+    "unselected Worker rows do not repeat policy and technical inventories");
   assert.ok(workerBlock.includes("workersCardNoEffectiveProgressLimited"), "Worker card explains no-effective-progress stop");
   assert.ok(workerBlock.includes("workersCardAttempts"), "Worker card explains correction attempts");
   assert.ok(workerBlock.includes("workersCardAttemptsNoExtra"), "zero correction attempts are phrased as behavior, not 0 jargon");
@@ -4753,7 +4911,7 @@ test("Hub primary Worker, Main, and verification summaries explain meaning befor
     "Main's original review note is available without becoming primary copy");
 
   for (const key of [
-    "workersCardDefaultPurpose", "workersCardBudgetUnlimited", "workersCardAttemptsNoExtra",
+    "workersCardBudgetUnlimited", "workersCardAttemptsNoExtra",
     "mainCardUsable", "mainCardDisconnected", "journeyFailedChecksTitle",
     "journeyCheckUiContract", "journeyNextVerification", "journeyWorkerIdentitySentence",
     "journeyDeliveryMainReviewDetails",
@@ -4999,7 +5157,7 @@ test("Hub top-level pages lead with purpose and share an input-process-output-ne
   // Overview intentionally drops the page-story block in favor of operations-first layout.
   const pageBindings: Array<{ page: string; renderer: string; denseMarker: string; hasPageStory: boolean }> = [
     { page: "overview", renderer: "rOverview", denseMarker: "renderCompactReadiness", hasPageStory: false },
-    { page: "work", renderer: "rWork", denseMarker: "work-board", hasPageStory: true },
+    { page: "work", renderer: "rWork", denseMarker: "renderWorkWorkbench", hasPageStory: false },
     { page: "board", renderer: "rTasks", denseMarker: "taskSubmitTitle", hasPageStory: true },
     { page: "plans", renderer: "rPlans", denseMarker: "noPlans", hasPageStory: true },
     { page: "goals", renderer: "rGoals", denseMarker: "noGoals", hasPageStory: true },
@@ -5021,10 +5179,14 @@ test("Hub top-level pages lead with purpose and share an input-process-output-ne
       const denseAt = block.indexOf(denseMarker);
       assert.ok(denseAt > 0, `${renderer} still renders dense content (${denseMarker})`);
       assert.ok(storyAt < denseAt, `${renderer} places page story before dense content`);
-    } else {
+    } else if (page === "overview") {
       assert.ok(!block.includes(storyCall), `Overview intentionally drops page-story block`);
       assert.ok(block.includes(denseMarker), `Overview renders compact readiness instead`);
       assert.ok(block.includes("ov-live-strip"), "Overview leads with live state strip");
+    } else {
+      assert.ok(!block.includes(storyCall), `${page} does not use the generic page-story block`);
+      assert.ok(block.includes(denseMarker), `${page} renders its focused dense content`);
+      assert.ok(block.includes("renderWorkShapeGuide"), "Work leads with the shape guide");
     }
   }
 
@@ -7842,8 +8004,12 @@ test("Hub authenticates onto Work as the only default work surface", async () =>
   const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   // Initial state: Work is active in both HTML chrome and JS state.
-  assert.match(src, /tab:\s*"work"/, "S.tab defaults to work");
-  assert.ok(!src.includes('tab: "overview"'), "S.tab no longer defaults to overview");
+  const stateStart = src.indexOf("var S = {");
+  const stateEnd = src.indexOf("};\nvar viewEl", stateStart);
+  assert.ok(stateStart >= 0 && stateEnd > stateStart, "top-level S initializer is present");
+  const stateInit = src.slice(stateStart, stateEnd);
+  assert.match(stateInit, /\btab:\s*"work"/, "S.tab defaults to work");
+  assert.doesNotMatch(stateInit, /\btab:\s*"overview"/, "S.tab no longer defaults to overview");
   assert.match(
     html,
     /data-tab="work"\s+class="nav-item active"/,
@@ -7858,7 +8024,8 @@ test("Hub authenticates onto Work as the only default work surface", async () =>
   }
   // Initial localized chrome matches Work page metadata (zh-CN default shell).
   assert.ok(html.includes('id="fl-page-title"') && html.includes(">工作<"), "initial page title is Work");
-  assert.ok(html.includes("统一的目标 → 计划 → 任务看板，含阻塞与下一步"), "initial page sub is Work");
+  assert.ok(html.includes("查看 Goal、独立 Plan 或一次性 Task 工作区，以及其中的工作"),
+    "initial page sub is workspace-neutral Work orientation");
   assert.ok(i18n.includes('work: { title: "Work"'), "English Work title remains truthful");
   assert.ok(i18n.includes('work: { title: "工作"'), "Chinese Work title remains truthful");
   // First refresh requests Work hierarchy/intake slices via the default tab fallback.
@@ -7952,12 +8119,12 @@ test("Hub same-task reload keeps its bounded breadcrumb and other Tasks never in
 test("Hub Work cards show only decision evidence and never technical ids", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const card = extractFunctionSource(src, "renderWorkCard");
+  const primary = extractFunctionSource(src, "workCardPrimaryLine");
   assert.ok(card.includes("work-card-name"), "card leads with the Task name");
-  assert.ok(card.includes("workPlacementLabel"), "card explains why it is in this column");
-  assert.ok(card.includes("workCardBlocker"), "card names prerequisites in plain language");
-  assert.ok(card.includes("workCardUnlocks"), "card names what it unlocks");
-  assert.ok(card.includes("workCardNext"), "card states the next action");
-  assert.ok(card.includes("workWorkerLabel"), "Worker label is resolved before display");
+  assert.ok(card.includes("work-card-status"), "card carries an explicit state label");
+  assert.ok(card.includes("workCardPrimaryLine"), "card renders one primary blocker-or-next line");
+  assert.ok(primary.includes("workCardBlocker") && primary.includes("workNarrativeText"),
+    "the primary line resolves blocker and coded next-action copy");
   // No raw id, token, command, endpoint, or result text becomes card copy.
   assert.ok(!card.includes("card.resultText") && !card.includes("card.error")
     && !card.includes("card.logs") && !card.includes("card.commands")
@@ -8221,13 +8388,18 @@ test("Hub Work copy is bilingual, explanation-first, and internal-vocabulary-fre
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   const { enSection, zhSection } = splitI18n(i18n);
-  assert.ok(src.includes('renderPageStory("work")'), "Work page still renders its purpose story");
+  const work = extractFunctionSource(src, "rWork");
+  assert.ok(work.includes("renderWorkShapeGuide()"), "Work page leads with shape rules");
+  assert.ok(!work.includes('renderPageStory("work")'), "generic page tutorial is not primary Work copy");
   const enKeys = [
     "workFilterApply", "workFilterReset", "workColumnWaitingDecision",
     "workCardBlocker", "workCardNext", "workGoalDecision",
     "workIndependentPlans", "workOneOffTasks", "workUnsupportedHierarchy",
     "workFilterInternalProjectsOmitted", "workOneOffCount",
-    "pageStoryWorkHow", "workFinishedWorkCount", "workNoFurtherAction",
+    "workShapeGuideTitle", "workShapeTaskRule", "workShapePlanRule", "workShapeGoalRule",
+    "workShapeProposalFlow", "workFinishedWorkCount", "workNoFurtherAction",
+    "workCurrentPhaseTitle", "workOneOffCurrentTitle", "workOneOffHistoryTitle",
+    "workPortfolioAttention", "workAdvancedTitle", "outcomeAdvancedHint",
   ];
   for (const key of enKeys) {
     assert.ok(enSection.includes(key), `en ${key}`);
@@ -8243,8 +8415,12 @@ test("Hub Work copy is bilingual, explanation-first, and internal-vocabulary-fre
     "zh explains omitted internal project choices");
   assert.ok(i18n.includes("{count} tasks"), "en one-off count is plain");
   assert.ok(i18n.includes("{count} 个任务"), "zh one-off count is plain");
-  assert.ok(i18n.includes("How this page works"), "en Work help disclosure title");
-  assert.ok(i18n.includes("如何使用这个页面"), "zh Work help disclosure title");
+  assert.ok(i18n.includes("One independently reviewable deliverable"), "en shape rule explains Task");
+  assert.ok(i18n.includes("一个可独立验收的交付"), "zh shape rule explains Task");
+  assert.ok(i18n.includes("More options"), "en expert controls have a reason");
+  assert.ok(i18n.includes("更多选项"), "zh expert controls have a reason");
+  assert.ok(!i18n.includes("Advanced — submit a task file"), "old unexplained Advanced label is gone");
+  assert.ok(!i18n.includes("如何使用这个页面"), "generic Work help title is gone from primary copy");
   assert.ok(i18n.includes("Finished work ({count})"), "en finished-work group is plain");
   assert.ok(i18n.includes("已结束的工作（{count}）"), "zh finished-work group is plain");
   assert.ok(i18n.includes("What happened: {text}"), "en lane outcome is neutral");
@@ -8258,42 +8434,137 @@ test("Hub Work copy is bilingual, explanation-first, and internal-vocabulary-fre
     "cards carry the hierarchy breadcrumb for the drawer");
 });
 
-// --- FL-108B: Work page explains itself without overwhelming ---
+test("FL-112B workspace selection uses canonical ids with deterministic fallback", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const kindStart = src.indexOf("var WORKSPACE_SELECTION_KINDS = [");
+  assert.ok(kindStart >= 0, "workspace selection kinds are explicit");
+  const kindConst = src.slice(kindStart, src.indexOf("];", kindStart) + 2);
+  const helperNames = [
+    "workMakeSelection",
+    "workSelectionKey",
+    "workSelectionEqual",
+    "workGoalIsTerminalStatusForSelection",
+    "workSelectionExists",
+    "workDefaultSelection",
+    "workResolveSelection",
+  ];
+  const helpers = [kindConst]
+    .concat(helperNames.map((name) => extractFunctionSource(src, name)))
+    .join("\n");
+  const api = new Function(`${helpers}; return {
+    workMakeSelection, workSelectionKey, workSelectionEqual,
+    workSelectionExists, workDefaultSelection, workResolveSelection
+  };`)() as {
+    workMakeSelection: (kind: string, id: string) => { kind: string; id: string } | null;
+    workSelectionKey: (selection: { kind: string; id: string } | null) => string;
+    workSelectionEqual: (
+      left: { kind: string; id: string } | null,
+      right: { kind: string; id: string } | null,
+    ) => boolean;
+    workSelectionExists: (view: Record<string, unknown>, selection: unknown) => boolean;
+    workDefaultSelection: (view: Record<string, unknown>) => { kind: string; id: string } | null;
+    workResolveSelection: (
+      view: Record<string, unknown>,
+      current: { kind: string; id: string } | null,
+    ) => { kind: string; id: string } | null;
+  };
+  const activeGoal = { goalId: "goal-active", status: "running" };
+  const finishedGoal = { goalId: "goal-finished", status: "completed" };
+  const independentPlan = { planId: "plan-independent", name: "A real phase" };
+  const oneOffTasks = { columns: {} };
+  const view = {
+    goals: [activeGoal, finishedGoal],
+    independentPlans: [independentPlan],
+    oneOffTasks,
+  };
 
-test("FL-108B Work-only help is a closed disclosure that retains every page-story slot", async () => {
+  const goal = api.workMakeSelection("goal", "goal-active")!;
+  const plan = api.workMakeSelection("plan", "plan-independent")!;
+  const inbox = api.workMakeSelection("one-off", "inbox")!;
+  assert.equal(api.workSelectionKey(goal), "goal:goal-active");
+  assert.equal(api.workSelectionEqual(goal, api.workMakeSelection("goal", "goal-active")), true);
+  assert.equal(api.workSelectionExists(view, goal), true, "Goal selection is canonical");
+  assert.equal(api.workSelectionExists(view, inbox), true, "one-off inbox is the only synthetic view key");
+  assert.equal(api.workSelectionExists(view, api.workMakeSelection("one-off", "task-1")), false,
+    "standalone Tasks do not become fake workspace parents");
+  assert.deepEqual(api.workDefaultSelection(view), goal, "first active Goal is the meaningful default");
+  assert.deepEqual(api.workResolveSelection(view, plan), plan, "valid independent Plan survives refresh");
+
+  const planOnly = { goals: [], independentPlans: [independentPlan], oneOffTasks };
+  assert.deepEqual(api.workResolveSelection(planOnly, goal), plan,
+    "removed Goal falls back to the available independent Plan");
+  assert.deepEqual(api.workDefaultSelection({ goals: [], independentPlans: [], oneOffTasks }), inbox,
+    "one-off work is selected when no Goal or Plan exists");
+  assert.equal(api.workDefaultSelection({ goals: [], independentPlans: [], oneOffTasks: null }), null,
+    "no canonical workspace produces no fake placeholder");
+});
+
+test("FL-112E2 focused Goals select the Core currentPlanId and fall back to the last phase", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const goal = extractFunctionSource(src, "renderWorkFocusedGoal");
+  const phase = extractFunctionSource(src, "renderWorkCurrentPhase");
+  const currentHelper = extractFunctionSource(src, "workGoalCurrentPlan");
+  const phasePlansHelper = extractFunctionSource(src, "workGoalPhasePlans");
+  const oneOff = extractFunctionSource(src, "renderWorkOneOffGroup");
+  const focusedOneOff = extractFunctionSource(src, "renderWorkFocusedOneOff");
+  assert.equal((goal.match(/renderWorkTaskBoard\(/g) || []).length, 1,
+    "a Goal renders exactly one Task board");
+  assert.ok(goal.includes("workGoalCurrentPlan(goal)"),
+    "the focused renderer selects the current Plan by Core projection");
+  assert.ok(currentHelper.includes("goal.plans || []"), "the selector consumes the canonical plans array");
+  assert.ok(currentHelper.includes("goal.currentPlanId"),
+    "the browser consumes currentPlanId only; it never computes phase readiness");
+  assert.ok(currentHelper.includes("plans[plans.length - 1]"),
+    "terminal Goal falls back to the last phase for completed-history inspection");
+  assert.ok(phasePlansHelper.includes("currentPlan"), "the current phase leads the ordered phase list");
+  assert.ok(phase.includes("var plan = (plans || [])[0]"),
+    "current phase is deterministic without browser-side readiness calculation");
+  assert.ok(!goal.includes("renderWorkPlanLane"), "the current phase is not a duplicate collapsible Plan wrapper");
+  const independent = extractFunctionSource(src, "renderWorkFocusedPlan");
+  assert.ok(independent.includes("workIndependentPlanHint"), "independent Plan has no invented Goal ancestry");
+  assert.ok(oneOff.includes("definition.limit"), "one-off groups bound the first rendered slice");
+  assert.ok(oneOff.includes('definition.key !== "history"'), "current groups lead while history stays closed");
+  assert.ok(oneOff.includes('limit === "all"'), "bounded history remains reachable with Show more");
+  assert.ok(focusedOneOff.includes("WORK_ONE_OFF_GROUPS"), "standalone Tasks are grouped by truthful status purpose");
+});
+
+// --- FL-112B: Work page explains shape and keeps the focused workspace calm ---
+
+test("FL-112B Work shape guide is visible and replaces generic page help", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const guide = extractFunctionSource(src, "renderWorkShapeGuide");
+  assert.ok(guide.includes('data-fl-role", "work-shape-guide"'), "shape guide role is stable");
+  assert.ok(guide.includes("workShapeTaskRule"), "guide explains Task");
+  assert.ok(guide.includes("workShapePlanRule"), "guide explains Plan");
+  assert.ok(guide.includes("workShapeGoalRule"), "guide explains Goal");
+  assert.ok(guide.includes("workShapeProposalFlow"), "guide names Main proposal and confirmation");
+  assert.ok(!extractFunctionSource(src, "rWork").includes('renderPageStory("work")'),
+    "generic input-process-output help is not duplicated on Work");
+  assert.ok(i18n.includes("More options") && i18n.includes("更多选项"),
+    "expert controls are named naturally in both locales");
+  assert.ok(!i18n.includes("Advanced — submit a task file"), "unexplained Advanced copy is gone");
+  // Other pages still keep the shared story renderer.
   const story = extractFunctionSource(src, "renderPageStory");
-  assert.ok(story.includes('page === "work"'), "Work branches into a disclosure");
-  assert.ok(story.includes('data-fl-role", "page-story-disclosure"'), "disclosure role is stable");
-  assert.ok(story.includes('data-fl-role", "page-story-disclosure-toggle"'), "toggle role is stable");
-  assert.ok(story.includes('t("pageStoryWorkHow")'), "disclosure uses the How-this-page title");
-  assert.ok(story.includes("details.appendChild(body)"), "purpose and flow live inside the disclosure");
-  assert.ok(story.includes('data-fl-role", "page-story-purpose"'), "purpose slot retained");
-  assert.ok(story.includes('page-story-" + item.slot'), "input/process/output/next slots retained");
-  // Closed by default: no open attribute is set on the Work details element.
-  assert.ok(!/details\.open\s*=\s*true/.test(story), "Work help is not forced open");
-  assert.ok(!story.includes('setAttribute("open"'), "Work help has no open attribute");
-  // Other pages still append purpose+flow directly (no Work-only disclosure).
   assert.ok(story.includes("card.appendChild(purpose)"), "non-Work pages keep always-open purpose");
   assert.ok(story.includes("card.appendChild(flow)"), "non-Work pages keep always-open flow");
   const rw = extractFunctionSource(src, "rWork");
   const outcomeAt = rw.indexOf("renderOutcomeSection()");
-  const storyAt = rw.indexOf('renderPageStory("work")');
+  const storyAt = rw.indexOf("renderWorkShapeGuide()");
   const filtersAt = rw.indexOf("renderWorkFilters()");
-  const boardAt = rw.indexOf('data-fl-role", "work-board"');
+  const boardAt = rw.indexOf("renderWorkWorkbench(view, S.workSelection)");
   assert.ok(outcomeAt > 0 && storyAt > outcomeAt && filtersAt > storyAt && boardAt > filtersAt,
-    "Work order is outcome → compact help → filters → board");
-  assert.ok(i18n.includes("How this page works") && i18n.includes("如何使用这个页面"),
-    "bilingual help titles ship");
-  assert.ok(css.includes(".page-story-disclosure"), "disclosure styles ship");
-  assert.ok(css.includes(".page-story-disclosure-summary"), "summary line styles ship");
-  assert.ok(!/page-story-disclosure[\s\S]{0,200}height:\s*\d+vh/.test(css),
-    "help disclosure does not use fixed viewport heights");
+    "Work order is outcome → shape rules → filters → focused workbench");
+  assert.ok(rw.includes('data-fl-role", "work-intro"'),
+    "outcome and shape explanation share one compact semantic intro");
+  assert.ok(css.includes(".work-shape-guide"), "shape guide styles ship");
+  assert.ok(css.includes(".work-shape-rules"), "three-level shape rules have a stable layout");
+  assert.ok(!/work-shape-guide[\s\S]{0,200}height:\s*\d+vh/.test(css),
+    "shape guide does not use fixed viewport heights");
 });
 
-test("FL-108B terminal Goals group into one counted, lazy Finished work disclosure", async () => {
+test("FL-112B terminal Goals stay in one counted, lazy Finished history disclosure", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   assert.ok(src.includes("function workGoalIsTerminalStatus("), "terminal status helper ships");
@@ -8319,22 +8590,18 @@ test("FL-108B terminal Goals group into one counted, lazy Finished work disclosu
   assert.ok(finished.includes('data-fl-role", "work-finished-toggle"'), "finished toggle role");
   assert.ok(finished.includes("workFinishedWorkCount"), "count is shown in the summary");
   assert.ok(finished.includes("ensureFinishedBody"), "terminal lanes are lazy");
-  assert.ok(finished.includes("renderWorkGoalLane(goal)"), "same Goal lane renderer when expanded");
+  assert.ok(finished.includes("renderWorkHistoryOption(goal)"), "history expands to selectable Goal summaries");
   assert.ok(finished.includes("if(details.open) ensureFinishedBody()"),
     "lanes render only after the disclosure opens");
-  const rw = extractFunctionSource(src, "rWork");
-  assert.ok(rw.includes("workGoalIsTerminalStatus"), "rWork partitions by canonical status");
-  assert.ok(rw.includes("activeGoals"), "active Goals are collected");
-  assert.ok(rw.includes("terminalGoals"), "terminal Goals are collected");
-  assert.ok(rw.includes("renderWorkFinishedGoals(terminalGoals)"), "terminal group is rendered");
-  const activeAppend = rw.indexOf("activeGoals.forEach");
-  const finishedAppend = rw.indexOf("renderWorkFinishedGoals");
-  const indepAppend = rw.indexOf("work-independent-plans");
-  const oneOffAppend = rw.indexOf("work-oneoff-tasks");
-  assert.ok(activeAppend > 0 && finishedAppend > activeAppend,
-    "active Goals render before the Finished work disclosure");
-  assert.ok(indepAppend > finishedAppend && oneOffAppend > indepAppend,
-    "independent plans and one-off stay after Goal groups");
+  const portfolio = extractFunctionSource(src, "renderWorkPortfolio");
+  assert.ok(portfolio.includes("workGoalIsTerminalStatusForSelection"),
+    "portfolio partitions active and terminal Goals by canonical status");
+  assert.ok(portfolio.includes("renderWorkFinishedGoals(finishedGoals)"),
+    "terminal Goal history is reachable from the rail");
+  assert.ok(portfolio.indexOf("activeGoals") < portfolio.indexOf("independent"),
+    "active Goal summaries precede independent Plans");
+  assert.ok(portfolio.indexOf("independent") < portfolio.indexOf("oneOffTasks"),
+    "one-off work remains a separate portfolio choice");
   assert.ok(css.includes(".work-finished-group"), "finished group styles ship");
   assert.ok(!/work-finished-group[\s\S]{0,240}(max-height:\s*\d+vh|overflow:\s*hidden)/.test(css),
     "finished group does not clip or fix viewport height");
@@ -8466,7 +8733,11 @@ test("FL-108C1 Work narrative is code-driven, bilingual, and fails closed", asyn
     assert.ok(!narrSrc.includes(banned), `workNarrativeText must not contain prose parse: ${banned}`);
     assert.ok(!appendSrc.includes(banned), `appendWorkLaneNarrative must not contain prose parse: ${banned}`);
   }
-  assert.ok(cardSrc.includes("workNarrativeText"), "cards render next action via codes");
+  const primarySrc = extractFunctionSource(src, "workCardPrimaryLine");
+  assert.ok(cardSrc.includes("workCardPrimaryLine")
+    && primarySrc.includes("workNarrativeText")
+    && primarySrc.includes("workCardBlocker"),
+    "cards render one coded blocker-or-next line");
   assert.ok(oneOffSrc.includes("workNarrativeText"), "one-off lane renders next action via codes");
 
   // Evaluate the pure renderer with a tiny i18n stand-in.
@@ -8800,8 +9071,10 @@ test("FL-108B Work composition stays presentation-only with no Core lifecycle mu
   const rw = extractFunctionSource(src, "rWork");
   assert.ok(rw.includes("normalizeWorkHierarchy(S.workHierarchy)"),
     "rWork still consumes the canonical hierarchy adapter");
-  assert.ok(rw.includes("activeGoals.push(goal)") && rw.includes("terminalGoals.push(goal)"),
-    "partition keeps the same Goal object references");
+  assert.ok(rw.includes("workResolveSelection(view, S.workSelection)"),
+    "selection keeps the same canonical Goal/Plan object references");
+  assert.ok(rw.includes("renderWorkWorkbench(view, S.workSelection)"),
+    "composition stays a presentation-only focused workspace");
   assert.ok(!rw.includes("JSON.parse(JSON.stringify") && !rw.includes("structuredClone"),
     "Goals are not deep-copied for presentation");
   // Empty intake remains reachable with a compact role marker.
@@ -8862,10 +9135,12 @@ test("FL-109C2A seven-column drop feedback reads only card.actionPolicy and neve
     "drop never reparents the card");
 
   const renderer = extractFunctionSource(src, "renderWorkColumns");
-  assert.ok(renderer.includes('cell.setAttribute("data-column", code)'), "each cell carries its column code");
-  const rw = extractFunctionSource(src, "rWork");
-  assert.ok(rw.includes("board.addEventListener(\"dragover\", workBoardDragOver)"),
-    "the board delegates drag over every lane");
+  const cellRenderer = extractFunctionSource(src, "workRenderColumnCell");
+  assert.ok(cellRenderer.includes('cell.setAttribute("data-column", code)'), "each cell carries its column code");
+  assert.ok(renderer.includes("workRenderColumnCell"), "column rendering stays delegated and canonical");
+  const board = extractFunctionSource(src, "renderWorkTaskBoard");
+  assert.ok(board.includes("board.addEventListener(\"dragover\", workBoardDragOver)"),
+    "the focused board delegates drag over every lane");
 });
 
 test("FL-109C2A Move/Act chooser is keyboard-operable and keeps every destination focusable", async () => {
@@ -8933,8 +9208,8 @@ test("FL-109C2A pending-action handoff is bilingual, truthful, and submits nothi
     assert.ok(enSection.includes(key), `en ${key}`);
     assert.ok(zhSection.includes(key), `zh ${key}`);
   }
-  assert.ok(i18n.includes("Pending action — not yet executed"), "en handoff title is plain");
-  assert.ok(i18n.includes("待执行操作——尚未执行"), "zh handoff title is plain");
+  assert.ok(i18n.includes("Pending action. Not yet executed"), "en handoff title is plain");
+  assert.ok(i18n.includes("待执行操作，尚未执行"), "zh handoff title is plain");
   assert.ok(i18n.includes("This card has not moved and no status changed"), "en truth line is explicit");
   assert.ok(i18n.includes("此卡片没有移动，状态也没有改变"), "zh truth line is explicit");
   assert.ok(!i18n.includes("Token savings from handoff"), "no unearned savings claim");
@@ -9306,7 +9581,7 @@ test("FL-109D2 outcome composer records once, preserves failed input, and never 
     assert.ok(enSection.includes(key), `en ${key}`);
     assert.ok(zhSection.includes(key), `zh ${key}`);
   }
-  assert.ok(enSection.includes("nothing has started"), "en pending truth is explicit");
+  assert.ok(enSection.toLowerCase().includes("nothing has started"), "en pending truth is explicit");
   assert.ok(zhSection.includes("尚未开始任何工作"), "zh pending truth is explicit");
   assert.ok(enSection.includes("not confirmed"), "en nothing-created truth is explicit");
   assert.ok(zhSection.includes("尚未确认"), "zh nothing-created truth is explicit");
@@ -9419,8 +9694,12 @@ test("FL-109D3B created story is plain-language and progressively disclosed", as
   assert.ok(created.includes("outcomeCreatedWhat"), "story answers what was created");
   assert.ok(created.includes("outcomeCreatedExecution"), "story answers what happened to execution");
   assert.ok(created.includes("outcomeCreatedNext"), "story answers what to do next");
-  assert.ok(created.includes("outcomeCreatedOpenTask"), "story offers opening the created Task");
-  assert.ok(created.includes("showTask(taskIds[0])"), "opening the created Task uses the ordinary detail path");
+  assert.ok(created.includes("outcomeCreatedOpenWorkspace"), "story offers one primary created-workspace action");
+  assert.ok(created.includes("outcomeRetryCreatedNavigation(intake)"),
+    "the primary action reopens from the clicked canonical created intake");
+  assert.ok(!created.includes("outcomeCreatedOpenTask"), "created story has no legacy Open Task bypass");
+  assert.ok(!created.includes("outcome-created-open-task"), "created story has no raw Task-detail control role");
+  assert.ok(!created.includes("showTask("), "created story never bypasses canonical workspace selection");
   assert.ok(created.includes("renderIntakeTechDetails(intake)"), "ids and receipt evidence stay under Technical details");
   assert.ok(!created.includes("outcomeHandoffCopy"), "created story has no handoff control");
 
@@ -9441,7 +9720,9 @@ test("FL-109D3B created story keys are bilingual plain language", async () => {
   for (const key of [
     "outcomeStatusCreated", "outcomeCreatedStatus", "outcomeCreatedWhat",
     "outcomeCreatedWhatBody", "outcomeCreatedExecution", "outcomeCreatedExecutionBody",
-    "outcomeCreatedNext", "outcomeCreatedNextBody", "outcomeCreatedOpenTask",
+    "outcomeCreatedNext", "outcomeCreatedNextBody", "outcomeCreatedNextBodyPending",
+    "outcomeCreatedWhoNext", "outcomeCreatedWhoNextPending", "outcomeCreatedNotVisible",
+    "outcomeCreatedOpenWorkspace",
     "outcomeConfirmAction", "outcomeConfirmTitle", "outcomeConfirmIntro",
     "outcomeConfirmShape", "outcomeConfirmDisplay", "outcomeConfirmScope",
     "outcomeConfirmTruth", "outcomeConfirmCancel", "outcomeConfirmSubmit",
@@ -9456,10 +9737,1180 @@ test("FL-109D3B created story keys are bilingual plain language", async () => {
   }
   // Plain-language truth: creation really happens, and uncertainty never
   // claims nothing happened.
-  assert.ok(enSection.includes("work created"), "en created story states the durable result");
+  assert.ok(enSection.toLowerCase().includes("work created"), "en created story states the durable result");
   assert.ok(zhSection.includes("工作已创建"), "zh created story states the durable result");
   assert.ok(enSection.includes("could not confirm whether"), "en network failure stays uncertain");
   assert.ok(zhSection.includes("无法确认工作是否已创建"), "zh network failure stays uncertain");
+  // Ready copy says the workspace can be opened; pending never claims opened.
+  assert.ok(enSection.includes("You can open its workspace from here."),
+    "en ready copy says the workspace can be opened");
+  assert.ok(zhSection.includes("你可以从这里打开对应工作区"),
+    "zh ready copy says the workspace can be opened");
+  assert.ok(enSection.includes("The workspace will open when it appears on the board."),
+    "en pending copy waits for the board");
+  assert.ok(zhSection.includes("工作区出现在看板后即可打开"),
+    "zh pending copy waits for the board");
+  assert.ok(!enSection.includes("and opened its workspace"),
+    "en created copy never claims the workspace is already open");
+  assert.ok(!zhSection.includes("并打开了对应的工作区"),
+    "zh created copy never claims the workspace is already open");
+});
+
+// --- FL-112E9: result-to-work first-use journey ---
+
+test("FL-112E9 composer and intake journey stay adjacent; history is bounded and collapsed", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const outcomeSection = extractFunctionSource(js, "renderOutcomeSection");
+  assert.ok(outcomeSection.indexOf("renderOutcomeComposer()") < outcomeSection.indexOf("renderIntakeStory()"),
+    "the intake journey is adjacent to the composer");
+  const story = extractFunctionSource(js, "renderIntakeStory");
+  assert.ok(story.includes("outcomeSelectPrimaryIntake(intakes, S.selectedIntakeId)"),
+    "primary vs history is a presentation-only split");
+  assert.ok(story.includes("renderIntakeDetail(split.selected)"), "one active intake is the primary journey");
+  assert.ok(story.includes("renderOutcomeIntakeHistory(split.rest)"), "older intakes stay a bounded history");
+  const history = extractFunctionSource(js, "renderOutcomeIntakeHistory");
+  assert.ok(history.includes('createElement("details")'), "intake history is a native collapsed disclosure");
+  assert.ok(history.includes("outcomeHistoryCount"), "history count is locale-owned");
+  const journey = extractFunctionSource(js, "renderOutcomeJourney");
+  assert.ok(journey.includes("OUTCOME_JOURNEY_KEYS"),
+    "the journey renderer consumes the shared four-step key array");
+  const keysStart = js.indexOf("var OUTCOME_JOURNEY_KEYS = [");
+  assert.ok(keysStart >= 0, "the shared four-step key array is declared");
+  const keysBlock = js.slice(keysStart, js.indexOf("];", keysStart) + 2);
+  for (const key of ["outcomeJourneyStep1", "outcomeJourneyStep2", "outcomeJourneyStep3", "outcomeJourneyStep4"]) {
+    assert.ok(keysBlock.includes(`"${key}"`), `${key} is declared in OUTCOME_JOURNEY_KEYS`);
+  }
+  const pending = extractFunctionSource(js, "renderPendingStory");
+  assert.ok(pending.includes("outcomePendingWhoNext"), "pending explains Main acts next");
+  assert.ok(pending.includes("outcome-handoff-disclosure"), "handoff mechanics stay behind a secondary disclosure");
+  assert.ok(pending.includes("renderIntakeHandoff(intake)"), "the exact handoff remains available");
+  const proposed = extractFunctionSource(js, "renderProposedPreview");
+  assert.ok(proposed.includes("outcomeProposedWhoNext"), "proposed explains the user acts next");
+  assert.ok(!proposed.includes("outcomeHandoffCopy"), "proposed keeps the one confirm action primary");
+  const created = extractFunctionSource(js, "renderCreatedStory");
+  assert.ok(created.includes("outcomeCreatedWhoNext"), "created ready copy names the open action");
+  assert.ok(created.includes("outcomeCreatedWhoNextPending"), "created pending copy waits for the board");
+  assert.ok(created.includes("outcomeCreatedIdentityResolvable"),
+    "created truth is based on hierarchy identity, not transient intent alone");
+  assert.ok(created.includes("outcomeRetryCreatedNavigation"), "opening the created workspace is retryable, never optimistic");
+  assert.ok(created.includes('data-fl-role", "outcome-created-open-workspace"'),
+    "one primary created-workspace action ships");
+  assert.ok(!created.includes("outcome-created-open-task"), "no legacy Task-detail bypass in the created story");
+  assert.ok(!created.includes("showTask("), "created story never raw-opens a Task drawer");
+});
+
+test("FL-112E9 stale selection falls back once without duplicating the primary in history", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const story = extractFunctionSource(src, "renderIntakeStory");
+  assert.ok(story.includes("outcomeSelectPrimaryIntake(intakes, S.selectedIntakeId)"),
+    "intake story uses the presentation-only primary/history split");
+  const fn = extractFunctionSource(src, "outcomeSelectPrimaryIntake");
+  const api = new Function(`${fn}; return outcomeSelectPrimaryIntake;`)() as (
+    intakes: Array<{ id: string; outcome?: string }>,
+    selectedIntakeId: string | null,
+  ) => { selected: { id: string } | null; rest: Array<{ id: string }> };
+
+  const intakes = [
+    { id: "newest", outcome: "Latest" },
+    { id: "older", outcome: "Earlier" },
+    { id: "oldest", outcome: "Oldest" },
+  ];
+
+  // Stale selected id falls back to the first canonical intake exactly once.
+  const stale = api(intakes, "missing-id");
+  assert.equal(stale.selected?.id, "newest");
+  assert.deepEqual(stale.rest.map((item) => item.id), ["older", "oldest"]);
+  assert.ok(!stale.rest.some((item) => item.id === "newest"),
+    "the fallback primary never reappears in older history");
+
+  // Missing selection behaves the same as a stale id.
+  const missing = api(intakes, null);
+  assert.equal(missing.selected?.id, "newest");
+  assert.deepEqual(missing.rest.map((item) => item.id), ["older", "oldest"]);
+
+  // A live selected id stays primary and is excluded from history.
+  const live = api(intakes, "older");
+  assert.equal(live.selected?.id, "older");
+  assert.deepEqual(live.rest.map((item) => item.id), ["newest", "oldest"]);
+});
+
+test("FL-112E9 created navigation opens the exact Goal, Plan, or parentless Task workspace", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const WORK_COLUMN_CODES = [
+    "not-started", "ready", "running", "waiting-verification",
+    "waiting-user-decision", "completed", "stopped-failed",
+  ];
+  const helpers = [
+    "workApplyCreatedNavigation",
+    "workMakeSelection",
+    "workSelectionKey",
+    "workSelectionEqual",
+    "workReadingGoalExists",
+    "workReadingTaskExists",
+    "workFindTaskCard",
+    "workCollectCards",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const view = {
+    schemaVersion: 1,
+    columns: WORK_COLUMN_CODES.map((code, order) => ({ code, order })),
+    goals: [{
+      goalId: "goal-1",
+      status: "running",
+      plans: [{ planId: "plan-goal", columns: {} }],
+    }],
+    independentPlans: [{
+      planId: "plan-1",
+      columns: { ready: [{ taskId: "task-plan", breadcrumb: { planId: "plan-1" } }] },
+    }],
+    oneOffTasks: {
+      columns: { ready: [{ taskId: "task-oneoff", breadcrumb: {} }] },
+    },
+  };
+  const api = new Function("view", "WORK_COLUMN_CODES", `
+    var WORKSPACE_SELECTION_KINDS = ["goal", "plan", "one-off"];
+    ${helpers}
+    var workBoardFocusRequest = null;
+    var S = { intakes: [], workSelection: null, workViewedGoalId: null, workViewedPlanId: null, outcomeCreatedNavigate: null, outcomeCreatedTaskDrawer: null };
+    return {
+      setIntakes(list){ S.intakes = list; },
+      setSelection(sel){ S.workSelection = sel; workBoardFocusRequest = null; },
+      apply(nav){ S.outcomeCreatedNavigate = nav; return workApplyCreatedNavigation(view); },
+      selection(){ return S.workSelection; },
+      drawer(){ return S.outcomeCreatedTaskDrawer; },
+      intent(){ return S.outcomeCreatedNavigate; },
+      focus(){ return workBoardFocusRequest; },
+      viewedGoal(){ return S.workViewedGoalId; },
+    };
+  `)(view, WORK_COLUMN_CODES) as {
+    setIntakes: (list: Record<string, unknown>[]) => void;
+    setSelection: (sel: { kind: string; id: string } | null) => void;
+    apply: (nav: Record<string, unknown>) => boolean;
+    selection: () => { kind: string; id: string } | null;
+    drawer: () => { taskId: string; crumb: unknown } | null;
+    intent: () => Record<string, unknown> | null;
+    focus: () => { key: string } | null;
+    viewedGoal: () => string | null;
+  };
+  api.setIntakes([{ id: "i1", status: "created" }]);
+
+  // Goal confirmation opens the Goal workspace.
+  assert.equal(api.apply({ intakeId: "i1", shape: "goal", goalId: "goal-1", planId: "", taskId: "" }), true);
+  assert.deepEqual(api.selection(), { kind: "goal", id: "goal-1" });
+  assert.equal(api.viewedGoal(), "goal-1");
+  assert.equal(api.intent(), null, "navigation consumes the intent");
+
+  // Standalone Plan confirmation opens the independent Plan workspace.
+  assert.equal(api.apply({ intakeId: "i1", shape: "plan", goalId: "", planId: "plan-1", taskId: "" }), true);
+  assert.deepEqual(api.selection(), { kind: "plan", id: "plan-1" });
+  assert.equal(api.intent(), null);
+
+  // Parentless Task confirmation selects Independent Tasks and queues the drawer.
+  assert.equal(api.apply({ intakeId: "i1", shape: "task", goalId: "", planId: "", taskId: "task-oneoff" }), true);
+  assert.deepEqual(api.selection(), { kind: "one-off", id: "inbox" });
+  assert.equal(api.drawer()?.taskId, "task-oneoff");
+  assert.equal(api.intent(), null);
+
+  // Idempotent retry: already on the exact workspace consumes the intent without a focus jump.
+  api.setSelection({ kind: "goal", id: "goal-1" });
+  api.setIntakes([{ id: "i1", status: "created" }]);
+  assert.equal(api.apply({ intakeId: "i1", shape: "goal", goalId: "goal-1", planId: "", taskId: "" }), true);
+  assert.equal(api.intent(), null, "idempotent retry consumes the intent");
+  assert.equal(api.focus(), null, "no duplicate focus jump on an already-open workspace");
+});
+
+test("FL-112E9 re-entry rebuilds intent after consumption and reopens exact Task/Plan/Goal", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const WORK_COLUMN_CODES = [
+    "not-started", "ready", "running", "waiting-verification",
+    "waiting-user-decision", "completed", "stopped-failed",
+  ];
+  const helpers = [
+    "outcomeCreatedNavigateFromConfirmation",
+    "outcomeEnsureCreatedNavigation",
+    "outcomeCreatedIdentityResolvable",
+    "workApplyCreatedNavigation",
+    "workMakeSelection",
+    "workSelectionKey",
+    "workSelectionEqual",
+    "workReadingGoalExists",
+    "workReadingTaskExists",
+    "workFindTaskCard",
+    "workCollectCards",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const view = {
+    schemaVersion: 1,
+    columns: WORK_COLUMN_CODES.map((code, order) => ({ code, order })),
+    goals: [{
+      goalId: "goal-1",
+      status: "running",
+      plans: [{ planId: "plan-goal", columns: {} }],
+    }],
+    independentPlans: [{
+      planId: "plan-1",
+      columns: { ready: [{ taskId: "task-plan", breadcrumb: { planId: "plan-1" } }] },
+    }],
+    oneOffTasks: {
+      columns: { ready: [{ taskId: "task-oneoff", breadcrumb: {} }] },
+    },
+  };
+  const api = new Function("view", "WORK_COLUMN_CODES", `
+    var WORKSPACE_SELECTION_KINDS = ["goal", "plan", "one-off"];
+    ${helpers}
+    var workBoardFocusRequest = null;
+    var S = { intakes: [], workSelection: null, workViewedGoalId: null, workViewedPlanId: null, outcomeCreatedNavigate: null, outcomeCreatedTaskDrawer: null };
+    return {
+      setIntakes(list){ S.intakes = list; },
+      setSelection(sel){ S.workSelection = sel; workBoardFocusRequest = null; },
+      clearIntent(){ S.outcomeCreatedNavigate = null; S.outcomeCreatedTaskDrawer = null; },
+      ensure(intake){ return outcomeEnsureCreatedNavigation(intake); },
+      apply(){ return workApplyCreatedNavigation(view); },
+      visible(intake){ return outcomeCreatedIdentityResolvable(view, intake); },
+      selection(){ return S.workSelection; },
+      drawer(){ return S.outcomeCreatedTaskDrawer; },
+      intent(){ return S.outcomeCreatedNavigate; },
+      fromConfirmation: outcomeCreatedNavigateFromConfirmation,
+    };
+  `)(view, WORK_COLUMN_CODES) as {
+    setIntakes: (list: Record<string, unknown>[]) => void;
+    setSelection: (sel: { kind: string; id: string } | null) => void;
+    clearIntent: () => void;
+    ensure: (intake: Record<string, unknown>) => Record<string, unknown> | null;
+    apply: () => boolean;
+    visible: (intake: Record<string, unknown>) => boolean;
+    selection: () => { kind: string; id: string } | null;
+    drawer: () => { taskId: string; crumb: unknown } | null;
+    intent: () => Record<string, unknown> | null;
+    fromConfirmation: (
+      intake: Record<string, unknown>,
+      receipt: Record<string, unknown> | null,
+    ) => Record<string, unknown> | null;
+  };
+
+  const goalIntake = {
+    id: "i-goal",
+    status: "created",
+    confirmation: { shape: "goal", goalId: "goal-1", planId: "plan-goal", taskIds: ["t-goal"] },
+  };
+  const planIntake = {
+    id: "i-plan",
+    status: "created",
+    confirmation: { shape: "plan", planId: "plan-1", taskIds: ["task-plan"] },
+  };
+  const taskIntake = {
+    id: "i-task",
+    status: "created",
+    confirmation: { shape: "task", taskIds: ["task-oneoff"] },
+  };
+
+  // After a prior Goal open consumed the intent, re-entry rebuilds and reopens.
+  api.setIntakes([goalIntake]);
+  api.clearIntent();
+  assert.equal(api.intent(), null, "prior navigation already consumed the intent");
+  assert.equal(api.visible(goalIntake), true, "exact Goal identity is resolvable");
+  assert.deepEqual(api.ensure(goalIntake), {
+    intakeId: "i-goal", shape: "goal", goalId: "goal-1", planId: "", taskId: "",
+  });
+  assert.equal(api.apply(), true);
+  assert.deepEqual(api.selection(), { kind: "goal", id: "goal-1" });
+  assert.equal(api.intent(), null, "successful re-entry consumes the rebuilt intent");
+
+  // Independent Plan re-entry after intent consumption.
+  api.setIntakes([planIntake]);
+  api.clearIntent();
+  api.setSelection(null);
+  assert.deepEqual(api.ensure(planIntake), {
+    intakeId: "i-plan", shape: "plan", goalId: "", planId: "plan-1", taskId: "",
+  });
+  assert.equal(api.apply(), true);
+  assert.deepEqual(api.selection(), { kind: "plan", id: "plan-1" });
+
+  // Parentless Task re-entry selects Independent Tasks and queues the drawer.
+  api.setIntakes([taskIntake]);
+  api.clearIntent();
+  api.setSelection(null);
+  assert.deepEqual(api.ensure(taskIntake), {
+    intakeId: "i-task", shape: "task", goalId: "", planId: "", taskId: "task-oneoff",
+  });
+  assert.equal(api.apply(), true);
+  assert.deepEqual(api.selection(), { kind: "one-off", id: "inbox" });
+  assert.equal(api.drawer()?.taskId, "task-oneoff");
+
+  // Non-created evidence must never rebuild navigation.
+  api.clearIntent();
+  assert.equal(api.ensure({ id: "i-proposed", status: "proposed", confirmation: goalIntake.confirmation }), null);
+  assert.equal(api.intent(), null, "proposed intakes cannot reconstruct created navigation");
+
+  // Malformed clicked intake clears a prior different-intake intent and cannot
+  // navigate using that foreign workspace receipt.
+  api.setIntakes([goalIntake, { id: "i-bad", status: "created", confirmation: { shape: "goal", goalId: "" } }]);
+  api.setSelection(null);
+  assert.deepEqual(api.ensure(goalIntake), {
+    intakeId: "i-goal", shape: "goal", goalId: "goal-1", planId: "", taskId: "",
+  });
+  assert.equal(api.intent()?.intakeId, "i-goal", "prior valid Goal intent is pending");
+  const malformed = { id: "i-bad", status: "created", confirmation: { shape: "goal", goalId: "" } };
+  assert.equal(api.ensure(malformed), null, "malformed confirmation produces no intent");
+  assert.equal(api.intent(), null, "prior foreign intent is cleared, not retained");
+  assert.equal(api.apply(), false, "no navigation executes from a cleared foreign intent");
+  assert.equal(api.selection(), null, "malformed click never opens the prior Goal workspace");
+
+  // Confirmation derivation stays shape-exact for Goal/Plan/Task.
+  assert.deepEqual(api.fromConfirmation(goalIntake, null), {
+    intakeId: "i-goal", shape: "goal", goalId: "goal-1", planId: "", taskId: "",
+  });
+  assert.deepEqual(api.fromConfirmation(planIntake, null), {
+    intakeId: "i-plan", shape: "plan", goalId: "", planId: "plan-1", taskId: "",
+  });
+  assert.deepEqual(api.fromConfirmation(taskIntake, null), {
+    intakeId: "i-task", shape: "task", goalId: "", planId: "", taskId: "task-oneoff",
+  });
+});
+
+test("FL-112E9 stale projection stays truthful: the created receipt remains and no workspace is invented", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const WORK_COLUMN_CODES = [
+    "not-started", "ready", "running", "waiting-verification",
+    "waiting-user-decision", "completed", "stopped-failed",
+  ];
+  const helpers = [
+    "outcomeCreatedNavigateFromConfirmation",
+    "outcomeEnsureCreatedNavigation",
+    "outcomeCreatedIdentityResolvable",
+    "workApplyCreatedNavigation",
+    "workMakeSelection",
+    "workSelectionKey",
+    "workSelectionEqual",
+    "workReadingGoalExists",
+    "workReadingTaskExists",
+    "workFindTaskCard",
+    "workCollectCards",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const view = {
+    schemaVersion: 1,
+    columns: WORK_COLUMN_CODES.map((code, order) => ({ code, order })),
+    goals: [],
+    independentPlans: [],
+    oneOffTasks: null,
+  };
+  const api = new Function("view", "WORK_COLUMN_CODES", `
+    var WORKSPACE_SELECTION_KINDS = ["goal", "plan", "one-off"];
+    ${helpers}
+    var workBoardFocusRequest = null;
+    var S = { intakes: [], workSelection: null, workViewedGoalId: null, workViewedPlanId: null, outcomeCreatedNavigate: null, outcomeCreatedTaskDrawer: null };
+    return {
+      setIntakes(list){ S.intakes = list; },
+      apply(nav){ S.outcomeCreatedNavigate = nav; return workApplyCreatedNavigation(view); },
+      ensure(intake){ return outcomeEnsureCreatedNavigation(intake); },
+      visible(intake){ return outcomeCreatedIdentityResolvable(view, intake); },
+      selection(){ return S.workSelection; },
+      intent(){ return S.outcomeCreatedNavigate; },
+    };
+  `)(view, WORK_COLUMN_CODES) as {
+    setIntakes: (list: Record<string, unknown>[]) => void;
+    apply: (nav: Record<string, unknown>) => boolean;
+    ensure: (intake: Record<string, unknown>) => Record<string, unknown> | null;
+    visible: (intake: Record<string, unknown>) => boolean;
+    selection: () => { kind: string; id: string } | null;
+    intent: () => Record<string, unknown> | null;
+  };
+
+  const createdIntake = {
+    id: "i1",
+    status: "created",
+    confirmation: { shape: "goal", goalId: "ghost-goal", planId: "", taskIds: [] },
+  };
+
+  // Created truth present, identity not in the refreshed hierarchy yet: the
+  // intent stays pending so a later refresh can navigate; nothing is invented.
+  api.setIntakes([createdIntake]);
+  assert.equal(api.visible(createdIntake), false, "missing projection is not treated as open");
+  assert.equal(api.apply({ intakeId: "i1", shape: "goal", goalId: "ghost-goal", planId: "", taskId: "" }), false);
+  assert.equal(api.selection(), null, "no guessed workspace is selected");
+  assert.deepEqual(api.intent(), { intakeId: "i1", shape: "goal", goalId: "ghost-goal", planId: "", taskId: "" },
+    "the truthful created receipt stays retryable");
+
+  // Re-entry while still missing keeps the same bounded intent without inventing a workspace.
+  assert.deepEqual(api.ensure(createdIntake), {
+    intakeId: "i1", shape: "goal", goalId: "ghost-goal", planId: "", taskId: "",
+  }, "matching pending intent is reused, not duplicated");
+  assert.equal(api.apply({ intakeId: "i1", shape: "goal", goalId: "ghost-goal", planId: "", taskId: "" }), false);
+  assert.equal(api.selection(), null, "still no guessed workspace after re-entry while missing");
+
+  // Stale intake (no longer in the bounded canonical list): the intent is
+  // discarded instead of navigating from a stale receipt.
+  api.setIntakes([]);
+  assert.equal(api.apply({ intakeId: "i1", shape: "goal", goalId: "ghost-goal", planId: "", taskId: "" }), false);
+  assert.equal(api.intent(), null, "stale identity fails safely");
+});
+
+test("FL-112E9 confirmation receipt drives the exact created-navigation intent", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const fn = extractFunctionSource(src, "outcomeCreatedNavigateFromConfirmation");
+  const api = new Function(`${fn}; return outcomeCreatedNavigateFromConfirmation;`)() as (
+    intake: Record<string, unknown>,
+    receipt: Record<string, unknown> | null,
+  ) => { intakeId: string; shape: string; goalId: string; planId: string; taskId: string } | null;
+
+  assert.deepEqual(
+    api({ id: "i1", confirmation: { shape: "goal", goalId: "g1", planId: "p1", taskIds: ["t1"] } }, null),
+    { intakeId: "i1", shape: "goal", goalId: "g1", planId: "", taskId: "" },
+  );
+  assert.deepEqual(
+    api({ id: "i1", confirmation: { shape: "plan", planId: "p1", taskIds: ["t1", "t2"] } }, null),
+    { intakeId: "i1", shape: "plan", goalId: "", planId: "p1", taskId: "" },
+  );
+  assert.deepEqual(
+    api({ id: "i1", confirmation: { shape: "task", taskIds: ["t1"] } }, null),
+    { intakeId: "i1", shape: "task", goalId: "", planId: "", taskId: "t1" },
+  );
+  assert.equal(api({ id: "i1", confirmation: { shape: "task", taskIds: [] } }, null), null);
+  assert.equal(api({ id: "i1", confirmation: { shape: "goal", goalId: "" } }, null), null);
+});
+
+test("FL-112E9 reload context restores the draft, selected intake, confirm step, and created navigation", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const helpers = [
+    "workReadingSafeString",
+    "workReadingSafeNumber",
+    "workReadingOptionalNumber",
+    "workReadingSafeFilterPart",
+    "workReadingNormalizeFilter",
+    "workReadingNormalizeRecord",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const constants = `
+    var WORK_READING_CONTEXT_VERSION = 1;
+    var WORK_READING_CONTEXT_MAX_CHARS = 12000;
+    var WORK_READING_CONTEXT_MAX_ID_CHARS = 180;
+    var WORK_READING_CONTEXT_MAX_COLLAPSE = 48;
+    var WORK_READING_CONTEXT_DISCLOSURES = ["finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen", "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen", "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"];
+    var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
+    var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
+  `;
+  const api = new Function("sessionStorage", `${constants}\n${helpers}\nreturn {
+    normalize: workReadingNormalizeRecord,
+  };`)({
+    getItem() { return null; },
+    setItem() {},
+    removeItem() {},
+  }) as {
+    normalize: (value: Record<string, unknown>) => Record<string, any> | null;
+  };
+
+  const normalized = api.normalize({
+    version: 1,
+    outcome: { outcome: "Ship a bounded fix", project: "/tmp/project", context: "Known behavior", requestedShape: "plan" },
+    selectedIntakeId: "intake-1",
+    confirmingIntakeId: "intake-1",
+    createdNavigate: { intakeId: "intake-1", shape: "goal", goalId: "g1", planId: "", taskId: "" },
+  });
+  assert.ok(normalized);
+  assert.deepEqual(normalized?.outcome, {
+    outcome: "Ship a bounded fix", project: "/tmp/project", context: "Known behavior", requestedShape: "plan",
+  });
+  assert.equal(normalized?.selectedIntakeId, "intake-1");
+  assert.equal(normalized?.confirmingIntakeId, "intake-1");
+  assert.deepEqual(normalized?.createdNavigate, { intakeId: "intake-1", shape: "goal", goalId: "g1", planId: "", taskId: "" });
+
+  // Bounded and field-safe: unknown shape enums and oversize ids fail closed.
+  const bad = api.normalize({
+    version: 1,
+    outcome: { outcome: "x".repeat(3000), requestedShape: "epic" },
+    selectedIntakeId: "y".repeat(200),
+    createdNavigate: { intakeId: "x", shape: "epic" },
+  });
+  assert.equal(bad?.outcome, null, "oversize outcome and unknown shape fail closed");
+  assert.equal(bad?.selectedIntakeId, "", "oversize intake id fails closed");
+  assert.equal(bad?.createdNavigate, null, "unknown created shape fails closed");
+});
+
+// --- FL-112E10: compose narrow reveal bridge + natural first-use copy ---
+
+test("FL-112E10 narrow New work bridge reveals the existing composer without mutation", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const header = extractFunctionSource(src, "renderWorkContextHeader");
+  assert.ok(header.includes('data-fl-role", "work-context-new-entry"'),
+    "first Work context exposes one New work bridge control");
+  assert.ok(header.includes('t("workNewEntryLabel")'),
+    "bridge reuses the existing New work label");
+  assert.ok(header.includes("workRevealNewEntry()"),
+    "bridge activates the reveal helper on deliberate click");
+  assert.ok(!header.includes("postJSON") && !header.includes("refresh(") && !header.includes("renderOutcomeComposer"),
+    "bridge never submits, refreshes, or mounts a second composer");
+
+  const reveal = extractFunctionSource(src, "workRevealNewEntry");
+  assert.ok(reveal.includes('[data-fl-role="outcome-section"]'),
+    "reveal targets the existing outcome section role");
+  assert.ok(reveal.includes('[data-fl-role="outcome-text"]'),
+    "reveal targets the existing outcome textbox role");
+  assert.ok(reveal.includes("scrollIntoView") && reveal.includes(".focus"),
+    "reveal scrolls and focuses only after activation");
+  assert.ok(reveal.includes("if(!section && !text) return"),
+    "missing targets are a safe no-op");
+  assert.doesNotMatch(reveal, /postJSON|refresh\s*\(|outcomeSubmit|render\s*\(/,
+    "reveal never mutates intake, submits, or re-renders");
+
+  // Behavioral: present targets scroll and focus; missing targets throw nothing.
+  const revealFn = new Function(`
+    ${reveal}
+    return workRevealNewEntry;
+  `)() as () => void;
+  let scrolled = 0;
+  let focused = 0;
+  const section = {
+    scrollIntoView() { scrolled += 1; },
+  };
+  const text = {
+    focus() { focused += 1; },
+  };
+  type TestDocumentHost = {
+    document?: { querySelector: (sel: string) => unknown };
+  };
+  const host = globalThis as unknown as TestDocumentHost;
+  const previousDocument = host.document;
+  host.document = {
+    querySelector(sel: string) {
+      if (sel.includes("outcome-section")) return section;
+      if (sel.includes("outcome-text")) return text;
+      return null;
+    },
+  };
+  try {
+    assert.doesNotThrow(() => revealFn(), "present targets do not throw");
+    assert.equal(scrolled, 1, "section scrolls once");
+    assert.equal(focused, 1, "textbox focuses once");
+    host.document = {
+      querySelector() { return null; },
+    };
+    assert.doesNotThrow(() => revealFn(), "missing targets are a silent no-op");
+    assert.equal(scrolled, 1, "missing targets do not scroll");
+    assert.equal(focused, 1, "missing targets do not focus");
+  } finally {
+    if (previousDocument === undefined) {
+      delete host.document;
+    } else {
+      host.document = previousDocument;
+    }
+  }
+
+  // One canonical composer remains in the portfolio rail.
+  const entry = extractFunctionSource(src, "renderWorkNewEntry");
+  assert.ok(entry.includes("renderOutcomeSection()"),
+    "the rail still mounts the one canonical composer");
+  const workbench = extractFunctionSource(src, "renderWorkWorkbench");
+  assert.ok(workbench.includes("renderWorkContextHeader") && workbench.includes("renderWorkPortfolio"),
+    "workbench still composes context header plus portfolio composer");
+});
+
+test("FL-112E10 Work orientation and Main handoff copy stay workspace-neutral and natural", async () => {
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  // Page subtitle is true for Goal, independent Plan, and one-off Task.
+  assert.match(enSection, /work:\s*\{\s*title:\s*"Work",\s*sub:\s*"[^"]*Goal[^"]*Plan[^"]*Task[^"]*"\s*\}/,
+    "English Work subtitle names Goal, Plan, and Task workspaces");
+  assert.match(zhSection, /work:\s*\{\s*title:\s*"工作",\s*sub:\s*"[^"]*Goal[^"]*Plan[^"]*Task[^"]*"\s*\}/,
+    "Chinese Work subtitle names Goal, Plan, and Task workspaces");
+  assert.ok(enSection.includes("independent Plan") || enSection.includes("one-off Task"),
+    "English subtitle is not Goal-phase-only");
+  assert.ok(zhSection.includes("独立 Plan") || zhSection.includes("一次性 Task"),
+    "Chinese subtitle is not Goal-phase-only");
+  assert.ok(html.includes("Goal") && html.includes("Plan") && html.includes("Task"),
+    "initial static shell subtitle stays workspace-neutral");
+  assert.ok(!html.includes("统一的目标 → 计划 → 任务看板"),
+    "initial shell drops the Goal-only hierarchy subtitle");
+
+  // Pending Main handoff: return to coordinating Main; confirm before start.
+  assert.ok(enSection.includes("Return to the Main client already coordinating this project"),
+    "English pending next step points back to the coordinating Main");
+  assert.ok(zhSection.includes("已经在协调本项目的 Main"),
+    "Chinese pending next step points back to the coordinating Main");
+  assert.ok(enSection.includes("work begins only after you confirm Main's proposal")
+    || enSection.includes("Work begins only after you confirm"),
+    "English pending copy states confirmation before start");
+  assert.ok(zhSection.includes("确认") && zhSection.includes("工作才会开始"),
+    "Chinese pending copy states confirmation before start");
+  assert.ok(!enSection.includes("forklight_outcome_intake_propose")
+    && !zhSection.includes("forklight_outcome_intake_propose"),
+    "user-facing pending prose stays free of protocol command names");
+
+  // Created-but-not-visible: direct existence truth, no invented-object defense.
+  assert.ok(enSection.includes("only after it really exists on the board"),
+    "English created-not-visible copy waits for real board presence");
+  assert.ok(zhSection.includes("真正出现在看板上"),
+    "Chinese created-not-visible copy waits for real board presence");
+  assert.ok(!enSection.includes("nothing is invented while it is missing"),
+    "English drops invented-object defense language");
+  assert.ok(!zhSection.includes("不会编造任何对象"),
+    "Chinese drops invented-object defense language");
+
+  // Preserve reviewed ready copy and confirmation boundary meaning.
+  assert.ok(enSection.includes("You can open its workspace from here."),
+    "ready created copy remains available");
+  assert.ok(zhSection.includes("你可以从这里打开对应工作区"),
+    "ready created Chinese copy remains available");
+  assert.ok(enSection.toLowerCase().includes("nothing has started")
+    || enSection.includes("Nothing starts until you confirm"),
+    "confirmation-before-start meaning remains in English");
+  assert.ok(zhSection.includes("尚未开始") || zhSection.includes("确认方案前不会启动"),
+    "confirmation-before-start meaning remains in Chinese");
+});
+
+// --- FL-112A: Work refresh continuity (identical polls + changed evidence) ---
+
+test("FL-112A Work continuity helpers ship with keep-or-refresh wiring", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  for (const name of [
+    "workVisibleTruthSnapshot",
+    "workStableTruthClone",
+    "workIsVolatileTruthKey",
+    "workDomIsLive",
+    "workShouldRetainDom",
+    "workSemanticFocusKey",
+    "workFindFocusTarget",
+    "workContentScrollEl",
+    "workMaterializeOpenFinishedBody",
+    "workCaptureWorkbenchContext",
+    "workRestoreWorkbenchContext",
+    "workRememberRenderSnapshot",
+  ]) {
+    assert.ok(src.includes(`function ${name}(`), `${name} must exist`);
+  }
+  assert.ok(src.includes("workRenderSnapshot"), "S tracks the last Work render snapshot");
+  assert.ok(src.includes("FL-112A Work refresh continuity"), "bounded boundary comment ships");
+  // Dual-clock invariant: raw field names must not appear as object-literal labels.
+  assert.ok(!src.includes("latestRuntimeSignalAt:"), "raw dual-clock field is not a UI object label");
+  assert.ok(!src.includes("latestEffectiveProgressAt:"), "raw progress field is not a UI object label");
+  const render = extractFunctionSource(src, "render");
+  assert.ok(render.includes("workShouldRetainDom"), "render consults the keep-or-refresh decision");
+  assert.ok(render.includes('tab === "work"'), "retain path is Work-only");
+  assert.ok(render.includes("updStatus()"), "chrome still updates before the retain check");
+  // Retain returns before rWork so identical polls never rebuild Work.
+  const retainAt = render.indexOf("workShouldRetainDom");
+  const rWorkAt = render.indexOf('case "work": rWork()');
+  assert.ok(retainAt > 0 && rWorkAt > retainAt, "retain decision runs before rWork dispatch");
+  const rWork = extractFunctionSource(src, "rWork");
+  assert.ok(rWork.includes("workCaptureWorkbenchContext()"), "rWork captures context before rebuild");
+  assert.ok(rWork.includes("workRestoreWorkbenchContext(continuity)"), "rWork restores after rebuild");
+  assert.ok(rWork.includes("workRememberRenderSnapshot()"), "rWork records the rendered snapshot");
+  assert.ok(rWork.includes("workActionRebindChooser()"), "chooser rebind still follows restore");
+  // Volatile clocks use suffix rules + a private extra-name array (no colon labels).
+  const volatile = extractFunctionSource(src, "workIsVolatileTruthKey");
+  assert.ok(volatile.includes("AtMs"), "millisecond timestamps are volatile");
+  assert.ok(volatile.includes("/At$/"), "ISO *At timestamps are volatile");
+  assert.ok(volatile.includes("indexOf"), "extra non-suffix keys use array indexOf");
+  assert.ok(src.includes("var WORK_TRUTH_VOLATILE_EXTRA"), "private extra-key array ships");
+  const capture = extractFunctionSource(src, "workCaptureWorkbenchContext");
+  const restore = extractFunctionSource(src, "workRestoreWorkbenchContext");
+  assert.ok(capture.includes("workContentScrollEl"), "capture reads the real .content scroll host");
+  assert.ok(capture.includes("contentScrollTop"), "capture stores content scrollTop");
+  assert.ok(!capture.includes("window.scrollY") && !capture.includes("pageYOffset"),
+    "capture does not use window page scroll");
+  assert.ok(restore.includes("workMaterializeOpenFinishedBody"),
+    "restore materializes Finished body before nested focus");
+  assert.ok(restore.includes("content.scrollTop"), "restore writes content scrollTop");
+  // Production order: Finished open → materialize → focus.
+  const finishedOpenAt = restore.indexOf("finished.open = true");
+  const materializeAt = restore.indexOf("workMaterializeOpenFinishedBody");
+  const focusAt = restore.indexOf("workFindFocusTarget");
+  assert.ok(finishedOpenAt >= 0 && materializeAt > finishedOpenAt && focusAt > materializeAt,
+    "Finished body materializes before focus restore");
+  const finished = extractFunctionSource(src, "renderWorkFinishedGoals");
+  assert.ok(finished.includes("_workEnsureFinishedBody = ensureFinishedBody"),
+    "Finished disclosure exposes the same ensure the toggle path uses");
+  const snap = extractFunctionSource(src, "workVisibleTruthSnapshot");
+  assert.ok(snap.includes("getLang"), "language is part of visible truth so locale changes re-render");
+  assert.ok(snap.includes("S.workHierarchy"), "hierarchy evidence is snapshotted");
+  assert.ok(snap.includes("S.workSelection"), "focused workspace is part of visible truth");
+  assert.ok(snap.includes("S.intakes"), "intake evidence is snapshotted");
+  assert.ok(snap.includes("S.workFilter"), "applied filter is snapshotted");
+  assert.ok(!snap.includes("S.lastOk") && !snap.includes("Date.now"),
+    "snapshot ignores connection clock chrome");
+});
+
+test("FL-112A three identical Work polls keep the same truth snapshot and skip DOM replace", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const extraStart = src.indexOf("var WORK_TRUTH_VOLATILE_EXTRA = [");
+  assert.ok(extraStart >= 0, "private volatile extra-key array ships");
+  const extraEnd = src.indexOf("];", extraStart) + 2;
+  const extraConst = src.slice(extraStart, extraEnd);
+  const helpers = [
+    extraConst,
+    extractFunctionSource(src, "workIsVolatileTruthKey"),
+    extractFunctionSource(src, "workStableTruthClone"),
+    extractFunctionSource(src, "workSelectionKey"),
+    extractFunctionSource(src, "workVisibleTruthSnapshot"),
+    extractFunctionSource(src, "workDomIsLive"),
+    extractFunctionSource(src, "workShouldRetainDom"),
+  ].join("\n");
+
+  // Minimal live Work mount marker so retain can succeed.
+  const viewEl = {
+    querySelector(sel: string) {
+      if (sel.includes("work-board") || sel.includes("outcome-section") || sel.includes("work-filters")) {
+        return { open: true };
+      }
+      return null;
+    },
+  };
+  const windowObj = {
+    ForklightI18n: { getLang() { return "zh"; } },
+  };
+  const hierarchy = {
+    schemaVersion: 1,
+    columns: [
+      { code: "not-started", order: 0 },
+      { code: "ready", order: 1 },
+      { code: "running", order: 2 },
+      { code: "waiting-verification", order: 3 },
+      { code: "waiting-user-decision", order: 4 },
+      { code: "completed", order: 5 },
+      { code: "stopped-failed", order: 6 },
+    ],
+    goals: [{
+      goalId: "g-finished",
+      name: "Finished goal",
+      status: "completed",
+      updatedAt: "2026-08-08T10:00:00.000Z",
+      plans: [{
+        planId: "p1",
+        name: "Phase",
+        columns: {
+          completed: [{
+            taskId: "t1",
+            name: "Done task",
+            nextAction: "No further action",
+            nextActionMessage: { code: "card-next-no-further-action" },
+            lastEventAt: "2026-08-08T10:00:01.000Z",
+            // Dual-clock fields: must strip via *At suffix without colon labels in source.
+            latestRuntimeSignalAt: "2026-08-08T10:00:03.000Z",
+            latestEffectiveProgressAt: "2026-08-08T10:00:04.000Z",
+          }],
+        },
+      }],
+    }],
+    independentPlans: [],
+    oneOffTasks: null,
+    filter: { applied: {} },
+  };
+  const intakes = [
+    { id: "in1", status: "pending", revision: 1, updatedAt: "2026-08-08T10:00:02.000Z" },
+  ];
+
+  const factory = new Function(
+    "window",
+    "viewEl",
+    `${helpers}
+     var S = {
+       tab: "work",
+       workFilter: {},
+       workSelection: null,
+       workHierarchy: null,
+       workHierarchyError: null,
+       intakes: null,
+       intakesError: null,
+       workRenderSnapshot: null
+     };
+     return {
+       S: S,
+       snapshot: workVisibleTruthSnapshot,
+       retain: workShouldRetainDom,
+       setHierarchy: function(h){ S.workHierarchy = h; },
+       setIntakes: function(list){ S.intakes = list; },
+       remember: function(s){ S.workRenderSnapshot = s; }
+     };`,
+  );
+  const api = factory(windowObj, viewEl) as {
+    S: { workRenderSnapshot: string | null; workHierarchy: unknown };
+    snapshot: () => string;
+    retain: () => boolean;
+    setHierarchy: (h: unknown) => void;
+    setIntakes: (list: unknown) => void;
+    remember: (s: string) => void;
+  };
+
+  // Poll 1: establish rendered snapshot (with clock fields present).
+  api.setHierarchy(JSON.parse(JSON.stringify(hierarchy)));
+  api.setIntakes(JSON.parse(JSON.stringify(intakes)));
+  const snap1 = api.snapshot();
+  api.remember(snap1);
+  assert.ok(snap1.includes("g-finished"), "snapshot captures Goal identity");
+  assert.ok(!snap1.includes("2026-08-08T10:00:00.000Z"), "volatile updatedAt is stripped");
+  assert.ok(!snap1.includes("2026-08-08T10:00:01.000Z"), "volatile lastEventAt is stripped");
+  assert.ok(!snap1.includes("2026-08-08T10:00:03.000Z"), "volatile runtime-signal clock is stripped");
+  assert.ok(!snap1.includes("2026-08-08T10:00:04.000Z"), "volatile progress clock is stripped");
+
+  // Polls 2 and 3: identical evidence with only timestamp churn.
+  // Live DOM identity is retained (no replacement) across three identical polls.
+  const liveBoard = { id: "live-work-board", open: true };
+  const liveView = {
+    querySelector(sel: string) {
+      if (sel.includes("work-board") || sel.includes("outcome-section") || sel.includes("work-filters")) {
+        return liveBoard;
+      }
+      return null;
+    },
+  };
+  // Rebind retain against the stable live mount for polls 2–3.
+  const retainFactory = new Function(
+    "window",
+    "viewEl",
+    `${helpers}
+     var S = {
+       tab: "work",
+       workFilter: {},
+       workSelection: null,
+       workHierarchy: null,
+       workHierarchyError: null,
+       intakes: null,
+       intakesError: null,
+       workRenderSnapshot: null
+     };
+     return {
+       S: S,
+       snapshot: workVisibleTruthSnapshot,
+       retain: workShouldRetainDom,
+       setHierarchy: function(h){ S.workHierarchy = h; },
+       setIntakes: function(list){ S.intakes = list; },
+       remember: function(s){ S.workRenderSnapshot = s; }
+     };`,
+  );
+  const liveApi = retainFactory(windowObj, liveView) as typeof api;
+  liveApi.setHierarchy(JSON.parse(JSON.stringify(hierarchy)));
+  liveApi.setIntakes(JSON.parse(JSON.stringify(intakes)));
+  const liveSnap = liveApi.snapshot();
+  liveApi.remember(liveSnap);
+
+  for (let poll = 2; poll <= 3; poll += 1) {
+    const next = JSON.parse(JSON.stringify(hierarchy)) as typeof hierarchy;
+    next.goals[0]!.updatedAt = `2026-08-08T10:00:0${poll}.000Z`;
+    next.goals[0]!.plans[0]!.columns.completed[0]!.lastEventAt =
+      `2026-08-08T10:00:1${poll}.000Z`;
+    next.goals[0]!.plans[0]!.columns.completed[0]!.latestRuntimeSignalAt =
+      `2026-08-08T10:00:3${poll}.000Z`;
+    const nextIntakes = JSON.parse(JSON.stringify(intakes)) as typeof intakes;
+    nextIntakes[0]!.updatedAt = `2026-08-08T10:00:2${poll}.000Z`;
+    liveApi.setHierarchy(next);
+    liveApi.setIntakes(nextIntakes);
+    const snapN = liveApi.snapshot();
+    assert.equal(snapN, liveSnap, `poll ${poll} truth matches the first render snapshot`);
+    assert.equal(liveApi.retain(), true, `poll ${poll} retains the live Work DOM`);
+    // The live board node identity is unchanged when retain wins.
+    assert.equal(
+      liveView.querySelector('[data-fl-role="work-board"]'),
+      liveBoard,
+      `poll ${poll} does not replace the Work board node`,
+    );
+  }
+});
+
+test("FL-112A changed Work evidence forces one refresh and restores surviving context", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const extraStart = src.indexOf("var WORK_TRUTH_VOLATILE_EXTRA = [");
+  assert.ok(extraStart >= 0, "private volatile extra-key array ships");
+  const extraEnd = src.indexOf("];", extraStart) + 2;
+  const extraConst = src.slice(extraStart, extraEnd);
+  const helpers = [
+    extraConst,
+    extractFunctionSource(src, "workIsVolatileTruthKey"),
+    extractFunctionSource(src, "workStableTruthClone"),
+    extractFunctionSource(src, "workSelectionKey"),
+    extractFunctionSource(src, "workVisibleTruthSnapshot"),
+    extractFunctionSource(src, "workDomIsLive"),
+    extractFunctionSource(src, "workShouldRetainDom"),
+    extractFunctionSource(src, "workSemanticFocusKey"),
+    extractFunctionSource(src, "workFindFocusTarget"),
+    extractFunctionSource(src, "workContentScrollEl"),
+    extractFunctionSource(src, "workMaterializeOpenFinishedBody"),
+    extractFunctionSource(src, "workCaptureWorkbenchContext"),
+    extractFunctionSource(src, "workRestoreWorkbenchContext"),
+  ].join("\n");
+
+  type NodeLike = {
+    open?: boolean;
+    scrollLeft?: number;
+    scrollTop?: number;
+    focusCalls: number;
+    ensureCalls: number;
+    _workEnsureFinishedBody?: () => void;
+    getAttribute(name: string): string | null;
+    setAttribute?(name: string, value: string): void;
+    querySelector(sel: string): NodeLike | null;
+    querySelectorAll(sel: string): NodeLike[];
+    closest(sel: string): NodeLike | null;
+    contains(other: NodeLike): boolean;
+    focus(opts?: { preventScroll?: boolean }): void;
+    parentElement: NodeLike | null;
+  };
+
+  const attrs = (map: Record<string, string>): NodeLike => {
+    const node: NodeLike = {
+      focusCalls: 0,
+      ensureCalls: 0,
+      parentElement: null,
+      getAttribute(name: string) { return map[name] ?? null; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      closest() { return null; },
+      contains() { return false; },
+      focus() { this.focusCalls += 1; },
+    };
+    return node;
+  };
+
+  // Real page scroll host: main.content (matches index.html).
+  const contentEl: NodeLike = {
+    ...attrs({}),
+    scrollTop: 240,
+    scrollLeft: 16,
+  };
+
+  // Nested Finished card focused inside the lazy body.
+  const nestedCard = attrs({ "data-fl-role": "work-card", "data-task-id": "t-finished-inner" });
+  const goneCard = attrs({ "data-fl-role": "work-card", "data-task-id": "t-gone" });
+  const finishedBody = attrs({ "data-fl-role": "work-finished-body" });
+  const finished = attrs({ "data-fl-role": "work-finished-group" });
+  finished.open = true;
+  // Production ensure hook: same shape renderWorkFinishedGoals installs.
+  let preBodyFilled = true;
+  finished._workEnsureFinishedBody = function ensureFinishedBody() {
+    finished.ensureCalls += 1;
+    preBodyFilled = true;
+  };
+  const finishedToggle = attrs({ "data-fl-role": "work-finished-toggle" });
+  const advanced = attrs({ "data-fl-role": "work-advanced" });
+  advanced.open = true;
+  const story = attrs({ "data-fl-role": "page-story-disclosure" });
+  story.open = false;
+  const oadv = attrs({ "data-fl-role": "outcome-advanced" });
+  oadv.open = true;
+  const board = attrs({ "data-fl-role": "work-board" });
+  board.scrollLeft = 120;
+
+  // Pre-rerender mount (capture source): Finished open with nested Task focused.
+  const preView: NodeLike = {
+    focusCalls: 0,
+    ensureCalls: 0,
+    parentElement: null,
+    getAttribute() { return null; },
+    querySelector(sel: string) {
+      if (sel.includes("work-finished-group")) return finished;
+      if (sel.includes("work-finished-body")) return finishedBody;
+      if (sel.includes("work-advanced") && !sel.includes("submit")) return advanced;
+      if (sel.includes("page-story-disclosure") && !sel.includes("toggle")) return story;
+      if (sel.includes("outcome-advanced")) return oadv;
+      if (sel.includes("work-board")) return board;
+      if (sel.includes("work-finished-toggle")) return finishedToggle;
+      if (sel.includes("work-card")) return nestedCard;
+      return null;
+    },
+    querySelectorAll(sel: string) {
+      if (sel.includes("work-card")) return [nestedCard, goneCard];
+      return [];
+    },
+    closest() { return null; },
+    contains(other: NodeLike) {
+      return other === nestedCard || other === finishedToggle || other === goneCard;
+    },
+    focus() { this.focusCalls += 1; },
+  };
+  nestedCard.parentElement = preView;
+  goneCard.parentElement = preView;
+
+  // Post-rerender mount: Finished starts closed/empty; ensure materializes nested card.
+  const postNestedCard = attrs({ "data-fl-role": "work-card", "data-task-id": "t-finished-inner" });
+  const postFinishedBody = attrs({ "data-fl-role": "work-finished-body" });
+  const postFinished = attrs({ "data-fl-role": "work-finished-group" });
+  postFinished.open = false;
+  let postBodyFilled = false;
+  const materializeOrder: string[] = [];
+  postFinished._workEnsureFinishedBody = function ensureFinishedBody() {
+    postFinished.ensureCalls += 1;
+    materializeOrder.push("ensure");
+    postBodyFilled = true;
+  };
+  const postAdvanced = attrs({ "data-fl-role": "work-advanced" });
+  postAdvanced.open = false;
+  const postStory = attrs({ "data-fl-role": "page-story-disclosure" });
+  postStory.open = false;
+  const postOadv = attrs({ "data-fl-role": "outcome-advanced" });
+  postOadv.open = false;
+  const postBoard = attrs({ "data-fl-role": "work-board" });
+  postBoard.scrollLeft = 0;
+  const postContent: NodeLike = {
+    ...attrs({}),
+    scrollTop: 0,
+    scrollLeft: 0,
+  };
+  const postView: NodeLike = {
+    focusCalls: 0,
+    ensureCalls: 0,
+    parentElement: null,
+    getAttribute() { return null; },
+    querySelector(sel: string) {
+      if (sel.includes("work-finished-group")) return postFinished;
+      if (sel.includes("work-finished-body")) return postBodyFilled ? postFinishedBody : null;
+      if (sel.includes("work-advanced") && !sel.includes("submit")) return postAdvanced;
+      if (sel.includes("page-story-disclosure") && !sel.includes("toggle")) return postStory;
+      if (sel.includes("outcome-advanced")) return postOadv;
+      if (sel.includes("work-board")) return postBoard;
+      if (sel.includes("work-card")) return postBodyFilled ? postNestedCard : null;
+      return null;
+    },
+    querySelectorAll(sel: string) {
+      if (sel.includes("work-card")) return postBodyFilled ? [postNestedCard] : [];
+      return [];
+    },
+    closest() { return null; },
+    contains(other: NodeLike) {
+      return postBodyFilled && other === postNestedCard;
+    },
+    focus() { this.focusCalls += 1; },
+  };
+  postNestedCard.parentElement = postView;
+  // Track focus after materialize in production order.
+  const originalFocus = postNestedCard.focus.bind(postNestedCard);
+  postNestedCard.focus = function(opts?: { preventScroll?: boolean }) {
+    materializeOrder.push("focus");
+    originalFocus(opts);
+  };
+
+  let active: NodeLike = nestedCard;
+  let viewEl: NodeLike = preView;
+  let contentHost: NodeLike = contentEl;
+  const windowObj = {
+    ForklightI18n: { getLang() { return "en"; } },
+  };
+  const documentObj = {
+    get activeElement() { return active; },
+    querySelector(sel: string) {
+      if (sel === "main.content" || sel === ".content") return contentHost;
+      return null;
+    },
+  };
+
+  const factory = new Function(
+    "window",
+    "document",
+    "getView",
+    `${helpers}
+     var viewEl = getView();
+     var S = {
+       tab: "work",
+       workFilter: {},
+       workSelection: null,
+       workHierarchy: { goals: [{ goalId: "g1", status: "completed",
+         plans: [{ planId: "p1", columns: { completed: [{ taskId: "t-finished-inner",
+           nextActionMessage: { code: "card-next-no-further-action" } }] } }] }] },
+       workHierarchyError: null,
+       intakes: [],
+       intakesError: null,
+       workRenderSnapshot: null
+     };
+     function refreshViewEl(){ viewEl = getView(); }
+     return {
+       S: S,
+       snapshot: function(){ refreshViewEl(); return workVisibleTruthSnapshot(); },
+       retain: function(){ refreshViewEl(); return workShouldRetainDom(); },
+       capture: function(){ refreshViewEl(); return workCaptureWorkbenchContext(); },
+       restore: function(ctx){ refreshViewEl(); return workRestoreWorkbenchContext(ctx); },
+       find: function(key){ refreshViewEl(); return workFindFocusTarget(key); },
+       setHierarchy: function(h){ S.workHierarchy = h; },
+       remember: function(s){ S.workRenderSnapshot = s; }
+     };`,
+  );
+  type WorkContinuityCtx = {
+    finishedOpen: boolean;
+    advancedOpen: boolean;
+    pageStoryOpen: boolean;
+    outcomeAdvancedOpen: boolean;
+    focusKey: string | null;
+    contentScrollTop: number;
+    contentScrollLeft: number;
+    boardScrollLeft: number;
+  };
+  const api = factory(
+    windowObj,
+    documentObj,
+    () => viewEl,
+  ) as {
+    S: { workRenderSnapshot: string | null };
+    snapshot: () => string;
+    retain: () => boolean;
+    capture: () => WorkContinuityCtx;
+    restore: (ctx: WorkContinuityCtx) => void;
+    find: (key: string) => NodeLike | null;
+    setHierarchy: (h: unknown) => void;
+    remember: (s: string) => void;
+  };
+
+  // First render snapshot.
+  const before = api.snapshot();
+  api.remember(before);
+  assert.equal(api.retain(), true, "unchanged evidence retains DOM before the change");
+  assert.equal(preBodyFilled, true, "pre-state Finished body is already materialized");
+
+  // User context while the board is live: Finished open, nested Task focused, .content scrolled.
+  active = nestedCard;
+  const ctx = api.capture();
+  assert.equal(ctx.finishedOpen, true, "Finished work open state is captured");
+  assert.equal(ctx.advancedOpen, true, "More options open state is captured");
+  assert.equal(ctx.outcomeAdvancedOpen, true, "outcome More options open state is captured");
+  assert.equal(ctx.focusKey, "task:t-finished-inner", "focus uses the nested Task id");
+  assert.equal(ctx.boardScrollLeft, 120, "horizontal board scroll is captured");
+  assert.equal(ctx.contentScrollTop, 240, "main.content scrollTop is captured");
+  assert.equal(ctx.contentScrollLeft, 16, "main.content scrollLeft is captured");
+
+  // Real evidence change: task next-action code changes.
+  api.setHierarchy({
+    goals: [{
+      goalId: "g1",
+      status: "completed",
+      plans: [{
+        planId: "p1",
+        columns: {
+          completed: [{
+            taskId: "t-finished-inner",
+            nextActionMessage: { code: "card-next-needs-recovery" },
+          }],
+        },
+      }],
+    }],
+  });
+  const after = api.snapshot();
+  assert.notEqual(after, before, "changed next-action evidence produces a new snapshot");
+  assert.equal(api.retain(), false, "changed evidence must not retain the old DOM");
+
+  // Simulate rerender mount and restore with the real .content host.
+  viewEl = postView;
+  contentHost = postContent;
+  assert.doesNotThrow(() => api.restore(ctx), "restore never throws");
+  assert.equal(postFinished.open, true, "Finished work disclosure is restored open");
+  assert.equal(postFinished.ensureCalls, 1, "lazy Finished body uses the production ensure hook");
+  assert.equal(postBodyFilled, true, "Finished body is materialized before nested lookup");
+  assert.equal(postAdvanced.open, true, "More options disclosure is restored open");
+  assert.equal(postOadv.open, true, "outcome advanced disclosure is restored open");
+  assert.equal(postBoard.scrollLeft, 120, "board horizontal scroll is restored");
+  assert.equal(postContent.scrollTop, 240, "main.content scrollTop is restored");
+  assert.equal(postContent.scrollLeft, 16, "main.content scrollLeft is restored");
+  assert.equal(postNestedCard.focusCalls, 1, "surviving nested Task focus is restored by id");
+  assert.deepEqual(materializeOrder, ["ensure", "focus"],
+    "production order materializes Finished body before focus");
+
+  // Removed focus target fails safely after materialization.
+  const goneCtx: WorkContinuityCtx = {
+    finishedOpen: true,
+    advancedOpen: false,
+    pageStoryOpen: false,
+    outcomeAdvancedOpen: false,
+    focusKey: "task:t-gone",
+    contentScrollTop: 0,
+    contentScrollLeft: 0,
+    boardScrollLeft: 0,
+  };
+  assert.equal(api.find("task:t-gone"), null, "removed Task has no focus target");
+  assert.doesNotThrow(() => api.restore(goneCtx), "missing focus target fails safely");
+  assert.equal(postNestedCard.focusCalls, 1, "missing target does not steal focus onto another Task");
 });
 
 // --- FL-108D1: Task Detail tells one clear input-to-delivery story ---
@@ -9688,6 +11139,48 @@ test("FL-108D1 Task Detail story layout stays scannable without a new visual sys
     "fail conclusion uses existing red token");
 });
 
+test("FL-105B Task Detail accents reserve rails for structure and retain semantic states", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+
+  const blockFor = (selector: string): string => {
+    const start = css.indexOf(`${selector} {`);
+    assert.ok(start >= 0, `${selector} rule exists`);
+    const end = css.indexOf("}", start);
+    return css.slice(start, end > start ? end + 1 : css.length);
+  };
+
+  const storyValue = blockFor(".task-story-primary-value");
+  assert.match(storyValue, /border:\s*var\(--border\)/, "ordinary story values use a quiet full border");
+  assert.doesNotMatch(storyValue, /border-left/, "ordinary story values do not grow a colored rail");
+
+  const preflightRails = [".preflight-rejects", ".preflight-classification", ".preflight-guidance"];
+  for (const selector of preflightRails) {
+    const block = blockFor(selector);
+    assert.match(block, /border:\s*1px\s+solid/, `${selector} keeps a bounded semantic border`);
+    assert.doesNotMatch(block, /border-left/, `${selector} does not add a nested side rail`);
+  }
+  assert.match(blockFor(".preflight-rejects"), /var\(--red\)/, "failure keeps the red semantic token");
+  assert.match(blockFor(".preflight-classification"), /var\(--hi2\)/, "classification keeps the selection/action token");
+  assert.match(blockFor(".preflight-guidance"), /var\(--yellow\)/, "warning keeps the yellow semantic token");
+
+  const preflight = extractFunctionSource(src, "renderPreflightResult");
+  assert.ok(preflight.includes("taskPreflightRejectTitle"), "failure has a visible text label");
+  assert.ok(preflight.includes("taskPreflightClassificationTitle"), "classification has a visible text label");
+  assert.ok(preflight.includes("taskPreflightGuidanceTitle"), "warning has a visible text label");
+  const tabs = extractFunctionSource(src, "renderTaskTabShell");
+  assert.ok(tabs.includes('setAttribute("aria-selected"'), "active tab state remains semantic");
+
+  assert.match(css, /\.task-tab\.is-active\s*\{[\s\S]*?background:\s*var\(--hi-soft\)[\s\S]*?border-color:/,
+    "active selection keeps both fill and border meaning");
+  assert.match(css, /\.btn\.primary\s*\{[\s\S]*?background:\s*var\(--hi\)[\s\S]*?color:\s*#fff/,
+    "primary actions retain their existing filled action treatment");
+  assert.match(css, /\.btn\.danger\s*\{[\s\S]*?border-color:[\s\S]*?var\(--coral\)/,
+    "danger actions retain their existing semantic treatment");
+  assert.match(css, /#fl-detail :is\(button, a, summary, input, select, textarea\):focus-visible\s*\{[\s\S]*?outline:\s*2px\s+solid/,
+    "detail focus remains visible without relying on color alone");
+});
+
 // --- FL-108D2: remove three misleading Task Detail cues ---
 
 test("FL-108D2 English and Chinese step titles have one visible number via the marker only", async () => {
@@ -9912,4 +11405,758 @@ test("FL-108D2 failed verification, integrated success, and active work preserve
   // Label helper never hides the raw command by inventing pass/fail from it.
   assert.ok(!/passed\s*===|conclusion\s*===/.test(labelSrc),
     "readable label helper does not inspect check outcome");
+});
+
+test("FL-112F advanced Work evidence uses DOM children, not object strings", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const renderer = extractFunctionSource(src, "renderWorkExpertTaskRecord");
+  const api = new Function(`
+    class FixtureNode {
+      constructor(tag) {
+        this.tag = tag;
+        this.className = "";
+        this.textContent = "";
+        this.children = [];
+        this.childNodes = this.children;
+        this.attributes = {};
+      }
+      appendChild(child) { this.children.push(child); return child; }
+      setAttribute(key, value) { this.attributes[key] = String(value); }
+      addEventListener() {}
+      toString() { return "[object HTML" + this.tag[0].toUpperCase() + this.tag.slice(1) + "Element]"; }
+    }
+    var document = { createElement: function(tag){ return new FixtureNode(tag); } };
+    function h(tag, cls, text){
+      var e = document.createElement(tag);
+      if(cls) e.className = cls;
+      if(text !== undefined) e.textContent = text;
+      return e;
+    }
+    function hd(tag, cls, kids){
+      var e = document.createElement(tag);
+      if(cls) e.className = cls;
+      (kids || []).forEach(function(k){ if(k) e.appendChild(k); });
+      return e;
+    }
+    function t(key){ return key; }
+    function workColumnLabel(code){ return code; }
+    function workExpertWorkerProfile(){ return null; }
+    function workExpertWorkerTuning(){ return "bounded tuning"; }
+    function showTask() {}
+    function switchTab() {}
+    var taskDetailActiveTab = "overview";
+    ${renderer}
+    function visibleText(node){
+      return String(node.textContent || "") + node.children.map(visibleText).join("");
+    }
+    function findRows(node, result){
+      result = result || [];
+      if(String(node.className || "").split(/\\s+/).indexOf("work-expert-row") >= 0) result.push(node);
+      node.children.forEach(function(child){ findRows(child, result); });
+      return result;
+    }
+    return { renderWorkExpertTaskRecord, visibleText, findRows };
+  `)() as {
+    renderWorkExpertTaskRecord: (card: Record<string, unknown>) => {
+      children: Array<{ children: unknown[] }>;
+      textContent: string;
+    };
+    visibleText: (node: unknown) => string;
+    findRows: (node: unknown) => Array<{ children: unknown[] }>;
+  };
+
+  const root = api.renderWorkExpertTaskRecord({
+    taskId: "task-1",
+    name: "Evidence task",
+    column: "running",
+    provider: "provider",
+    model: "model",
+    runtime: "runtime",
+    workerProfileId: "worker-1",
+    actionPolicy: { destinations: { completed: {} } },
+  });
+  const rows = api.findRows(root);
+  assert.equal(rows.length, 6, "all advanced evidence facts render");
+  assert.ok(rows.every((row) => row.children.length === 2),
+    "each evidence row has separate label and value children");
+  assert.doesNotMatch(api.visibleText(root), /\[object HTML(?:[A-Za-z]+)Element\]/,
+    "visible advanced evidence contains no serialized DOM child");
+});
+
+test("FL-112F reload context is versioned, bounded, field-safe, and storage-failure tolerant", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const helpers = [
+    "workReadingSafeString",
+    "workReadingSafeNumber",
+    "workReadingOptionalNumber",
+    "workReadingSafeFilterPart",
+    "workReadingNormalizeFilter",
+    "workReadingNormalizeRecord",
+    "workReadSessionContext",
+    "workWriteSessionContext",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const constants = `
+    var WORK_READING_CONTEXT_KEY = "fl-work-reading-context";
+    var WORK_READING_CONTEXT_VERSION = 1;
+    var WORK_READING_CONTEXT_MAX_CHARS = 12000;
+    var WORK_READING_CONTEXT_MAX_ID_CHARS = 180;
+    var WORK_READING_CONTEXT_MAX_COLLAPSE = 48;
+    var WORK_READING_CONTEXT_DISCLOSURES = ["finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen", "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen", "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"];
+    var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
+    var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
+  `;
+  let raw = "";
+  let removed = 0;
+  let writtenKey = "";
+  let writtenValue = "";
+  let hasWritten = false;
+  const storage = {
+    getItem() { return raw || null; },
+    removeItem() { removed += 1; },
+    setItem(key: string, value: string) {
+      writtenKey = key;
+      writtenValue = value;
+      hasWritten = true;
+    },
+  };
+  const api = new Function("sessionStorage", `${constants}\n${helpers}\nreturn {
+    normalize: workReadingNormalizeRecord,
+    read: workReadSessionContext,
+    write: workWriteSessionContext,
+  };`)(storage) as {
+    normalize: (value: Record<string, unknown>) => Record<string, any> | null;
+    read: () => Record<string, any> | null;
+    write: (value: Record<string, unknown>) => void;
+  };
+  const collapse: Record<string, boolean> = {};
+  for (let index = 0; index < 60; index += 1) collapse[`safe-${index}`] = true;
+  const normalized = api.normalize({
+    version: 1,
+    workspace: { kind: "goal", id: "x".repeat(181) },
+    phase: { goalId: "goal-1", planId: "plan-1" },
+    disclosures: { advancedOpen: true, privateDisclosure: true },
+    collapse,
+    detail: { open: true, taskId: "task-1", tab: "private-output" },
+    scroll: { contentTop: 120, detailTop: 72, board: { key: "goal:goal-1|phase:plan-1", left: 64 } },
+    filters: {
+      applied: {
+        project: "/private/secret/project",
+        projectLabel: "Visible project",
+        column: "invented-state",
+        workerProfileId: "worker-1",
+      },
+    },
+    prompt: "private draft",
+    output: "private output",
+  });
+  assert.ok(normalized);
+  assert.equal(normalized?.workspace, null, "oversized workspace ids fail closed");
+  assert.deepEqual(normalized?.phase, { goalId: "goal-1", planId: "plan-1" });
+  assert.equal(normalized?.filters.applied.projectLabel, "Visible project");
+  assert.equal(normalized?.filters.applied.column, "", "unknown filter options fall back independently");
+  assert.equal(normalized?.detail.tab, "overview", "unknown detail tabs fall back safely");
+  assert.equal(normalized?.scroll.detailTop, 72, "Task Detail scroll is bounded presentation state");
+  assert.equal(Object.keys(normalized?.collapse || {}).length, 48, "collapse state is bounded");
+  assert.equal(JSON.stringify(normalized).includes("/private/secret/project"), false,
+    "raw project paths are not accepted as stored filter fields");
+  assert.equal((normalized as any)?.prompt, undefined, "free-form prompt is not in the record schema");
+  assert.equal(api.normalize({ version: 99 }), null, "unknown schema versions are rejected");
+  assert.equal(api.normalize({ version: 1, scroll: { board: { key: "goal:g", left: "bad" } } })?.scroll.board,
+    null, "invalid board scroll is treated as absent rather than as a restored zero");
+
+  raw = "not-json";
+  assert.doesNotThrow(() => api.read(), "malformed session data cannot break Work");
+  assert.equal(removed, 1, "malformed session data is cleared safely");
+  raw = "x".repeat(12001);
+  removed = 0;
+  assert.equal(api.read(), null, "oversized session data is rejected before parsing");
+  assert.equal(removed, 1, "oversized session data is cleared safely");
+  storage.setItem = () => { throw new Error("session storage blocked"); };
+  assert.doesNotThrow(() => api.write({ version: 1 }), "blocked storage does not break Work");
+  storage.setItem = (key: string, value: string) => {
+    writtenKey = key;
+    writtenValue = value;
+    hasWritten = true;
+  };
+  hasWritten = false;
+  api.write({ version: 1, filler: "x".repeat(13000) });
+  assert.equal(hasWritten, false, "oversized records are not written");
+  api.write({ version: 1 });
+  assert.equal(writtenKey, "fl-work-reading-context");
+  assert.ok(writtenValue.length <= 12000);
+});
+
+test("FL-112F relevant-column focus is one-shot and yields to restored or manual scroll", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const priorityStart = src.indexOf("var WORK_RELEVANT_COLUMN_PRIORITY = [");
+  const priority = src.slice(priorityStart, src.indexOf("];", priorityStart) + 2);
+  const relevant = extractFunctionSource(src, "workRelevantColumnCode");
+  const focus = extractFunctionSource(src, "workFocusRelevantColumn");
+  const maybe = extractFunctionSource(src, "workMaybeFocusRelevantColumn");
+  const cells = [
+    ["not-started", 0, 0], ["ready", 0, 150], ["running", 0, 300],
+    ["waiting-verification", 0, 450], ["waiting-user-decision", 0, 600],
+    ["completed", 1, 750], ["stopped-failed", 0, 900],
+  ].map(([code, count, left]) => ({
+    getAttribute(name: string) { return name === "data-column" ? code : String(count); },
+    offsetLeft: left,
+  }));
+  const head = {
+    querySelectorAll() { return cells; },
+    querySelector(selector: string) {
+      const match = selector.match(/data-column="([^"]+)"/);
+      return cells.find((cell) => cell.getAttribute("data-column") === match?.[1]) || null;
+    },
+  };
+  const board = {
+    scrollLeft: 0,
+    querySelector() { return head; },
+  };
+  const viewEl = { querySelector() { return board; } };
+  const api = new Function("viewEl", `${priority}\n${relevant}\n${focus}\n${maybe}
+    var S = { workSelection: { kind: "goal", id: "g1" } };
+    var workBoardFocusRequest = null;
+    var workReloadBoardScrollRestored = false;
+    var writes = 0;
+    function workSelectionKey(selection){ return selection.kind + ":" + selection.id; }
+    function workScheduleReadingContextSave(){ writes += 1; }
+    return {
+      relevant: workRelevantColumnCode,
+      request(key){ workBoardFocusRequest = key ? { key: key } : null; },
+      restored(value){ workReloadBoardScrollRestored = value; },
+      run: workMaybeFocusRelevantColumn,
+      state(){
+        var board = viewEl.querySelector('[data-fl-role="work-board"]');
+        return { left: board.scrollLeft, restored: workReloadBoardScrollRestored, writes };
+      },
+    };`)(viewEl) as {
+    relevant: (columns: Record<string, unknown>) => string | null;
+    request: (key: string | null) => void;
+    restored: (value: boolean) => void;
+    run: () => void;
+    state: () => { left: number; restored: boolean; writes: number };
+  };
+  assert.equal(api.relevant({ completed: ["task"], "waiting-user-decision": ["decision"] }),
+    "waiting-user-decision", "attention work outranks completed history");
+  api.request("goal:g1");
+  api.run();
+  assert.equal(api.state().left, 742, "new selection scrolls inside the board to the first relevant column");
+  board.scrollLeft = 137;
+  api.run();
+  assert.equal(api.state().left, 137, "polls without a new selection do not reset manual board scroll");
+  board.scrollLeft = 211;
+  api.request("goal:g1");
+  api.restored(true);
+  api.run();
+  assert.equal(api.state().left, 211, "restored scroll wins over initial-column focus");
+  assert.equal(api.state().restored, false, "restored-scroll guard is consumed once");
+});
+
+test("FL-112F Work copy and calm empty columns preserve the canonical board contract", async () => {
+  const [src, css, i18n] = await Promise.all([
+    readFile(path.join(hubPublic, "app.js"), "utf8"),
+    readFile(path.join(hubPublic, "app.css"), "utf8"),
+    readFile(path.join(hubPublic, "i18n.js"), "utf8"),
+  ]);
+  const { enSection, zhSection } = splitI18n(i18n);
+  assert.ok(enSection.includes("One finite phase made of ordered Tasks"));
+  assert.ok(zhSection.includes("一个由有序 Task 组成的有限阶段"));
+  assert.ok(enSection.includes("Tasks in this phase") && zhSection.includes("当前阶段的 Task"));
+  assert.ok(enSection.includes("This Goal owns ordered phases") && zhSection.includes("Goal 包含阶段"));
+  const goal = extractFunctionSource(src, "renderWorkFocusedGoal");
+  assert.ok(goal.includes('"workPhaseTasksTitle"') && goal.includes('"workGoalTasksHint"'),
+    "Goal board names Tasks in the selected phase");
+  const columns = extractFunctionSource(src, "renderWorkColumns");
+  const columnCell = extractFunctionSource(src, "workRenderColumnCell");
+  assert.ok(columns.includes("workRenderColumnCell")
+    && columnCell.includes("is-empty")
+    && columnCell.includes("work-cell-title")
+    && columnCell.includes("work-cell-empty"),
+    "empty columns retain visible canonical state labels");
+  assert.match(css, /\.work-cell-empty\s*\{[\s\S]*?min-height:\s*0[\s\S]*?border:\s*0[\s\S]*?background:\s*transparent/,
+    "empty columns use a restrained inline note instead of a heavy empty card");
+  assert.match(css, /\.work-board\s*>\s*\.work-lane-row\s+\.work-cell\.is-empty/,
+    "empty-cell styling is scoped to the contained Work board");
+  assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.work-board\s*\{[\s\S]*?overflow-x:\s*visible/,
+    "small-screen Work remains vertically stacked without document overflow");
+});
+
+test("FL-112F terminal-Goal default phase is saved/restored so manual board scroll wins", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const build = extractFunctionSource(src, "workBuildSessionContext");
+  assert.ok(build.includes("workEffectiveGoalPhaseId"),
+    "save resolves the effective visible phase, not only an explicitly clicked one");
+  const WORK_COLUMN_CODES = [
+    "not-started", "ready", "running", "waiting-verification",
+    "waiting-user-decision", "completed", "stopped-failed",
+  ];
+  const constants = `
+    var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
+    var WORK_READING_CONTEXT_DISCLOSURES = ["finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen", "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen", "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"];
+    var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
+  `;
+  const helpers = [
+    "workReadingSafeNumber",
+    "normalizeWorkHierarchy",
+    "workMakeSelection",
+    "workSelectionKey",
+    "workSelectionExists",
+    "workGoalIsTerminalStatusForSelection",
+    "workGoalCurrentPlan",
+    "workGoalViewedPlan",
+    "workEffectiveGoalPlan",
+    "workEffectiveGoalPhaseId",
+    "workReadingPhaseExists",
+    "workCollectCards",
+    "workReadingTaskExists",
+    "workReadingGoalExists",
+    "workReadingPlanExists",
+    "workReadingFocusExists",
+    "workReadingBoardKey",
+    "workReadingContextToContinuity",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const view = {
+    schemaVersion: 1,
+    columns: WORK_COLUMN_CODES.map((code, order) => ({ code, order })),
+    goals: [{
+      goalId: "g1",
+      name: "Terminal Goal",
+      status: "completed",
+      plans: [
+        { planId: "p1", name: "Setup", columns: {} },
+        {
+          planId: "p2",
+          name: "Land",
+          columns: {
+            completed: [{
+              taskId: "t1", name: "Task one",
+              breadcrumb: { goalId: "g1", goalName: "Terminal Goal", planId: "p2", planName: "Land", taskName: "Task one" },
+            }],
+          },
+        },
+      ],
+    }],
+    independentPlans: [],
+    oneOffTasks: null,
+  };
+  const api = new Function("view", `${constants}\n${helpers}
+    var workReloadBoardScrollRestored = false;
+    var S = { workSelection: null, workViewedGoalId: null, workViewedPlanId: null, workHierarchy: view, intakes: [] };
+    function selectGoal(id){ S.workSelection = { kind: "goal", id: String(id) }; }
+    function setPhase(goalId, planId){
+      S.workViewedGoalId = goalId ? String(goalId) : null;
+      S.workViewedPlanId = planId ? String(planId) : null;
+    }
+    function phaseChanged(){
+      if(!(S.workSelection && S.workSelection.kind === "goal")) return false;
+      if(String(S.workViewedGoalId || "") !== String(S.workSelection.id || "")) return true;
+      if(S.workViewedPlanId && !workReadingPhaseExists(view, S.workSelection.id, S.workViewedPlanId)) return true;
+      return false;
+    }
+    return {
+      selectGoal, setPhase,
+      effectivePhaseId(){ return workEffectiveGoalPhaseId(); },
+      boardKey(){ return workReadingBoardKey(); },
+      phaseExists(g, p){ return workReadingPhaseExists(view, g, p); },
+      toContinuity(record){ return workReadingContextToContinuity(view, record); },
+      phaseChanged,
+    };`)(view) as {
+    selectGoal: (id: string) => void;
+    setPhase: (goalId: string | null, planId: string | null) => void;
+    effectivePhaseId: () => string;
+    boardKey: () => string;
+    phaseExists: (g: string, p: string) => boolean;
+    toContinuity: (record: Record<string, unknown>) => Record<string, any>;
+    phaseChanged: () => boolean;
+  };
+
+  // Given: a completed Goal with one last Plan, S.workViewedPlanId unset, board manually scrolled.
+  api.selectGoal("g1");
+  api.setPhase("g1", null);
+  assert.equal(api.effectivePhaseId(), "p2",
+    "terminal-Goal default phase resolves to its last Plan without an explicit click");
+  assert.equal(api.boardKey(), "goal:g1|phase:p2",
+    "saved board scroll is bound to the effective default phase");
+
+  // When: the same tab hard reloads with that saved effective phase.
+  const record = {
+    workspace: { kind: "goal", id: "g1" },
+    phase: { goalId: "g1", planId: "p2" },
+    scroll: { board: { key: "goal:g1|phase:p2", left: 555 }, contentTop: 0, contentLeft: 0, detailTop: 0 },
+    detail: { open: false, taskId: "", tab: "overview" },
+    disclosures: {},
+    focusKey: "",
+  };
+  api.selectGoal("g1");
+  api.setPhase(null, null);
+  const restorable = api.phaseExists("g1", "p2")
+    && String(record.phase.goalId) === "g1";
+  api.setPhase("g1", "p2");
+  assert.equal(restorable, true, "the saved effective default phase is validated against canonical truth");
+  const continuity = api.toContinuity(record);
+  assert.equal(continuity.boardScrollCaptured, true, "matching phase keeps the saved manual board scroll");
+  assert.equal(continuity.boardScrollLeft, 555, "the manual board position is restored");
+  assert.equal(api.phaseChanged(), false,
+    "the restored default phase is not classified as a change, so one-shot focus does not overwrite the board");
+
+  // Given: the stored Plan no longer exists in canonical truth (stale phase).
+  const staleRecord = {
+    workspace: { kind: "goal", id: "g1" },
+    phase: { goalId: "g1", planId: "p9" },
+    scroll: { board: { key: "goal:g1|phase:p9", left: 555 }, contentTop: 0, contentLeft: 0, detailTop: 0 },
+    detail: { open: false, taskId: "", tab: "overview" },
+    disclosures: {},
+    focusKey: "",
+  };
+  api.selectGoal("g1");
+  api.setPhase(null, null);
+  assert.equal(api.phaseExists("g1", "p9"), false, "stored phase is absent from canonical truth");
+  assert.equal(api.toContinuity(staleRecord).boardScrollCaptured, false,
+    "a stale phase never captures a board position");
+  assert.equal(api.phaseChanged(), true,
+    "a stale phase still triggers the one-shot relevant-column focus for a genuinely new phase");
+});
+
+test("FL-112F reopened Task draws its canonical Goal > Plan > Task breadcrumb", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const restore = extractFunctionSource(src, "workRestoreSavedTaskDetail");
+  assert.ok(restore.includes("card && card.breadcrumb"),
+    "reopened Task passes the exact canonical card breadcrumb to showTask");
+  const WORK_COLUMN_CODES = [
+    "not-started", "ready", "running", "waiting-verification",
+    "waiting-user-decision", "completed", "stopped-failed",
+  ];
+  const helpers = [
+    "workReadingSafeNumber",
+    "workCollectCards",
+    "workReadingTaskExists",
+    "workFindTaskCard",
+    "workRestoreSavedTaskDetail",
+  ].map((name) => extractFunctionSource(src, name)).join("\n");
+  const view = {
+    schemaVersion: 1,
+    columns: WORK_COLUMN_CODES.map((code, order) => ({ code, order })),
+    goals: [{
+      goalId: "g1",
+      name: "Terminal Goal",
+      status: "completed",
+      plans: [{
+        planId: "p2",
+        name: "Land",
+        columns: {
+          completed: [{
+            taskId: "t1", name: "Task one",
+            breadcrumb: { goalId: "g1", goalName: "Terminal Goal", planId: "p2", planName: "Land", taskName: "Task one" },
+          }],
+        },
+      }],
+    }],
+    independentPlans: [],
+    oneOffTasks: null,
+  };
+  const api = new Function("view", `${helpers}
+    var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
+    var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
+    var workReloadRestoreContext = null;
+    var workReloadDetailScrollTop = null;
+    var taskDetailActiveTab = "";
+    var calls = [];
+    function showTask(id, crumb){ calls.push({ id: String(id), crumb: crumb || null }); }
+    return {
+      run(ctx){
+        calls = [];
+        workReloadRestoreContext = ctx;
+        workRestoreSavedTaskDetail(view);
+        return { calls: calls.slice(), tab: taskDetailActiveTab, scroll: workReloadDetailScrollTop };
+      },
+    };`)(view) as {
+    run: (ctx: Record<string, any>) => {
+      calls: Array<{ id: string; crumb: Record<string, any> | null }>;
+      tab: string;
+      scroll: number | null;
+    };
+  };
+
+  const opened = api.run({ detailOpen: true, detailTaskId: "t1", detailTab: "process", detailScrollTop: 42 });
+  assert.equal(opened.calls.length, 1, "a reloaded Task still opens its drawer");
+  assert.equal(opened.calls[0]?.id, "t1", "the same Task id reopens");
+  assert.equal(opened.calls[0]?.crumb?.goalName, "Terminal Goal", "canonical Goal segment restores");
+  assert.equal(opened.calls[0]?.crumb?.planName, "Land", "canonical Plan segment restores");
+  assert.equal(opened.calls[0]?.crumb?.taskName, "Task one", "canonical Task segment restores");
+  assert.equal(opened.tab, "process", "saved detail tab restores");
+  assert.equal(opened.scroll, 42, "saved detail scroll restores");
+
+  const stale = api.run({ detailOpen: true, detailTaskId: "t999", detailTab: "overview", detailScrollTop: 0 });
+  assert.equal(stale.calls.length, 0,
+    "a Task that no longer exists never reopens with invented ancestry");
+});
+
+// --- FL-116A Worker settings flow ---
+
+test("FL-116A Worker settings lead with a compact selectable list and one grouped editor", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+
+  // The generic four-step story is still the page intro, placed before the
+  // selector, and the page renders dense worker data.
+  assert.ok(block.includes('renderPageStory("workers")'), "worker page calls the compact page story");
+  assert.ok(block.indexOf('renderPageStory("workers")') < block.indexOf("workerProfiles"),
+    "compact intro leads before the selector");
+
+  // One grouped editor exposes every decision flow with a stable marker.
+  for (const group of ["identity", "stops", "recovery", "connection", "contract"]) {
+    assert.ok(block.includes(`workerGroup("${group}"`), `editor has ${group} group`);
+  }
+  assert.ok(block.includes('setAttribute("data-worker-group", groupKey)'), "groups set a stable marker");
+  assert.ok(block.includes('data-fl-role", "worker-group"'), "groups have a semantic role");
+  assert.ok(block.includes('data-fl-role", "worker-safety"'), "fixed safety region ships");
+  assert.ok(block.includes("worker-preview-region"), "effective preview region ships");
+  assert.ok(block.includes("recovery-narrative"), "recovery narrative ships");
+  assert.ok(block.includes("workerRefreshSummaries()"), "closed-group summaries refresh");
+  assert.ok(src.includes("workerOpenGroups"), "open-group state is preserved in S");
+
+  // Every existing flexible control id remains reachable inside the grouped form.
+  for (const id of [
+    "fl-wp-id", "fl-wp-label", "fl-wp-budget-mode", "fl-wp-budget",
+    "fl-wp-execution", "fl-wp-network-mode", "fl-wp-network-http",
+    "fl-wp-network-https", "fl-wp-network-noproxy",
+  ]) {
+    assert.ok(block.includes(id), `control ${id} still ships`);
+  }
+  assert.ok(src.includes('t("workersPricingRoute")'), "pricing route control still ships");
+});
+
+test("FL-116A Worker settings copy is bilingual and the recovery narrative is truthful", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+
+  for (const key of [
+    "workersGroupIdentity", "workersGroupStops", "workersGroupRecovery",
+    "workersGroupConnection", "workersGroupContract", "workersSafetyTitle",
+    "workersRecoveryNarrative", "workersRecoverySeparateNote",
+    "workersDurationHoursUnit", "workersDurationMinutesUnit",
+    "workersDurationSecondsUnit", "workersDurationMsUnit",
+    "workersPreviewTechnical",
+  ]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+
+  // Repair copy is truthful: frozen execution mode, finite allowance,
+  // independent verification, and never a native Goal for non-Codex Runtimes.
+  const enRepair = enSection.slice(enSection.indexOf("workersRecoveryNarrative"),
+    enSection.indexOf("workersNetworkLabel", enSection.indexOf("workersRecoveryNarrative")));
+  assert.match(enRepair, /execution mode frozen/, "en repair names the frozen execution mode");
+  assert.match(enRepair, /never described as a native Goal/, "en repair never claims Goal for other Runtimes");
+  assert.match(enRepair, /independently verifies/, "en repair keeps independent verification");
+  const zhRepair = zhSection.slice(zhSection.indexOf("workersRecoveryNarrative"),
+    zhSection.indexOf("workersNetworkLabel", zhSection.indexOf("workersRecoveryNarrative")));
+  assert.ok(zhRepair.includes("冻结"), "zh repair names the frozen execution mode");
+  assert.ok(zhRepair.includes("独立验收"), "zh repair keeps independent verification");
+  assert.ok(zhRepair.includes("原生 Goal"), "zh repair names native Goal truthfully");
+  assert.ok(zhRepair.includes("绝不会被描述为原生 Goal"), "zh repair never claims Goal for other Runtimes");
+  assert.match(enRepair, /limited to the configured count/, "en repair allowance stays finite");
+  assert.ok(zhRepair.includes("次数"), "zh repair allowance stays finite");
+
+  // The safety rules are explanatory and explicitly not weakenable.
+  assert.ok(enSection.includes("The flexible limits above cannot weaken them"),
+    "en safety note cannot be weakened");
+  assert.ok(zhSection.includes("不能削弱它们"), "zh safety note cannot be weakened");
+  assert.ok(src.includes("workersSafetyCommit"), "no-commit authority is wired");
+  assert.ok(src.includes("workersSafetyVerification"), "independent verification is wired");
+  assert.ok(src.includes("workersSafetyIntegration"), "Main-controlled Integration is wired");
+});
+
+test("FL-116A Worker duration adapters round-trip the millisecond contract losslessly", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const api = new Function(`
+    ${extractFunctionSource(src, "msDurationParts")}
+    ${extractFunctionSource(src, "durationPartsToMs")}
+    return { msDurationParts, durationPartsToMs };
+  `)() as {
+    msDurationParts: (ms: number | null | undefined) => { value: string; unit: string };
+    durationPartsToMs: (value: string, unit: string) => number | undefined;
+  };
+  // Exact round trips for hours, minutes, seconds, and the raw-ms fallback.
+  for (const ms of [3600000, 7200000, 1800000, 60000, 30000, 10000, 1000, 1234567]) {
+    const parts = api.msDurationParts(ms);
+    const back = api.durationPartsToMs(parts.value, parts.unit);
+    assert.equal(back, ms, `lossless round trip for ${ms}ms`);
+  }
+  // Blank keeps inherit/unlimited semantics; it is never a hidden finite value.
+  assert.equal(api.durationPartsToMs("", "minutes"), undefined);
+  assert.deepEqual(api.msDurationParts(null), { value: "", unit: "minutes" }, "unlimited renders blank");
+});
+
+test("FL-116A forced native Goal is blocked with a clear inline reason in the editor", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+  // The editor both signals and blocks forced unsupported native Goal.
+  assert.ok(block.includes('execHint.classList.add("is-blocked")'), "inline reason is visibly blocked");
+  assert.ok(block.includes('selEx.value === "native-goal" && selR.value !== "codex-cli"'),
+    "editor blocks forced native Goal before save");
+  assert.ok(block.includes("workersExecutionUnsupportedNativeGoal"), "inline reason copy is wired");
+  assert.ok(i18n.includes("no proven native Goal yet"), "en inline reason copy");
+  assert.ok(i18n.includes("尚未被证明支持原生 Goal"), "zh inline reason copy");
+  // auto stays truthful and does not claim every Runtime has Goal.
+  assert.ok(i18n.includes("Runtime's real Goal when the Runtime proves one"),
+    "auto never claims Goal for every Runtime");
+});
+
+test("FL-116A effective preview keeps a plain-language consequence plus the technical table", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const preview = extractFunctionSource(src, "renderWorkerPreview");
+  assert.ok(preview.includes("preview-consequences"), "beginner view renders a consequence summary");
+  assert.ok(preview.includes("preview-tech"), "full source/enforcement table stays under a disclosure");
+  assert.ok(preview.includes('t("workersAdvancedToggle")'), "technical disclosure stays reachable");
+  assert.ok(src.includes("function workerPreviewConsequences"), "consequence builder ships");
+  const consequences = extractFunctionSource(src, "workerPreviewConsequences");
+  assert.ok(consequences.includes("validationRepairConsequenceText"), "repair consequence is plain language");
+  assert.ok(consequences.includes("workersPreviewUnlimitedLine"), "unlimited values stay explicit");
+  assert.ok(i18n.includes("is unlimited."), "en unlimited consequence");
+  assert.ok(i18n.includes("不受限制"), "zh unlimited consequence");
+  assert.ok(i18n.includes("View the full source and enforcement table"), "en technical disclosure hint");
+  assert.ok(i18n.includes("完整的来源与执行阶段表"), "zh technical disclosure hint");
+});
+
+test("FL-116A Worker rail is a compact selectable row with keyboard selection", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+  assert.ok(block.includes('"card profile-card worker-row"'), "each saved Worker is one compact row");
+  assert.ok(block.includes('is-editing is-selected"'), "the editing row is visibly selected");
+  assert.ok(block.includes('setAttribute("role", isEditing ? "group" : "button")'),
+    "unselected rows are keyboard selectors while the selected row contains progressive controls");
+  assert.ok(block.includes('setAttribute("tabindex", "0")'), "the row is focusable");
+  assert.ok(block.includes('setAttribute("aria-pressed", "false")'), "unselected rows expose pressed state");
+  assert.ok(block.includes('setAttribute("aria-current", "true")'), "the selected row exposes current state");
+  assert.ok(block.includes('e.key === "Enter" || e.key === " "'), "Enter/Space selects a row");
+  assert.ok(block.includes("ev.stopPropagation()"), "row actions do not bubble into selection");
+  // Only compact identity facts lead. Repeated purpose prose is gone, and
+  // management disclosures exist only inside the selected branch.
+  assert.ok(block.indexOf('var story = h("div", "profile-story")') < block.indexOf("cardEl.appendChild(story);"),
+    "story stays the compact identity surface");
+  assert.ok(!block.includes('profile-story-purpose'), "rows do not repeat purpose paragraphs");
+  assert.ok(block.indexOf("if(isEditing){") < block.indexOf("workersCardTechnicalDetails"),
+    "technical details are progressively reachable only for the selected Worker");
+});
+
+test("FL-116A execution help distinguishes auto, native Goal, and single-run", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const { enSection, zhSection } = splitI18n(i18n);
+  for (const key of ["workersExecutionSingleRunHint", "workersExecutionNativeGoalHint"]) {
+    assert.ok(enSection.includes(key), `en ${key}`);
+    assert.ok(zhSection.includes(key), `zh ${key}`);
+  }
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+  assert.ok(block.includes('selEx.value === "single-run"'), "single-run has its own help branch");
+  assert.ok(block.includes('selEx.value === "native-goal"'), "native-goal has its own help branch");
+  assert.ok(block.includes("workersExecutionNativeGoalHint"), "native-goal help is wired");
+  assert.ok(block.includes("workersExecutionSingleRunHint"), "single-run help is wired");
+  assert.ok(block.includes("resolvedHint"), "resolved behavior line exists");
+  assert.ok(block.includes("workerResolvedModeForSelection"), "resolved mode reads backend readiness");
+  // single-run copy must not reuse the auto copy.
+  assert.ok(enSection.includes("One normal run only."), "single-run has its own plain copy");
+});
+
+test("FL-116A closed-group summaries and beginner preview consume backend preview rows", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+  assert.ok(block.includes("S.workerPreviewRows"), "summaries read the backend preview rows");
+  assert.ok(block.includes("workerPreviewRow("), "summary helper reads preview rows by field");
+  assert.ok(block.includes("S.workerQualityPreviewRows"), "quality summary reads quality preview rows");
+  assert.ok(src.includes("S.workerPreviewRows = res.preview"), "fetchWorkerPreview stores the rows");
+  assert.ok(src.includes("workerSummariesRefresher"), "preview completion refreshes summaries");
+  const consequences = extractFunctionSource(src, "workerPreviewConsequences");
+  for (const field of [
+    "maxDurationMs", "noProgressTimeoutMs", "observedTokenCeiling",
+    "fileLimit", "changedLineLimit", "maxConcurrency", "baseMaxAttempts",
+    "maxMainCorrections", "maxMainReverifications", "maxAdaptationRounds",
+  ]) {
+    assert.ok(consequences.includes('"' + field + '"'), `consequence covers ${field}`);
+  }
+  for (const key of [
+    "workersPreviewTokenLine", "workersPreviewFileLine", "workersPreviewLineLine",
+    "workersPreviewAttemptsNoExtraLine", "workersPreviewMainCorrectionsLine",
+    "workersPreviewReverifyLine", "workersPreviewAdaptationLine",
+    "workersGroupTokenSummary", "workersGroupFileSummary", "workersGroupLineSummary",
+    "workersGroupAdaptationSummary", "workersGroupAdaptationOffSummary",
+  ]) {
+    assert.ok(i18n.indexOf(key) !== i18n.lastIndexOf(key), `${key} is bilingual`);
+  }
+});
+
+test("FL-116A unsaved draft survives deliberate rWorker rebuilds without autosave", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(src.includes("function workerCaptureDraftFromDom"), "draft capture helper ships");
+  assert.ok(src.includes("function workerReplayCapturedControls"),
+    "exact live controls can be replayed after a presentation-only rebuild");
+  assert.ok(src.includes("S.workerDraft"), "draft state exists in S");
+  assert.ok(src.includes("S.workerFormRendered"), "rendered flag guards capture");
+  assert.ok(src.includes("workerFormContextId"), "render context identifies the Worker whose draft is in the DOM");
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+  assert.ok(block.includes("S.workerDraft = capturedDraft"), "rWorker captures before clearing");
+  assert.ok(block.includes("S.workerFormContextId === S.workerEditId"),
+    "switching Worker rows cannot restore the previous Worker's draft into the new selection");
+  assert.ok(block.includes("workerRestoreDraft()"), "rWorker restores the captured draft");
+  assert.ok(block.includes("S.workerSummariesRefresher = workerRefreshSummaries"),
+    "preview can refresh the summaries after a rebuild");
+  const switchSrc = extractFunctionSource(src, "switchTab");
+  assert.ok(switchSrc.includes("workerCaptureDraftFromDom"), "leaving the tab captures the draft");
+  const languageHandlerStart = src.indexOf("window.onForklightLangChange = function()");
+  const languageHandlerEnd = src.indexOf("\n  };", languageHandlerStart);
+  const languageHandler = src.slice(languageHandlerStart, languageHandlerEnd);
+  assert.ok(languageHandler.includes("workerCaptureDraftFromDom"),
+    "language changes capture the live Worker draft before rebuilding translated DOM");
+  assert.ok(languageHandler.includes("S.workerFormRendered = false"),
+    "language changes consume the old form once before rWorker restores the draft");
+  assert.ok(languageHandler.includes("workerReplayCapturedControls"),
+    "language changes replay intentionally blank and unsaved live control values after translation");
+  const refreshSrc = extractFunctionSource(src, "refresh");
+  assert.ok(src.includes("function workerVisibleTruthKey"), "visible Worker truth has a bounded signature");
+  assert.ok(refreshSrc.includes("workerVisibleTruthKey() !== S.workerRenderedTruthKey"),
+    "polling rebuilds only when canonical Worker or readiness truth changes");
+  assert.ok(refreshSrc.includes("render()"), "changed readiness and profile-list truth reaches the page");
+  assert.ok(block.includes("S.workerRenderedTruthKey = workerVisibleTruthKey()"),
+    "each completed Worker render records its visible truth");
+  assert.ok(block.includes("S.workerFormContextId = S.workerEditId"),
+    "each completed Worker render records its draft ownership context");
+  // No autosave: the only mutation after a rebuild is restoring the draft.
+  assert.ok(!/workerCaptureDraftFromDom[\s\S]{0,80}postJSON/.test(src),
+    "capturing the draft never posts to the server");
+});
+
+test("FL-116A fail-loud group mapping and quiet visual hierarchy are guarded", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+  // A new AdvancedPolicy group without a bucket fails loudly instead of vanishing.
+  assert.ok(src.includes("workerValidateGroupBucketCoverage"), "fail-loud bucket validation ships");
+  assert.ok(src.includes('" has no editor bucket"'), "unassigned group throws a clear error");
+  // No new thick side accent bars on the recovery narrative or safety box.
+  assert.doesNotMatch(css, /\.recovery-narrative\s*\{[^}]*border-left:\s*3px/,
+    "recovery narrative has no thick side bar");
+  assert.doesNotMatch(css, /\.worker-safety\s*\{[^}]*border-left:\s*3px/,
+    "safety box has no thick side bar");
+  // Preview panels are flat sections, not nested cards.
+  assert.ok(block.includes('h("div", "preview-panel")'), "preview panels are not nested cards");
+  assert.doesNotMatch(block, /card preview-panel/, "no card-in-card preview panels");
 });

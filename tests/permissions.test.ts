@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,10 @@ import {
   runtimeTemporaryDirectoryAliases,
   workerLaunch,
 } from "../src/workers/claude.js";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 test("P2 Worker never receives Bash or web tools", () => {
   const task = {
@@ -137,4 +142,53 @@ test("macOS Worker launch restricts writes to task-owned directories", { skip: p
   assert.match(profile, new RegExp(`\\(literal "${escapedSourceRoot}"\\)`));
   assert.doesNotMatch(profile, /fixtures\/checkout/);
   assert.doesNotMatch(profile, /verifier-git|GIT_DIR|GIT_INDEX_FILE/);
+});
+
+test("macOS checkpoint launch sandbox allows the exact Node runtime and canonical modules, never broad Home", { skip: process.platform !== "darwin" }, () => {
+  const task = {
+    id: "task-ckpt-perm",
+    paths: {
+      root: "/tmp/forklight-perm/runs/task-ckpt-perm",
+      workspace: "/tmp/forklight-perm/runs/task-ckpt-perm/workspace",
+      claudeConfig: "/tmp/forklight-perm/runs/task-ckpt-perm/claude-config",
+    },
+    spec: {
+      runtime: { executable: "claude" },
+    },
+  } as unknown as TaskRecord;
+  const launch = workerLaunch(task, ["--version"]);
+  assert.equal(launch.command, "/usr/bin/sandbox-exec");
+  const profile = launch.args[1] ?? "";
+  const nodeExec = process.execPath;
+  // The exact Node runtime (and its realpath) used to launch the checkpoint
+  // MCP server is readable; a broad Home read allow is never added.
+  assert.match(profile, new RegExp(`\\(literal "${escapeRegExp(nodeExec)}"\\)`));
+  assert.match(profile, new RegExp(`\\(literal "${escapeRegExp(realpathSync(nodeExec))}"\\)`));
+  assert.equal(profile.indexOf("(allow file-read* (subpath"), -1);
+  assert.equal(profile.indexOf(`(allow file-read* (subpath "${homedir()}")`), -1);
+  // Canonical source/dist module closure proven necessary for the server.
+  assert.match(profile, /activation\/runner\.ts/);
+  assert.match(profile, /core\/process\.ts/);
+  assert.match(profile, /core\/source-digest\.ts/);
+  assert.match(profile, /core\/time\.ts/);
+  assert.match(profile, /daemon\/client\.ts/);
+  assert.match(profile, /daemon\/protocol\.ts/);
+  assert.match(profile, /core\/config\.ts/);
+  assert.match(profile, /core\/build-identity\.ts/);
+  // Workspace isolation stays intact: the exact configured workspace path is
+  // exempt from the Home read-deny (asserted by its full path, not a shortened
+  // substring), and verifier credential state never leaks into the profile.
+  const workspace = "/tmp/forklight-perm/runs/task-ckpt-perm/workspace";
+  assert.match(profile, new RegExp(`\\(require-not \\(subpath "${escapeRegExp(workspace)}"\\)\\)`));
+  assert.doesNotMatch(profile, /verifier-git|GIT_DIR|GIT_INDEX_FILE/);
+  // process.execPath is literal-only: never a subpath exception that would
+  // broaden the Node/NVM directory or its parents into a readable tree.
+  assert.doesNotMatch(profile, new RegExp(`\\(require-not \\(subpath "${escapeRegExp(nodeExec)}"\\)\\)`));
+  assert.doesNotMatch(profile, new RegExp(`\\(require-not \\(subpath "${escapeRegExp(path.dirname(nodeExec))}"\\)\\)`));
+  assert.doesNotMatch(profile, new RegExp(`\\(require-not \\(subpath "${escapeRegExp(path.join(homedir(), ".nvm"))}"\\)\\)`));
+  // The four canonical module files are literal-only exceptions as well.
+  assert.doesNotMatch(profile, /\(require-not \(subpath "[^"]*src\/activation\/runner\.ts"\)\)/);
+  assert.doesNotMatch(profile, /\(require-not \(subpath "[^"]*src\/core\/process\.ts"\)\)/);
+  assert.doesNotMatch(profile, /\(require-not \(subpath "[^"]*src\/core\/source-digest\.ts"\)\)/);
+  assert.doesNotMatch(profile, /\(require-not \(subpath "[^"]*src\/core\/time\.ts"\)\)/);
 });

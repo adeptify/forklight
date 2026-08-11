@@ -36,6 +36,60 @@ function toolTarget(input: JsonObject): string {
   return target === undefined ? "" : truncate(target, 240);
 }
 
+export type McpServerReadiness = "ready" | "failed" | "unknown";
+
+/** One privacy-safe MCP readiness entry. Only bounded codes are stored. */
+export interface McpServerReadinessEntry {
+  name: string;
+  status: McpServerReadiness;
+}
+
+function normalizeMcpStatus(value: unknown): McpServerReadiness | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "ready" || normalized === "running" || normalized === "connected" || normalized === "ok") {
+    return "ready";
+  }
+  if (normalized === "failed" || normalized === "error" || normalized === "unavailable") {
+    return "failed";
+  }
+  return "unknown";
+}
+
+/**
+ * Project Claude init MCP readiness into bounded codes. Accepts the measured
+ * Claude Code 2.1.206 shape (array of `{name, status}`), object-map shapes
+ * (`{forklight_checkpoint: {status}}`), and camelCase variants. Only bounded
+ * readiness codes are stored; raw server diagnostics never leave this parser.
+ */
+export function parseMcpServerReadiness(root: JsonObject): McpServerReadinessEntry[] {
+  const raw = root.mcp_servers ?? root.mcpServers;
+  const entries: McpServerReadinessEntry[] = [];
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      const server = asObject(item);
+      if (server === undefined) continue;
+      const name = typeof server.name === "string" ? server.name.trim() : "";
+      const status = normalizeMcpStatus(server.status);
+      if (name.length === 0 || status === undefined) continue;
+      entries.push({ name, status });
+    }
+  } else {
+    const map = asObject(raw);
+    if (map !== undefined) {
+      for (const [name, value] of Object.entries(map)) {
+        if (name.length === 0) continue;
+        const status = typeof value === "string"
+          ? normalizeMcpStatus(value)
+          : normalizeMcpStatus(asObject(value)?.status);
+        if (status === undefined) continue;
+        entries.push({ name, status });
+      }
+    }
+  }
+  return entries;
+}
+
 function strictNonNegativeInt(value: unknown): number | undefined {
   if (typeof value !== "number") return undefined;
   if (!Number.isFinite(value)) return undefined;
@@ -129,6 +183,7 @@ export class ClaudeEventNormalizer {
 
     if (type === "system" && root.subtype === "init") {
       const sessionId = typeof root.session_id === "string" ? root.session_id : undefined;
+      const mcpServers = parseMcpServerReadiness(root);
       return [
         {
           type: "worker.message",
@@ -137,6 +192,7 @@ export class ClaudeEventNormalizer {
             {
               model: root.model,
               tools: root.tools,
+              ...(mcpServers.length === 0 ? {} : { mcpServers }),
             },
             RUNTIME_ACTIVITY_LIVENESS,
           ),

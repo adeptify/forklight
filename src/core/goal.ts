@@ -80,15 +80,33 @@ export interface GoalMilestoneSpec {
   gate: GoalMilestoneGate;
 }
 
+/** One ordered Goal phase: a validated Plan plus its local milestone gates. */
+export interface GoalPhaseSpec {
+  planFile: string;
+  plan: WorkPlan;
+  milestones: GoalMilestoneSpec[];
+}
+
+/**
+ * Normalized loaded Goal for both file versions. v1 (one Plan) and v2
+ * (two or more ordered Plans) collapse into the same ordered `phases` model.
+ * The legacy `planFile` / `plan` / `milestones` fields alias phase zero so
+ * v1 callers stay byte-compatible.
+ */
 export interface LoadedGoal {
-  version: 1;
+  version: 1 | 2;
   name: string;
   objective: string;
   goalFile: string;
+  /** Legacy primary Plan identity; equals phases[0].planFile. */
   planFile: string;
+  /** Legacy primary Plan; equals phases[0].plan. */
   plan: WorkPlan;
-  policy: GoalPolicy;
+  /** Legacy primary milestones; equals phases[0].milestones. */
   milestones: GoalMilestoneSpec[];
+  /** Ordered phases for both versions. v2 requires at least two entries. */
+  phases: GoalPhaseSpec[];
+  policy: GoalPolicy;
 }
 
 export interface GoalLoadReport {
@@ -101,6 +119,8 @@ export interface GoalLoadReport {
 
 export interface GoalMilestoneView {
   itemId: string;
+  /** Owning Plan identity; present on plan-qualified (v2 and migrated) rows. */
+  planId?: string;
   itemIndex: number;
   /** Original immutable Plan Task id for this milestone. */
   taskId?: string;
@@ -163,7 +183,20 @@ export interface GoalView {
   goalId: string;
   name: string;
   objective: string;
+  /** Legacy primary Plan identity; equals planIds[0] when associations exist. */
   planId: string;
+  /**
+   * Every Plan owned by this Goal in stable ordinal order.
+   * v2 phases are milestone-supervised; ownership-attached later Plans remain
+   * associated only until a future slice supervises them.
+   */
+  planIds: string[];
+  /**
+   * Core-selected current phase: the first supervised phase with an
+   * unsatisfied milestone. Absent when every supervised milestone is
+   * satisfied (terminal Goal); Hub falls back to the last phase for history.
+   */
+  currentPlanId?: string;
   status: GoalStatus;
   reasonCode: GoalReasonCode;
   reason: string;
@@ -193,10 +226,21 @@ export interface GoalView {
   };
 }
 
-export interface GoalRegistrationResult {
-  goalId: string;
+/** Per-Plan registration facts in ordered phase order. V2 callers use these
+ *  for an unambiguous Task map when Plan-local item IDs repeat across phases. */
+export interface GoalPlanRegistrationResult {
   planId: string;
   taskIdsByItemId: Record<string, string>;
+}
+
+export interface GoalRegistrationResult {
+  goalId: string;
+  /** Legacy primary Plan identity (phase zero). */
+  planId: string;
+  /** Legacy primary Plan Task map (phase zero). */
+  taskIdsByItemId: Record<string, string>;
+  /** Ordered per-Plan registration results for every phase. */
+  planResults: GoalPlanRegistrationResult[];
 }
 
 export interface GoalAdvanceResult {
@@ -288,7 +332,13 @@ export async function loadGoal(
   );
   const issues: string[] = [];
 
-  if (root.version !== 1) issues.push("goal.version must be 1");
+  const rawVersion = root.version;
+  if (rawVersion !== 1 && rawVersion !== 2) issues.push("goal.version must be 1 or 2");
+  // Narrow the parsed file version to the supported literal union without
+  // relying on control-flow narrowing of `unknown`. The invalid fallback keeps
+  // parsing only to accumulate the version issue; the final guard rejects the
+  // load before any record is produced.
+  const version: 1 | 2 = rawVersion === 1 ? 1 : rawVersion === 2 ? 2 : 1;
   const name = typeof root.name === "string" && root.name.trim()
     ? root.name.trim()
     : "";
@@ -297,14 +347,6 @@ export async function loadGoal(
     ? root.objective.trim()
     : "";
   if (!objective) issues.push("goal.objective must be a non-empty string");
-
-  const planField = root.planFile ?? root.plan;
-  if (typeof planField !== "string" || planField.trim() === "") {
-    issues.push("goal.planFile (or plan) must be a non-empty string");
-  }
-  const planFile = typeof planField === "string"
-    ? path.resolve(path.dirname(goalFile), expandHome(planField.trim()))
-    : "";
 
   const policyRaw = requireObject(root.policy ?? {}, "goal.policy");
   const maxDurationMs = isPositiveIntOrNull(policyRaw.maxDurationMs, "goal.policy.maxDurationMs", issues);
@@ -337,69 +379,6 @@ export async function loadGoal(
     issues,
   );
 
-  if (!Array.isArray(root.milestones)) {
-    issues.push("goal.milestones must be an array");
-  }
-  const rawMilestones = Array.isArray(root.milestones) ? root.milestones : [];
-  if (rawMilestones.length < GOAL_MIN_ITEMS || rawMilestones.length > GOAL_MAX_ITEMS) {
-    issues.push(
-      `goal.milestones must contain ${GOAL_MIN_ITEMS} to ${GOAL_MAX_ITEMS} items (got ${rawMilestones.length})`,
-    );
-  }
-
-  const milestones: GoalMilestoneSpec[] = [];
-  const seen = new Set<string>();
-  rawMilestones.forEach((value, index) => {
-    const item = requireObject(value, `goal.milestones[${index}]`);
-    const itemId = requireNonEmptyString(item.itemId, `goal.milestones[${index}].itemId`);
-    if (seen.has(itemId)) issues.push(`goal milestone itemId ${itemId} is duplicated`);
-    seen.add(itemId);
-    if (!isGate(item.gate)) {
-      issues.push(
-        `goal.milestones[${index}].gate must be machine, main-accept, or integration`,
-      );
-    }
-    milestones.push({
-      itemId,
-      gate: isGate(item.gate) ? item.gate : "machine",
-    });
-  });
-
-  let plan: WorkPlan | undefined;
-  if (planFile) {
-    try {
-      const report = await assertWorkPlan(planFile, policy);
-      plan = report.plan;
-      if (plan.items.length !== milestones.length) {
-        issues.push(
-          `goal milestones (${milestones.length}) must match plan items (${plan.items.length})`,
-        );
-      }
-      if (plan.items.length < GOAL_MIN_ITEMS || plan.items.length > GOAL_MAX_ITEMS) {
-        issues.push(
-          `goal plan must contain ${GOAL_MIN_ITEMS} to ${GOAL_MAX_ITEMS} tasks (got ${plan.items.length})`,
-        );
-      }
-      const planIds = new Set(plan.items.map((item) => item.id));
-      for (const milestone of milestones) {
-        if (!planIds.has(milestone.itemId)) {
-          issues.push(`goal milestone ${milestone.itemId} is not a plan item`);
-        }
-      }
-      for (const item of plan.items) {
-        if (!seen.has(item.id)) {
-          issues.push(`plan item ${item.id} is missing a goal milestone gate`);
-        }
-      }
-    } catch (error) {
-      issues.push(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  if (issues.length > 0 || plan === undefined || !name || !objective) {
-    return { passed: false, issues };
-  }
-
   // Preserve explicit null through the loaded object (JSON.stringify keeps null).
   const frozenPolicy: GoalPolicy = {
     maxDurationMs: policyRaw.maxDurationMs === null ? null : maxDurationMs,
@@ -409,18 +388,168 @@ export async function loadGoal(
     maxNoNewEvidenceCycles,
   };
 
+  /** Shared per-Plan milestone parsing. Returns parsed specs and accumulates issues. */
+  const parseMilestones = (
+    raw: unknown,
+    label: string,
+  ): { milestones: GoalMilestoneSpec[]; seen: Set<string> } => {
+    if (!Array.isArray(raw)) {
+      issues.push(`${label} must be an array`);
+    }
+    const rawMilestones = Array.isArray(raw) ? raw : [];
+    const parsed: GoalMilestoneSpec[] = [];
+    const seen = new Set<string>();
+    rawMilestones.forEach((value, index) => {
+      const item = requireObject(value, `${label}[${index}]`);
+      const itemId = requireNonEmptyString(item.itemId, `${label}[${index}].itemId`);
+      if (seen.has(itemId)) issues.push(`goal milestone itemId ${itemId} is duplicated`);
+      seen.add(itemId);
+      if (!isGate(item.gate)) {
+        issues.push(
+          `${label}[${index}].gate must be machine, main-accept, or integration`,
+        );
+      }
+      parsed.push({
+        itemId,
+        gate: isGate(item.gate) ? item.gate : "machine",
+      });
+    });
+    return { milestones: parsed, seen };
+  };
+
+  const phases: GoalPhaseSpec[] = [];
+
+  if (version === 1) {
+    // --- v1: one Plan + top-level milestones (byte-compatible) ---
+    const planField = root.planFile ?? root.plan;
+    if (typeof planField !== "string" || planField.trim() === "") {
+      issues.push("goal.planFile (or plan) must be a non-empty string");
+    }
+    const planFile = typeof planField === "string"
+      ? path.resolve(path.dirname(goalFile), expandHome(planField.trim()))
+      : "";
+
+    if (!Array.isArray(root.milestones)) {
+      issues.push("goal.milestones must be an array");
+    }
+    const rawMilestones = Array.isArray(root.milestones) ? root.milestones : [];
+    if (rawMilestones.length < GOAL_MIN_ITEMS || rawMilestones.length > GOAL_MAX_ITEMS) {
+      issues.push(
+        `goal.milestones must contain ${GOAL_MIN_ITEMS} to ${GOAL_MAX_ITEMS} items (got ${rawMilestones.length})`,
+      );
+    }
+    const { milestones, seen } = parseMilestones(rawMilestones, "goal.milestones");
+
+    let plan: WorkPlan | undefined;
+    if (planFile) {
+      try {
+        const report = await assertWorkPlan(planFile, policy);
+        plan = report.plan;
+        if (plan.items.length !== milestones.length) {
+          issues.push(
+            `goal milestones (${milestones.length}) must match plan items (${plan.items.length})`,
+          );
+        }
+        if (plan.items.length < GOAL_MIN_ITEMS || plan.items.length > GOAL_MAX_ITEMS) {
+          issues.push(
+            `goal plan must contain ${GOAL_MIN_ITEMS} to ${GOAL_MAX_ITEMS} tasks (got ${plan.items.length})`,
+          );
+        }
+        const planIds = new Set(plan.items.map((item) => item.id));
+        for (const milestone of milestones) {
+          if (!planIds.has(milestone.itemId)) {
+            issues.push(`goal milestone ${milestone.itemId} is not a plan item`);
+          }
+        }
+        for (const item of plan.items) {
+          if (!seen.has(item.id)) {
+            issues.push(`plan item ${item.id} is missing a goal milestone gate`);
+          }
+        }
+      } catch (error) {
+        issues.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    if (issues.length > 0 || plan === undefined || !name || !objective) {
+      return { passed: false, issues };
+    }
+    phases.push({ planFile: plan.planFile, plan, milestones });
+  } else if (version === 2) {
+    // --- v2: two or more ordered phase Plans with local milestone gates ---
+    if (!Array.isArray(root.plans)) {
+      issues.push("goal.plans must be an array");
+    }
+    const rawPlans = Array.isArray(root.plans) ? root.plans : [];
+    if (rawPlans.length < 2) {
+      issues.push("goal.plans must contain at least two ordered Plans");
+    }
+    const seenPlanFiles = new Set<string>();
+    for (let index = 0; index < rawPlans.length; index += 1) {
+      const entry = requireObject(rawPlans[index], `goal.plans[${index}]`);
+      const phasePlanField = entry.planFile ?? entry.plan;
+      if (typeof phasePlanField !== "string" || phasePlanField.trim() === "") {
+        issues.push(`goal.plans[${index}].planFile must be a non-empty string`);
+        continue;
+      }
+      const phasePlanFile = path.resolve(
+        path.dirname(goalFile),
+        expandHome(phasePlanField.trim()),
+      );
+      if (seenPlanFiles.has(phasePlanFile)) {
+        issues.push(`goal.plans[${index}].planFile is duplicated`);
+      }
+      seenPlanFiles.add(phasePlanFile);
+      const { milestones, seen } = parseMilestones(
+        entry.milestones,
+        `goal.plans[${index}].milestones`,
+      );
+      try {
+        const report = await assertWorkPlan(phasePlanFile, policy);
+        const plan = report.plan;
+        if (plan.items.length !== milestones.length) {
+          issues.push(
+            `goal.plans[${index}] milestones (${milestones.length}) must match plan items (${plan.items.length})`,
+          );
+        }
+        const planIds = new Set(plan.items.map((item) => item.id));
+        for (const milestone of milestones) {
+          if (!planIds.has(milestone.itemId)) {
+            issues.push(`goal milestone ${milestone.itemId} is not a plan item in phase ${index}`);
+          }
+        }
+        for (const item of plan.items) {
+          if (!seen.has(item.id)) {
+            issues.push(`plan item ${item.id} is missing a goal milestone gate in phase ${index}`);
+          }
+        }
+        phases.push({ planFile: plan.planFile, plan, milestones });
+      } catch (error) {
+        issues.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    if (issues.length > 0 || phases.length < 2 || !name || !objective) {
+      return { passed: false, issues };
+    }
+  }
+
+  if (issues.length > 0 || phases.length === 0 || !name || !objective) {
+    return { passed: false, issues };
+  }
+
   return {
     passed: true,
     issues: [],
     goal: {
-      version: 1,
+      version,
       name,
       objective,
       goalFile,
-      planFile: plan.planFile,
-      plan,
+      planFile: phases[0]!.planFile,
+      plan: phases[0]!.plan,
+      milestones: phases[0]!.milestones,
+      phases,
       policy: frozenPolicy,
-      milestones,
     },
   };
 }
@@ -1031,6 +1160,8 @@ export function evaluateMilestoneGate(
 export interface GoalEvidenceFacts {
   items: Array<{
     itemId: string;
+    /** Plan identity so duplicate local item IDs across phases stay distinct. */
+    planId?: string;
     taskId?: string;
     taskStatus?: TaskStatus;
     /** Effective Task (successor after direct Goal handoff). */
@@ -1238,6 +1369,7 @@ export function collectGoalEvidenceFacts(
         : undefined;
     return {
       itemId: milestone.itemId,
+      ...(milestone.planId === undefined ? {} : { planId: milestone.planId }),
       ...(milestone.taskId === undefined ? {} : { taskId: milestone.taskId }),
       ...(lineage.originalTask === undefined
         ? {}
@@ -1322,6 +1454,37 @@ function workerIdentity(task: TaskRecord | undefined): FrozenWorkerIdentity | un
   };
 }
 
+/**
+ * Core-selected current phase: the first supervised Plan whose milestones are
+ * not all satisfied, in stable ordinal order. Ownership-attached Plans without
+ * milestone rows are not supervised and never block or advance the Goal.
+ * Returns undefined when every supervised milestone is satisfied (terminal).
+ */
+export function resolveGoalCurrentPlanId(
+  store: StateStore,
+  goalId: string,
+): string | undefined {
+  const goal = store.getGoal(goalId);
+  const associations = store.listGoalPlanAssociations(goalId);
+  const orderedPlanIds = associations.length > 0
+    ? associations.map((association) => association.planId)
+    : [goal.planId];
+  const milestones = store.getGoalMilestones(goalId);
+  const byPlan = new Map<string, GoalMilestoneRecord[]>();
+  for (const milestone of milestones) {
+    const key = milestone.planId ?? goal.planId;
+    const list = byPlan.get(key) ?? [];
+    list.push(milestone);
+    byPlan.set(key, list);
+  }
+  for (const planId of orderedPlanIds) {
+    const planMilestones = byPlan.get(planId) ?? [];
+    if (planMilestones.length === 0) continue;
+    if (planMilestones.some((milestone) => !milestone.satisfied)) return planId;
+  }
+  return undefined;
+}
+
 export function projectGoal(store: StateStore, goalId: string): GoalView {
   const goal = store.getGoal(goalId);
   const milestones = store.getGoalMilestones(goalId);
@@ -1339,6 +1502,7 @@ export function projectGoal(store: StateStore, goalId: string): GoalView {
     const worker = workerIdentity(effective);
     return {
       itemId: milestone.itemId,
+      ...(milestone.planId === undefined ? {} : { planId: milestone.planId }),
       itemIndex: milestone.itemIndex,
       ...(milestone.taskId === undefined ? {} : { taskId: milestone.taskId }),
       ...(original === undefined
@@ -1450,12 +1614,22 @@ export function projectGoal(store: StateStore, goalId: string): GoalView {
     whatJustHappened = goal.reason;
   }
 
+  // Ordered associations are the multi-Plan authority; planId stays the legacy primary.
+  const associations = store.listGoalPlanAssociations(goalId);
+  const planIds = associations.length > 0
+    ? associations.map((association) => association.planId)
+    : [goal.planId];
+  // Core-owned current-phase projection; Hub never computes phase readiness.
+  const currentPlanId = resolveGoalCurrentPlanId(store, goalId);
+
   return {
     schemaVersion: 1,
     goalId: goal.id,
     name: goal.name,
     objective: goal.objective,
     planId: goal.planId,
+    planIds,
+    ...(currentPlanId === undefined ? {} : { currentPlanId }),
     status: goal.status,
     reasonCode: goal.reasonCode,
     reason: goal.reason,
@@ -1528,7 +1702,10 @@ export function reconcileGoalRecords(
     || goal.status === "failed";
 
   const previousSatisfied = new Map(
-    milestones.map((milestone) => [milestone.itemId, milestone.satisfied]),
+    milestones.map((milestone) => [
+      `${milestone.planId ?? goal.planId}::${milestone.itemId}`,
+      milestone.satisfied,
+    ]),
   );
   const updatedMilestones: GoalMilestoneRecord[] = milestones.map((milestone) => {
     const lineage = resolveEffectiveMilestoneLineage(store, milestone);
@@ -1651,7 +1828,9 @@ export function reconcileGoalRecords(
   store.saveGoal(updatedGoal, updatedMilestones);
 
   const newlySatisfiedItemIds = updatedMilestones
-    .filter((m) => m.satisfied && previousSatisfied.get(m.itemId) !== true)
+    .filter((m) =>
+      m.satisfied
+      && previousSatisfied.get(`${m.planId ?? goal.planId}::${m.itemId}`) !== true)
     .map((m) => m.itemId);
 
   return {
@@ -1763,26 +1942,33 @@ export function stopGoalRecords(
   return projectGoal(store, goalId);
 }
 
-/** Build initial durable records before atomic persistence. */
+/** Build initial durable records before atomic persistence.
+ *  Every persisted milestone carries its Plan identity so duplicate local item
+ *  IDs across phases never collide. */
 export function buildGoalRecords(input: {
   loaded: LoadedGoal;
-  planId: string;
-  taskIdsByItemId: Record<string, string>;
+  /** Ordered Plan ids, one per loaded phase (phase zero is the primary). */
+  phasePlanIds: string[];
+  /** Per-phase local itemId → staged Task id maps, aligned with `phasePlanIds`. */
+  phaseTaskIdsByItemId: Array<Record<string, string>>;
   createdAt: string;
 }): { goal: GoalRecord; milestones: GoalMilestoneRecord[] } {
-  const { loaded, planId, taskIdsByItemId, createdAt } = input;
+  const { loaded, phasePlanIds, phaseTaskIdsByItemId, createdAt } = input;
   const goalId = loaded.goalFile;
   const emptyFacts: GoalEvidenceFacts = {
-    items: loaded.milestones.map((milestone) => {
-      const taskId = taskIdsByItemId[milestone.itemId];
-      return {
-        itemId: milestone.itemId,
-        ...(taskId === undefined ? {} : { taskId }),
-        taskStatus: "queued" as TaskStatus,
-        gate: milestone.gate,
-        satisfied: false,
-      };
-    }),
+    items: loaded.phases.flatMap((phase, phaseIndex) =>
+      phase.milestones.map((milestone) => {
+        const taskId = phaseTaskIdsByItemId[phaseIndex]![milestone.itemId];
+        return {
+          itemId: milestone.itemId,
+          planId: phasePlanIds[phaseIndex]!,
+          ...(taskId === undefined ? {} : { taskId }),
+          taskStatus: "queued" as TaskStatus,
+          gate: milestone.gate,
+          satisfied: false,
+        };
+      }),
+    ),
   };
   const digest = computeEvidenceDigest(emptyFacts);
   const goal: GoalRecord = {
@@ -1790,7 +1976,7 @@ export function buildGoalRecords(input: {
     version: 1,
     name: loaded.name,
     objective: loaded.objective,
-    planId,
+    planId: phasePlanIds[0]!,
     goalFile: loaded.goalFile,
     policy: {
       maxDurationMs: loaded.policy.maxDurationMs,
@@ -1808,20 +1994,24 @@ export function buildGoalRecords(input: {
     createdAt,
     updatedAt: createdAt,
   };
-  const indexById = new Map(loaded.plan.items.map((item, index) => [item.id, index]));
-  const milestones: GoalMilestoneRecord[] = loaded.milestones.map((milestone) => {
-    const taskId = taskIdsByItemId[milestone.itemId];
-    return {
-      goalId,
-      itemId: milestone.itemId,
-      ...(taskId === undefined ? {} : { taskId }),
-      gate: milestone.gate,
-      itemIndex: indexById.get(milestone.itemId) ?? 0,
-      satisfied: false,
-      reasonCode: "waiting-task" as const,
-      reason: reasonText("waiting-task"),
-      updatedAt: createdAt,
-    };
+  const milestones: GoalMilestoneRecord[] = loaded.phases.flatMap((phase, phaseIndex) => {
+    const planId = phasePlanIds[phaseIndex]!;
+    const indexById = new Map(phase.plan.items.map((item, index) => [item.id, index]));
+    return phase.milestones.map((milestone) => {
+      const taskId = phaseTaskIdsByItemId[phaseIndex]![milestone.itemId];
+      return {
+        goalId,
+        planId,
+        itemId: milestone.itemId,
+        ...(taskId === undefined ? {} : { taskId }),
+        gate: milestone.gate,
+        itemIndex: indexById.get(milestone.itemId) ?? 0,
+        satisfied: false,
+        reasonCode: "waiting-task" as const,
+        reason: reasonText("waiting-task"),
+        updatedAt: createdAt,
+      };
+    });
   });
   return { goal, milestones };
 }

@@ -45,11 +45,11 @@ import {
   parseDaemonShutdownIntent,
   requiresMatchingBuildIdentity,
 } from "../src/daemon/protocol.js";
-import { daemonSocketPath } from "../src/core/config.js";
+import { daemonSocketPath, taskPaths } from "../src/core/config.js";
 import { DetachedDaemonFixture } from "./helpers/detached-daemon.js";
 import { DaemonCoordinator, isManagedWorkerCommand, probeProvidersBounded } from "../src/daemon/coordinator.js";
 import { assertWorkPlan } from "../src/core/plan.js";
-import { buildTaskRecord, checkReviseEligibility, executeAttempt, prepareTaskWorkspace, registerTaskFromSpec } from "../src/core/runner.js";
+import { buildTaskRecord, checkReviseEligibility, correctTask, executeAttempt, prepareTaskWorkspace, registerTaskFromSpec } from "../src/core/runner.js";
 import { parseTaskSpec, REVIEW_GRAPH_TASK_FILE_PREFIX } from "../src/core/task.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
 import { SettingsService, type ForkLightSettings } from "../src/core/settings.js";
@@ -72,9 +72,15 @@ import { upsertModelConfig } from "../src/core/model-catalog.js";
 import { upsertWorkerProfile } from "../src/core/worker-profiles.js";
 import {
   buildTaskAdmissionPreview,
+  taskPolicyFromSettings,
   type SafeTaskAdmissionPreview,
 } from "../src/core/task-preview.js";
+import {
+  buildGoalValidationPreview,
+  type SafeGoalValidationPreview,
+} from "../src/core/goal-preview.js";
 import type { ProviderAuthInspector } from "../src/core/providers.js";
+import type { CorrectionExecutionIntent } from "../src/workers/types.js";
 
 // File-scope no-op SIGTERM handler: the coordinator's
 // authorizeActivationHandoffShutdown sends SIGTERM to its own pid,
@@ -95,6 +101,9 @@ test("identity matching protects state changes but lets a new build stop an old 
   assert.equal(requiresMatchingBuildIdentity("validate_file"), false);
   assert.equal(requiresMatchingBuildIdentity("submit_file"), true);
   assert.equal(requiresMatchingBuildIdentity("reuse_task_class"), true);
+  // Goal validation is read-only; submit remains mutating.
+  assert.equal(requiresMatchingBuildIdentity("goal_validate"), false);
+  assert.equal(requiresMatchingBuildIdentity("goal_submit_file"), true);
   // Adaptation preview is read-only; apply is mutating.
   assert.equal(requiresMatchingBuildIdentity("adaptation_preview"), false);
   assert.equal(requiresMatchingBuildIdentity("adaptation_apply"), true);
@@ -952,6 +961,7 @@ test("successful prerequisite queues each waiting dependent exactly once", async
   assert.equal(store.getTask(first.id).status, "waiting");
   assert.equal(store.getTask(second.id).status, "waiting");
 
+  // Legacy machine success (no material Candidate) remains sufficient.
   store.setTaskStatus(foundation.id, "succeeded", { error: null });
   await coordinator.recover();
   await coordinator.recover();
@@ -960,6 +970,222 @@ test("successful prerequisite queues each waiting dependent exactly once", async
   const queued = (coordinator.health().queuedTaskIds as string[]).sort();
   assert.deepEqual(queued, [first.id, second.id].sort());
   assert.equal(store.listEvents(first.id).filter((event) => event.type === "task.ready").length, 1);
+  await coordinator.shutdown();
+  store.close();
+});
+
+/** Seed machine success plus a material current Candidate for independent-Plan gates. */
+function seedMaterialCandidate(
+  store: StateStore,
+  taskId: string,
+  digest = "a".repeat(64),
+  opts: { filesChanged?: number; affectedPaths?: string[] } = {},
+): { attemptId: string; revisionId: string; verificationSequence: number } {
+  const task = store.getTask(taskId);
+  const attemptId = task.currentAttemptId ?? `attempt-${taskId.slice(0, 8)}`;
+  try {
+    store.getAttempt(attemptId);
+  } catch {
+    store.createAttempt({
+      id: attemptId,
+      taskId,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: `session-${attemptId}`,
+      rawLogPath: path.join(task.paths.logs, "worker.log"),
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+    });
+  }
+  store.updateTask(taskId, { currentAttemptId: attemptId });
+  store.setTaskStatus(taskId, "succeeded", { error: null, finishedAt: new Date().toISOString() });
+  store.addEvent(taskId, attemptId, "verification.completed", "verification passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [],
+    diffPath: task.paths.diff,
+    sourceUnchanged: false,
+  });
+  const verification = store.listEvents(taskId)
+    .filter((event) => event.type === "verification.completed")
+    .at(-1)!;
+  const revisionId = `rev-${digest.slice(0, 8)}`;
+  const filesChanged = opts.filesChanged ?? 1;
+  const affectedPaths = opts.affectedPaths ?? ["src/a.ts"];
+  store.addEvent(taskId, attemptId, "candidate.revision.captured", "revision captured", {
+    id: revisionId,
+    taskId,
+    attemptId,
+    attemptOrdinal: 1,
+    verificationEventSequence: verification.sequence,
+    patchDigest: digest,
+    filesChanged,
+    changedLines: filesChanged,
+    affectedPaths,
+    verificationPassed: true,
+    createdAt: new Date().toISOString(),
+  });
+  return { attemptId, revisionId, verificationSequence: verification.sequence };
+}
+
+function seedExactMainAccept(
+  store: StateStore,
+  taskId: string,
+  digest: string,
+  attemptId: string,
+  revisionId: string,
+  verificationSequence: number,
+): void {
+  store.addEvent(taskId, attemptId, "main-review.completed", "Main agent review: accept", {
+    decision: "accept",
+    reason: "Accepted for independent-Plan dependency gate fixture",
+    attemptId,
+    verificationEventSequence: verificationSequence,
+    candidateRevisionId: revisionId,
+    acceptedPatchDigest: digest,
+  });
+}
+
+function seedExactIntegration(
+  store: StateStore,
+  taskId: string,
+  digest: string,
+  status: "applied" | "rolled-back" | "retained-failure" = "applied",
+): void {
+  const suffix = `${status}-${store.listIntegrationResults(taskId).length}`;
+  const receiptId = `receipt-${taskId.slice(0, 8)}-${suffix}`;
+  store.saveIntegrationReceipt({
+    id: receiptId,
+    taskId,
+    patchDigest: digest,
+    affectedFiles: ["src/a.ts"],
+    rejectionReasons: [],
+    sourceEvidence: {},
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    consumed: true,
+  });
+  store.saveIntegrationResult({
+    id: `op-${taskId.slice(0, 8)}-${suffix}`,
+    receiptId,
+    taskId,
+    status,
+    ...(status === "applied" ? { appliedAt: new Date().toISOString() } : {}),
+    createdAt: new Date().toISOString(),
+    stages: status === "applied"
+      ? [
+          { stage: "source-applied", status: "passed" },
+          { stage: "source-verified", status: "passed" },
+          { stage: "artifact-built", status: "not-applicable" },
+          { stage: "runtime-activated", status: "not-applicable" },
+        ]
+      : [
+          { stage: "source-applied", status: "failed" },
+          { stage: "runtime-activated", status: "not-applicable" },
+        ],
+  });
+}
+
+test("independent Plan holds dependents until material Candidate is reviewed and delivered", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-dep-delivery-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const foundation = graphTask(store, "foundation-delivery");
+  const consumer = graphTask(store, "consumer-delivery");
+  createGraph(
+    store,
+    "dependency-delivery",
+    [
+      { itemId: "foundation", task: foundation },
+      { itemId: "consumer", task: consumer },
+    ],
+    [{ itemId: "consumer", dependsOnItemId: "foundation" }],
+  );
+  coordinator.queueTask(consumer.id);
+  assert.equal(store.getTask(consumer.id).status, "waiting");
+
+  const digest = "b".repeat(64);
+  const seeded = seedMaterialCandidate(store, foundation.id, digest);
+  await coordinator.recover();
+  await coordinator.recover();
+  // Material Candidate at machine success must not unlock the dependent.
+  assert.equal(store.getTask(consumer.id).status, "waiting");
+  assert.equal(store.listEvents(consumer.id).filter((e) => e.type === "task.ready").length, 0);
+
+  seedExactMainAccept(
+    store,
+    foundation.id,
+    digest,
+    seeded.attemptId,
+    seeded.revisionId,
+    seeded.verificationSequence,
+  );
+  await coordinator.recover();
+  // Accept alone is not final delivery.
+  assert.equal(store.getTask(consumer.id).status, "waiting");
+
+  seedExactIntegration(store, foundation.id, digest, "rolled-back");
+  await coordinator.recover();
+  // Rolled-back Integration never unlocks.
+  assert.equal(store.getTask(consumer.id).status, "waiting");
+  assert.equal(store.listEvents(consumer.id).filter((e) => e.type === "task.ready").length, 0);
+
+  // Successful final delivery of the exact accepted Candidate unlocks once.
+  seedExactIntegration(store, foundation.id, digest, "applied");
+  await coordinator.recover();
+  await coordinator.recover();
+  assert.equal(store.getTask(consumer.id).status, "queued");
+  assert.equal(store.listEvents(consumer.id).filter((e) => e.type === "task.ready").length, 1);
+
+  await coordinator.shutdown();
+  store.close();
+});
+
+test("zero-diff and legacy prerequisites complete at machine success without invented delivery", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-dep-zerodiff-"));
+  const store = new StateStore(home);
+  const coordinator = testCoordinator(store, 0);
+  const legacy = graphTask(store, "legacy-prereq");
+  const zeroDiff = graphTask(store, "zerodiff-prereq");
+  const legacyConsumer = graphTask(store, "legacy-consumer");
+  const zeroDiffConsumer = graphTask(store, "zerodiff-consumer");
+  createGraph(
+    store,
+    "dependency-zerodiff",
+    [
+      { itemId: "legacy", task: legacy },
+      { itemId: "zerodiff", task: zeroDiff },
+      { itemId: "legacy-consumer", task: legacyConsumer },
+      { itemId: "zerodiff-consumer", task: zeroDiffConsumer },
+    ],
+    [
+      { itemId: "legacy-consumer", dependsOnItemId: "legacy" },
+      { itemId: "zerodiff-consumer", dependsOnItemId: "zerodiff" },
+    ],
+  );
+  coordinator.queueTask(legacyConsumer.id);
+  coordinator.queueTask(zeroDiffConsumer.id);
+
+  store.setTaskStatus(legacy.id, "succeeded", { error: null });
+  seedMaterialCandidate(store, zeroDiff.id, "c".repeat(64), {
+    filesChanged: 0,
+    affectedPaths: [],
+  });
+  await coordinator.recover();
+  await coordinator.recover();
+  assert.equal(store.getTask(legacyConsumer.id).status, "queued");
+  assert.equal(store.getTask(zeroDiffConsumer.id).status, "queued");
+  assert.equal(
+    store.listEvents(legacyConsumer.id).filter((e) => e.type === "task.ready").length,
+    1,
+  );
+  assert.equal(
+    store.listEvents(zeroDiffConsumer.id).filter((e) => e.type === "task.ready").length,
+    1,
+  );
+
   await coordinator.shutdown();
   store.close();
 });
@@ -1192,6 +1418,151 @@ test("validate_file is read-only on success and rejection", async () => {
       const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
       assert.deepEqual(health.queuedTaskIds, []);
       assert.deepEqual(health.activeTaskIds, []);
+    } finally {
+      after.close();
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+// --- goal_validate read-only validation preview ---
+
+async function writeDaemonGoalFixture(home: string, options: {
+  name?: string;
+  objective?: string;
+  invalidDependency?: boolean;
+} = {}): Promise<{ goalFile: string; planFile: string }> {
+  const root = path.join(home, "goal");
+  await mkdir(root, { recursive: true });
+  const planFile = path.join(root, "plan.json");
+  const task = path.resolve("examples/deepseek-checkout.yaml");
+  await writeFile(
+    planFile,
+    JSON.stringify({
+      version: 1,
+      name: "Daemon goal validate plan",
+      objective: "Four-task plan for the read-only goal_validate method.",
+      items: options.invalidDependency === true
+        ? [
+            { id: "alpha", task, dependsOn: [] },
+            { id: "beta", task, dependsOn: ["ghost"] },
+          ]
+        : [
+            { id: "foundation", task, dependsOn: [] },
+            { id: "service", task, dependsOn: ["foundation"] },
+            { id: "console", task, dependsOn: ["foundation"] },
+            { id: "integrate-docs", task, dependsOn: ["service", "console"] },
+          ],
+    }),
+  );
+  const goalFile = path.join(root, "goal.json");
+  await writeFile(
+    goalFile,
+    JSON.stringify({
+      version: 1,
+      name: options.name ?? "Daemon goal validate",
+      objective: options.objective ?? "Prove the daemon goal_validate method is read-only.",
+      planFile,
+      policy: {
+        maxDurationMs: null,
+        noProgressTimeoutMs: null,
+        maxCorrectionRounds: 1,
+        maxReviewRounds: 1,
+        maxNoNewEvidenceCycles: 2,
+      },
+      milestones: options.invalidDependency === true
+        ? [
+            { itemId: "alpha", gate: "machine" },
+            { itemId: "beta", gate: "machine" },
+          ]
+        : [
+            { itemId: "foundation", gate: "machine" },
+            { itemId: "service", gate: "machine" },
+            { itemId: "console", gate: "machine" },
+            { itemId: "integrate-docs", gate: "machine" },
+          ],
+    }, null, 2),
+  );
+  return { goalFile, planFile };
+}
+
+test("goal_validate is read-only, shares one preview, and agrees with the shared builder", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-gv-daemon-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const { goalFile } = await writeDaemonGoalFixture(home);
+    const viaDaemon = await daemonRequest<SafeGoalValidationPreview>(
+      "goal_validate",
+      { goalFile },
+      home,
+    );
+    assert.equal(viaDaemon.passed, true);
+    assert.equal(viaDaemon.version, 1);
+    assert.equal(viaDaemon.phaseCount, 1);
+    assert.equal(viaDaemon.taskCount, 4);
+    assert.equal(viaDaemon.name, "Daemon goal validate");
+    assert.equal(viaDaemon.phases![0]!.milestones.length, 4);
+    assert.equal(viaDaemon.phases![0]!.milestones[1]!.itemId, "service");
+
+    // Parity: the daemon method shares the exact core projection.
+    const store = new StateStore(home);
+    try {
+      const viaShared = await buildGoalValidationPreview(
+        goalFile,
+        taskPolicyFromSettings(new SettingsService(store).get()),
+      );
+      assert.deepEqual(viaDaemon, viaShared);
+    } finally {
+      store.close();
+    }
+
+    const serialized = JSON.stringify(viaDaemon);
+    assert.doesNotMatch(serialized, /python3|unittest|deepseek|api-key|"goalFile"|"planFile"/);
+
+    // Read-only: no Goal, Plan, Task, event, receipt, or workspace created.
+    const after = new StateStore(home);
+    try {
+      assert.deepEqual(after.listGoals(), []);
+      assert.deepEqual(after.listTasks(), []);
+      assert.deepEqual(after.listPlans(), []);
+      const health = await daemonRequest<Record<string, unknown>>("health", {}, home);
+      assert.deepEqual(health.queuedTaskIds, []);
+      assert.deepEqual(health.activeTaskIds, []);
+    } finally {
+      after.close();
+    }
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("goal_validate returns validator issues and rejects relative paths read-only", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-gv-daemon-invalid-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const { goalFile } = await writeDaemonGoalFixture(home, { invalidDependency: true });
+    const viaDaemon = await daemonRequest<SafeGoalValidationPreview>(
+      "goal_validate",
+      { goalFile },
+      home,
+    );
+    assert.equal(viaDaemon.passed, false);
+    assert.ok(viaDaemon.issues.some((issue) => /unknown task/i.test(issue)));
+    assert.ok(viaDaemon.issues.join("\n").includes("ghost"));
+    assert.equal(viaDaemon.phases, undefined);
+
+    await assert.rejects(
+      async () => daemonRequest("goal_validate", { goalFile: "relative-goal.json" }, home),
+      /requires an absolute Goal file path/,
+    );
+
+    const after = new StateStore(home);
+    try {
+      assert.deepEqual(after.listGoals(), []);
+      assert.deepEqual(after.listTasks(), []);
     } finally {
       after.close();
     }
@@ -7705,6 +8076,167 @@ test("maxExtraAttempts zero does not block structured correction with maxMainCor
   } finally {
     await coordinator.shutdown();
     store.close();
+  }
+});
+
+test("structured correction carries typed Main correction intent through correctTask to the Codex adapter", async () => {
+  // End-to-end runner contract: coordinator.correct consumes a durable
+  // structured grant and queues the same Task; correctTask re-reads the grant,
+  // builds an explicit typed correction intent (never inferred from feedback
+  // text), and executeAttempt delivers it to the Codex adapter's hooks. The
+  // fake adapter simulates crossing the prior complete native Goal by requiring
+  // the typed intent before returning success.
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-correct-codex-intent-"));
+  const store = new StateStore(home);
+  try {
+    const project = path.join(home, "source");
+    await mkdir(path.join(project, "src"), { recursive: true });
+    await writeFile(path.join(project, "src", "hello.ts"), "export const n = 1;\n");
+
+    let capturedIntent: CorrectionExecutionIntent | undefined;
+    let capturedResuming: boolean | undefined;
+    let capturedFeedback: string | undefined;
+    resetWorkerRegistryForTests();
+    getWorkerAdapter("codex-cli");
+    const capabilities = getWorkerAdapter("codex-cli").capabilities();
+    registerWorkerAdapter({
+      name: "codex-cli",
+      displayName: "Codex CLI (correction intent)",
+      defaultExecutable: "codex",
+      capabilities: () => capabilities,
+      doctor: () => ({
+        runtime: "codex-cli",
+        ok: true,
+        executable: "codex",
+        issues: [],
+        capabilities,
+      }),
+      validateSpec: () => {},
+      effortArgs: () => [],
+      toolProtocolAppendix: () => [],
+      checkpointProtocolAppendix: () => [],
+      run: async (ctx) => {
+        capturedIntent = ctx.hooks?.correctionIntent;
+        capturedResuming = ctx.resuming;
+        capturedFeedback = ctx.hooks?.feedback;
+        await writeFile(path.join(ctx.task.paths.workspace, "src", "hello.ts"), "export const n = 2;\n");
+        return { status: "succeeded", exitCode: 0, resultText: "correction ok" };
+      },
+    });
+
+    const id = "abcd1234-abcd-4abc-8abc-abcdefabcdef";
+    const paths = taskPaths(home, id);
+    const spec = parseTaskSpec(
+      {
+        version: 2,
+        name: "codex-correction-intent",
+        project,
+        provider: { name: "openai", model: "gpt-5.6-luna", keychainService: "forklight.openai.api-key" },
+        runtime: { name: "codex-cli", executable: "codex", effort: "high", maxBudgetUsd: null },
+        workspace: { exclude: [] },
+        worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+        executionPreference: "auto",
+        completionPolicy: { noChangeMode: "off", changeBudgetMode: "off" },
+        contract: {
+          outcome: "Observable outcome text here",
+          context: ["ctx"],
+          inScope: ["in"],
+          outOfScope: ["out"],
+          executionSteps: ["step one", "step two"],
+          deliverables: ["d1"],
+          modules: [{
+            name: "m1",
+            responsibility: "does work",
+            consumes: ["a"],
+            produces: ["b"],
+            boundaries: ["c"],
+          }],
+          callChain: ["one", "two"],
+          scenarios: [
+            { name: "normal-correction", given: "g", when: "w", then: "t" },
+            { name: "boundary-no-authority", given: "g", when: "w", then: "t" },
+          ],
+          risks: ["r"],
+          changeBudget: { maxFiles: 4, maxDiffLines: 100 },
+        },
+        acceptance: { criteria: ["c1"], commands: ["true"] },
+      },
+      project,
+    ) as TaskSpec;
+    assert.equal(spec.executionMode, "native-goal", "auto preference freezes native-goal for Codex");
+    const task: TaskRecord = {
+      id,
+      name: spec.name,
+      status: "queued",
+      sourcePath: project,
+      taskFile: path.join(home, "task.yaml"),
+      spec,
+      paths,
+      sessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    };
+    store.createTask(task);
+    await prepareTaskWorkspace(store, store.getTask(id));
+    store.setTaskStatus(id, "succeeded", { error: null });
+
+    const attemptId = seedPassingVerification(store, store.getTask(id));
+    await mkdir(task.paths.root, { recursive: true });
+    await writeFile(task.paths.diff, "succeeded candidate bytes\n");
+    const verSeq = store.listEvents(id)
+      .filter((e) => e.type === "verification.completed" && e.attemptId === attemptId)
+      .reduce((latest, e) => latest === undefined || e.sequence > latest.sequence ? e : latest, undefined as { sequence: number } | undefined);
+    assert.ok(verSeq !== undefined, "verification event must exist");
+    const revision = await captureCandidateRevision(
+      store, store.getTask(id), store.getAttempt(attemptId),
+      verSeq!.sequence, true, ["src/module.ts"], 1, 4,
+    );
+    store.addEvent(id, attemptId, "main-review.completed",
+      "Main review: revise", {
+        decision: "revise", reason: "Repair the remaining gap",
+        attemptId, verificationEventSequence: verSeq!.sequence,
+      });
+
+    const coordinator = testCoordinator(store, 0);
+    try {
+      const queued = coordinator.correct(
+        id,
+        "Repair the remaining module boundary",
+        null,
+        true,
+        revision.id,
+        ["src/module.ts"],
+        [{
+          description: "Repair the remaining module issue",
+          acceptanceExpectation: "The original acceptance command passes",
+        }],
+      );
+      assert.equal(queued.status, "queued");
+      const grantEvent = store.listEvents(id)
+        .find((e) => e.type === "attempt.authorization.granted")!;
+      const grant = grantEvent.payload as Record<string, unknown>;
+      assert.equal(grant.kind, "correction");
+      assert.equal(grant.candidateRevisionId, revision.id);
+      assert.equal(typeof grant.gapContractDigest, "string");
+
+      const result = await correctTask(store, id);
+      assert.equal(result.task.status, "succeeded");
+      assert.equal(result.attempt.ordinal, 2);
+      assert.equal(capturedResuming, true, "correction resumes the existing session");
+      assert.ok(capturedFeedback?.includes("Repair the remaining module"), "canonical correction feedback reaches the adapter");
+      assert.deepEqual(capturedIntent, {
+        kind: "main-correction",
+        authorizationEventSequence: grantEvent.sequence,
+        candidateRevisionId: revision.id,
+        gapContractDigest: grant.gapContractDigest,
+      });
+    } finally {
+      await coordinator.shutdown();
+    }
+  } finally {
+    store.close();
+    resetWorkerRegistryForTests();
+    await rm(home, { recursive: true, force: true });
   }
 });
 

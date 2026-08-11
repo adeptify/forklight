@@ -1,10 +1,12 @@
 # ForkLight development guidance
 
-- Read `PROJECT.md` before planning meaningful ForkLight work. It is the only
-  project-management source for the Goal, M0-M5 status, current actions, and
-  durable decisions. Reconcile it against Git, Store, build, Daemon, and Hub
-  truth at stable checkpoints; never create or append a second status,
-  roadmap, progress, or dogfood log.
+- Read `goals/forklight-main-token-leverage/contract.md`, `plan.md`,
+  `progress.md`, and `decisions.md` before meaningful ForkLight work. That
+  Goal directory is the only project-management entry point. Reconcile it
+  against Git, Store, build, Daemon, CLI/API and Hub truth at stable
+  checkpoints; never create a second status, roadmap, progress, or dogfood log.
+  `PROJECT.md` is a temporary legacy snapshot to be compressed during
+  start-up consolidation.
 - **ForkLight must dogfood ForkLight for its own meaningful iteration.** For
   every non-trivial ForkLight feature, bug fix, refactor, or product-quality
   change, the Main must first run `forklight health`, define a bounded Task

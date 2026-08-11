@@ -276,6 +276,275 @@ test("dependencies prevent Ready even when raw status is queued", () => {
   assert.equal(result.placementReason, "dependency-unsatisfied");
 });
 
+test("independent Plan hierarchy holds Ready until material Candidate is delivered", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-dep-delivery-"));
+  const store = new StateStore(home);
+  try {
+    const foundation = taskRecord("wh-foundation", {
+      status: "succeeded",
+      name: "Foundation",
+    });
+    const consumer = taskRecord("wh-consumer", {
+      status: "queued",
+      name: "Consumer",
+    });
+    store.createTask(foundation);
+    store.createTask(consumer);
+    const plan: PlanRecord = {
+      id: "wh-dep-plan",
+      name: "Independent delivery gate",
+      objective: "Hold until reviewed delivery",
+      planFile: "/tmp/wh-dep.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    store.createPlanGraph(
+      plan,
+      [
+        {
+          id: "foundation",
+          planId: plan.id,
+          taskId: foundation.id,
+          itemIndex: 0,
+          taskFile: foundation.taskFile,
+        },
+        {
+          id: "consumer",
+          planId: plan.id,
+          taskId: consumer.id,
+          itemIndex: 1,
+          taskFile: consumer.taskFile,
+        },
+      ],
+      [{ planId: plan.id, itemId: "consumer", dependsOnItemId: "foundation" }],
+    );
+
+    const digest = "e".repeat(64);
+    // Material Candidate without Main accept.
+    const attemptId = `attempt-${foundation.id.slice(0, 8)}`;
+    store.createAttempt({
+      id: attemptId,
+      taskId: foundation.id,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: `session-${attemptId}`,
+      rawLogPath: path.join(foundation.paths.logs, "worker.log"),
+      startedAt: TS,
+      finishedAt: TS,
+    });
+    store.updateTask(foundation.id, { currentAttemptId: attemptId });
+    store.setTaskStatus(foundation.id, "succeeded", { error: null, finishedAt: TS });
+    store.addEvent(foundation.id, attemptId, "verification.completed", "verification passed", {
+      passed: true,
+      commands: [],
+    });
+    const verification = store.listEvents(foundation.id)
+      .filter((e) => e.type === "verification.completed")
+      .at(-1)!;
+    const revisionId = `rev-${digest.slice(0, 8)}`;
+    store.addEvent(foundation.id, attemptId, "candidate.revision.captured", "revision captured", {
+      id: revisionId,
+      taskId: foundation.id,
+      attemptId,
+      attemptOrdinal: 1,
+      verificationEventSequence: verification.sequence,
+      patchDigest: digest,
+      filesChanged: 1,
+      changedLines: 1,
+      affectedPaths: ["src/a.ts"],
+      verificationPassed: true,
+      createdAt: TS,
+    });
+
+    const held = projectWorkHierarchy(store, (task) => summaryFor(task));
+    const heldCard = findCard(held, consumer.id)!;
+    assert.equal(heldCard.column, "not-started");
+    assert.equal(heldCard.placementReason, "dependency-unsatisfied");
+    assert.equal(heldCard.namedDependencies[0]?.state, "waiting");
+    assert.ok(
+      heldCard.blockers.some((b) => b.code === "dependency-waiting"),
+      "held card names the unsatisfied dependency",
+    );
+    assert.equal(heldCard.actionPolicy.destinations.ready.disposition, "automatic-only");
+    assert.equal(heldCard.actionPolicy.destinations.ready.reason, "dependency-held");
+
+    // Accept without Integration still holds.
+    store.addEvent(foundation.id, attemptId, "main-review.completed", "Main agent review: accept", {
+      decision: "accept",
+      reason: "Accepted for hierarchy delivery gate",
+      attemptId,
+      verificationEventSequence: verification.sequence,
+      candidateRevisionId: revisionId,
+      acceptedPatchDigest: digest,
+    });
+    const acceptedCard = findCard(
+      projectWorkHierarchy(store, (task) => summaryFor(task)),
+      consumer.id,
+    )!;
+    assert.equal(acceptedCard.column, "not-started");
+    assert.equal(acceptedCard.placementReason, "dependency-unsatisfied");
+    assert.equal(acceptedCard.namedDependencies[0]?.state, "waiting");
+
+    // Rolled-back Integration still holds.
+    store.saveIntegrationReceipt({
+      id: "receipt-rb",
+      taskId: foundation.id,
+      patchDigest: digest,
+      affectedFiles: ["src/a.ts"],
+      rejectionReasons: [],
+      sourceEvidence: {},
+      createdAt: TS,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      consumed: true,
+    });
+    store.saveIntegrationResult({
+      id: "op-rb",
+      receiptId: "receipt-rb",
+      taskId: foundation.id,
+      status: "rolled-back",
+      createdAt: TS,
+    });
+    const rolledCard = findCard(
+      projectWorkHierarchy(store, (task) => summaryFor(task)),
+      consumer.id,
+    )!;
+    assert.equal(rolledCard.column, "not-started");
+    assert.equal(rolledCard.placementReason, "dependency-unsatisfied");
+    assert.equal(rolledCard.namedDependencies[0]?.state, "waiting");
+
+    // Exact successful delivery unlocks Ready.
+    store.saveIntegrationReceipt({
+      id: "receipt-ok",
+      taskId: foundation.id,
+      patchDigest: digest,
+      affectedFiles: ["src/a.ts"],
+      rejectionReasons: [],
+      sourceEvidence: {},
+      createdAt: TS,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      consumed: true,
+    });
+    store.saveIntegrationResult({
+      id: "op-ok",
+      receiptId: "receipt-ok",
+      taskId: foundation.id,
+      status: "applied",
+      appliedAt: TS,
+      createdAt: TS,
+      stages: [
+        { stage: "source-applied", status: "passed" },
+        { stage: "source-verified", status: "passed" },
+        { stage: "artifact-built", status: "not-applicable" },
+        { stage: "runtime-activated", status: "not-applicable" },
+      ],
+    });
+    const readyCard = findCard(
+      projectWorkHierarchy(store, (task) => summaryFor(task)),
+      consumer.id,
+    )!;
+    assert.equal(readyCard.column, "ready");
+    assert.equal(readyCard.placementReason, "queued-ready");
+    assert.equal(readyCard.namedDependencies[0]?.state, "satisfied");
+    assert.equal(
+      readyCard.blockers.some((b) => b.code === "dependency-waiting" || b.code === "dependency-failed"),
+      false,
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("independent Plan hierarchy completes legacy and zero-diff prerequisites at machine success", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-dep-legacy-"));
+  const store = new StateStore(home);
+  try {
+    const legacy = taskRecord("wh-legacy", { status: "succeeded", name: "Legacy" });
+    const zero = taskRecord("wh-zero", { status: "succeeded", name: "ZeroDiff" });
+    const legacyConsumer = taskRecord("wh-legacy-c", { status: "queued", name: "LegacyConsumer" });
+    const zeroConsumer = taskRecord("wh-zero-c", { status: "queued", name: "ZeroConsumer" });
+    for (const task of [legacy, zero, legacyConsumer, zeroConsumer]) store.createTask(task);
+    const plan: PlanRecord = {
+      id: "wh-legacy-plan",
+      name: "Legacy zero-diff gate",
+      objective: "Machine success is enough",
+      planFile: "/tmp/wh-legacy.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    store.createPlanGraph(
+      plan,
+      [
+        { id: "legacy", planId: plan.id, taskId: legacy.id, itemIndex: 0, taskFile: legacy.taskFile },
+        { id: "zero", planId: plan.id, taskId: zero.id, itemIndex: 1, taskFile: zero.taskFile },
+        {
+          id: "legacy-c",
+          planId: plan.id,
+          taskId: legacyConsumer.id,
+          itemIndex: 2,
+          taskFile: legacyConsumer.taskFile,
+        },
+        {
+          id: "zero-c",
+          planId: plan.id,
+          taskId: zeroConsumer.id,
+          itemIndex: 3,
+          taskFile: zeroConsumer.taskFile,
+        },
+      ],
+      [
+        { planId: plan.id, itemId: "legacy-c", dependsOnItemId: "legacy" },
+        { planId: plan.id, itemId: "zero-c", dependsOnItemId: "zero" },
+      ],
+    );
+
+    // Zero-diff revision is verification-complete, not delivery-pending.
+    const attemptId = "attempt-zero";
+    store.createAttempt({
+      id: attemptId,
+      taskId: zero.id,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: "session-zero",
+      rawLogPath: path.join(zero.paths.logs, "worker.log"),
+      startedAt: TS,
+      finishedAt: TS,
+    });
+    store.updateTask(zero.id, { currentAttemptId: attemptId });
+    store.addEvent(zero.id, attemptId, "verification.completed", "verification passed", {
+      passed: true,
+      commands: [],
+    });
+    const verification = store.listEvents(zero.id)
+      .filter((e) => e.type === "verification.completed")
+      .at(-1)!;
+    store.addEvent(zero.id, attemptId, "candidate.revision.captured", "empty revision", {
+      id: "rev-zero",
+      taskId: zero.id,
+      attemptId,
+      attemptOrdinal: 1,
+      verificationEventSequence: verification.sequence,
+      patchDigest: "f".repeat(64),
+      filesChanged: 0,
+      changedLines: 0,
+      affectedPaths: [],
+      verificationPassed: true,
+      createdAt: TS,
+    });
+
+    const view = projectWorkHierarchy(store, (task) => summaryFor(task));
+    const legacyCard = findCard(view, legacyConsumer.id)!;
+    assert.equal(legacyCard.column, "ready");
+    assert.equal(legacyCard.placementReason, "queued-ready");
+    assert.equal(legacyCard.namedDependencies[0]?.state, "satisfied");
+    const zeroCard = findCard(view, zeroConsumer.id)!;
+    assert.equal(zeroCard.column, "ready");
+    assert.equal(zeroCard.placementReason, "queued-ready");
+    assert.equal(zeroCard.namedDependencies[0]?.state, "satisfied");
+  } finally {
+    store.close();
+  }
+});
+
 test("dependency-held blocked and waiting map to not-started not stopped-failed", () => {
   for (const status of ["blocked", "waiting"] as const) {
     const result = mapTaskToHierarchyColumn({
@@ -1779,6 +2048,316 @@ test("FL-108C1 completed Goal gate cards expose coded gate-satisfied messages", 
     assert.equal(card.nextActionMessage?.params?.gate, "machine");
     // Legacy string preserved for compatibility consumers
     assert.equal(card.nextAction, "Machine gate is satisfied.");
+  } finally {
+    store.close();
+  }
+});
+
+test("multi-Plan Goal nests associated Plans in ordinal order and never as independent", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-multi-plan-"));
+  const store = new StateStore(home);
+  try {
+    const primaryTask = taskRecord("mp-primary-task", {
+      status: "queued",
+      name: "Primary phase task",
+      project: "/tmp/multi-goal",
+      workerProfileId: "deepseek-builder",
+    });
+    const laterTask = taskRecord("mp-later-task", {
+      status: "running",
+      name: "Later phase task",
+      project: "/tmp/multi-goal",
+      workerProfileId: "grok-builder",
+    });
+    const indepTask = taskRecord("mp-indep-task", {
+      status: "queued",
+      name: "Truly independent",
+      project: "/tmp/other",
+      workerProfileId: "deepseek-builder",
+    });
+
+    const primaryPlan: PlanRecord = {
+      id: "mp-primary",
+      name: "Primary phase",
+      objective: "First ordered Plan",
+      planFile: "/tmp/mp-primary.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    const laterPlan: PlanRecord = {
+      id: "mp-later",
+      name: "Later phase",
+      objective: "Second ordered Plan",
+      planFile: "/tmp/mp-later.yaml",
+      createdAt: TS,
+      updatedAt: "2026-08-03T13:00:00.000Z",
+    };
+    const indepPlan: PlanRecord = {
+      id: "mp-indep",
+      name: "Independent",
+      objective: "No Goal",
+      planFile: "/tmp/mp-indep.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    const goal: GoalRecord = {
+      id: "mp-goal",
+      version: 1,
+      name: "Multi plan goal",
+      objective: "Own ordered Plans",
+      planId: primaryPlan.id,
+      goalFile: "/tmp/mp-goal.json",
+      policy: {
+        maxDurationMs: null,
+        noProgressTimeoutMs: null,
+        maxCorrectionRounds: 1,
+        maxReviewRounds: 1,
+        maxNoNewEvidenceCycles: 1,
+      },
+      status: "running",
+      reasonCode: "none",
+      reason: "progressing",
+      evidenceDigest: "f".repeat(64),
+      evidenceAt: TS,
+      counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    const milestones: GoalMilestoneRecord[] = [
+      {
+        goalId: goal.id,
+        itemId: "p1",
+        taskId: primaryTask.id,
+        gate: "machine",
+        itemIndex: 0,
+        satisfied: false,
+        reasonCode: "waiting-machine",
+        reason: "waiting",
+        updatedAt: TS,
+      },
+    ];
+
+    store.createPlanExecutionWithGoal(
+      [{ task: primaryTask, creationEvent: { summary: "created", payload: {} } }],
+      primaryPlan,
+      [{
+        id: "p1",
+        planId: primaryPlan.id,
+        taskId: primaryTask.id,
+        itemIndex: 0,
+        taskFile: primaryTask.taskFile,
+      }],
+      [],
+      goal,
+      milestones,
+    );
+    store.createTask(laterTask);
+    store.createPlanGraph(
+      laterPlan,
+      [{
+        id: "l1",
+        planId: laterPlan.id,
+        taskId: laterTask.id,
+        itemIndex: 0,
+        taskFile: laterTask.taskFile,
+      }],
+      [],
+    );
+    store.createTask(indepTask);
+    store.createPlanGraph(
+      indepPlan,
+      [{
+        id: "i1",
+        planId: indepPlan.id,
+        taskId: indepTask.id,
+        itemIndex: 0,
+        taskFile: indepTask.taskFile,
+      }],
+      [],
+    );
+    store.setTaskStatus(laterTask.id, "running");
+    store.attachPlanToGoal(goal.id, laterPlan.id);
+
+    const projectSurface = (task: TaskRecord): SafeTaskSummary => {
+      if (task.id === laterTask.id) return summaryFor(task, "worker-running");
+      return summaryFor(task, "queued");
+    };
+
+    const view = projectWorkHierarchy(store, projectSurface);
+    assert.equal(view.goals.length, 1);
+    const goalLane = view.goals[0]!;
+    assert.equal(goalLane.goalId, "mp-goal");
+    assert.deepEqual(
+      goalLane.plans.map((plan) => plan.planId),
+      ["mp-primary", "mp-later"],
+    );
+    // Associated later Plan is not independent; only the true independent Plan is.
+    assert.equal(view.independentPlans.length, 1);
+    assert.equal(view.independentPlans[0]!.planId, "mp-indep");
+
+    const laterCard = findCard(view, laterTask.id)!;
+    assert.equal(laterCard.breadcrumb.goalId, "mp-goal");
+    assert.equal(laterCard.breadcrumb.planId, "mp-later");
+    assert.equal(laterCard.column, "running");
+    // Later Plans are nested ownership only — no primary milestone gate rewrite.
+    assert.equal(laterCard.goalGate, undefined);
+
+    // Filter to the later Plan Task: keep Goal + later Plan, omit empty primary.
+    const filtered = projectWorkHierarchy(store, projectSurface, {
+      project: "/tmp/multi-goal",
+      column: "running",
+    });
+    assert.equal(filtered.goals.length, 1);
+    assert.equal(filtered.goals[0]!.goalId, "mp-goal");
+    assert.deepEqual(
+      filtered.goals[0]!.plans.map((plan) => plan.planId),
+      ["mp-later"],
+    );
+    assert.equal(filtered.independentPlans.length, 0);
+    assert.equal(filtered.oneOffTasks, undefined);
+    const filteredCard = findCard(filtered, laterTask.id)!;
+    assert.equal(filteredCard.breadcrumb.goalId, "mp-goal");
+    assert.equal(filteredCard.breadcrumb.planId, "mp-later");
+    // Hierarchy remains Goal -> Plan -> Task, never a flat Task list.
+    assert.equal(filtered.goals[0]!.kind, "goal");
+    assert.equal(filtered.goals[0]!.plans[0]!.kind, "plan");
+  } finally {
+    store.close();
+  }
+});
+
+test("supervised multi-phase Goal exposes currentPlanId and phase-blocks later phases", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-wh-phase-"));
+  const store = new StateStore(home);
+  try {
+    const phaseOneTask = taskRecord("wh-p1-task", {
+      status: "queued",
+      name: "Phase one task",
+      project: "/tmp/phases",
+      workerProfileId: "deepseek-builder",
+    });
+    const phaseTwoTask = taskRecord("wh-p2-task", {
+      status: "queued",
+      name: "Phase two task",
+      project: "/tmp/phases",
+      workerProfileId: "deepseek-builder",
+    });
+    const planOne: PlanRecord = {
+      id: "wh-phase-one",
+      name: "Phase one",
+      objective: "First supervised phase",
+      planFile: "/tmp/wh-phase-one.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    const planTwo: PlanRecord = {
+      id: "wh-phase-two",
+      name: "Phase two",
+      objective: "Second supervised phase",
+      planFile: "/tmp/wh-phase-two.yaml",
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    const goal: GoalRecord = {
+      id: "wh-phase-goal",
+      version: 1,
+      name: "Phase goal",
+      objective: "Two supervised phases",
+      planId: planOne.id,
+      goalFile: "/tmp/wh-phase-goal.json",
+      policy: {
+        maxDurationMs: null,
+        noProgressTimeoutMs: null,
+        maxCorrectionRounds: 1,
+        maxReviewRounds: 1,
+        maxNoNewEvidenceCycles: 1,
+      },
+      status: "running",
+      reasonCode: "none",
+      reason: "progressing",
+      evidenceDigest: "b".repeat(64),
+      evidenceAt: TS,
+      counters: { correctionRounds: 0, reviewRounds: 0, noNewEvidenceCycles: 0 },
+      createdAt: TS,
+      updatedAt: TS,
+    };
+    const milestones: GoalMilestoneRecord[] = [
+      {
+        goalId: goal.id,
+        planId: planOne.id,
+        itemId: "p1",
+        taskId: phaseOneTask.id,
+        gate: "machine",
+        itemIndex: 0,
+        satisfied: false,
+        reasonCode: "waiting-machine",
+        reason: "waiting",
+        updatedAt: TS,
+      },
+      {
+        goalId: goal.id,
+        planId: planTwo.id,
+        itemId: "p2",
+        taskId: phaseTwoTask.id,
+        gate: "machine",
+        itemIndex: 0,
+        satisfied: false,
+        reasonCode: "waiting-machine",
+        reason: "waiting",
+        updatedAt: TS,
+      },
+    ];
+    const associations = [
+      { goalId: goal.id, planId: planOne.id, ordinal: 0, createdAt: TS },
+      { goalId: goal.id, planId: planTwo.id, ordinal: 1, createdAt: TS },
+    ];
+    store.createGoalPhasesExecution({
+      registrationsByPlan: [
+        [{ task: phaseOneTask, creationEvent: { summary: "created", payload: {} } }],
+        [{ task: phaseTwoTask, creationEvent: { summary: "created", payload: {} } }],
+      ],
+      plans: [planOne, planTwo],
+      itemsByPlan: [
+        [{ id: "p1", planId: planOne.id, taskId: phaseOneTask.id, itemIndex: 0, taskFile: phaseOneTask.taskFile }],
+        [{ id: "p2", planId: planTwo.id, taskId: phaseTwoTask.id, itemIndex: 0, taskFile: phaseTwoTask.taskFile }],
+      ],
+      dependenciesByPlan: [[], []],
+      goal,
+      associations,
+      milestones,
+    });
+
+    const projectSurface = (task: TaskRecord): SafeTaskSummary => summaryFor(task, "queued");
+    const view = projectWorkHierarchy(store, projectSurface);
+    assert.equal(view.goals.length, 1);
+    const goalLane = view.goals[0]!;
+    assert.equal(goalLane.currentPlanId, planOne.id);
+    assert.deepEqual(
+      goalLane.plans.map((plan) => plan.planId),
+      [planOne.id, planTwo.id],
+    );
+
+    const phaseOneCard = findCard(view, phaseOneTask.id)!;
+    assert.equal(phaseOneCard.column, "ready", "current phase card is ready");
+    const phaseTwoCard = findCard(view, phaseTwoTask.id)!;
+    assert.equal(phaseTwoCard.column, "not-started", "later supervised phase stays not-started");
+    assert.ok(
+      phaseTwoCard.blockers.some((blocker) => /earlier Goal phase/i.test(blocker.label)),
+      "phase blocker carries a plain phase-prerequisite reason",
+    );
+
+    // Advance phase one: seed durable machine gate evidence AND mark the
+    // milestone row satisfied so the stored flag matches live gate evaluation.
+    seedMachineSucceeded(store, phaseOneTask.id);
+    store.saveGoal(goal, [
+      { ...milestones[0]!, satisfied: true, reasonCode: "none", reason: "satisfied", updatedAt: TS },
+      milestones[1]!,
+    ]);
+    const advanced = projectWorkHierarchy(store, projectSurface);
+    const advancedLane = advanced.goals[0]!;
+    assert.equal(advancedLane.currentPlanId, planTwo.id);
+    const advancedPhaseTwo = findCard(advanced, phaseTwoTask.id)!;
+    assert.equal(advancedPhaseTwo.column, "ready", "current phase advances to phase two");
   } finally {
     store.close();
   }

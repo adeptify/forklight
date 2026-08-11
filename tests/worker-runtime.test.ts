@@ -1139,6 +1139,12 @@ test("runCodexWorker launches a fake Codex, normalizes success with exact usage,
       "utf8",
     );
     assertCodexEditablePromptContract(promptArtifact);
+    assert.match(promptArtifact, /Worker validation self-check/);
+    assert.match(promptArtifact, /acceptance-1: true/);
+    assert.doesNotMatch(
+      promptArtifact,
+      /Do not integrate source, commit, push, run acceptance commands yourself/,
+    );
     assertCodexForbiddenAuthorityAbsent(promptArtifact, envDump.argv);
   } finally {
     for (const key of parentEnvKeys) {
@@ -4261,6 +4267,648 @@ test("Codex native Goal resume fails closed when the persisted Goal cannot conti
     assert.match(result.error ?? "", /cannot continue/);
   } finally {
     second.store.close();
+  }
+});
+
+// --- Completed-Goal Main correction (FL-112E4) ---
+
+/** Canonical typed Main-correction intent used by the deterministic fixtures. */
+function correctionIntent42(): import("../src/workers/types.js").CorrectionExecutionIntent {
+  return { kind: "main-correction", authorizationEventSequence: 42 };
+}
+
+/** Durable original binding for a completed original Goal (no correction unit). */
+async function completedOriginalBinding(): Promise<Record<string, unknown>> {
+  return runInterruptedNativeGoal();
+}
+
+test("Codex native Goal structured correction crosses a prior complete Goal on the exact Thread", async () => {
+  // Original Goal completed; Main authorized one structured correction. The
+  // adapter must reuse the exact durable Thread and start one fresh bounded
+  // app-server execution unit instead of failing on the complete Goal. The
+  // installed app-server emits no repeated Goal-complete notification for the
+  // correction Turn because the persisted Goal is already complete, so the
+  // exact current-Turn completion plus its own canonical final output must
+  // close the Worker without a second Goal update. The short no-progress
+  // backstop turns a regression into a fast no-progress failure instead of a
+  // 30-minute hang.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  const binding = await completedOriginalBinding();
+  const fixture = await codexNativeGoalFixture({
+    effectivePolicy: {
+      profileId: "test",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+    },
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "complete",
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "thread/tokenUsage/updated", params: goalUsageParams() },
+          { method: "item/completed", params: itemCompletedParams({ text: "Correction finished" }) },
+          { method: "turn/completed", params: turnCompletedParams() },
+        ],
+      },
+    },
+  });
+  await writeFile(fixture.bindingPath, `${JSON.stringify(binding, null, 2)}\n`, { mode: 0o600 });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: true,
+      hooks: {
+        feedback: "Canonical structured correction instruction",
+        correctionIntent: correctionIntent42(),
+      },
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "succeeded", "correction closes on its exact Turn without a repeated Goal-complete");
+    assert.equal(result.resultText, "Correction finished");
+    assert.deepEqual(result.usage, {
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadInputTokens: 40,
+      cacheCreationInputTokens: 3,
+      source: "terminal-result",
+      complete: true,
+    });
+
+    const requests = await readRequestLog(fixture.requestLog);
+    assert.ok(requests.some((r) => r.method === "thread/resume"), "correction resumes the exact Thread");
+    assert.ok(requests.some((r) => r.method === "thread/goal/get"), "correction verifies the prior Goal identity");
+    assert.equal(
+      requests.some((r) => r.method === "thread/goal/set"),
+      false,
+      "completed Goal status is never reset to active",
+    );
+    assert.ok(requests.some((r) => r.method === "turn/start"), "fresh correction Turn starts on the same Thread");
+    assert.equal(requests.some((r) => r.method === "thread/start"), false, "no new Thread is created");
+
+    const persisted = await readBindingJson(fixture.bindingPath);
+    assert.equal(persisted.threadId, "thread-1", "exact Thread retained");
+    assert.equal(persisted.correctionUnit, true, "fresh correction unit durably bound");
+    assert.equal(persisted.authorizationEventSequence, 42, "grant identity durably bound");
+
+    const events = fixture.store.listEvents(fixture.task.id);
+    const resumed = events.find((e) => e.type === "worker.resumed");
+    assert.ok(resumed, "worker.resumed persisted");
+    assert.equal(
+      (resumed?.payload as { correctionUnit?: unknown }).correctionUnit,
+      true,
+      "evidence distinguishes completed-Goal correction from ordinary resume",
+    );
+    assert.equal(events.filter((e) => e.type === "worker.completed").length, 1);
+    // A terminal correction Turn with its own final output is never narrated as
+    // "continuing": the join closes the Worker once.
+    assert.ok(
+      !events.some((e) => (e.payload as { activityKind?: string } | undefined)?.activityKind === "goal-continuing"),
+      "terminal correction Turn is not narrated as continuing",
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal ordinary resume keeps strict Goal-complete join", async () => {
+  // Mirrors the correction Turn but without any correction authority: the
+  // resumed active Goal completes its Turn with final output and no current-Turn
+  // Goal-complete event. Ordinary Goal success stays closed and the existing
+  // no-progress watchdog applies.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  const binding = await completedOriginalBinding();
+  const fixture = await codexNativeGoalFixture({
+    effectivePolicy: {
+      profileId: "test",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+    },
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "active",
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "thread/tokenUsage/updated", params: goalUsageParams() },
+          { method: "item/completed", params: itemCompletedParams() },
+          { method: "turn/completed", params: turnCompletedParams() },
+        ],
+      },
+    },
+  });
+  await writeFile(fixture.bindingPath, `${JSON.stringify(binding, null, 2)}\n`, { mode: 0o600 });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: true,
+      hooks: {},
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.policyLimit?.category, "no-progress");
+    assert.equal(result.resultText, undefined, "ordinary resume cannot close without current-Turn Goal-complete evidence");
+    assert.ok(!fixture.store.listEvents(fixture.task.id).some((e) => e.type === "worker.completed"));
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal correction without canonical final output stays fail-closed", async () => {
+  // The correction unit is admitted across the completed Goal, but the exact
+  // Turn completes without its own canonical final output. Correction terminal
+  // authority never invents success: the join stays closed and the existing
+  // no-progress policy terminates the Worker.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  const binding = await completedOriginalBinding();
+  const fixture = await codexNativeGoalFixture({
+    effectivePolicy: {
+      profileId: "test",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+    },
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "complete",
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "thread/tokenUsage/updated", params: goalUsageParams() },
+          { method: "turn/completed", params: turnCompletedParams() },
+        ],
+      },
+    },
+  });
+  await writeFile(fixture.bindingPath, `${JSON.stringify(binding, null, 2)}\n`, { mode: 0o600 });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: true,
+      hooks: { correctionIntent: correctionIntent42() },
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.policyLimit?.category, "no-progress");
+    assert.equal(result.resultText, undefined, "missing final output never invents success");
+    assert.ok(!fixture.store.listEvents(fixture.task.id).some((e) => e.type === "worker.completed"));
+    const persisted = await readBindingJson(fixture.bindingPath);
+    assert.equal(persisted.correctionUnit, true, "authority was durably bound but never invented success");
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal correction failed or interrupted Turn cannot join", async () => {
+  // The exact correction Turn reports failed/interrupted even with a final item.
+  // Exact current-Turn completion is required; a failed/interrupted Turn never
+  // succeeds under correction authority.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  for (const status of ["failed", "interrupted"] as const) {
+    const binding = await completedOriginalBinding();
+    const fixture = await codexNativeGoalFixture({
+      effectivePolicy: {
+        profileId: "test",
+        values,
+        provenance,
+        enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+      },
+      config: {
+        objective: binding.objective as string,
+        goalStatus: "complete",
+        batchAfter: ["turn/start"],
+        after: {
+          "turn/start": [
+            { method: "thread/tokenUsage/updated", params: goalUsageParams() },
+            { method: "item/completed", params: itemCompletedParams() },
+            { method: "turn/completed", params: turnCompletedParams(status) },
+          ],
+        },
+      },
+    });
+    await writeFile(fixture.bindingPath, `${JSON.stringify(binding, null, 2)}\n`, { mode: 0o600 });
+    try {
+      const result = await runCodexWorker({
+        store: fixture.store,
+        task: fixture.task,
+        attempt: fixture.attempt,
+        resuming: true,
+        hooks: { correctionIntent: correctionIntent42() },
+      }, fixture.operatorCodexHome);
+      assert.equal(result.status, "failed");
+      assert.equal(result.policyLimit?.category, "no-progress");
+      assert.equal(result.resultText, undefined, `correction Turn ${status} never produces success`);
+      assert.ok(!fixture.store.listEvents(fixture.task.id).some((e) => e.type === "worker.completed"));
+    } finally {
+      fixture.store.close();
+    }
+  }
+});
+
+test("Codex native Goal correction stale Turn completion cannot join", async () => {
+  // The final item belongs to the exact current Turn, but the Turn completion
+  // carries a different (stale) Turn id. Exact current-Turn completion is
+  // required, so the join stays closed and the no-progress policy terminates.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  const binding = await completedOriginalBinding();
+  const fixture = await codexNativeGoalFixture({
+    effectivePolicy: {
+      profileId: "test",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+    },
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "complete",
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "thread/tokenUsage/updated", params: goalUsageParams() },
+          { method: "item/completed", params: itemCompletedParams() },
+          { method: "turn/completed", params: turnCompletedParams("completed", "turn-stale") },
+        ],
+      },
+    },
+  });
+  await writeFile(fixture.bindingPath, `${JSON.stringify(binding, null, 2)}\n`, { mode: 0o600 });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: true,
+      hooks: { correctionIntent: correctionIntent42() },
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.policyLimit?.category, "no-progress");
+    assert.equal(result.resultText, undefined, "stale Turn completion cannot close the correction");
+    assert.ok(!fixture.store.listEvents(fixture.task.id).some((e) => e.type === "worker.completed"));
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal completed-Goal correction without typed authority stays closed", async () => {
+  // Same persisted complete Goal, no pending Main correction grant being
+  // consumed: ordinary resume must still fail closed and create no unit.
+  const binding = await completedOriginalBinding();
+  const second = await codexNativeGoalFixture({
+    config: { objective: binding.objective as string, goalStatus: "complete" },
+  });
+  await writeFile(second.bindingPath, `${JSON.stringify(binding, null, 2)}\n`, { mode: 0o600 });
+  try {
+    const result = await runCodexWorker({
+      store: second.store,
+      task: second.task,
+      attempt: second.attempt,
+      resuming: true,
+      hooks: {},
+    }, second.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "runtime");
+    assert.match(result.error ?? "", /cannot continue/);
+    const failed = second.store.listEvents(second.task.id).find((e) => e.type === "worker.failed");
+    assert.equal((failed?.payload as { reasonCode?: string } | undefined)?.reasonCode, "codex-goal-not-continuable");
+    assert.equal(
+      (await readRequestLog(second.requestLog)).some((r) => r.method === "thread/goal/set"),
+      false,
+      "no fresh unit without correction authority",
+    );
+  } finally {
+    second.store.close();
+  }
+});
+
+test("Codex native Goal completed correction unit never starts a second unit", async () => {
+  // A fresh correction unit is durably active and its Goal also reports
+  // complete. Even with a matching typed intent, recovery must not start
+  // another unit; it fails closed instead.
+  const binding = await completedOriginalBinding();
+  const durable = { ...binding, correctionUnit: true, authorizationEventSequence: 42 };
+  const fixture = await codexNativeGoalFixture({
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "complete",
+    },
+  });
+  await writeFile(fixture.bindingPath, `${JSON.stringify(durable, null, 2)}\n`, { mode: 0o600 });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: true,
+      hooks: {
+        correctionIntent: correctionIntent42(),
+      },
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "runtime");
+    assert.match(result.error ?? "", /cannot continue/);
+    const requests = await readRequestLog(fixture.requestLog);
+    assert.equal(requests.some((r) => r.method === "thread/goal/set"), false, "no second unit starts");
+    assert.equal(requests.some((r) => r.method === "turn/start"), false, "no model work starts");
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal correction restart recovers the exact correction unit once", async () => {
+  // Run 1: an authorized correction starts a fresh unit and is interrupted
+  // before terminal evidence. The fresh unit identity is durably bound.
+  const binding = await completedOriginalBinding();
+  const first = await codexNativeGoalFixture({
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "complete",
+    },
+  });
+  await writeFile(first.bindingPath, `${JSON.stringify(binding, null, 2)}\n`, { mode: 0o600 });
+  let correctionBinding: Record<string, unknown> = {};
+  try {
+    const result = await runCodexWorker({
+      store: first.store,
+      task: first.task,
+      attempt: first.attempt,
+      resuming: true,
+      hooks: {
+        wasInterrupted: () => true,
+        correctionIntent: correctionIntent42(),
+      },
+    }, first.operatorCodexHome);
+    assert.equal(result.status, "interrupted");
+  } finally {
+    correctionBinding = await readBindingJson(first.bindingPath);
+    first.store.close();
+  }
+  assert.equal(correctionBinding.correctionUnit, true, "fresh unit durably bound before interrupt");
+  assert.equal(correctionBinding.authorizationEventSequence, 42);
+
+  // Run 2: daemon restart recovery resumes that exact correction unit once.
+  // The recovery path re-reads the durable restart grant and resumes via
+  // resumeTask (no typed correction intent). The persisted Goal is still
+  // complete — the real App Server emits no repeated Goal-complete — so the
+  // adapter must restore correction terminal authority from the durable unit,
+  // resume the same Thread/unit, and close only after the exact new Turn plus
+  // its own canonical final output. A short no-progress backstop turns any
+  // regression into a fast failure instead of a 30-minute wait.
+  const values = { ...testDefaultAdvancedPolicy(), noProgressTimeoutMs: 4_000, workerStopGraceMs: 40 };
+  const provenance = Object.fromEntries(
+    Object.keys(values).map((field) => [field, "task"]),
+  ) as Record<keyof typeof values, "task">;
+  const second = await codexNativeGoalFixture({
+    effectivePolicy: {
+      profileId: "test",
+      values,
+      provenance,
+      enforcementCapability: enforcementCapabilityForRuntime("codex-cli"),
+    },
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "complete",
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "thread/tokenUsage/updated", params: goalUsageParams() },
+          { method: "item/completed", params: itemCompletedParams({ text: "Correction unit resumed after restart" }) },
+          { method: "turn/completed", params: turnCompletedParams() },
+        ],
+      },
+    },
+  });
+  await writeFile(second.bindingPath, `${JSON.stringify(correctionBinding, null, 2)}\n`, { mode: 0o600 });
+  try {
+    const result = await runCodexWorker({
+      store: second.store,
+      task: second.task,
+      attempt: second.attempt,
+      resuming: true,
+      hooks: {},
+    }, second.operatorCodexHome);
+    assert.equal(result.status, "succeeded", "restart recovery closes on its exact Turn without a repeated Goal-complete");
+    assert.equal(result.resultText, "Correction unit resumed after restart");
+    const requests = await readRequestLog(second.requestLog);
+    assert.ok(requests.some((r) => r.method === "thread/resume"), "recovery resumes the exact Thread");
+    assert.equal(requests.some((r) => r.method === "thread/goal/set"), false, "recovery must not start another unit or relabel the Goal");
+    assert.equal(requests.some((r) => r.method === "thread/start"), false, "recovery must not create a Thread");
+    const persisted = await readBindingJson(second.bindingPath);
+    assert.equal(persisted.threadId, "thread-1", "exact Thread retained across recovery");
+    assert.equal(persisted.correctionUnit, true, "correction marker retained across recovery");
+    assert.equal(persisted.authorizationEventSequence, 42, "grant identity retained across recovery");
+    const events = second.store.listEvents(second.task.id);
+    const resumed = events.find((e) => e.type === "worker.resumed");
+    assert.ok(resumed, "worker.resumed persisted for recovery");
+    assert.match(resumed.summary, /recovered the in-progress Main correction unit/);
+    assert.equal(
+      (resumed?.payload as { correctionUnit?: unknown }).correctionUnit,
+      true,
+      "recovery restores the same correction unit, not a fresh admission",
+    );
+    assert.equal(events.filter((e) => e.type === "worker.completed").length, 1, "closes once");
+    assert.ok(
+      !events.some((e) => (e.payload as { activityKind?: string } | undefined)?.activityKind === "goal-continuing"),
+      "recovered terminal correction Turn is not narrated as continuing",
+    );
+  } finally {
+    second.store.close();
+  }
+});
+
+test("Codex native Goal correction identity drift fails closed", async () => {
+  // Bound correction grant identity differs from the grant being consumed:
+  // no model work may start and no second unit may be created.
+  const binding = await completedOriginalBinding();
+  const durable = { ...binding, correctionUnit: true, authorizationEventSequence: 42 };
+  const fixture = await codexNativeGoalFixture({
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "active",
+      after: { "turn/start": exactCurrentTurnTerminalAfter() },
+    },
+  });
+  await writeFile(fixture.bindingPath, `${JSON.stringify(durable, null, 2)}\n`, { mode: 0o600 });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: true,
+      hooks: {
+        correctionIntent: { kind: "main-correction", authorizationEventSequence: 99 },
+      },
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "runtime");
+    assert.match(result.error ?? "", /identity drift/);
+    const requests = await readRequestLog(fixture.requestLog);
+    assert.equal(requests.some((r) => r.method === "turn/start"), false, "no model work starts on drift");
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Codex native Goal malformed correction binding fails closed before model work", async () => {
+  // The correction identity is one inseparable strict positive safe-integer
+  // pair. An orphaned marker, a missing/negative/fractional sequence, or a
+  // sequence without the marker is malformed and must never resume or start a
+  // unit. Each case shares one fresh original binding.
+  const original = await completedOriginalBinding();
+  const malformedBindings: Array<Record<string, unknown>> = [
+    { ...original, correctionUnit: true },
+    { ...original, correctionUnit: true, authorizationEventSequence: 0 },
+    { ...original, correctionUnit: true, authorizationEventSequence: -5 },
+    { ...original, correctionUnit: true, authorizationEventSequence: 1.5 },
+    { ...original, correctionUnit: true, authorizationEventSequence: Number.NaN },
+    { ...original, authorizationEventSequence: 42 },
+    { ...original, unexpected: true },
+    { ...original, updatedAt: null },
+  ];
+  for (const malformed of malformedBindings) {
+    const fixture = await codexNativeGoalFixture({
+      config: { objective: original.objective as string, goalStatus: "complete" },
+    });
+    await writeFile(fixture.bindingPath, `${JSON.stringify(malformed, null, 2)}\n`, { mode: 0o600 });
+    try {
+      const result = await runCodexWorker({
+        store: fixture.store,
+        task: fixture.task,
+        attempt: fixture.attempt,
+        resuming: true,
+        hooks: {
+          correctionIntent: correctionIntent42(),
+        },
+      }, fixture.operatorCodexHome);
+      assert.equal(result.status, "failed");
+      assert.equal(result.failureCategory, "runtime");
+      assert.match(result.error ?? "", /binding is invalid/);
+      assert.equal(
+        (await readRequestLog(fixture.requestLog)).some((r) => r.method === "turn/start"),
+        false,
+        "malformed binding starts no model work",
+      );
+    } finally {
+      fixture.store.close();
+    }
+  }
+});
+
+test("Codex native Goal malformed repair binding fails closed before model work", async () => {
+  // An authorization sequence without a repair-unit marker is the concrete
+  // malformed durable shape that previously risked being interpreted as an
+  // ordinary resume. It must be rejected by the binding parser before the
+  // exact Thread is resumed, and the process must exit naturally without a
+  // watchdog-dependent pending request.
+  const original = await completedOriginalBinding();
+  const malformedBindings: Array<Record<string, unknown>> = [
+    { ...original, authorizationEventSequence: 42 },
+    { ...original, repairUnit: true },
+    { ...original, repairUnit: true, authorizationEventSequence: 42 },
+  ];
+  for (const malformed of malformedBindings) {
+    const fixture = await codexNativeGoalFixture({
+      config: { objective: original.objective as string, goalStatus: "complete" },
+    });
+    await writeFile(fixture.bindingPath, `${JSON.stringify(malformed, null, 2)}\n`, { mode: 0o600 });
+    try {
+      const result = await runCodexWorker({
+        store: fixture.store,
+        task: fixture.task,
+        attempt: fixture.attempt,
+        resuming: true,
+        hooks: {
+          validationRepairIntent: {
+            kind: "worker-validation-repair",
+            authorizationEventSequence: 42,
+            round: 1,
+            attemptId: fixture.attempt.id,
+          },
+        },
+      }, fixture.operatorCodexHome);
+      assert.equal(result.status, "failed");
+      assert.equal(result.failureCategory, "runtime");
+      assert.match(result.error ?? "", /binding is invalid/);
+      const requests = await readRequestLog(fixture.requestLog);
+      assert.equal(requests.some((r) => r.method === "thread/resume"), false, "no Thread resume starts");
+      assert.equal(requests.some((r) => r.method === "thread/goal/get"), false, "no Goal lookup starts");
+      assert.equal(requests.some((r) => r.method === "turn/start"), false, "no model work starts");
+    } finally {
+      fixture.store.close();
+    }
+  }
+});
+
+test("Codex native Goal correction keeps cumulative same-Thread usage replace-not-add", async () => {
+  const binding = await completedOriginalBinding();
+  const fixture = await codexNativeGoalFixture({
+    config: {
+      objective: binding.objective as string,
+      goalStatus: "complete",
+      // batchAfter keeps the whole terminal burst in one race buffer replay so
+      // the correction join (which no longer waits for a repeated Goal-complete)
+      // still observes the later cumulative usage snapshot deterministically.
+      batchAfter: ["turn/start"],
+      after: {
+        "turn/start": [
+          { method: "thread/tokenUsage/updated", params: goalUsageParams() },
+          { method: "item/completed", params: itemCompletedParams() },
+          { method: "turn/completed", params: turnCompletedParams() },
+          {
+            method: "thread/tokenUsage/updated",
+            params: goalUsageParams({
+              tokenUsage: {
+                total: {
+                  inputTokens: 300,
+                  outputTokens: 60,
+                  cachedInputTokens: 110,
+                  cacheWriteInputTokens: 5,
+                },
+              },
+            }),
+          },
+          { method: "thread/goal/updated", params: goalUpdatedParams("complete") },
+        ],
+      },
+    },
+  });
+  await writeFile(fixture.bindingPath, `${JSON.stringify(binding, null, 2)}\n`, { mode: 0o600 });
+  try {
+    const result = await runCodexWorker({
+      store: fixture.store,
+      task: fixture.task,
+      attempt: fixture.attempt,
+      resuming: true,
+      hooks: {
+        correctionIntent: correctionIntent42(),
+      },
+    }, fixture.operatorCodexHome);
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.usage?.inputTokens, 300, "newest cumulative snapshot replaces earlier totals");
+    assert.equal(result.usage?.outputTokens, 60);
+    assert.equal(result.usage?.cacheReadInputTokens, 110);
+    assert.equal(result.usage?.cacheCreationInputTokens, 5);
+  } finally {
+    fixture.store.close();
   }
 });
 

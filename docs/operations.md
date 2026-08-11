@@ -211,6 +211,34 @@ checkpoint does **not** authorize Integration — ForkLight still reruns every
 acceptance command independently. Checkpoint is an early Worker feedback loop,
 not a substitute for independent verification or Main review.
 
+### 3a. Automatic validation repair (same-Worker, finite)
+
+A Worker completion is **not** Task success. The ordinary verified-delivery
+path is: implementation → Worker self-check → ForkLight independent
+verification → (when eligible) a finite number of same-Worker repair rounds →
+Main semantic/boundary review.
+
+When independent verification finds an ordinary behavior failure and the
+effective `maxWorkerValidationRepairs` allowance is greater than zero, ForkLight
+authorizes one same-Worker repair round in the existing Task workspace and
+session. After the Worker repairs, ForkLight independently reruns the **complete
+unchanged** original acceptance suite. The allowance is finite:
+
+- The global default is **1** for new Tasks (`execution.maxWorkerValidationRepairs`).
+- Every Worker can inherit that default or override it in its Advanced settings
+  (`advancedPolicy.maxWorkerValidationRepairs`). The Task freezes the effective
+  value at creation; later settings changes do not affect existing Tasks.
+- **0 disables** automatic repair: after a failed build or test, Main decides
+  the next step and nothing is retried automatically.
+- The value is an **allowance**, never an endless loop: when the allowance is
+  used up, the Task stops and Main decides.
+
+Failures that cannot be fixed by retrying the Worker — credentials, provider,
+network, timeout, source, policy, verifier-infrastructure, or capture problems —
+never consume a repair round. ForkLight records a durable skip with the reason
+and a clear next action, and Task Detail explains the practical cause instead
+of presenting it as an ordinary code problem.
+
 ### 4. Record a repaired delivery without rewriting Worker history
 
 If a Worker Task remains `failed` or `interrupted` but Main has repaired the
@@ -266,6 +294,34 @@ Advanced settings. Both default to one and accept zero to disable their path.
 Neither operation starts automatically, consumes ordinary retry allowance, or
 loops. Reverify-only also rejects competition candidates, policy/source
 failures, empty business Diffs, running Attempts, and exhausted allowance.
+
+### 4b. Resolve handled attention without inventing success
+
+When a failed/interrupted Task — or a succeeded Task with no delivered outcome
+and no running Attempt — no longer needs operational attention because the
+real-world problem was fixed or the work was superseded, Main can close it as
+resolved attention:
+
+```bash
+forklight resolve <task-id> \
+  --reason superseded \
+  --evidence <evidence-task-id> \
+  --note "successor covered the remaining work" \
+  --confirm
+```
+
+`--reason` is required and must be one of `environment-recovered`,
+`superseded`, `handled-elsewhere`, or `no-longer-needed`. `--evidence` is
+optional: it links an **existing** successor or evidence Task id for audit
+trail only. Linking evidence does **not** change machine status, delivery
+truth, review truth, or model statistics, and it does **not** turn the Task
+into delivered. The Task keeps its machine status (failed, interrupted, or
+succeeded) and moves to History with reason `attention-resolved`; every review,
+routing, Candidate, Token, cost, and delivery fact stays readable. Reopen with
+`forklight reopen <task-id> --confirm` returns the unchanged Task to its
+evidence-derived Now placement. Delivered, activated, and verified-repaired
+Tasks are never eligible. Unknown or ambiguous resolve/reopen flags fail before
+Daemon contact.
 
 ### 5. Multi-model competition
 

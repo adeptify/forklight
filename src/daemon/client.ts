@@ -114,7 +114,7 @@ export function daemonRequestTimeoutMs(
   // out first; the per-command timeout remains authoritative inside the
   // daemon. Callers may request a longer transport window when they know the
   // suite size.
-  const requested = method === "integration_wait"
+  const requested = method === "integration_wait" || method === "checkpoint_wait"
     ? params.timeoutMs
     : method === "remediation_verify" || method === "candidate_reverify"
       ? (params.requestTimeoutMs ?? 6 * 60 * 60 * 1000)

@@ -737,15 +737,18 @@ test("previewEffectivePolicy returns all fields with value, source, phase, unlim
     caps,
   );
 
-  // Every advanced field, including the independent Main correction and
-  // candidate reverification caps.
-  assert.equal(preview.length, 16);
+  // Every advanced field, including Main correction, candidate reverification,
+  // and Worker validation-repair caps.
+  assert.equal(preview.length, 17);
   const corrections = preview.find((row) => row.field === "maxMainCorrections")!;
   assert.equal(corrections.value, 1);
   assert.equal(corrections.source, "global");
   const reverifications = preview.find((row) => row.field === "maxMainReverifications")!;
   assert.equal(reverifications.value, 1);
   assert.equal(reverifications.source, "global");
+  const workerRepairs = preview.find((row) => row.field === "maxWorkerValidationRepairs")!;
+  assert.equal(workerRepairs.value, 1);
+  assert.equal(workerRepairs.source, "global");
 
   // maxDurationMs: null from task, unlimited=true
   const dur = preview.find((r) => r.field === "maxDurationMs")!;

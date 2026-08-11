@@ -58,6 +58,10 @@ import {
   formatTaskAdmissionPreviewHuman,
   taskPolicyFromSettings,
 } from "./core/task-preview.js";
+import {
+  buildGoalValidationPreview,
+  formatGoalValidationPreviewHuman,
+} from "./core/goal-preview.js";
 import { createKeychainStore } from "./core/secrets.js";
 import { SettingsService } from "./core/settings.js";
 import {
@@ -146,6 +150,13 @@ import {
   isBuildIdentity,
 } from "./core/build-identity.js";
 import { daemonExchange } from "./daemon/client.js";
+import {
+  WORK_HIERARCHY_COLUMNS,
+  type WorkHierarchyColumnCode,
+  type WorkHierarchyPlanLane,
+  type WorkHierarchyTaskCard,
+  type WorkHierarchyView,
+} from "./core/work-hierarchy.js";
 
 /**
  * Build the same evidence-aware Task surface the daemon exposes to MCP and Hub.
@@ -198,15 +209,25 @@ Usage:
   forklight submit <task.yaml>
   forklight validate <task.yaml> [--json]
   forklight validate-plan <plan.yaml> [--json]
+  forklight validate-goal <goal.yaml> [--json]
   forklight submit-plan <plan.yaml>
   forklight inspect-plan <plan-id> [--json]
   forklight board [--json]
+  forklight work-hierarchy [--project <path>] [--column <code-or-comma-list>] [--worker-profile <id>] [--json]
+      # read-only Goal > Plan > Task hierarchy; never starts a daemon
+  forklight task-plan-context <task-id> [--json]
+      # read-only Plan membership + direct dependency edges; never starts a daemon
   forklight submit-goal <goal.yaml>
   forklight goal status <goal-id> [--json]
   forklight goal list [--json] [--limit <n>]
   forklight goal advance <goal-id> --confirm [--json]
   forklight goal stop <goal-id> --confirm [--json]
   forklight goal handoff <task-id> --revision <id> --reusable <json> --gaps <json> --to-profile <id> --reason <text> --confirm [--json]
+  forklight outcome create --outcome <text> [--shape auto|task|plan|goal] [--json]
+  forklight outcome list [--status pending|proposed|created] [--limit <n>] [--json]
+  forklight outcome get <intake-id> [--json]
+  forklight outcome propose <intake-id> --expected-revision <n> --shape task|plan|goal --artifact <path> --reason <text> [--json]
+  forklight outcome confirm <intake-id> --expected-revision <n> --confirm [--json]
   forklight status <task-id> [--json]
   forklight wait <task-id> --timeout-ms <positive integer> [--poll-ms <positive integer>] [--until change|terminal] [--json]
       # change = status/attempt/event-sequence/updatedAt cursor (not status-only)
@@ -215,7 +236,10 @@ Usage:
   forklight correct <task-id> --feedback <text> [--max-budget-usd <number|none>] [--candidate-revision <id> --reusable-paths <json-array> --remaining-gaps <json-array>] --confirm
   forklight resolve <task-id> --reason <code> [--note <text>] [--evidence <task-id>] --confirm [--json]
       # code: environment-recovered | superseded | handled-elsewhere | no-longer-needed
+      # closes handled attention: a failed/interrupted or succeeded-not-delivered Task moves to History
+      # --evidence optionally links an existing successor/evidence Task; it does not mark success or delivery
   forklight reopen <task-id> [--note <text>] --confirm [--json]
+      # returns the unchanged Task from History to Now
   forklight main-review <task-id> --decision <accept|revise|reject> --reason <text> --confirm
   forklight failure-attribution <task-id> --attempt <id> --verification-sequence <n> --cause <candidate|verification-infrastructure|acceptance-contract|insufficient-evidence> --note <text> [--candidate-revision <id> --candidate-digest <sha256>] --confirm [--json]
   forklight review-graph create <task-id> --reviewer-profile <id> [--reviewer-profile <id> ...] --reason <text> --confirm [--json]
@@ -657,6 +681,67 @@ function humanAdaptationApplyLines(result: Record<string, unknown>): string {
 function option(arguments_: string[], flag: string): string | undefined {
   const index = arguments_.indexOf(flag);
   return index >= 0 ? arguments_[index + 1] : undefined;
+}
+
+/**
+ * Command-local resolve/reopen argv grammar. Allows only documented flags,
+ * rejects unknown flags, stray positionals, duplicate value/switch flags, and
+ * missing values before any Daemon contact or exchange-receipt mutation.
+ * Global `--json` remains compatible: it is accepted here and still read by
+ * the existing top-level `json` detection.
+ */
+function parseResolveReopenArgs(
+  operation: "resolve" | "reopen",
+  arguments_: readonly string[],
+): {
+  reason?: string;
+  note?: string;
+  evidenceTaskId?: string;
+  confirm: boolean;
+} {
+  const valueFlags = operation === "resolve"
+    ? new Set(["--reason", "--note", "--evidence"])
+    : new Set(["--note"]);
+  const switchFlags = new Set(["--confirm", "--json"]);
+  const values = new Map<string, string>();
+  const switches = new Set<string>();
+
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const token = arguments_[index]!;
+    if (!token.startsWith("-")) {
+      throw new Error(`${operation}: unexpected argument: ${token}`);
+    }
+    if (valueFlags.has(token)) {
+      if (values.has(token)) {
+        throw new Error(`${operation}: duplicate flag: ${token}`);
+      }
+      const value = arguments_[index + 1];
+      if (value === undefined || value.startsWith("-")) {
+        throw new Error(`${operation}: ${token} requires a value`);
+      }
+      values.set(token, value);
+      index += 1;
+      continue;
+    }
+    if (switchFlags.has(token)) {
+      if (switches.has(token)) {
+        throw new Error(`${operation}: duplicate flag: ${token}`);
+      }
+      switches.add(token);
+      continue;
+    }
+    throw new Error(`${operation}: unknown argument: ${token}`);
+  }
+
+  const reason = values.get("--reason");
+  const note = values.get("--note");
+  const evidenceTaskId = values.get("--evidence");
+  return {
+    ...(reason === undefined ? {} : { reason }),
+    ...(note === undefined ? {} : { note }),
+    ...(evidenceTaskId === undefined ? {} : { evidenceTaskId }),
+    confirm: switches.has("--confirm"),
+  };
 }
 
 /** Optional readiness deadline for daemon start/restart only. */
@@ -1233,6 +1318,353 @@ function humanHubStatusLines(status: HubInspectionStatus): string {
   return `${lines.join("\n")}\n`;
 }
 
+// --- Outcome intake CLI (FL-109D1) ---
+
+/** Strict command-local outcome argv grammar. Allows only the documented
+ *  flags, rejects unknown flags, stray positionals, duplicate value/switch
+ *  flags, and missing values before any Daemon contact or mutation. Global
+ *  `--json` remains compatible: it is accepted as a switch here and still read
+ *  by the existing top-level `json` detection. */
+function parseOutcomeArgs(
+  operation: string,
+  arguments_: readonly string[],
+  valueFlags: readonly string[],
+  switchFlags: readonly string[] = ["--json"],
+): { values: Map<string, string>; switches: Set<string> } {
+  const valueSet = new Set(valueFlags);
+  const switchSet = new Set(switchFlags);
+  const values = new Map<string, string>();
+  const switches = new Set<string>();
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const token = arguments_[index]!;
+    if (!token.startsWith("-")) {
+      throw new Error(`outcome ${operation}: unexpected argument: ${token}`);
+    }
+    if (valueSet.has(token)) {
+      if (values.has(token)) {
+        throw new Error(`outcome ${operation}: duplicate flag: ${token}`);
+      }
+      const value = arguments_[index + 1];
+      if (value === undefined || value.startsWith("-")) {
+        throw new Error(`outcome ${operation}: ${token} requires a value`);
+      }
+      values.set(token, value);
+      index += 1;
+      continue;
+    }
+    if (switchSet.has(token)) {
+      if (switches.has(token)) {
+        throw new Error(`outcome ${operation}: duplicate flag: ${token}`);
+      }
+      switches.add(token);
+      continue;
+    }
+    throw new Error(`outcome ${operation}: unknown argument: ${token}`);
+  }
+  return { values, switches };
+}
+
+/** Parse `--expected-revision` as a positive safe integer. The daemon
+ *  normalizers require a numeric revision, so a string is never forwarded. */
+function parseOutcomeExpectedRevision(raw: string | undefined): number {
+  const value = required(raw, "expected revision (--expected-revision)");
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error("outcome --expected-revision must be a positive integer");
+  }
+  return parsed;
+}
+
+/** Privacy-safe next action for one intake view. Always names the exact
+ *  revision the next command needs; never exposes artifact paths, raw
+ *  contracts, commands, credentials, or Provider settings. */
+function humanOutcomeIntakeNextAction(view: Record<string, unknown>): string {
+  const id = String(view.id);
+  const revision = String(view.revision);
+  if (view.status === "pending") {
+    return `next: forklight outcome propose ${id} --expected-revision ${revision} --shape task|plan|goal --artifact <path> --reason <text>`;
+  }
+  if (view.status === "proposed") {
+    return `next: forklight outcome confirm ${id} --expected-revision ${revision} --confirm`;
+  }
+  return "next: none — the outcome is created";
+}
+
+/** Compact human block for one intake view (create/get). Explains status,
+ *  revision, selected shape, work count, and the exact next command. */
+function humanOutcomeIntakeLines(view: Record<string, unknown>): string {
+  const lines: string[] = [];
+  lines.push(`status: ${String(view.status)}`);
+  lines.push(`intakeId: ${String(view.id)}`);
+  lines.push(`revision: ${String(view.revision)}`);
+  lines.push(`outcome: ${String(view.outcome)}`);
+  lines.push(`requestedShape: ${String(view.requestedShape)}`);
+  const proposal = view.proposal;
+  if (proposal !== undefined && typeof proposal === "object" && proposal !== null) {
+    const p = proposal as Record<string, unknown>;
+    lines.push(`selectedShape: ${String(p.shape)}`);
+    lines.push(`artifactKind: ${String(p.artifactKind)}`);
+    lines.push(`taskCount: ${String(p.taskCount)}`);
+    if (typeof p.artifactDigestPrefix === "string") {
+      lines.push(`artifactDigestPrefix: ${p.artifactDigestPrefix}`);
+    }
+    if (typeof p.reason === "string") lines.push(`reason: ${p.reason}`);
+  }
+  const confirmation = view.confirmation;
+  if (confirmation !== undefined && typeof confirmation === "object" && confirmation !== null) {
+    const c = confirmation as Record<string, unknown>;
+    lines.push(`receiptId: ${String(c.receiptId)}`);
+    lines.push(`createdShape: ${String(c.shape)}`);
+    lines.push(`taskCount: ${String((c.taskIds as unknown[] | undefined)?.length ?? 0)}`);
+    if (c.planId !== undefined) lines.push(`planId: ${String(c.planId)}`);
+    if (c.goalId !== undefined) lines.push(`goalId: ${String(c.goalId)}`);
+  }
+  lines.push(humanOutcomeIntakeNextAction(view));
+  return `${lines.join("\n")}\n`;
+}
+
+function humanOutcomeIntakeListLines(views: Record<string, unknown>[]): string {
+  if (views.length === 0) return "No outcome intakes.\n";
+  const lines = [`${views.length} outcome intake(s):`];
+  for (const view of views) {
+    const proposal = view.proposal as Record<string, unknown> | undefined;
+    const selected = proposal === undefined ? "" : ` shape=${String(proposal.shape)}`;
+    lines.push(
+      `  ${String(view.id)} | ${String(view.status)} | rev ${String(view.revision)} | ${String(view.requestedShape)}${selected} | ${String(view.outcome)}`,
+    );
+  }
+  lines.push("next: forklight outcome get <intake-id> to inspect a draft");
+  return `${lines.join("\n")}\n`;
+}
+
+/** Human block for the propose response ({ intake, preview }). The preview is
+ *  the canonical no-work confirmation surface; the next action names the exact
+ *  proposal revision confirm needs. */
+function humanOutcomeProposeLines(result: Record<string, unknown>): string {
+  const preview = result.preview as Record<string, unknown> | undefined;
+  const lines: string[] = [];
+  if (preview !== undefined) {
+    lines.push(`status: proposed`);
+    lines.push(`intakeId: ${String(preview.intakeId)}`);
+    lines.push(`revision: ${String(preview.intakeRevision)}`);
+    lines.push(`outcome: ${String(preview.outcome)}`);
+    lines.push(`selectedShape: ${String(preview.selectedShape)}`);
+    lines.push(`artifactKind: ${String(preview.artifactKind)}`);
+    lines.push(`taskCount: ${String(preview.taskCount)}`);
+    lines.push(`artifactDigestPrefix: ${String(preview.artifactDigestPrefix)}`);
+    const contracts = preview.contractsInvolved;
+    if (Array.isArray(contracts) && contracts.length > 0) {
+      lines.push(`contractsInvolved: ${contracts.join(", ")}`);
+    }
+    if (typeof preview.reason === "string") lines.push(`reason: ${preview.reason}`);
+    lines.push(`workCreated: ${String(preview.workCreated)}`);
+    lines.push(`confirmationHappened: ${String(preview.confirmationHappened)}`);
+    lines.push(`note: ${String(preview.note)}`);
+    lines.push(
+      `next: forklight outcome confirm ${String(preview.intakeId)} --expected-revision ${String(preview.intakeRevision)} --confirm`,
+    );
+  } else {
+    const intake = result.intake as Record<string, unknown> | undefined;
+    if (intake !== undefined) {
+      lines.push(`status: ${String(intake.status)}`);
+      lines.push(`intakeId: ${String(intake.id)}`);
+      lines.push(`revision: ${String(intake.revision)}`);
+      lines.push(humanOutcomeIntakeNextAction(intake));
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** Human block for the confirm response ({ intake, receipt }). Reports the
+ *  durable receipt and created work count; nothing remains to do. */
+function humanOutcomeConfirmLines(result: Record<string, unknown>): string {
+  const intake = result.intake as Record<string, unknown> | undefined;
+  const receipt = result.receipt as Record<string, unknown> | undefined;
+  const lines: string[] = [];
+  lines.push(`status: created`);
+  if (intake !== undefined) {
+    lines.push(`intakeId: ${String(intake.id)}`);
+    lines.push(`revision: ${String(intake.revision)}`);
+  }
+  if (receipt !== undefined) {
+    lines.push(`receiptId: ${String(receipt.receiptId)}`);
+    lines.push(`shape: ${String(receipt.shape)}`);
+    lines.push(`taskCount: ${String((receipt.taskIds as unknown[] | undefined)?.length ?? 0)}`);
+    if (receipt.planId !== undefined) lines.push(`planId: ${String(receipt.planId)}`);
+    if (receipt.goalId !== undefined) lines.push(`goalId: ${String(receipt.goalId)}`);
+  }
+  lines.push("next: none — the outcome is created");
+  return `${lines.join("\n")}\n`;
+}
+
+/** Strict command-local argv grammar for the read-only hierarchy observers.
+ *  Allows only documented value/switch flags, rejects unknown flags, stray
+ *  positionals, duplicate flags, and missing values before any Daemon contact.
+ *  Global `--json` remains compatible: it is accepted as a switch here and
+ *  still read by the existing top-level `json` detection. */
+function parseHierarchyObserverArgs(
+  command: "work-hierarchy" | "task-plan-context",
+  arguments_: readonly string[],
+  valueFlags: readonly string[],
+): { values: Map<string, string>; switches: Set<string> } {
+  const valueSet = new Set(valueFlags);
+  const switchSet = new Set(["--json"]);
+  const values = new Map<string, string>();
+  const switches = new Set<string>();
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const token = arguments_[index]!;
+    if (!token.startsWith("-")) {
+      throw new Error(`${command}: unexpected argument: ${token}`);
+    }
+    if (valueSet.has(token)) {
+      if (values.has(token)) {
+        throw new Error(`${command}: duplicate flag: ${token}`);
+      }
+      const value = arguments_[index + 1];
+      if (value === undefined || value.startsWith("-")) {
+        throw new Error(`${command}: ${token} requires a value`);
+      }
+      values.set(token, value);
+      index += 1;
+      continue;
+    }
+    if (switchSet.has(token)) {
+      if (switches.has(token)) {
+        throw new Error(`${command}: duplicate flag: ${token}`);
+      }
+      switches.add(token);
+      continue;
+    }
+    throw new Error(`${command}: unknown argument: ${token}`);
+  }
+  return { values, switches };
+}
+
+/** Short plain column labels for the compact terminal hierarchy. The seven
+ *  stable codes stay derivable; empty columns are omitted entirely. */
+const WORK_HIERARCHY_COLUMN_LABELS: Record<WorkHierarchyColumnCode, string> = {
+  "not-started": "not-started",
+  ready: "ready",
+  running: "running",
+  "waiting-verification": "verifying",
+  "waiting-user-decision": "main-decision",
+  completed: "completed",
+  "stopped-failed": "stopped/failed",
+};
+
+/** Render one status column block: only non-empty columns, cards indented one
+ *  level under the column header. Technical Task id stays visible but secondary
+ *  to the card name and the daemon-projected next action. */
+function humanWorkHierarchyColumns(
+  lines: string[],
+  columns: Record<WorkHierarchyColumnCode, WorkHierarchyTaskCard[]>,
+  indent: string,
+): void {
+  for (const code of WORK_HIERARCHY_COLUMNS) {
+    const cards = columns[code];
+    if (cards.length === 0) continue;
+    lines.push(`${indent}[${WORK_HIERARCHY_COLUMN_LABELS[code]}] (${cards.length})`);
+    for (const card of cards) {
+      lines.push(`${indent}  ${card.taskId}  ${card.name}  ${card.nextAction}`);
+    }
+  }
+}
+
+/** Render one Plan lane under an ancestor (Goal or independent section). */
+function humanWorkHierarchyPlanLane(
+  lines: string[],
+  plan: WorkHierarchyPlanLane,
+  indent: string,
+): void {
+  lines.push(`${indent}Plan: ${plan.name} (id=${plan.planId})`);
+  lines.push(
+    `${indent}  progress: ${plan.summary.progress.completed}/${plan.summary.progress.total} (${plan.summary.progress.percent}%)`,
+  );
+  lines.push(`${indent}  what: ${plan.summary.whatCompleted}`);
+  lines.push(`${indent}  blocked: ${plan.summary.blocker}`);
+  lines.push(`${indent}  next: ${plan.summary.nextAction}`);
+  humanWorkHierarchyColumns(lines, plan.columns, `${indent}  `);
+}
+
+/** Render one lane summary block shared by Goal, independent Plan, and
+ *  one-off sections. */
+function humanWorkHierarchyLaneSummary(
+  lines: string[],
+  summary: WorkHierarchyView["goals"][number]["summary"],
+  indent: string,
+): void {
+  lines.push(`${indent}progress: ${summary.progress.completed}/${summary.progress.total} (${summary.progress.percent}%)`);
+  lines.push(`${indent}what: ${summary.whatCompleted}`);
+  lines.push(`${indent}blocked: ${summary.blocker}`);
+  lines.push(`${indent}next: ${summary.nextAction}`);
+}
+
+/**
+ * Compact nested terminal view of the canonical WorkHierarchyView. Goal lanes
+ * contain Plan lanes contain Task cards grouped by execution column; independent
+ * Plans and one-off Tasks are their own truthful lanes. Never flattens Goal,
+ * Plan, and Task into peer cards.
+ */
+function humanWorkHierarchyLines(view: WorkHierarchyView): string {
+  const lines: string[] = [];
+  if (view.goals.length === 0 && view.independentPlans.length === 0 && view.oneOffTasks === undefined) {
+    return "No work hierarchy.\n";
+  }
+  for (const goal of view.goals) {
+    lines.push(`Goal: ${goal.name} (id=${goal.goalId}) — ${goal.status}`);
+    humanWorkHierarchyLaneSummary(lines, goal.summary, "  ");
+    for (const plan of goal.plans) {
+      humanWorkHierarchyPlanLane(lines, plan, "  ");
+    }
+  }
+  for (const plan of view.independentPlans) {
+    lines.push(`Independent Plan: ${plan.name} (id=${plan.planId})`);
+    humanWorkHierarchyLaneSummary(lines, plan.summary, "  ");
+    humanWorkHierarchyColumns(lines, plan.columns, "  ");
+  }
+  if (view.oneOffTasks !== undefined) {
+    lines.push("One-off Tasks:");
+    humanWorkHierarchyLaneSummary(lines, view.oneOffTasks.summary, "  ");
+    humanWorkHierarchyColumns(lines, view.oneOffTasks.columns, "  ");
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** Plain explanation of one Task's Plan membership and bounded named edges.
+ *  A standalone Task (daemon returned no context) gets an explicit plain
+ *  explanation instead of an empty block. */
+function humanTaskPlanContextLines(
+  taskId: string,
+  context: Record<string, unknown> | undefined,
+): string {
+  if (context === undefined) {
+    return `Task ${taskId} is standalone — it belongs to no Plan.\n`;
+  }
+  const planName = typeof context.planName === "string" ? context.planName : undefined;
+  const lines: string[] = [];
+  lines.push(`Task: ${taskId}`);
+  lines.push(`Plan: ${planName ?? String(context.planId)} (id=${String(context.planId)})`);
+  lines.push(`position: item ${String(context.itemId)} (index ${String(context.itemIndex ?? "-")})`);
+  const deps = Array.isArray(context.namedDependencies)
+    ? (context.namedDependencies as Array<Record<string, unknown>>)
+    : [];
+  const requiredBy = Array.isArray(context.namedRequiredBy)
+    ? (context.namedRequiredBy as Array<Record<string, unknown>>)
+    : [];
+  lines.push(`prerequisites: ${deps.length}`);
+  for (const dep of deps) {
+    const name = typeof dep.taskName === "string" ? dep.taskName : String(dep.itemId);
+    const state = typeof dep.state === "string" ? ` (${dep.state})` : "";
+    lines.push(`  ${name}${state}  id=${String(dep.itemId)}${typeof dep.taskId === "string" ? ` task=${dep.taskId}` : ""}`);
+  }
+  lines.push(`dependents: ${requiredBy.length}`);
+  for (const dep of requiredBy) {
+    const name = typeof dep.taskName === "string" ? dep.taskName : String(dep.itemId);
+    lines.push(`  ${name}  id=${String(dep.itemId)}${typeof dep.taskId === "string" ? ` task=${dep.taskId}` : ""}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 async function main(): Promise<void> {
   const [command, positional, ...rest] = process.argv.slice(2);
   if (!command || command === "help" || command === "--help" || command === "-h") {
@@ -1435,6 +1867,24 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "validate-goal") {
+    const store = new StateStore(forklightHome());
+    try {
+      const settings = new SettingsService(store).get();
+      const policy = taskPolicyFromSettings(settings);
+      const preview = await buildGoalValidationPreview(
+        required(positional, "goal file"),
+        policy,
+      );
+      if (json) process.stdout.write(`${JSON.stringify(preview, null, 2)}\n`);
+      else process.stdout.write(formatGoalValidationPreviewHuman(preview));
+      if (!preview.passed) process.exitCode = 1;
+    } finally {
+      store.close();
+    }
+    return;
+  }
+
   if (command === "submit-plan") {
     await ensureDaemon();
     const result = await daemonRequest<{ planId: string; taskIdsByItemId: Record<string, string> }>(
@@ -1485,6 +1935,50 @@ async function main(): Promise<void> {
         );
       }
     }
+    return;
+  }
+
+  if (command === "work-hierarchy") {
+    // work-hierarchy has no positional: the first flag is captured in
+    // `positional`, so parse the full remaining argv after the command.
+    const hierarchyArgs = [positional, ...rest].filter(
+      (value): value is string => value !== undefined,
+    );
+    const parsed = parseHierarchyObserverArgs(
+      "work-hierarchy",
+      hierarchyArgs,
+      ["--project", "--column", "--worker-profile"],
+    );
+    // Read-only projection: never starts a daemon and never mutates state.
+    // Filters forward to the daemon's exact allowlisted fields (project,
+    // column, workerProfileId); strict Core parsing owns validation.
+    const filter: Record<string, unknown> = {};
+    const project = parsed.values.get("--project");
+    if (project !== undefined) filter.project = project;
+    const column = parsed.values.get("--column");
+    if (column !== undefined) filter.column = column;
+    const workerProfileId = parsed.values.get("--worker-profile");
+    if (workerProfileId !== undefined) filter.workerProfileId = workerProfileId;
+    const result = await daemonObserverRequest<WorkHierarchyView>("work_hierarchy", filter);
+    process.stdout.write(json
+      ? `${JSON.stringify(result, null, 2)}\n`
+      : humanWorkHierarchyLines(result));
+    return;
+  }
+
+  if (command === "task-plan-context") {
+    const taskId = required(positional, "task id");
+    parseHierarchyObserverArgs("task-plan-context", rest, []);
+    // Read-only projection: never starts a daemon and never mutates state.
+    // A standalone Task yields no Plan context; JSON keeps null and the human
+    // view explains the standalone state plainly.
+    const result = await daemonObserverRequest<Record<string, unknown> | undefined>(
+      "task_plan_context",
+      { taskId },
+    );
+    process.stdout.write(json
+      ? `${result === undefined ? "null" : JSON.stringify(result, null, 2)}\n`
+      : humanTaskPlanContextLines(taskId, result));
     return;
   }
 
@@ -1682,6 +2176,119 @@ async function main(): Promise<void> {
       return;
     }
     throw new Error(`Unknown goal operation: ${operation}\n\n${usage()}`);
+  }
+
+  if (command === "outcome") {
+    const operation = required(positional, "outcome operation");
+    if (operation === "create") {
+      const parsed = parseOutcomeArgs("create", rest, ["--outcome", "--shape"]);
+      const outcome = required(parsed.values.get("--outcome"), "outcome text (--outcome)");
+      const shape = parsed.values.get("--shape") ?? "auto";
+      if (shape !== "auto" && shape !== "task" && shape !== "plan" && shape !== "goal") {
+        throw new Error("outcome create --shape must be auto, task, plan, or goal");
+      }
+      // Creating a pending draft is an explicit mutation; the daemon owns the
+      // intake record and never creates Task/Plan/Goal work here.
+      await ensureDaemon();
+      const result = await daemonRequest<Record<string, unknown>>("outcome_intake_create", {
+        outcome,
+        requestedShape: shape,
+      });
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanOutcomeIntakeLines(result));
+      return;
+    }
+    if (operation === "list") {
+      const parsed = parseOutcomeArgs("list", rest, ["--status", "--limit"]);
+      const status = parsed.values.get("--status");
+      if (status !== undefined && status !== "pending" && status !== "proposed" && status !== "created") {
+        throw new Error("outcome list --status must be pending, proposed, or created");
+      }
+      let limit: number | undefined;
+      const rawLimit = parsed.values.get("--limit");
+      if (rawLimit !== undefined) {
+        const parsedLimit = Number(rawLimit);
+        if (!Number.isSafeInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+          throw new Error("outcome list --limit must be an integer from 1 to 100");
+        }
+        limit = parsedLimit;
+      }
+      // Read-only projection: never starts a daemon and never mutates state.
+      const result = await daemonObserverRequest<Record<string, unknown>[]>("outcome_intake_list", {
+        ...(status === undefined ? {} : { status }),
+        ...(limit === undefined ? {} : { limit }),
+      });
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanOutcomeIntakeListLines(result));
+      return;
+    }
+    if (operation === "get") {
+      const intakeId = required(rest[0], "outcome intake id");
+      parseOutcomeArgs("get", rest.slice(1), []);
+      // Read-only projection: never starts a daemon.
+      const result = await daemonObserverRequest<Record<string, unknown>>("outcome_intake_get", {
+        intakeId,
+      });
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanOutcomeIntakeLines(result));
+      return;
+    }
+    if (operation === "propose") {
+      const intakeId = required(rest[0], "outcome intake id");
+      const parsed = parseOutcomeArgs(
+        "propose",
+        rest.slice(1),
+        ["--expected-revision", "--shape", "--artifact", "--reason"],
+      );
+      const expectedRevision = parseOutcomeExpectedRevision(parsed.values.get("--expected-revision"));
+      const shape = required(parsed.values.get("--shape"), "proposal shape (--shape)");
+      if (shape !== "task" && shape !== "plan" && shape !== "goal") {
+        throw new Error("outcome propose --shape must be task, plan, or goal");
+      }
+      const reason = required(parsed.values.get("--reason"), "proposal reason (--reason)");
+      const artifact = required(parsed.values.get("--artifact"), "artifact path (--artifact)");
+      // Propose is read-only with respect to work: it validates the bound
+      // artifact through the existing loaders and returns a no-work preview.
+      await ensureDaemon();
+      const result = await daemonRequest<Record<string, unknown>>("outcome_intake_propose", {
+        intakeId,
+        expectedRevision,
+        shape,
+        reason,
+        artifactPath: path.resolve(artifact),
+      });
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanOutcomeProposeLines(result));
+      return;
+    }
+    if (operation === "confirm") {
+      const intakeId = required(rest[0], "outcome intake id");
+      const parsed = parseOutcomeArgs(
+        "confirm",
+        rest.slice(1),
+        ["--expected-revision"],
+        ["--confirm", "--json"],
+      );
+      const expectedRevision = parseOutcomeExpectedRevision(parsed.values.get("--expected-revision"));
+      if (!parsed.switches.has("--confirm")) {
+        throw new Error("outcome confirm requires --confirm");
+      }
+      await ensureDaemon();
+      const result = await daemonRequest<Record<string, unknown>>("outcome_intake_confirm", {
+        intakeId,
+        expectedRevision,
+        confirm: true,
+      });
+      process.stdout.write(json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanOutcomeConfirmLines(result));
+      return;
+    }
+    throw new Error(`Unknown outcome operation: ${operation}\n\n${usage()}`);
   }
 
   if (command === "daemon") {
@@ -2410,6 +3017,7 @@ async function main(): Promise<void> {
   function humanCandidateReverifyLines(result: Record<string, unknown>): string {
     const lines: string[] = [];
     lines.push(`status: ${result.status}`);
+    lines.push(`path: ${result.path}`);
     lines.push(`taskId: ${result.taskId}`);
     lines.push(`taskStatus: ${result.taskStatus}`);
     lines.push(`attemptId: ${result.attemptId}`);
@@ -3203,13 +3811,14 @@ async function main(): Promise<void> {
     }
     if (command === "resolve") {
       const taskId = required(positional, "task id");
-      const reason = required(option(rest, "--reason"), "resolve reason code (--reason)");
-      const note = option(rest, "--note");
-      if (!rest.includes("--confirm")) {
+      // Validate the full command-local grammar before receipt mutation or Daemon contact.
+      const parsed = parseResolveReopenArgs("resolve", rest);
+      const reason = required(parsed.reason, "resolve reason code (--reason)");
+      if (!parsed.confirm) {
         throw new Error("resolve requires explicit --confirm");
       }
-      const evidenceTaskId = option(rest, "--evidence");
-      const normalizedNote = note === undefined ? undefined : note.trim();
+      const evidenceTaskId = parsed.evidenceTaskId;
+      const normalizedNote = parsed.note === undefined ? undefined : parsed.note.trim();
       const { output } = await withCliExchangeReceipt({
         operation: "forklight_resolve",
         home: forklightHome(),
@@ -3240,11 +3849,12 @@ async function main(): Promise<void> {
     }
     if (command === "reopen") {
       const taskId = required(positional, "task id");
-      const note = option(rest, "--note");
-      if (!rest.includes("--confirm")) {
+      // Validate the full command-local grammar before receipt mutation or Daemon contact.
+      const parsed = parseResolveReopenArgs("reopen", rest);
+      if (!parsed.confirm) {
         throw new Error("reopen requires explicit --confirm");
       }
-      const normalizedNote = note === undefined ? undefined : note.trim();
+      const normalizedNote = parsed.note === undefined ? undefined : parsed.note.trim();
       const { output } = await withCliExchangeReceipt({
         operation: "forklight_reopen",
         home: forklightHome(),
